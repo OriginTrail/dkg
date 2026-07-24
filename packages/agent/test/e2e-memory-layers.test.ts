@@ -689,6 +689,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
         inclusion: {
           txHash,
           blockNumber: onChain.blockNumber,
+          blockHash: `0x${'ab'.repeat(32)}`,
           blockTimestamp: onChain.blockTimestamp,
         },
         finalization: {
@@ -705,6 +706,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
         publishProof: {
           merkleRoot: intent.sealMerkleRoot,
           authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
         },
       },
       publisher: recoveryPublisher,
@@ -1351,6 +1353,90 @@ describe('rootless graph-scoped KA lifecycle', () => {
     if (processed?.status !== 'finalized') {
       throw new Error(`Expected queued sub-graph update to finalize: ${JSON.stringify((processed as any)?.failure)}`);
     }
+    if (
+      !processed.broadcast
+      || !processed.inclusion
+      || processed.finalization.mode === 'local'
+      || !processed.finalization.txHash
+      || !processed.finalization.publisherAddress
+    ) {
+      throw new Error('Expected a chain-finalized queued sub-graph update');
+    }
+
+    const finalizationHandler = agent.getOrCreateFinalizationHandler();
+    const reconcile = vi.spyOn(finalizationHandler, 'handleChainReconciledKC');
+    const recoveryChain = (agent as any).chain;
+    const recoveryReceiptUal = buildKnowledgeAssetUal(
+      recoveryChain.chainId,
+      await recoveryChain.getDKGKnowledgeAssetsAddress(),
+      BigInt(intent.seal.reservedKaId!),
+    );
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      walletId: 'wallet-1',
+      request: intent,
+      job: {
+        jobId: 'subgraph-recovery-job',
+        jobSlug: 'subgraph-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        status: 'broadcast',
+        broadcast: processed.broadcast,
+        timestamps: { acceptedAt: 1, broadcastAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+      recovery: {
+        inclusion: {
+          ...processed.inclusion,
+          blockHash: `0x${'ab'.repeat(32)}`,
+        },
+        finalization: {
+          ...processed.finalization,
+          ual: recoveryReceiptUal,
+          batchId: intent.seal.reservedKaId,
+          startKAId: intent.seal.reservedKaId,
+          endKAId: intent.seal.reservedKaId,
+        },
+        publishProof: {
+          merkleRoot: intent.sealMerkleRoot,
+          authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
+        },
+      },
+      publisher: (agent as any).publisher,
+    } as any);
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      subGraphName,
+      publisherAddress: processed.finalization.publisherAddress,
+      authorAddress: intent.seal.authorAddress,
+      versionBlock: processed.inclusion.blockNumber,
+      trustedAssertionEvidence: expect.objectContaining({
+        subGraphName,
+        publisherAddress: processed.finalization.publisherAddress,
+        authorAddress: intent.seal.authorAddress,
+        blockNumber: processed.inclusion.blockNumber,
+        txIndex: 4,
+      }),
+    }), expect.anything());
+    const recoveredInput = reconcile.mock.calls.at(-1)?.[0];
+    if (!recoveredInput?.trustedAssertionEvidence || !intent.kaUal) {
+      throw new Error('Expected trusted named-recovery evidence');
+    }
+    reconcile.mockRestore();
+
+    await expect(finalizationHandler.handleChainReconciledKC({
+      ...recoveredInput,
+      trustedAssertionEvidence: {
+        ...recoveredInput.trustedAssertionEvidence,
+        transactionHash: `0x${'cd'.repeat(32)}`,
+        txIndex: 1,
+      },
+    }, createOperationContext('system'))).resolves.toBe('stale-target');
+    const recoveredVersionSurvives = await (agent as any).store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { <${intent.kaUal}> `
+        + `<http://dkg.io/ontology/materializedVersion> "${processed.inclusion.blockNumber}:4" ; `
+        + `<http://dkg.io/ontology/transactionHash> "${recoveredInput.trustedAssertionEvidence.transactionHash}" . } }`,
+    );
+    expect(recoveredVersionSurvives).toMatchObject({ type: 'boolean', value: true });
 
     const subgraphVm = await agent.query(
       `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,

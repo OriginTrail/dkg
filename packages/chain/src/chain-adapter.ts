@@ -186,7 +186,9 @@ export interface OnChainPublishResult {
    * GH#842 last-writer-wins guard so a publish and a same-block update don't
    * compare equal (which would let a late stale publish-promotion clobber the
    * already-applied update). Optional for back-compat with adapters that
-   * don't yet populate it; callers MUST fall back to `0`.
+   * don't yet populate it. Best-effort callers may fall back to `0`; recovery
+   * paths that persist trusted provenance MUST defer or independently resolve
+   * the receipt index rather than inventing ordering evidence.
    */
   txIndex?: number;
   blockTimestamp: number;
@@ -223,6 +225,42 @@ export interface OnChainPublishResult {
     drawnFromEpoch: bigint;
     drawnFromTopUp: bigint;
   };
+}
+
+/**
+ * Canonical receipt evidence required by durable finalization recovery.
+ *
+ * This is deliberately separate from {@link OnChainPublishResult}: legacy
+ * publish consumers may tolerate incomplete ordering metadata, while recovery
+ * must never persist or materialize provenance without an exact block hash and
+ * transaction index.
+ */
+export interface CanonicalFinalizationReceipt {
+  txHash: string;
+  blockNumber: number;
+  blockHash: string;
+  txIndex: number;
+  merkleRoot: Uint8Array;
+  publisherAddress: string;
+  authorAddress?: string;
+  batchId: bigint;
+  kaId: bigint;
+  startKAId: bigint;
+  endKAId: bigint;
+  knowledgeAssetsContract?: string;
+}
+
+export type CanonicalFinalizationReceiptResolution =
+  | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt }
+  | { status: 'pending' }
+  | { status: 'reorged' }
+  | { status: 'rejected' }
+  | { status: 'not-found' };
+
+export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
+  /** Persisted block identity supplied during replay canonicality checks. */
+  expectedBlockHash?: string;
+  expectedBlockNumber?: number;
 }
 
 export interface UpdateKAParams {
@@ -976,6 +1014,16 @@ export interface ChainAdapter {
     txHash: string,
     options?: ChainReadOptions,
   ): Promise<OnChainPublishResult | null>;
+
+  /**
+   * Recovery-only receipt capability with mandatory canonical ordering.
+   * Adapters that omit it are explicitly unsupported for durable graph-scoped
+   * finalization recovery; callers must not fabricate missing fields.
+   */
+  resolveCanonicalFinalizationReceipt?(
+    txHash: string,
+    options?: CanonicalFinalizationReceiptReadOptions,
+  ): Promise<CanonicalFinalizationReceiptResolution>;
 
   /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).

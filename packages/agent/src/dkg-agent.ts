@@ -1777,10 +1777,24 @@ export class DKGAgent extends DKGAgentBase {
     } catch {
       // best-effort; libp2p teardown below will close residual streams
     }
-    await this.node.stop();
+    try {
+      await this.node.stop();
+    } finally {
+      this.finalizationRuntime.markStopped();
+    }
     if (this.syncVerifyWorker) {
       await this.syncVerifyWorker.close();
       this.syncVerifyWorker = undefined;
+    }
+    // Finalization consumers are now stopped. Checkpoint and close their
+    // separate inbox before releasing the RFC-64 persistence lifetime.
+    let recoveryCloseFailed = false;
+    let recoveryCloseFailure: unknown;
+    try {
+      await this.closeFinalizationRecoveryStore();
+    } catch (error) {
+      recoveryCloseFailed = true;
+      recoveryCloseFailure = error;
     }
     // OT-RFC-64 inventory consumers are now stopped. Release the exclusive
     // inventory foundation before the triple store closes, but finish the
@@ -1816,6 +1830,13 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.started = false;
+    if (recoveryCloseFailed && inventoryCloseFailed) {
+      throw new AggregateError(
+        [recoveryCloseFailure, inventoryCloseFailure],
+        'Finalization inbox and RFC-64 persistence both failed to close',
+      );
+    }
+    if (recoveryCloseFailed) throw recoveryCloseFailure;
     if (inventoryCloseFailed) throw inventoryCloseFailure;
   }
 

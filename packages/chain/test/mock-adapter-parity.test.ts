@@ -135,6 +135,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getBlockTimestamp',
   'broadcastSignedTransactionWithFailover',
   'getTransactionReceiptWithFailover',
+  'getTransactionWithFailover',
   'waitForReceiptWithFailover',
   'signPopulatedTransaction',
   // #1336 read-facade + populate plumbing: the chain-concept read facades over

@@ -11,6 +11,10 @@ export interface FinalizationLifecycleLogOptions {
   localNodeIdentityId?: string | number | bigint;
 }
 
+export interface FinalizationLifecycleLogOptionsSource {
+  getLifecycleLogOptions(): FinalizationLifecycleLogOptions | undefined;
+}
+
 export interface FinalizationLifecycleFields {
   ual?: string;
   contextGraphId?: string;
@@ -43,20 +47,26 @@ export function finalizationLifecycleDecision(
 export class FinalizationLifecycleLogger {
   constructor(
     private readonly log: Logger,
-    private readonly options: FinalizationLifecycleLogOptions | undefined,
+    private readonly options:
+      | FinalizationLifecycleLogOptions
+      | FinalizationLifecycleLogOptionsSource
+      | undefined,
   ) {}
 
   record(ctx: OperationContext, decision: FinalizationLifecycleDecision): void {
     const msg = decision.fields;
     if (!msg.ual) return;
+    const options = this.options && 'getLifecycleLogOptions' in this.options
+      ? this.options.getLifecycleLogOptions()
+      : this.options;
     logKaLifecycleEvent(this.log, ctx, {
       level: msg.level,
       assetUal: msg.ual,
       stage: 'finalization',
       event: decision.event,
       role: 'receiver',
-      localPeerId: this.options?.localPeerId ?? 'unknown',
-      localNodeIdentityId: this.options?.localNodeIdentityId?.toString() ?? 'unknown',
+      localPeerId: options?.localPeerId ?? 'unknown',
+      localNodeIdentityId: options?.localNodeIdentityId?.toString() ?? 'unknown',
       metadata: this.metadata(msg),
     });
   }

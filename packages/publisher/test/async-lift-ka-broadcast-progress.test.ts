@@ -115,7 +115,12 @@ describe('KA async VM publish broadcast progress', () => {
     const finalized: Array<{ jobId: string; status: string }> = [];
     const publisher = createPublisher({
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { txHash, blockNumber: 42, blockTimestamp: 2_000 },
+        inclusion: {
+          txHash,
+          blockNumber: 42,
+          blockHash: `0x${'ab'.repeat(32)}`,
+          blockTimestamp: 2_000,
+        },
         finalization: {
           mode: 'published',
           txHash,
@@ -128,6 +133,7 @@ describe('KA async VM publish broadcast progress', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
       knowledgeAssetVmPublishHandler: {
@@ -191,7 +197,11 @@ describe('KA async VM publish broadcast progress', () => {
     const publisher = createPublisher({
       recoveryLookupTimeoutMs: 1,
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { txHash, blockNumber: 43 },
+        inclusion: {
+          txHash,
+          blockNumber: 43,
+          blockHash: `0x${'ab'.repeat(32)}`,
+        },
         finalization: {
           mode: 'published',
           txHash,
@@ -204,6 +214,7 @@ describe('KA async VM publish broadcast progress', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
       knowledgeAssetVmPublishHandler: {

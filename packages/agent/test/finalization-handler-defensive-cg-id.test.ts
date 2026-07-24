@@ -141,7 +141,9 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve('UNEXPECTED'),
     );
-    const handler = new FinalizationHandler(store, undefined, undefined, resolver);
+    const handler = new FinalizationHandler(store, undefined, {
+      resolveContextGraphOnChainId: resolver,
+    });
 
     const msg = makeMsg({ targetContextGraphId: PER_CG_ID_FROM_GOSSIP });
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
@@ -161,7 +163,9 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve(PER_CG_ID_FROM_RESOLVER),
     );
-    const handler = new FinalizationHandler(store, undefined, undefined, resolver);
+    const handler = new FinalizationHandler(store, undefined, {
+      resolveContextGraphOnChainId: resolver,
+    });
 
     const msg = makeMsg();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
@@ -199,7 +203,9 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.reject(new Error('chain RPC dead')),
     );
-    const handler = new FinalizationHandler(store, undefined, undefined, resolver);
+    const handler = new FinalizationHandler(store, undefined, {
+      resolveContextGraphOnChainId: resolver,
+    });
 
     const msg = makeMsg();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
@@ -218,7 +224,9 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve(null),
     );
-    const handler = new FinalizationHandler(store, undefined, undefined, resolver);
+    const handler = new FinalizationHandler(store, undefined, {
+      resolveContextGraphOnChainId: resolver,
+    });
 
     const msg = makeMsg();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
@@ -237,7 +245,9 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve('99'),
     );
-    const handler = new FinalizationHandler(store, undefined, undefined, resolver);
+    const handler = new FinalizationHandler(store, undefined, {
+      resolveContextGraphOnChainId: resolver,
+    });
 
     const msg = makeMsg({ targetContextGraphId: PER_CG_ID_FROM_GOSSIP });
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
