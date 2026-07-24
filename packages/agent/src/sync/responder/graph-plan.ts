@@ -35,6 +35,7 @@ import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/w
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
+import type { ExactGraphReadMode } from './durable-data-request-policy.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -1575,12 +1576,11 @@ export async function readDurableDataPage(params: {
   releaseCacheOnShortPage?: boolean;
   assetUals?: readonly string[];
   /**
-   * Force exact-graph payloads through OFFSET/LIMIT reads instead of loading a
-   * whole graph snapshot. Public exact fetches use this with a conservative
-   * row cap so unauthenticated callers cannot amplify one response into a
-   * multi-megabyte pre-serialization materialization.
+   * Select whether exact-graph payloads may use a bounded graph snapshot or
+   * must use OFFSET/LIMIT reads. Resource policy is resolved by the handler;
+   * this planner only consumes the neutral read strategy.
    */
-  forcePagedGraphs?: boolean;
+  exactGraphReadMode?: ExactGraphReadMode;
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1620,7 +1620,7 @@ export async function readDurableDataPage(params: {
           () => Promise.resolve(true),
           planSignal,
           new Map(entries.map((entry) => [entry.graph, entry.rowCount])),
-          params.forcePagedGraphs,
+          params.exactGraphReadMode,
         );
       },
     );
@@ -1674,7 +1674,7 @@ export async function readDurableDataPage(params: {
           isAdmitted(params.rowListMemo ? undefined : planSignal),
           planSignal,
           knownRowCounts,
-          params.forcePagedGraphs,
+          params.exactGraphReadMode,
         );
       },
     );
@@ -1833,7 +1833,7 @@ async function buildExactGraphPagePlan(
   isAdmitted: (graph: string) => Promise<boolean>,
   signal?: AbortSignal,
   knownRowCounts?: ReadonlyMap<string, number>,
-  forcePagedGraphs = false,
+  exactGraphReadMode: ExactGraphReadMode = 'snapshot-or-page',
 ): Promise<ExactGraphPagePlan> {
   const entries: ExactGraphPagePlanEntry[] = [];
   for (const graph of dedupeStrings(graphs).sort(compareCodePoint)) {
@@ -1848,7 +1848,11 @@ async function buildExactGraphPagePlan(
   return {
     entries,
     totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
-    pagedGraphs: new Set(forcePagedGraphs ? entries.map((entry) => entry.graph) : []),
+    pagedGraphs: new Set(
+      exactGraphReadMode === 'page-only'
+        ? entries.map((entry) => entry.graph)
+        : [],
+    ),
   };
 }
 

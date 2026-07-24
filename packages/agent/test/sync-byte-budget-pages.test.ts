@@ -20,6 +20,7 @@ import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
 } from '../src/sync/responder/graph-plan.js';
+import { resolveDurableDataRequestPolicy } from '../src/sync/responder/durable-data-request-policy.js';
 import {
   linesFromNquads,
   registerTestSyncHandler,
@@ -353,5 +354,35 @@ describe('byte-budget sync pagination', () => {
 
   it('retains the 64-row transport fallback floor', () => {
     expect(SYNC_REQUEST_SAFE_PAGE_SIZE).toBe(64);
+  });
+
+  it('derives exact-fetch resource policy without trusting signature fields', () => {
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+      hasExactAssetFilter: true,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      cacheMode: 'page-only',
+      exactGraphReadMode: 'page-only',
+    });
+
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+      hasExactAssetFilter: false,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      cacheMode: 'session-snapshot',
+      exactGraphReadMode: 'snapshot-or-page',
+    });
   });
 });

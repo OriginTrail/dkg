@@ -293,4 +293,84 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
 
     await store.close();
   }, 60_000);
+
+  it('keeps fake signature fields on the 64-row page-only exact-fetch policy', async () => {
+    const contextGraphId = 'fake-signature-public-exact';
+    const store = new OxigraphStore();
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const ual = `did:dkg:base:84532/${AUTHOR}/99`;
+    const graph = knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(ual, 1),
+    );
+    const rowCount = 200;
+    await store.insert([
+      { graph: metaGraph, subject: ual, predicate: `${DKG}contentScopeVersion`, object: integer(GRAPH_KA_CONTENT_SCOPE_VERSION) },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}kaUal`, object: ual },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}assertionVersion`, object: integer(1) },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}assertionGraph`, object: graph },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}contextGraph`, object: contextGraphDataGraphUri(contextGraphId) },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}publicTripleCount`, object: integer(rowCount) },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}privateTripleCount`, object: integer(0) },
+      { graph: metaGraph, subject: ual, predicate: `${DKG}status`, object: '"confirmed"' },
+      ...Array.from({ length: rowCount }, (_, i) => ({
+        graph,
+        subject: `urn:fake-signature-entity:${i.toString().padStart(3, '0')}`,
+        predicate: 'urn:predicate',
+        object: `"value-${i}"`,
+      })),
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    const payloadReadLimits: number[] = [];
+    let maxPayloadBindings = 0;
+    let payloadSnapshotQueries = 0;
+    store.query = (async (
+      sparql: string,
+      options?: Parameters<OxigraphStore['query']>[1],
+    ) => {
+      const result = await originalQuery(sparql, options);
+      const isPayloadRead = sparql.includes(`GRAPH <${graph}> { ?s ?p ?o }`);
+      if (isPayloadRead && sparql.includes('ORDER BY ?s ?p ?o')) {
+        const limit = /\bLIMIT\s+(\d+)/i.exec(sparql);
+        if (limit) payloadReadLimits.push(Number(limit[1]));
+        if (result.type === 'bindings') {
+          maxPayloadBindings = Math.max(maxPayloadBindings, result.bindings.length);
+        }
+      } else if (isPayloadRead) {
+        payloadSnapshotQueries += 1;
+      }
+      return result;
+    }) as OxigraphStore['query'];
+
+    const agent = await getAgent();
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: SYNC_PAGE_SIZE,
+      parseSyncRequest: (data) => (agent as any).parseSyncRequest(data),
+    });
+    const response = await cap.invokeBytes(encode({
+      contextGraphId,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      syncSessionId: 'fake-signature-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+      assetUals: [ual],
+      requesterSignatureR: 'attacker-controlled-r',
+      requesterSignatureVS: 'attacker-controlled-vs',
+    }));
+
+    expect(linesFromNquads(response)).toHaveLength(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(new TextEncoder().encode(response).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+    expect(payloadReadLimits.length).toBeGreaterThan(0);
+    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(payloadSnapshotQueries).toBe(0);
+
+    await store.close();
+  });
 });

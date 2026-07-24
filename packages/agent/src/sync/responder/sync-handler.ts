@@ -8,10 +8,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
-  SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 import {
   serializeWorkspacePublicSnapshotQuads,
@@ -56,6 +54,7 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
+import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -556,30 +555,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const hintedPageRows = typeof request.pageRowsHint === 'number' &&
-      Number.isSafeInteger(request.pageRowsHint)
-      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
-      : 0;
-    const usesByteBudgetPage = !isWorkspace &&
-      phase === 'data' &&
-      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-      hintedPageRows > limit;
-    const unauthenticatedPublicExactFetch = usesByteBudgetPage &&
-      assetUals !== undefined &&
-      (!request.requesterSignatureR || !request.requesterSignatureVS);
-    // Public exact-fetch pipe requests are intentionally unsigned. Keep their
-    // pre-serialization store read at the conservative 64-row floor instead of
-    // materializing the full 8,192-row hint and discarding everything beyond
-    // the 4 MiB response budget. Authenticated and non-exact durable sync keeps
-    // the throughput-oriented hint.
-    const durableDataLimit = usesByteBudgetPage
-      ? Math.min(
-        hintedPageRows,
-        unauthenticatedPublicExactFetch
-          ? SYNC_REQUEST_SAFE_PAGE_SIZE
-          : SYNC_BYTE_BUDGET_MAX_ROWS,
-      )
-      : limit;
+    const durableDataPolicy = resolveDurableDataRequestPolicy({
+      legacyLimit: limit,
+      includeSharedMemory: isWorkspace,
+      phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: assetUals !== undefined,
+    });
+    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
     // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
     // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
     // the page ≤ budget for BOTH modes, so this only selects the belt-and-
@@ -856,14 +840,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit: durableDataLimit,
+          limit: durableDataPolicy.limit,
           signal,
-          // A row-list snapshot would eagerly materialize every selected KA,
-          // defeating the public exact-fetch read cap before serialization.
-          rowListMemo: session && !unauthenticatedPublicExactFetch
+          rowListMemo: session && durableDataPolicy.cacheMode === 'session-snapshot'
             ? durableDataRowsMemo
             : undefined,
-          rowListCacheScope: session && !unauthenticatedPublicExactFetch
+          rowListCacheScope: session && durableDataPolicy.cacheMode === 'session-snapshot'
             ? peerId
             : undefined,
           refreshRowList: session?.refreshRowList,
@@ -874,9 +856,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
-          // Prevent the exact-graph planner from loading an entire KA graph
-          // when this unauthenticated response is allowed to read only 64 rows.
-          forcePagedGraphs: unauthenticatedPublicExactFetch,
+          exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
