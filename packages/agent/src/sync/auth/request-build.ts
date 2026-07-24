@@ -206,12 +206,24 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
           // wire and the responder routes to readCatalogPage instead of falling
           // back to the DEFAULT data phase (which is gated and serves nothing).
           ? '|catalog'
-          : '';
+          // Byte-budget tokens make the otherwise implicit DATA phase explicit,
+          // so upgraded parsers have an unambiguous start for the keyed tail.
+          : useByteBudgetPage
+            ? '|data'
+            : '';
     // Trailing keyed tokens are additive; old responders ignore the extra parts.
+    // Keep the byte-budget tokens BEFORE the legacy session/since/assets tail:
+    // old exact-fetch responders can still recover those narrowing tokens from
+    // the end even though they do not understand byte-budget pagination.
+    const byteBudgetSuffix = useByteBudgetPage
+      ? `|page-mode|${SYNC_BYTE_BUDGET_PAGE_MODE}|page-rows|${requestedLimit}`
+      : '';
     const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
     const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
     const assetsSuffix = assetUals ? `|assets|${encodeExactAssetUals(assetUals)}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${requestedLimit}${phaseSuffix}${sessionSuffix}${sinceSuffix}${assetsSuffix}`);
+    return new TextEncoder().encode(
+      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${byteBudgetSuffix}${sessionSuffix}${sinceSuffix}${assetsSuffix}`,
+    );
   }
 
   const request: SyncRequestEnvelope = {

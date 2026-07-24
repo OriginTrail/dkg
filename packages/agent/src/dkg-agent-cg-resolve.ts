@@ -997,6 +997,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     let sinceBatchId: string | undefined;
     let syncSessionId: string | undefined;
     let assetUals: string[] | undefined;
+    let pageMode: typeof SYNC_BYTE_BUDGET_PAGE_MODE | undefined;
+    let pageRowsHint: number | undefined;
     let tail = parts.length;
     if (tail >= 2 && parts[tail - 2] === 'assets') {
       assetUals = decodeExactAssetUals(parts[tail - 1]);
@@ -1016,7 +1018,30 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       parts[tail - 1].length > 0
     ) {
       syncSessionId = parts[tail - 1];
+      tail -= 2;
     }
+    if (
+      tail >= 2 &&
+      parts[tail - 2] === 'page-rows' &&
+      /^\d+$/.test(parts[tail - 1])
+    ) {
+      const parsedPageRows = Number(parts[tail - 1]);
+      if (Number.isSafeInteger(parsedPageRows) && parsedPageRows > SYNC_PAGE_SIZE) {
+        pageRowsHint = Math.min(parsedPageRows, SYNC_BYTE_BUDGET_MAX_ROWS);
+      }
+      tail -= 2;
+    }
+    if (
+      tail >= 2 &&
+      parts[tail - 2] === 'page-mode' &&
+      parts[tail - 1] === SYNC_BYTE_BUDGET_PAGE_MODE
+    ) {
+      pageMode = SYNC_BYTE_BUDGET_PAGE_MODE;
+    }
+    // A row hint without the matching capability is inert. This mirrors the
+    // authenticated JSON parser and prevents a malformed pipe tail from
+    // accidentally selecting the byte-budget responder path.
+    if (pageMode === undefined) pageRowsHint = undefined;
     return {
       contextGraphId,
       offset: parseInt(parts[1], 10) || 0,
@@ -1027,6 +1052,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       syncSessionId,
       sinceBatchId,
       assetUals,
+      pageMode,
+      pageRowsHint,
     };
   }
 

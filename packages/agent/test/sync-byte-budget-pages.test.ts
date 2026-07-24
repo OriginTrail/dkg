@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  DEFAULT_MAX_READ_BYTES,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
@@ -31,6 +35,26 @@ function makeCtx(): OperationContext {
 function noopLog(): void {}
 
 describe('byte-budget sync pagination', () => {
+  it('advertises byte-budget paging in an unauthenticated public request', async () => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'data',
+      needsAuth: false,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+    });
+
+    expect(new TextDecoder().decode(encoded)).toBe(
+      `${CG_ID}|0|${SYNC_REQUEST_PAGE_SIZE}|data`
+      + `|page-mode|${SYNC_BYTE_BUDGET_PAGE_MODE}|page-rows|${SYNC_REQUEST_PAGE_SIZE}`,
+    );
+  });
+
   it('keeps the authenticated legacy limit signed while adding the larger hint', async () => {
     const wallet = ethers.Wallet.createRandom();
     const signedLimits: number[] = [];
@@ -256,6 +280,47 @@ describe('byte-budget sync pagination', () => {
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
     });
     expect(linesFromNquads(upgraded)).toHaveLength(1_200);
+
+    await store.close();
+  });
+
+  it('never emits an oversized legacy response frame and keeps negotiated data under 4 MiB', async () => {
+    const store = new OxigraphStore();
+    const graph = `did:dkg:context-graph:${CG_ID}/context/oversized`;
+    const largeObject = `"${'x'.repeat(22_000)}"`;
+    await store.insert(Array.from({ length: SYNC_PAGE_SIZE }, (_, i) => ({
+      graph,
+      subject: `urn:large-subject:${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: largeObject,
+    })));
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+
+    await expect(cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      syncSessionId: 'oversized-legacy-session',
+    })).rejects.toThrow(
+      new RegExp(`exceeds ${DEFAULT_MAX_READ_BYTES}-byte transport frame cap`),
+    );
+
+    const negotiated = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      syncSessionId: 'oversized-negotiated-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    });
+    const negotiatedBytes = new TextEncoder().encode(negotiated).byteLength;
+    expect(negotiatedBytes).toBeGreaterThan(0);
+    expect(negotiatedBytes).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+    expect(linesFromNquads(negotiated).length).toBeLessThan(SYNC_PAGE_SIZE);
 
     await store.close();
   });

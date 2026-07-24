@@ -1,5 +1,6 @@
 import {
   createOperationContext,
+  DEFAULT_MAX_READ_BYTES,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
@@ -866,7 +867,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      return new TextEncoder().encode(nquads.join('\n'));
+      const responseBytes = new TextEncoder().encode(nquads.join('\n'));
+      if (responseBytes.byteLength > DEFAULT_MAX_READ_BYTES) {
+        const message = `Sync responder refused ${responseBytes.byteLength}-byte response for `
+          + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
+          + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; requester must negotiate byte-budget paging`;
+        logWarn(createOperationContext('sync'), message);
+        throw new Error(message);
+      }
+      return responseBytes;
     };
 
     const preAuthorizationScheduling: SyncResponderScheduling = {

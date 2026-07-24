@@ -1,6 +1,12 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
+import {
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_PAGE_SIZE,
+  SYNC_REQUEST_PAGE_SIZE,
+} from '../src/dkg-agent-constants.js';
+import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from '../src/sync/exact-assets.js';
 
 // #1871 — the exact-KA filter is only as safe as the production wire parsing
@@ -26,6 +32,8 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
 
   const parse = async (value: unknown) =>
     (await getAgent() as any).parseSyncRequest(encode(value));
+  const parseBytes = async (value: Uint8Array) =>
+    (await getAgent() as any).parseSyncRequest(value);
 
   it('preserves a valid assetUals filter from a JSON envelope', async () => {
     const parsed = await parse({ contextGraphId: 'cg', phase: 'data', assetUals: [UAL_7, UAL_8] });
@@ -59,6 +67,33 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     expect(parsed.syncSessionId).toBe('s-1');
     expect(parsed.sinceBatchId).toBe('42');
     expect(parsed.assetUals).toEqual([UAL_7]);
+  });
+
+  it('round-trips public exact-fetch byte-budget negotiation through the pipe wire form', async () => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: 'mfacts',
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: 'peer-responder',
+      requesterPeerId: 'peer-requester',
+      phase: 'data',
+      syncSessionId: 's-1',
+      sinceBatchId: '42',
+      assetUals: [UAL_7, UAL_8],
+      needsAuth: false,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+    });
+    const parsed = await parseBytes(encoded);
+
+    expect(parsed.phase).toBe('data');
+    expect(parsed.limit).toBe(SYNC_PAGE_SIZE);
+    expect(parsed.pageMode).toBe(SYNC_BYTE_BUDGET_PAGE_MODE);
+    expect(parsed.pageRowsHint).toBe(SYNC_REQUEST_PAGE_SIZE);
+    expect(parsed.syncSessionId).toBe('s-1');
+    expect(parsed.sinceBatchId).toBe('42');
+    expect(parsed.assetUals).toEqual([UAL_7, UAL_8]);
   });
 
   it('parses the |assets| token without session/since tokens', async () => {
