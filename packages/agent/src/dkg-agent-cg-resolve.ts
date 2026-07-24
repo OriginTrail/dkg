@@ -210,10 +210,13 @@ import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import {
-  decodeExactAssetUals,
   normalizeExactAssetUals,
   requireExactAssetUals,
 } from './sync/exact-assets.js';
+import {
+  decodePipeSyncRequestTail,
+  normalizeByteBudgetPageHint,
+} from './sync/auth/pipe-request-tail.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
@@ -286,8 +289,6 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
-  SYNC_BYTE_BUDGET_MAX_ROWS,
-  SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
@@ -948,14 +949,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
-        pageMode: parsed.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE
-          ? SYNC_BYTE_BUDGET_PAGE_MODE
-          : undefined,
-        pageRowsHint: parsed.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-          Number.isSafeInteger(parsed.pageRowsHint) &&
-          Number(parsed.pageRowsHint) > SYNC_PAGE_SIZE
-          ? Math.min(Number(parsed.pageRowsHint), SYNC_BYTE_BUDGET_MAX_ROWS)
-          : undefined,
+        ...normalizeByteBudgetPageHint(parsed.pageMode, parsed.pageRowsHint),
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -990,33 +984,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
     const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const phase = normalizeSyncPhase(parts[3]);
-    // Phase C: parse only the trailing keyed tokens emitted by
-    // `buildSyncRequestEnvelope` (after the optional phase/snapshot suffix).
-    // Scanning every segment would misparse ordinary values literally equal to
-    // "since" or "session" as control tokens. Old encoders never emit them.
-    let sinceBatchId: string | undefined;
-    let syncSessionId: string | undefined;
-    let assetUals: string[] | undefined;
-    let tail = parts.length;
-    if (tail >= 2 && parts[tail - 2] === 'assets') {
-      assetUals = decodeExactAssetUals(parts[tail - 1]);
-      tail -= 2;
-    }
-    if (
-      tail >= 2 &&
-      parts[tail - 2] === 'since' &&
-      /^\d+$/.test(parts[tail - 1])
-    ) {
-      sinceBatchId = parts[tail - 1];
-      tail -= 2;
-    }
-    if (
-      tail >= 2 &&
-      parts[tail - 2] === 'session' &&
-      parts[tail - 1].length > 0
-    ) {
-      syncSessionId = parts[tail - 1];
-    }
+    const tail = decodePipeSyncRequestTail(parts);
     return {
       contextGraphId,
       offset: parseInt(parts[1], 10) || 0,
@@ -1024,9 +992,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       includeSharedMemory,
       phase,
       snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
-      syncSessionId,
-      sinceBatchId,
-      assetUals,
+      ...tail,
     };
   }
 

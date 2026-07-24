@@ -1,5 +1,6 @@
 import {
   createOperationContext,
+  DEFAULT_MAX_READ_BYTES,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
@@ -7,7 +8,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
 } from '../../dkg-agent-constants.js';
@@ -54,6 +54,7 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
+import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -554,15 +555,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const hintedPageRows = typeof request.pageRowsHint === 'number' &&
-      Number.isSafeInteger(request.pageRowsHint)
-      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
-      : 0;
-    const usesByteBudgetPage = !isWorkspace &&
-      phase === 'data' &&
-      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-      hintedPageRows > limit;
-    const durableDataLimit = usesByteBudgetPage ? hintedPageRows : limit;
+    const durableDataPolicy = resolveDurableDataRequestPolicy({
+      legacyLimit: limit,
+      includeSharedMemory: isWorkspace,
+      phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: assetUals !== undefined,
+    });
+    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
     // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
     // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
     // the page ≤ budget for BOTH modes, so this only selects the belt-and-
@@ -839,10 +840,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit: durableDataLimit,
+          limit: durableDataPolicy.limit,
           signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
+          rowListMemo: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? durableDataRowsMemo
+            : undefined,
+          rowListCacheScope: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? peerId
+            : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
           exactGraphPlanMemo: durableDataExactGraphPlanMemo,
@@ -851,6 +856,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
+          exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
@@ -910,9 +916,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           },
         );
 
+    const guardSyncResponseBytes = (bytes: Uint8Array): Uint8Array => {
+      if (bytes.byteLength <= DEFAULT_MAX_READ_BYTES) return bytes;
+      const message = `Sync responder refused ${bytes.byteLength}-byte response for `
+        + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
+        + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; response must be paginated below the transport ceiling`;
+      logWarn(createOperationContext('sync'), message);
+      throw new Error(message);
+    };
+
     return response.then((res) => {
+      const guarded = guardSyncResponseBytes(res);
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
-      return res;
+      return guarded;
     }).catch((err) => {
       if (err instanceof SyncResponderBusyError) {
         getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });

@@ -35,6 +35,7 @@ import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/w
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
+import type { ExactGraphReadMode } from './durable-data-request-policy.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -1574,6 +1575,12 @@ export async function readDurableDataPage(params: {
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
   assetUals?: readonly string[];
+  /**
+   * Select whether exact-graph payloads may use a bounded graph snapshot or
+   * must use OFFSET/LIMIT reads. Resource policy is resolved by the handler;
+   * this planner only consumes the neutral read strategy.
+   */
+  exactGraphReadMode?: ExactGraphReadMode;
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1613,6 +1620,7 @@ export async function readDurableDataPage(params: {
           () => Promise.resolve(true),
           planSignal,
           new Map(entries.map((entry) => [entry.graph, entry.rowCount])),
+          params.exactGraphReadMode,
         );
       },
     );
@@ -1666,6 +1674,7 @@ export async function readDurableDataPage(params: {
           isAdmitted(params.rowListMemo ? undefined : planSignal),
           planSignal,
           knownRowCounts,
+          params.exactGraphReadMode,
         );
       },
     );
@@ -1824,6 +1833,7 @@ async function buildExactGraphPagePlan(
   isAdmitted: (graph: string) => Promise<boolean>,
   signal?: AbortSignal,
   knownRowCounts?: ReadonlyMap<string, number>,
+  exactGraphReadMode: ExactGraphReadMode = 'snapshot-or-page',
 ): Promise<ExactGraphPagePlan> {
   const entries: ExactGraphPagePlanEntry[] = [];
   for (const graph of dedupeStrings(graphs).sort(compareCodePoint)) {
@@ -1838,7 +1848,11 @@ async function buildExactGraphPagePlan(
   return {
     entries,
     totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
-    pagedGraphs: new Set<string>(),
+    pagedGraphs: new Set(
+      exactGraphReadMode === 'page-only'
+        ? entries.map((entry) => entry.graph)
+        : [],
+    ),
   };
 }
 

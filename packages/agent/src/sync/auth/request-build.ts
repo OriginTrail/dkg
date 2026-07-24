@@ -4,7 +4,8 @@ import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
-import { encodeExactAssetUals, requireExactAssetUals } from '../exact-assets.js';
+import { requireExactAssetUals } from '../exact-assets.js';
+import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -206,12 +207,21 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
           // wire and the responder routes to readCatalogPage instead of falling
           // back to the DEFAULT data phase (which is gated and serves nothing).
           ? '|catalog'
-          : '';
-    // Trailing keyed tokens are additive; old responders ignore the extra parts.
-    const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
-    const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    const assetsSuffix = assetUals ? `|assets|${encodeExactAssetUals(assetUals)}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${requestedLimit}${phaseSuffix}${sessionSuffix}${sinceSuffix}${assetsSuffix}`);
+          // Byte-budget tokens make the otherwise implicit DATA phase explicit,
+          // so upgraded parsers have an unambiguous start for the keyed tail.
+          : useByteBudgetPage
+            ? '|data'
+            : '';
+    const tail = encodePipeSyncRequestTail({
+      pageMode: useByteBudgetPage ? SYNC_BYTE_BUDGET_PAGE_MODE : undefined,
+      pageRowsHint: useByteBudgetPage ? requestedLimit : undefined,
+      syncSessionId,
+      sinceBatchId,
+      assetUals,
+    });
+    return new TextEncoder().encode(
+      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${tail}`,
+    );
   }
 
   const request: SyncRequestEnvelope = {
