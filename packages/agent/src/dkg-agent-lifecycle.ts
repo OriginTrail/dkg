@@ -809,8 +809,11 @@ export interface ContextGraphCatchupOptions {
 export type DurableSyncOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
-   * Total wall-clock budget for the legacy durable lane. The agent clamps this
-   * independently so an API caller cannot create an unbounded sync operation.
+   * Wall-clock budget for each bounded legacy durable phase. Network transfer
+   * and post-fetch chain authentication use separate deadlines so a completed
+   * transfer cannot consume the authentication phase before it starts. The
+   * agent clamps both independently so an API caller cannot create an
+   * unbounded sync operation.
    */
   totalTimeoutMs?: number;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
@@ -4338,7 +4341,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetUals: assetUals,
         stopOnBackoffWorthyFailure: true,
-        totalTimeoutMs: 60_000,
+        totalTimeoutMs: SYNC_TOTAL_TIMEOUT_MS,
         priority: 1_000,
       },
     );
@@ -4405,6 +4408,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncAgentsMeta,
       createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(
         remainingContextGraphs,
+        totalTimeoutMs,
+      ),
+      createGraphScopedAuthenticationDeadline: () => this.createContextGraphSyncDeadline(
+        1,
         totalTimeoutMs,
       ),
       fetchSyncPages: (

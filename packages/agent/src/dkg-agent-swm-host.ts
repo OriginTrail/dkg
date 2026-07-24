@@ -264,6 +264,13 @@ type JoinApprovalRetryEntry = {
 };
 type VmReconcileSwmNamespace = { metaGraph: string; dataGraph: string };
 type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]; complete: boolean };
+/**
+ * Recovery assets can approach the sync frame budget individually. Keep each
+ * request to one KA so a slow multi-page asset gets the full foreground
+ * transfer window and a committed asset is never replayed behind a later
+ * timeout. The wire protocol's larger cap remains available to other callers.
+ */
+const VM_RECONCILE_EXACT_FETCH_ASSETS = 1;
 type VmReconcileSwmCandidateState = {
   swmGen: string | null;
   candidateNamespaces: VmReconcileSwmNamespace[];
@@ -3740,14 +3747,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // unverified or rejected peer.
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'VM exact fetch'))) continue;
 
-      // The wire protocol rejects filters above MAX_EXACT_SYNC_ASSETS, so a
-      // scan batch configured larger than the protocol cap is requested in
-      // protocol-sized slices; targets past the cap stay in `remaining` for a
+      // The wire protocol accepts a larger filter, but recovery deliberately
+      // gives one potentially frame-sized KA the full foreground transfer
+      // budget. Targets past that bounded request stay in `remaining` for a
       // later peer or pass. Revalidation is likewise restricted to the
       // requested slice — each revalidated ordinal costs chain reads, and an
       // unrequested target cannot have changed state.
-      const requestedTargets = remaining.slice(0, MAX_EXACT_SYNC_ASSETS);
-      const deferredTargets = remaining.slice(MAX_EXACT_SYNC_ASSETS);
+      const exactFetchSize = Math.min(
+        MAX_EXACT_SYNC_ASSETS,
+        VM_RECONCILE_EXACT_FETCH_ASSETS,
+      );
+      const requestedTargets = remaining.slice(0, exactFetchSize);
+      const deferredTargets = remaining.slice(exactFetchSize);
       const requestedUals = [...new Set(requestedTargets.map((target) => target.ual))];
       for (const target of requestedTargets) {
         this.emitReplication({

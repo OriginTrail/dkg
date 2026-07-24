@@ -205,6 +205,7 @@ function runGraphScopedDurableSync(options: {
     deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
   createContextGraphSyncDeadline?: () => number;
+  createGraphScopedAuthenticationDeadline?: () => number;
   deleteCheckpoint?: (key: string) => void;
   setCheckpoint?: (key: string, offset: number) => void;
   logWarn?: (ctx: OperationContext, message: string) => void;
@@ -217,6 +218,8 @@ function runGraphScopedDurableSync(options: {
     contextGraphIds: [contextGraphId],
     createContextGraphSyncDeadline:
       options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000),
+    createGraphScopedAuthenticationDeadline:
+      options.createGraphScopedAuthenticationDeadline,
     fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
       phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
     ),
@@ -243,7 +246,25 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
-  it('hands the exact context-graph deadline to graph-scoped storage', async () => {
+  it('starts bounded chain authentication after an exhausted fetch deadline', async () => {
+    const fetchDeadline = 1;
+    const authenticationDeadline = 1_800_000_234_567;
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runGraphScopedDurableSync({
+      createContextGraphSyncDeadline: () => fetchDeadline,
+      createGraphScopedAuthenticationDeadline: () => authenticationDeadline,
+      storeGraphScopedAsset,
+    });
+
+    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
+  });
+
+  it('falls back to the fetch deadline when no authentication phase factory is wired', async () => {
     const deadline = 1_800_000_123_456;
     const storeGraphScopedAsset = vi.fn(async (
       _asset: VerifiedGraphScopedAsset,

@@ -106,6 +106,16 @@ interface DurableSyncContext {
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   /** Exact missing KAs for VM recovery; undefined retains normal full/delta sync. */
   exactAssetUalsFor?: (contextGraphId: string) => string[] | undefined;
+  /**
+   * Starts a fresh, bounded chain-authentication phase after the network
+   * payload has been fetched and verified. A single deadline is shared by all
+   * graph-scoped assets in the page so materialization cannot multiply the
+   * caller's authentication budget by the number of KAs.
+   *
+   * Optional for compatibility with lower-level callers; without it the
+   * network deadline remains the fail-closed authentication deadline.
+   */
+  createGraphScopedAuthenticationDeadline?: () => number;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -194,6 +204,7 @@ export async function runDurableSync(
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
+    createGraphScopedAuthenticationDeadline,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -554,8 +565,11 @@ export async function runDurableSync(
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }
+      const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
+        ? createGraphScopedAuthenticationDeadline?.() ?? deadline
+        : deadline;
       for (const asset of partitioned.assets) {
-        const outcome = await storeGraphScopedAsset!(asset, deadline);
+        const outcome = await storeGraphScopedAsset!(asset, graphScopedAuthenticationDeadline);
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does

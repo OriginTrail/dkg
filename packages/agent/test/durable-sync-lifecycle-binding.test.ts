@@ -85,6 +85,9 @@ async function captureGraphScopedStore(
     contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
     log: { info: () => {}, warn, debug: () => {} },
   };
+  agentLike.createContextGraphSyncDeadline = (
+    LifecycleSyncMethods.prototype as any
+  ).createContextGraphSyncDeadline;
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.requireLocalCgMatchesOnChainSlot = (
     DKGAgent.prototype as any
@@ -106,6 +109,36 @@ describe('durable sync lifecycle chain binding', () => {
   beforeEach(() => {
     mockedRunDurableSync.mockClear();
     mockedMaterialize.mockClear();
+  });
+
+  it('starts a fresh bounded authentication phase after network fetch', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    await captureGraphScopedStore({ chainId: 'none' } as ChainAdapter);
+
+    const syncContext = mockedRunDurableSync.mock.calls[0]![0];
+    expect(syncContext.createGraphScopedAuthenticationDeadline).toBeTypeOf('function');
+    expect(syncContext.createGraphScopedAuthenticationDeadline!()).toBe(1_800_000_120_000);
+  });
+
+  it('gives exact VM recovery a full standard transfer phase', async () => {
+    const runLegacyDurableSync = vi.fn(async () => ({}));
+    const agentLike = { runLegacyDurableSync };
+    const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
+
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+      agentLike as any,
+      '12D3KooWExactRecoveryPeer',
+      '0x1111111111111111111111111111111111111111/blackbox',
+      [exactUal],
+    );
+
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
+      exactAssetUals: [exactUal],
+      stopOnBackoffWorthyFailure: true,
+      totalTimeoutMs: 120_000,
+      priority: 1_000,
+    });
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {

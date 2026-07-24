@@ -2082,7 +2082,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
   });
 
-  it('slices an over-cap recovery batch to the wire protocol limit and defers the rest', async () => {
+  it('fetches one large recovery KA per peer attempt and defers the rest', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmBatchCap', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
@@ -2131,13 +2131,14 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const result = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
 
-    // Peer 1 gets exactly the protocol cap; the deferred tail goes to peer 2.
+    // Every peer attempt gives one potentially frame-sized KA the full
+    // foreground budget. The untouched tail remains for the next sweep.
     expect(fetches).toHaveLength(2);
-    expect(fetches[0]!.uals).toHaveLength(MAX_EXACT_SYNC_ASSETS);
-    expect(fetches[1]!.uals).toEqual(targets.slice(MAX_EXACT_SYNC_ASSETS).map((t) => t.ual));
+    expect(fetches[0]!.uals).toEqual([targets[0]!.ual]);
+    expect(fetches[1]!.uals).toEqual([targets[1]!.ual]);
     // Revalidation runs only for requested targets, in request order.
-    expect(revalidated).toEqual(targets.map((t) => t.ordinal));
-    expect(result.size).toBe(targets.length);
+    expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
+    expect(result.size).toBe(2);
   });
 
   it('damps an unproductive exact batch with the per-CG fetch cooldown', async () => {
