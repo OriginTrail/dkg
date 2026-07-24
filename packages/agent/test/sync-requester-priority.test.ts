@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { createOperationContext, PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  PROTOCOL_SYNC_CHANGELOG,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { runOrderedContextGraphSyncs } from '../src/sync/requester/ordered-sync.js';
@@ -202,6 +206,67 @@ describe('requester per-CG priority admission', () => {
     expect(lane.result.completedPhases).toBe(1);
     expect(lane.result.deferredBackpressure).toBe(1);
     expect(lane.remainingLegacyCgs).toEqual([]);
+  });
+
+  it('routes the growing agents phonebook directly to row-paged legacy sync', async () => {
+    const admissions: string[] = [];
+    const changelogRuns: string[] = [];
+    const emptyResult = {
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 1,
+      checkpointAdvances: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+      rejectedKcs: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+      deniedPhases: 0,
+      backoffWorthyFailures: 0,
+      deferredBackpressure: 0,
+    };
+    const agent = {
+      config: { syncContextGraphPriorities: {} },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        contextGraphId: string,
+        _lane: string,
+        _label: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admissions.push(contextGraphId);
+        return work();
+      },
+      runChangelogSyncForCg: async (
+        _ctx: unknown,
+        _peer: string,
+        contextGraphId: string,
+      ) => {
+        changelogRuns.push(contextGraphId);
+        return emptyResult;
+      },
+      log: { info: noop, warn: noop },
+    };
+
+    const lane = await (LifecycleSyncMethods.prototype.runChangelogLane as any).call(
+      agent,
+      ctx,
+      'peer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'public-cg'],
+    );
+
+    expect(admissions).toEqual([SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'public-cg']);
+    expect(changelogRuns).toEqual([SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'public-cg']);
+    expect(lane.remainingLegacyCgs).toEqual([SYSTEM_CONTEXT_GRAPHS.AGENTS]);
   });
 
   it('preserves completed shared-memory progress when a later admission is deferred', async () => {
