@@ -11,6 +11,7 @@ import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 import {
   serializeWorkspacePublicSnapshotQuads,
@@ -563,7 +564,22 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       phase === 'data' &&
       request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
       hintedPageRows > limit;
-    const durableDataLimit = usesByteBudgetPage ? hintedPageRows : limit;
+    const unauthenticatedPublicExactFetch = usesByteBudgetPage &&
+      assetUals !== undefined &&
+      (!request.requesterSignatureR || !request.requesterSignatureVS);
+    // Public exact-fetch pipe requests are intentionally unsigned. Keep their
+    // pre-serialization store read at the conservative 64-row floor instead of
+    // materializing the full 8,192-row hint and discarding everything beyond
+    // the 4 MiB response budget. Authenticated and non-exact durable sync keeps
+    // the throughput-oriented hint.
+    const durableDataLimit = usesByteBudgetPage
+      ? Math.min(
+        hintedPageRows,
+        unauthenticatedPublicExactFetch
+          ? SYNC_REQUEST_SAFE_PAGE_SIZE
+          : SYNC_BYTE_BUDGET_MAX_ROWS,
+      )
+      : limit;
     // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
     // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
     // the page ≤ budget for BOTH modes, so this only selects the belt-and-
@@ -842,8 +858,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           offset,
           limit: durableDataLimit,
           signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
+          // A row-list snapshot would eagerly materialize every selected KA,
+          // defeating the public exact-fetch read cap before serialization.
+          rowListMemo: session && !unauthenticatedPublicExactFetch
+            ? durableDataRowsMemo
+            : undefined,
+          rowListCacheScope: session && !unauthenticatedPublicExactFetch
+            ? peerId
+            : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
           exactGraphPlanMemo: durableDataExactGraphPlanMemo,
@@ -852,6 +874,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
+          // Prevent the exact-graph planner from loading an entire KA graph
+          // when this unauthenticated response is allowed to read only 64 rows.
+          forcePagedGraphs: unauthenticatedPublicExactFetch,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
@@ -867,15 +892,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      const responseBytes = new TextEncoder().encode(nquads.join('\n'));
-      if (responseBytes.byteLength > DEFAULT_MAX_READ_BYTES) {
-        const message = `Sync responder refused ${responseBytes.byteLength}-byte response for `
-          + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
-          + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; requester must negotiate byte-budget paging`;
-        logWarn(createOperationContext('sync'), message);
-        throw new Error(message);
-      }
-      return responseBytes;
+      return new TextEncoder().encode(nquads.join('\n'));
     };
 
     const preAuthorizationScheduling: SyncResponderScheduling = {
@@ -919,9 +936,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           },
         );
 
+    const guardSyncResponseBytes = (bytes: Uint8Array): Uint8Array => {
+      if (bytes.byteLength <= DEFAULT_MAX_READ_BYTES) return bytes;
+      const message = `Sync responder refused ${bytes.byteLength}-byte response for `
+        + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
+        + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; response must be paginated below the transport ceiling`;
+      logWarn(createOperationContext('sync'), message);
+      throw new Error(message);
+    };
+
     return response.then((res) => {
+      const guarded = guardSyncResponseBytes(res);
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
-      return res;
+      return guarded;
     }).catch((err) => {
       if (err instanceof SyncResponderBusyError) {
         getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });

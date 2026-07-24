@@ -1574,6 +1574,13 @@ export async function readDurableDataPage(params: {
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
   assetUals?: readonly string[];
+  /**
+   * Force exact-graph payloads through OFFSET/LIMIT reads instead of loading a
+   * whole graph snapshot. Public exact fetches use this with a conservative
+   * row cap so unauthenticated callers cannot amplify one response into a
+   * multi-megabyte pre-serialization materialization.
+   */
+  forcePagedGraphs?: boolean;
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1613,6 +1620,7 @@ export async function readDurableDataPage(params: {
           () => Promise.resolve(true),
           planSignal,
           new Map(entries.map((entry) => [entry.graph, entry.rowCount])),
+          params.forcePagedGraphs,
         );
       },
     );
@@ -1666,6 +1674,7 @@ export async function readDurableDataPage(params: {
           isAdmitted(params.rowListMemo ? undefined : planSignal),
           planSignal,
           knownRowCounts,
+          params.forcePagedGraphs,
         );
       },
     );
@@ -1824,6 +1833,7 @@ async function buildExactGraphPagePlan(
   isAdmitted: (graph: string) => Promise<boolean>,
   signal?: AbortSignal,
   knownRowCounts?: ReadonlyMap<string, number>,
+  forcePagedGraphs = false,
 ): Promise<ExactGraphPagePlan> {
   const entries: ExactGraphPagePlanEntry[] = [];
   for (const graph of dedupeStrings(graphs).sort(compareCodePoint)) {
@@ -1838,7 +1848,7 @@ async function buildExactGraphPagePlan(
   return {
     entries,
     totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
-    pagedGraphs: new Set<string>(),
+    pagedGraphs: new Set(forcePagedGraphs ? entries.map((entry) => entry.graph) : []),
   };
 }
 

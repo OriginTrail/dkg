@@ -4,7 +4,8 @@ import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
-import { encodeExactAssetUals, requireExactAssetUals } from '../exact-assets.js';
+import { requireExactAssetUals } from '../exact-assets.js';
+import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -211,18 +212,15 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
           : useByteBudgetPage
             ? '|data'
             : '';
-    // Trailing keyed tokens are additive; old responders ignore the extra parts.
-    // Keep the byte-budget tokens BEFORE the legacy session/since/assets tail:
-    // old exact-fetch responders can still recover those narrowing tokens from
-    // the end even though they do not understand byte-budget pagination.
-    const byteBudgetSuffix = useByteBudgetPage
-      ? `|page-mode|${SYNC_BYTE_BUDGET_PAGE_MODE}|page-rows|${requestedLimit}`
-      : '';
-    const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
-    const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    const assetsSuffix = assetUals ? `|assets|${encodeExactAssetUals(assetUals)}` : '';
+    const tail = encodePipeSyncRequestTail({
+      pageMode: useByteBudgetPage ? SYNC_BYTE_BUDGET_PAGE_MODE : undefined,
+      pageRowsHint: useByteBudgetPage ? requestedLimit : undefined,
+      syncSessionId,
+      sinceBatchId,
+      assetUals,
+    });
     return new TextEncoder().encode(
-      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${byteBudgetSuffix}${sessionSuffix}${sinceSuffix}${assetsSuffix}`,
+      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${tail}`,
     );
   }
 

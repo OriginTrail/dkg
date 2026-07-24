@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import {
+  contextGraphCatalogUri,
   DEFAULT_MAX_READ_BYTES,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -321,6 +322,31 @@ describe('byte-budget sync pagination', () => {
     expect(negotiatedBytes).toBeGreaterThan(0);
     expect(negotiatedBytes).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
     expect(linesFromNquads(negotiated).length).toBeLessThan(SYNC_PAGE_SIZE);
+
+    await store.close();
+  });
+
+  it('guards an oversized prepared catalog response at the common protocol boundary', async () => {
+    const store = new OxigraphStore();
+    const graph = contextGraphCatalogUri(CG_ID);
+    const largeObject = `"${'c'.repeat(22_000)}"`;
+    await store.insert(Array.from({ length: SYNC_PAGE_SIZE }, (_, i) => ({
+      graph,
+      subject: `urn:catalog-subject:${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: largeObject,
+    })));
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+
+    await expect(cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'catalog',
+    })).rejects.toThrow(
+      new RegExp(`exceeds ${DEFAULT_MAX_READ_BYTES}-byte transport frame cap`),
+    );
 
     await store.close();
   });
