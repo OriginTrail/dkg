@@ -10,6 +10,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  computeFlatKCRootV10,
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
   readGraphKnowledgeAssetConfirmationKindV1,
   readLocallyTrustedKnowledgeAssetControls,
@@ -21,7 +22,9 @@ import {
 } from '../oversize-filter.js';
 
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
+const ASSERTION_GRAPH = 'http://dkg.io/ontology/assertionGraph';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
+const PRIVATE_MERKLE_ROOT = 'http://dkg.io/ontology/privateMerkleRoot';
 const STATUS = 'http://dkg.io/ontology/status';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 const MATERIALIZED_VERSION = 'http://dkg.io/ontology/materializedVersion';
@@ -51,6 +54,96 @@ export type VerifyContextGraphBinding = (
 ) => Promise<boolean>;
 
 export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
+
+/**
+ * Detect an exact replay that was already admitted through this requester's
+ * authenticated materialization path. `materializedVersion` and `status` are
+ * stripped from peer input before storage, so their local presence can be used
+ * as a trust marker only when the immutable assertion identity still matches.
+ *
+ * This is deliberately an optimization, not an admission fallback: missing,
+ * malformed, duplicated, or mismatched metadata returns false and forces the
+ * caller through normal chain authentication again.
+ */
+export async function isAuthenticatedGraphScopedAssetMaterialized(params: {
+  store: TripleStore;
+  asset: VerifiedGraphScopedAsset;
+  options?: QueryOptions;
+}): Promise<boolean> {
+  const { store, asset, options = {} } = params;
+  const incomingRoots = asset.metadataQuads
+    .filter((quad) => quad.predicate === MERKLE_ROOT)
+    .map((quad) => quad.object);
+  if (incomingRoots.length !== 1) return false;
+
+  let incomingRoot: Uint8Array;
+  try {
+    incomingRoot = parseBytes32Literal(incomingRoots[0]!, 'merkleRoot');
+  } catch {
+    return false;
+  }
+  const privateRoots: Uint8Array[] = [];
+  try {
+    for (const quad of asset.metadataQuads) {
+      if (quad.predicate === PRIVATE_MERKLE_ROOT) {
+        privateRoots.push(parseBytes32Literal(quad.object, 'privateMerkleRoot'));
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  const [metadataResult, dataResult] = await Promise.all([
+    store.query(`
+      SELECT ?assertionVersion ?assertionGraph ?merkleRoot ?materializedVersion ?status WHERE {
+        GRAPH <${assertSafeIri(asset.metaGraph)}> {
+          <${assertSafeIri(asset.ual)}> <${ASSERTION_VERSION}> ?assertionVersion ;
+            <${ASSERTION_GRAPH}> ?assertionGraph ;
+            <${MERKLE_ROOT}> ?merkleRoot ;
+            <${MATERIALIZED_VERSION}> ?materializedVersion ;
+            <${STATUS}> ?status .
+        }
+      }
+    `, options),
+    store.query(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${assertSafeIri(asset.assertionGraph)}> { ?s ?p ?o }
+      }
+    `, options),
+  ]);
+  if (
+    metadataResult.type !== 'bindings'
+    || metadataResult.bindings.length !== 1
+    || dataResult.type !== 'bindings'
+  ) return false;
+
+  const row = metadataResult.bindings[0]!;
+  const version = parseUnsignedIntegerLiteral(row.assertionVersion);
+  const storedRoot = parseBytes32LiteralOrUndefined(row.merkleRoot);
+  const materializedVersion = parseRdfLiteral(row.materializedVersion ?? '');
+  const status = parseRdfLiteral(row.status ?? '');
+  const storedAssertionGraph = stripIriBinding(row.assertionGraph);
+  const localData = dataResult.bindings.flatMap((binding): Quad[] => (
+    binding.s !== undefined && binding.p !== undefined && binding.o !== undefined
+      ? [{
+          subject: binding.s,
+          predicate: binding.p,
+          object: binding.o,
+          graph: asset.assertionGraph,
+        }]
+      : []
+  ));
+  const localRoot = computeFlatKCRootV10(localData, privateRoots);
+
+  return version === asset.assertionVersion
+    && storedAssertionGraph === asset.assertionGraph
+    && storedRoot !== undefined
+    && bytesEqual(storedRoot, incomingRoot)
+    && bytesEqual(localRoot, incomingRoot)
+    && materializedVersion !== undefined
+    && /^\d+:\d+$/.test(materializedVersion)
+    && status === 'confirmed';
+}
 
 /**
  * Bind the peer-verified payload to current chain truth before its structural
@@ -434,6 +527,27 @@ function parseBytes32Literal(raw: string, field: string): Uint8Array {
     throw new Error(`Graph-scoped durable sync ${field} must be 32 bytes of hexadecimal data`);
   }
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
+}
+
+function parseBytes32LiteralOrUndefined(raw: string | undefined): Uint8Array | undefined {
+  if (raw === undefined) return undefined;
+  try {
+    return parseBytes32Literal(raw, 'merkleRoot');
+  } catch {
+    return undefined;
+  }
+}
+
+function parseUnsignedIntegerLiteral(raw: string | undefined): bigint | undefined {
+  if (raw === undefined) return undefined;
+  const lexical = parseRdfLiteral(raw) ?? raw;
+  if (!/^\d+$/.test(lexical)) return undefined;
+  return BigInt(lexical);
+}
+
+function stripIriBinding(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  return raw.match(/^<([^>]*)>$/)?.[1] ?? raw;
 }
 
 function parseTransactionHashLiteral(raw: string): string {

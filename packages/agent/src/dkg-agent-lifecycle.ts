@@ -104,6 +104,7 @@ import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelo
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
 import {
   authenticateVerifiedGraphScopedAsset,
+  isAuthenticatedGraphScopedAssetMaterialized,
   materializeVerifiedGraphScopedAsset,
   type VerifiedGraphScopedAsset,
   type VerifyContextGraphBinding,
@@ -4429,6 +4430,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         source: 'agent.durableSync.storeInsert',
       }),
       storeGraphScopedAsset: async (asset, deadline) => {
+        if (await isAuthenticatedGraphScopedAssetMaterialized({
+          store: this.store,
+          asset,
+          options: {
+            priority: 'background',
+            source: 'agent.durableSync.graphScopedReplayProbe',
+          },
+        })) {
+          return 'stale';
+        }
         const authentication = await authenticateDurableGraphScopedAsset({
           chain: this.chain,
           asset,

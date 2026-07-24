@@ -14,6 +14,7 @@ vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOr
   >();
   return {
     ...actual,
+    isAuthenticatedGraphScopedAssetMaterialized: vi.fn(async () => false),
     materializeVerifiedGraphScopedAsset: vi.fn(async () => 'applied' as const),
   };
 });
@@ -22,6 +23,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import {
+  isAuthenticatedGraphScopedAssetMaterialized,
   materializeVerifiedGraphScopedAsset,
   type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
@@ -34,6 +36,7 @@ const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
 const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as OperationContext;
 
 const mockedRunDurableSync = vi.mocked(runDurableSync);
+const mockedReplayProbe = vi.mocked(isAuthenticatedGraphScopedAssetMaterialized);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 
 function graphScopedAsset(
@@ -105,7 +108,36 @@ async function captureGraphScopedStore(
 describe('durable sync lifecycle chain binding', () => {
   beforeEach(() => {
     mockedRunDurableSync.mockClear();
+    mockedReplayProbe.mockReset();
+    mockedReplayProbe.mockResolvedValue(false);
     mockedMaterialize.mockClear();
+  });
+
+  it('skips chain authentication for an exact locally authenticated replay', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const getLatestMerkleRoot = vi.fn(async () => root);
+    const getMerkleRootCount = vi.fn(async () => 2n);
+    const getKAContextGraphId = vi.fn(async () => 14n);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot,
+      getMerkleRootCount,
+      getKAContextGraphId,
+    } as ChainAdapter;
+    mockedReplayProbe.mockResolvedValueOnce(true);
+
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain);
+    await expect(storeGraphScopedAsset(
+      graphScopedAsset(root),
+      Date.now() + 60_000,
+    )).resolves.toBe('stale');
+
+    expect(mockedReplayProbe).toHaveBeenCalledTimes(1);
+    expect(getLatestMerkleRoot).not.toHaveBeenCalled();
+    expect(getMerkleRootCount).not.toHaveBeenCalled();
+    expect(getKAContextGraphId).not.toHaveBeenCalled();
+    expect(mockedMaterialize).not.toHaveBeenCalled();
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {

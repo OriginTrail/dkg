@@ -25,6 +25,7 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   authenticateVerifiedGraphScopedAsset,
+  isAuthenticatedGraphScopedAssetMaterialized,
   materializeVerifiedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
   type VerifyContextGraphBinding,
@@ -243,6 +244,69 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('recognizes only an exact replay with local authenticated materialization markers', async () => {
+    const store = new OxigraphStore();
+    const root = computeFlatKCRootV10([dataQuad(2)], []);
+    const rootHex = toHex(root);
+    const asset: VerifiedGraphScopedAsset = {
+      contextGraphId,
+      ual,
+      assertionVersion: 2n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [dataQuad(2)],
+      metadataQuads: metadata(2, rootHex),
+    };
+    await store.insert([
+      ...asset.dataQuads,
+      ...asset.metadataQuads,
+      {
+        subject: ual,
+        predicate: `${DKG}materializedVersion`,
+        object: '"123:4"',
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}status`,
+        object: '"confirmed"',
+        graph: metaGraph,
+      },
+    ]);
+
+    await expect(isAuthenticatedGraphScopedAssetMaterialized({
+      store,
+      asset,
+    })).resolves.toBe(true);
+
+    const changedRoot = new Uint8Array(32);
+    changedRoot[31] = 3;
+    await expect(isAuthenticatedGraphScopedAssetMaterialized({
+      store,
+      asset: {
+        ...asset,
+        metadataQuads: metadata(2, toHex(changedRoot)),
+      },
+    })).resolves.toBe(false);
+
+    await store.deleteByPattern({ graph: assertionGraph });
+    await store.insert([dataQuad(1)]);
+    await expect(isAuthenticatedGraphScopedAssetMaterialized({
+      store,
+      asset,
+    })).resolves.toBe(false);
+
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: ual,
+      predicate: `${DKG}materializedVersion`,
+    });
+    await expect(isAuthenticatedGraphScopedAssetMaterialized({
+      store,
+      asset,
+    })).resolves.toBe(false);
+  });
+
   it('hands the exact context-graph deadline to graph-scoped storage', async () => {
     const deadline = 1_800_000_123_456;
     const storeGraphScopedAsset = vi.fn(async (
