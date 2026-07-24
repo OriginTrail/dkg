@@ -2143,30 +2143,38 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     // Revalidation runs only for requested targets, in request order.
     expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
     expect(result.outcomes.size).toBe(2);
-    expect(result.nextRecoveryOrdinal).toBe(2);
+    expect(result).toMatchObject({
+      madeProgress: true,
+      remainingTargets: targets.slice(2),
+    });
   });
 
   it('keeps an attempted pending target ahead of deferred targets and damps retries', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmBatchCooldown', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
-    const peer = '12D3KooWExactCooldownPeer';
+    const peerA = '12D3KooWExactCooldownPeerA';
+    const peerB = '12D3KooWExactCooldownPeerB';
     const localCgId = '0x0000000000000000000000000000000000000001/exact-cooldown';
-    const connected = [{ toString: () => peer }];
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
     (internals as any).node = {
       peerId: '12D3KooWExactCooldownLocalPeer',
       libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
     };
-    (internals as any).preferredSyncPeers.set(localCgId, peer);
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
     (internals as any).resolveCuratorPeerIdsForCg = async () => ({
-      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+      peerIds: [peerA, peerB], curatorIsLocal: false, legacyTripleResolved: false,
     });
     (internals as any).ensurePeerConnected = async () => undefined;
     (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
     (internals as any).waitForSyncProtocol = async () => true;
-    let fetchCount = 0;
-    (internals as any).syncExactKnowledgeAssetsFromPeer = async () => {
-      fetchCount += 1;
+    const fetchedUals: string[][] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeer = async (
+      _peerId: string,
+      _cgId: string,
+      uals: string[],
+    ) => {
+      fetchedUals.push(uals);
       return {
         fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
         failedPeers: 1, failedPhases: 0, deferredBackpressure: 0,
@@ -2191,16 +2199,22 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const targets = [target, deferredTarget];
     const first = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
-    expect(fetchCount).toBe(1);
+    expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
-    expect(first.nextRecoveryOrdinal).toBeUndefined();
+    expect(first).toMatchObject({
+      madeProgress: false,
+      remainingTargets: targets,
+    });
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
-    expect(fetchCount).toBe(1);
+    expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
     expect(second.outcomes.size).toBe(0);
-    expect(second.nextRecoveryOrdinal).toBeUndefined();
+    expect(second).toMatchObject({
+      madeProgress: false,
+      remainingTargets: targets,
+    });
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {

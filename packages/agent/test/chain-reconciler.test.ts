@@ -250,6 +250,8 @@ describe('reconcileContextGraph — sweep', () => {
             target.ordinal,
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
+          madeProgress: true,
+          remainingTargets: [],
         };
       },
     });
@@ -284,7 +286,8 @@ describe('reconcileContextGraph — sweep', () => {
             ordinal,
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
-          nextRecoveryOrdinal: ordinals[3],
+          madeProgress: true,
+          remainingTargets: targets.slice(3),
         };
       },
     });
@@ -322,8 +325,10 @@ describe('reconcileContextGraph — sweep', () => {
           },
         };
       },
-      recoverPendingOrdinals: async () => ({
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
         outcomes: new Map(),
+        madeProgress: false,
+        remainingTargets: targets,
       }),
     });
     const state = createCursorState(0);
@@ -430,6 +435,8 @@ describe('reconcileContextGraph — sweep', () => {
             target.ordinal,
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
+          madeProgress: true,
+          remainingTargets: [],
         };
       },
     });

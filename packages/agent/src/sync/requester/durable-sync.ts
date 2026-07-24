@@ -91,14 +91,7 @@ interface DurableSyncContext {
    */
   onAccessDenied?: (contextGraphId: string) => void;
   syncAgentsMeta?: boolean;
-  /** Preferred deadline model for new callers. */
-  durableSyncBudget?: DurableSyncBudget;
-  /**
-   * @deprecated Compatibility boundary for deep-import callers from before
-   * durable sync split fetch and authentication into separate bounded phases.
-   * The one deadline created for a CG remains shared by both phases.
-   */
-  createContextGraphSyncDeadline?: (remainingContextGraphs: number) => number;
+  durableSyncBudget: DurableSyncBudget;
   fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -161,20 +154,21 @@ interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-function resolveDurableSyncBudget(context: DurableSyncContext): DurableSyncBudget {
-  if (context.durableSyncBudget) return context.durableSyncBudget;
+interface LegacyDurableSyncContext extends Omit<DurableSyncContext, 'durableSyncBudget'> {
+  /**
+   * @deprecated Deep-import compatibility for callers from before durable sync
+   * split fetch and authentication into separate bounded phases.
+   */
+  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
+}
 
-  const createLegacyDeadline = context.createContextGraphSyncDeadline;
-  if (!createLegacyDeadline) {
-    throw new TypeError(
-      'runDurableSync requires durableSyncBudget or createContextGraphSyncDeadline',
-    );
-  }
-
+function legacyDurableSyncBudget(
+  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number,
+): DurableSyncBudget {
   let currentContextGraphDeadline: number | undefined;
   return {
     fetchDeadline: (remainingContextGraphs) => {
-      currentContextGraphDeadline = createLegacyDeadline(remainingContextGraphs);
+      currentContextGraphDeadline = createContextGraphSyncDeadline(remainingContextGraphs);
       return currentContextGraphDeadline;
     },
     graphScopedAuthenticationDeadline: () => {
@@ -183,6 +177,16 @@ function resolveDurableSyncBudget(context: DurableSyncContext): DurableSyncBudge
       }
       return currentContextGraphDeadline;
     },
+  };
+}
+
+function normalizeDurableSyncContext(
+  context: DurableSyncContext | LegacyDurableSyncContext,
+): DurableSyncContext {
+  if ('durableSyncBudget' in context) return context;
+  return {
+    ...context,
+    durableSyncBudget: legacyDurableSyncBudget(context.createContextGraphSyncDeadline),
   };
 }
 
@@ -220,6 +224,12 @@ export function filterExactAssetDurablePayload(
 }
 
 export async function runDurableSync(
+  context: DurableSyncContext | LegacyDurableSyncContext,
+): Promise<InitializedDurableSyncResult> {
+  return runDurableSyncWithBudget(normalizeDurableSyncContext(context));
+}
+
+async function runDurableSyncWithBudget(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
   const {
@@ -229,7 +239,7 @@ export async function runDurableSync(
     onPhase,
     onAccessDenied,
     syncAgentsMeta = true,
-    durableSyncBudget: configuredDurableSyncBudget,
+    durableSyncBudget,
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
@@ -244,7 +254,6 @@ export async function runDurableSync(
     logWarn,
     logDebug,
   } = context;
-  const durableSyncBudget = configuredDurableSyncBudget ?? resolveDurableSyncBudget(context);
 
   const accumulator = createDurableSyncAccumulator();
 
