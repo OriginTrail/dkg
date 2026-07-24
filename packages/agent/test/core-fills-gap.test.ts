@@ -68,6 +68,7 @@ interface AgentInternals {
       maxPeerAttempts?: number;
       isTargetCurrent?: () => boolean;
       deferActiveFetch?: boolean;
+      bypassNegativeCache?: boolean;
     },
   ): Promise<{ status: string }>;
   recoverVmReconcileBatch(
@@ -1217,6 +1218,154 @@ describe('Phase D - VM reconcile damping', () => {
 
     expect(fetch.calls).toHaveLength(1);
     expect(handleChainReconciledKC.calls).toHaveLength(2);
+  });
+
+  it('generation-gates unchanged metadata-pending batch scans without priming connections', async () => {
+    const internals = await boot();
+    const onChainCgId = 68n;
+    const root = new Uint8Array(32);
+    root[31] = 68;
+    registerUnmatchedKC(internals.chain, 9068n, onChainCgId, bytesToHex(root));
+
+    const handleChainReconciledKC = recorder(async () =>
+      'verified-vm-metadata-pending' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC,
+    }));
+    const primeCatchupConnections = recorder(async () => {
+      throw new Error('batched negative-cache checks must not dial discovered agents');
+    });
+    (internals as any).primeCatchupConnections = primeCatchupConnections;
+
+    const first = await internals.reconcileChainOrdinal(
+      '68',
+      onChainCgId,
+      0,
+      undefined,
+      { deferActiveFetch: true },
+    );
+    expect(first).toMatchObject({
+      status: 'pending',
+      recovery: { reason: 'verified-vm-metadata-pending' },
+    });
+    expect(handleChainReconciledKC.calls).toHaveLength(1);
+    const metadataPendingCache =
+      (internals as any).vmReconcileNegativeCache as Map<string, {
+        failures: number;
+        nextRetryAt: number;
+        swmGen: string;
+        candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+        peerTopologyKey: string;
+      }>;
+    expect(metadataPendingCache.size).toBe(1);
+    const [metadataPendingKey, firstMetadataPending] =
+      [...metadataPendingCache.entries()][0]!;
+    expect(firstMetadataPending.swmGen).toMatch(/^local-write-gen:\d+$/);
+    const metadataPendingRetryDelay =
+      firstMetadataPending.nextRetryAt - Date.now();
+    // A loaded node can take several minutes to traverse all subscribed CGs.
+    // Pin a first retry horizon that survives that traversal; local generation
+    // or connected-peer topology changes still invalidate it immediately.
+    expect(metadataPendingRetryDelay).toBeGreaterThan(4 * 60_000);
+
+    // Retained retry history must actually grow beyond the ordinary ten-minute
+    // ceiling. Otherwise a traversal longer than that ceiling re-runs the same
+    // unchanged historical gaps forever without ever reaching a cache hit.
+    firstMetadataPending.nextRetryAt = Date.now() - 1;
+    (internals as any).recordVmReconcileNegativeCache(
+      metadataPendingKey,
+      '68',
+      {
+        swmGen: firstMetadataPending.swmGen,
+        candidateNamespaces: firstMetadataPending.candidateNamespaces,
+        peerTopologyKey: firstMetadataPending.peerTopologyKey,
+      },
+      'metadata_pending',
+    );
+    const secondMetadataPending = metadataPendingCache.get(metadataPendingKey)!;
+    expect(secondMetadataPending.failures).toBe(2);
+    expect(secondMetadataPending.nextRetryAt - Date.now())
+      .toBeGreaterThan(metadataPendingRetryDelay);
+
+    // Activity in another CG advances the node-global changelog but must not
+    // invalidate a miss whose target CG has not changed.
+    await internals.store.insert([{
+      subject: 'urn:test:unrelated-activity',
+      predicate: 'http://schema.org/name',
+      object: '"unrelated local evidence"',
+      graph: contextGraphWorkspaceMetaGraphUri('unrelated-cg'),
+    }]);
+
+    await expect(internals.reconcileChainOrdinal(
+      '68',
+      onChainCgId,
+      0,
+      undefined,
+      { deferActiveFetch: true },
+    )).resolves.toEqual({ status: 'pending' });
+    expect(handleChainReconciledKC.calls).toHaveLength(1);
+    expect(primeCatchupConnections.calls).toHaveLength(0);
+
+    await internals.store.insert([{
+      subject: 'urn:test:metadata-arrived',
+      predicate: 'http://schema.org/name',
+      object: '"new local evidence"',
+      graph: contextGraphWorkspaceMetaGraphUri('68'),
+    }]);
+
+    const afterWrite = await internals.reconcileChainOrdinal(
+      '68',
+      onChainCgId,
+      0,
+      undefined,
+      { deferActiveFetch: true },
+    );
+    expect(afterWrite).toMatchObject({
+      status: 'pending',
+      recovery: { reason: 'verified-vm-metadata-pending' },
+    });
+    expect(handleChainReconciledKC.calls).toHaveLength(2);
+    expect(primeCatchupConnections.calls).toHaveLength(0);
+  });
+
+  it('bypasses a metadata-pending miss for same-pass exact-fetch revalidation', async () => {
+    const internals = await boot();
+    const onChainCgId = 69n;
+    const root = new Uint8Array(32);
+    root[31] = 69;
+    registerUnmatchedKC(internals.chain, 9069n, onChainCgId, bytesToHex(root));
+
+    let attempts = 0;
+    const handleChainReconciledKC = recorder(async () => {
+      attempts += 1;
+      return attempts === 1
+        ? 'verified-vm-metadata-pending' as const
+        : 'already-confirmed' as const;
+    });
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC,
+    }));
+
+    await expect(internals.reconcileChainOrdinal(
+      '69',
+      onChainCgId,
+      0,
+      undefined,
+      { deferActiveFetch: true },
+    )).resolves.toMatchObject({
+      status: 'pending',
+      recovery: { reason: 'verified-vm-metadata-pending' },
+    });
+
+    await expect(internals.reconcileChainOrdinal(
+      '69',
+      onChainCgId,
+      0,
+      undefined,
+      { deferActiveFetch: true, bypassNegativeCache: true },
+    )).resolves.toEqual({ status: 'already', blockNumber: 0 });
+    expect(handleChainReconciledKC.calls).toHaveLength(2);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
   it('retries an incomplete SWM operation when data changes without triple-count changes', async () => {
