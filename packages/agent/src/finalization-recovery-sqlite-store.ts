@@ -94,19 +94,20 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       const digest = finalizationEnvelopeSha256(input.rawMessage);
       if (existingRow) {
         const existing = finalizationRecoveryRowToEntry(existingRow);
+        const sameEnvelope = existing.envelopeSha256 === digest
+          && Buffer.from(existing.rawMessage).equals(Buffer.from(input.rawMessage));
         if (existing.state === 'REORGED') {
-          return sameFinalizationRecoveryIdentity(existing, input)
+          return sameEnvelope && sameFinalizationRecoveryIdentity(existing, input)
             ? { status: 'existing', entry: existing }
             : { status: 'conflict' };
         }
         if (existing.state === 'SETTLED') {
-          return sameFinalizationRecoveryIdentity(existing, input)
+          return sameEnvelope && sameFinalizationRecoveryIdentity(existing, input)
             ? { status: 'existing', entry: existing }
             : { status: 'conflict' };
         }
         if (
-          existing.envelopeSha256 !== digest
-          || !Buffer.from(existing.rawMessage).equals(Buffer.from(input.rawMessage))
+          !sameEnvelope
           || existing.chainId !== input.chainId
           || existing.contextGraphId !== input.contextGraphId
           || existing.ual !== input.ual

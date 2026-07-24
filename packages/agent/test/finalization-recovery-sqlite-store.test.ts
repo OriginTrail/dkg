@@ -395,14 +395,10 @@ describe('SQLite finalization recovery store', () => {
       const repeated = await reopened.receive(received({
         rawMessage: Uint8Array.from([1, 2, 3, 5]),
       }));
-      expect(repeated).toMatchObject({
+      expect(repeated).toEqual({ status: 'conflict' });
+      await expect(reopened.receive(received())).resolves.toMatchObject({
         status: 'existing',
-        entry: {
-          state: 'REORGED',
-          generation: 1,
-          attemptCount: 0,
-          rawMessage: RAW,
-        },
+        entry: { state: 'REORGED', generation: 1, rawMessage: RAW },
       });
       await expect(reopened.markVerified('entry-1', 0, evidence()))
         .resolves.toEqual({ status: 'conflict' });
@@ -427,7 +423,7 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('makes a matching SETTLED identity revalidatable but rejects unrelated changes', async () => {
+  it('makes a byte-identical SETTLED envelope revalidatable but rejects changed bytes', async () => {
     const directory = await temporaryDirectory();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
@@ -435,12 +431,13 @@ describe('SQLite finalization recovery store', () => {
       await store.markVerified('entry-1', 0, evidence());
       await store.transition('entry-1', 0, 'SETTLED');
 
-      await expect(store.receive(received({
-        rawMessage: Uint8Array.from([1, 2, 3, 5]),
-      }))).resolves.toMatchObject({
+      await expect(store.receive(received())).resolves.toMatchObject({
         status: 'existing',
         entry: { state: 'SETTLED', generation: 0 },
       });
+      await expect(store.receive(received({
+        rawMessage: Uint8Array.from([1, 2, 3, 5]),
+      }))).resolves.toEqual({ status: 'conflict' });
       await expect(store.receive(received({
         assertionVersion: '2',
         rawMessage: Uint8Array.from([1, 2, 3, 6]),
