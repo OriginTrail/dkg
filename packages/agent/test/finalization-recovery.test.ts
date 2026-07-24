@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  decodeFinalizationMessage,
   encodeFinalizationMessage,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   type FinalizationMessageMsg,
@@ -130,6 +131,92 @@ describe('graph-scoped finalization recovery admission', () => {
       accessPolicy: 'allowList',
       allowedPeers: ['12D3KooWReader', '12D3KooWReader'],
     }), CONTEXT_GRAPH)).toEqual({ ok: false, reason: 'invalid-allowed-peers' });
+  });
+
+  it('canonicalizes target context graph IDs for durable duplicate identity and replay', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-canonical-cg-id-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      let pending = true;
+      const noncanonicalMessage = message({
+        targetContextGraphId: '042',
+        timestampMs: 1,
+      });
+      const canonicalMessage = {
+        ...noncanonicalMessage,
+        targetContextGraphId: '42',
+      };
+      const chain = recoveryChain({
+        resolveCanonicalFinalizationReceipt: async () => pending
+          ? { status: 'pending' as const }
+          : { status: 'confirmed' as const, receipt: confirmedReceipt() },
+      });
+      store = await openSqliteFinalizationRecoveryStore(directory);
+      let recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      const noncanonical = parseGraphScopedFinalization(
+        noncanonicalMessage,
+        CONTEXT_GRAPH,
+      );
+      const canonical = parseGraphScopedFinalization(
+        canonicalMessage,
+        CONTEXT_GRAPH,
+      );
+      if (!noncanonical.ok || !canonical.ok) {
+        throw new Error('expected canonicalizable graph-scoped messages');
+      }
+      expect(noncanonical.value.msg.targetContextGraphId).toBe('42');
+
+      await recovery.processLive({
+        rawMessage: encodeFinalizationMessage(noncanonicalMessage),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: noncanonical.value,
+      });
+      await recovery.processLive({
+        rawMessage: encodeFinalizationMessage(canonicalMessage),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: canonical.value,
+      });
+      const [deferred] = await store.list();
+      expect(deferred).toMatchObject({
+        state: 'RECEIVED',
+        targetContextGraphId: '42',
+      });
+      expect(
+        decodeFinalizationMessage(deferred!.rawMessage).targetContextGraphId,
+      ).toBe('42');
+
+      await store.close();
+      store = await openSqliteFinalizationRecoveryStore(directory);
+      pending = false;
+      recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        targetContextGraphId: '42',
+      }]);
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('persists RECEIVED before a store-heavy operation can fail', async () => {

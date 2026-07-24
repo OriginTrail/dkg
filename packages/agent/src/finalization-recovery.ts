@@ -6,6 +6,7 @@ import type {
 } from '@origintrail-official/dkg-chain';
 import {
   decodeFinalizationMessage,
+  encodeFinalizationMessage,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -305,6 +306,10 @@ export class FinalizationRecovery<
       ual: candidate.scope.ual,
       txHash: candidate.msg.txHash,
     });
+    const rawMessage = canonicalFinalizationRecoveryEnvelope(
+      input.rawMessage,
+      candidate,
+    );
     try {
       const result = await store.receive({
         key,
@@ -320,7 +325,7 @@ export class FinalizationRecovery<
         ...(candidate.msg.targetContextGraphId
           ? { targetContextGraphId: candidate.msg.targetContextGraphId }
           : {}),
-        rawMessage: input.rawMessage,
+        rawMessage,
       });
       if (
         result.status === 'inserted'
@@ -1679,4 +1684,29 @@ function sameBigIntValue(
   } catch {
     return false;
   }
+}
+
+function canonicalFinalizationRecoveryEnvelope(
+  rawMessage: Uint8Array,
+  candidate: ParsedGraphScopedFinalization,
+): Uint8Array {
+  const canonicalTarget = candidate.msg.targetContextGraphId || undefined;
+  if (!canonicalTarget) return rawMessage;
+  try {
+    const decoded = decodeFinalizationMessage(rawMessage);
+    const rawTarget = decoded.targetContextGraphId || undefined;
+    if (
+      rawTarget
+      && rawTarget !== canonicalTarget
+      && sameBigIntValue(rawTarget, canonicalTarget)
+    ) {
+      return encodeFinalizationMessage({
+        ...decoded,
+        targetContextGraphId: canonicalTarget,
+      });
+    }
+  } catch {
+    // Admission already decoded this envelope; preserve fail-closed store identity.
+  }
+  return rawMessage;
 }

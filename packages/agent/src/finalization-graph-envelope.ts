@@ -383,6 +383,12 @@ export function parseGraphScopedFinalization(
       targetContextGraphId !== undefined
       && (!/^\d+$/.test(targetContextGraphId) || BigInt(targetContextGraphId) <= 0n)
     ) return reject('invalid-target-context-graph');
+    const canonicalTargetContextGraphId = targetContextGraphId === undefined
+      ? undefined
+      : BigInt(targetContextGraphId).toString();
+    const canonicalMessage = canonicalTargetContextGraphId !== targetContextGraphId
+      ? { ...msg, targetContextGraphId: canonicalTargetContextGraphId }
+      : msg;
     const startKAId = protobufScalarToBigInt(msg.startKAId);
     const endKAId = protobufScalarToBigInt(msg.endKAId);
     const batchId = protobufScalarToBigInt(msg.batchId);
@@ -394,7 +400,7 @@ export function parseGraphScopedFinalization(
     return {
       ok: true,
       value: {
-        msg,
+        msg: canonicalMessage,
         scope,
         assertionVersion,
         kaId,
