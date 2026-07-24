@@ -3547,12 +3547,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return `${localCgId}\0${digest.digest('hex')}`;
   }
 
-  vmReconcileConnectedPeerTopologyKey(this: DKGAgent): string {
+  vmReconcileConnectedPeerTopologyKey(this: DKGAgent, localCgId: string): string {
     try {
+      // Only a newly reachable recovery source is evidence worth bypassing an
+      // exact-batch backoff. Edge peers routinely connect/disconnect through
+      // relays and most cannot serve this CG; including every connection made
+      // that ambient churn clear all per-CG dampers once per sweep. Core peers
+      // and the authenticated curator hint are the stable source candidates
+      // used by the recovery ordering below.
+      const recoverySourcePeerIds = new Set(this.knownCorePeerIds);
+      const preferredPeerId = this.preferredSyncPeers.get(localCgId);
+      if (preferredPeerId) recoverySourcePeerIds.add(preferredPeerId);
       return [...new Set(
         this.node.libp2p.getConnections()
           .map((connection) => connection.remotePeer?.toString())
-          .filter((peerId): peerId is string => typeof peerId === 'string' && peerId.length > 0),
+          .filter((peerId): peerId is string => (
+            typeof peerId === 'string'
+            && peerId.length > 0
+            && recoverySourcePeerIds.has(peerId)
+          )),
       )].sort().join(',');
     } catch {
       return '';
@@ -3568,7 +3581,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (exactBatchBackoffKey) {
       const exactBatchBackoff = this.vmReconcileExactBatchBackoff.get(exactBatchBackoffKey);
       if (exactBatchBackoff && now < exactBatchBackoff.nextRetryAt) {
-        if (exactBatchBackoff.peerTopologyKey === this.vmReconcileConnectedPeerTopologyKey()) {
+        if (exactBatchBackoff.peerTopologyKey === this.vmReconcileConnectedPeerTopologyKey(localCgId)) {
           return false;
         }
         // A different connected peer set is new recovery evidence. Fail open
@@ -3609,7 +3622,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       localCgId,
       failures,
       nextRetryAt: Date.now() + backoff,
-      peerTopologyKey: this.vmReconcileConnectedPeerTopologyKey(),
+      peerTopologyKey: this.vmReconcileConnectedPeerTopologyKey(localCgId),
     });
     getMetrics().storeRetryAttemptsTotal.add(1, {
       scope: 'vm_reconcile',

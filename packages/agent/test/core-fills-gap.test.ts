@@ -2225,6 +2225,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const internals = agent as unknown as AgentInternals;
     const peerA = '12D3KooWExactBackoffPeerA';
     const peerB = '12D3KooWExactBackoffPeerB';
+    const incidentalEdge = '12D3KooWExactBackoffIncidentalEdge';
     const connected = [{ toString: () => peerA }];
     const localCgId = '0x0000000000000000000000000000000000000001/exact-backoff';
     (internals as any).node = {
@@ -2277,13 +2278,20 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(secondRecord.nextRetryAt).toBeGreaterThan(firstRecord.nextRetryAt);
     expect(fetchCount).toBe(2);
 
-    // A newly connected source is fresh recovery evidence and immediately
-    // bypasses both the target-set delay and the short per-CG cooldown.
-    connected.push({ toString: () => peerB });
+    // Ambient edge connection churn is not fresh recovery evidence and must
+    // not clear the target-set backoff.
+    connected.push({ toString: () => incidentalEdge });
     vi.setSystemTime(firstRecord.nextRetryAt + 1);
     expect(Date.now()).toBeLessThan(secondRecord.nextRetryAt);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
-    expect(fetchCount).toBe(4);
+    expect(fetchCount).toBe(2);
+
+    // A newly connected core source is fresh recovery evidence and immediately
+    // bypasses both the target-set delay and the short per-CG cooldown.
+    (internals as any).knownCorePeerIds.add(peerB);
+    connected.push({ toString: () => peerB });
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(fetchCount).toBe(5);
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {
