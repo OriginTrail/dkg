@@ -61,7 +61,10 @@ export async function normalizeRecoveredNamedKaPublish(input: {
 }): Promise<RecoveredNamedKaPublish> {
   const { request, job, recovery, chain } = input;
   const inconsistent = (message: string): Error => recoveryInconsistent(request.name, message);
+  // Hash equality (merkle roots, tx hashes) vs UAL identity equality are distinct concepts;
+  // give each its own name so the boundary check does not read as a hex-hash comparison.
   const sameHex = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
+  const sameUal = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
 
   if (!sameHex(job.broadcast.txHash, recovery.inclusion.txHash)) {
     throw inconsistent(
@@ -142,37 +145,37 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     }
   }
   if (!ual) throw inconsistent('chain recovery did not return the published UAL');
-  let expectedReceiptUal: string;
-  try {
-    if (!chain.getDKGKnowledgeAssetsAddress) {
-      throw new Error('the configured chain adapter cannot resolve the DKGKnowledgeAssets address');
+  // The normalized identity is always the canonical graph-local `localUal`, never the raw
+  // resolver wire form. Cross-check the returned `ual` against the SAME reserved packed KA id
+  // in either proven-equivalent representation — both already bound to chain truth by the
+  // batchId/startKAId/endKAId === reservedKaId (above) and the author-bit / localScope checks,
+  // all independent of `ual`. Match the graph-local form first (the shape the CLI resolver
+  // surfaces for named KAs); only when it does not match do we resolve and compare the
+  // canonical chain-receipt form (DKGKnowledgeAssets contract + packed id) the generic mapper
+  // produces — so the common named-KA path never needs the contract address. Every other UAL
+  // fails closed; `ual` is validated here and never exported.
+  if (!sameUal(ual, localUal)) {
+    let expectedReceiptUal: string;
+    try {
+      if (!chain.getDKGKnowledgeAssetsAddress) {
+        throw new Error('the configured chain adapter cannot resolve the DKGKnowledgeAssets address');
+      }
+      const knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
+      expectedReceiptUal = buildKnowledgeAssetUal(
+        chain.chainId,
+        ethers.getAddress(knowledgeAssetsContract),
+        reservedKaId,
+      );
+    } catch (error) {
+      throw inconsistent(
+        `could not resolve the canonical receipt UAL: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-    const knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
-    expectedReceiptUal = buildKnowledgeAssetUal(
-      chain.chainId,
-      ethers.getAddress(knowledgeAssetsContract),
-      reservedKaId,
-    );
-  } catch (error) {
-    throw inconsistent(
-      `could not resolve the canonical receipt UAL: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  // Cross-check the resolver's returned UAL against the SAME reserved packed KA id in either
-  // of its two proven-equivalent wire representations — both already bound to chain truth by
-  // the batchId/startKAId/endKAId === reservedKaId (above) and the author-bit / localScope
-  // checks, all of which run before this point and are independent of `ual`:
-  //   - the canonical chain-receipt form (DKGKnowledgeAssets contract + packed id), produced
-  //     by the generic recovery mapper; or
-  //   - the graph-local form (sealed author + low-96 KA number), which the CLI resolver
-  //     deliberately surfaces for named/graph-scoped KAs.
-  // Accept EITHER exact form; every other UAL fails closed. `ual` is ONLY validated here — it
-  // is never exported; the normalized identity is the canonical graph-local `localUal`, so
-  // callers never have to reason about which wire shape the resolver happened to send.
-  if (!sameHex(ual, expectedReceiptUal) && !sameHex(ual, localUal)) {
-    throw inconsistent(
-      `published receipt UAL ${ual} does not match the canonical receipt UAL ${expectedReceiptUal} or the graph-local UAL ${localUal}`,
-    );
+    if (!sameUal(ual, expectedReceiptUal)) {
+      throw inconsistent(
+        `published receipt UAL ${ual} does not match the graph-local UAL ${localUal} or the canonical receipt UAL ${expectedReceiptUal}`,
+      );
+    }
   }
   if (!publisherAddress || !ethers.isAddress(publisherAddress)) {
     throw inconsistent('chain recovery did not return a valid publisher address');

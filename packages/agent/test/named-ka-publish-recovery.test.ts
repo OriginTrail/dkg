@@ -197,151 +197,81 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
   });
 });
 
+// Declarative boundary matrix: each row names the one invalid condition and supplies the
+// request/recovery it mutates; everything else stays canonical. `job` and a freshly seeded
+// non-superseded `chain` are constant, so a row that reaches the normalizer must be rejected
+// for its named reason alone.
+const REJECT_CASES: ReadonlyArray<{
+  readonly name: string;
+  readonly request?: KnowledgeAssetVmPublishRequest;
+  readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+}> = [
+  {
+    name: 'returned UAL is neither the receipt nor the graph-local form',
+    recovery: recoveryEvidence(`did:dkg:${CHAIN_ID}/${AUTHOR}/999`),
+  },
+  {
+    name: 'returned contract-form UAL has the wrong contract address',
+    recovery: recoveryEvidence(
+      buildKnowledgeAssetUal(CHAIN_ID, ethers.getAddress(`0x${'99'.repeat(20)}`), RESERVED_KA_ID),
+    ),
+  },
+  {
+    name: 'returned UAL is on the wrong chain',
+    recovery: recoveryEvidence(`did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}`),
+  },
+  {
+    name: 'queued graph UAL is bound to a different chain',
+    request: baseRequest({ kaUal: `did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}` }),
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+  },
+  {
+    name: 'queued graph UAL author does not match the reserved KA id',
+    request: baseRequest({ kaUal: `did:dkg:${CHAIN_ID}/0x${'11'.repeat(20)}/${KA_NUMBER}` }),
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+  },
+  {
+    name: 'queued graph UAL KA number does not match the reserved KA id',
+    request: baseRequest({ kaUal: `did:dkg:${CHAIN_ID}/${AUTHOR}/7` }),
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+  },
+  {
+    name: 'returned singleton range does not equal the reserved KA id',
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+      endKAId: (RESERVED_KA_ID + 1n).toString() as BigIntString,
+    }),
+  },
+  {
+    name: 'inclusion tx hash does not match the queued broadcast tx',
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+      inclusion: { txHash: `0x${'ef'.repeat(32)}` as Hex, blockNumber: 77, blockHash: BLOCK_HASH },
+    }),
+  },
+  {
+    name: 'proof merkle root does not match the queued seal',
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+      publishProof: { merkleRoot: `0x${'ba'.repeat(32)}` as Hex, authorAddress: AUTHOR, txIndex: 4 },
+    }),
+  },
+  {
+    name: 'transaction author does not match the sealed author',
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+      publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: `0x${'11'.repeat(20)}` as Hex, txIndex: 4 },
+    }),
+  },
+  {
+    name: 'returned publisher address is missing',
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, { omitPublisher: true }),
+  },
+];
+
 describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', () => {
-  it('rejects a returned UAL that is neither the receipt nor the graph-local form', async () => {
-    const wrongNumberUal = `did:dkg:${CHAIN_ID}/${AUTHOR}/999`;
+  it.each(REJECT_CASES)('rejects when the $name', async ({ request, recovery }) => {
     await expect(
       normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
+        request: request ?? baseRequest(),
         job: broadcastJob(),
-        recovery: recoveryEvidence(wrongNumberUal),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects a returned contract-form UAL with the wrong contract address', async () => {
-    const wrongContractUal = buildKnowledgeAssetUal(
-      CHAIN_ID,
-      ethers.getAddress(`0x${'99'.repeat(20)}`),
-      RESERVED_KA_ID,
-    );
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(wrongContractUal),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects a returned UAL on the wrong chain', async () => {
-    const wrongChainUal = `did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}`;
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(wrongChainUal),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the queued graph UAL is bound to a different chain', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest({ kaUal: `did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}` }),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the queued graph UAL author does not match the reserved KA id', async () => {
-    const otherAuthor = `0x${'11'.repeat(20)}` as Hex;
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest({ kaUal: `did:dkg:${CHAIN_ID}/${otherAuthor}/${KA_NUMBER}` }),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the queued graph UAL KA number does not match the reserved KA id', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest({ kaUal: `did:dkg:${CHAIN_ID}/${AUTHOR}/7` }),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the returned singleton range does not equal the reserved KA id', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
-          endKAId: (RESERVED_KA_ID + 1n).toString() as BigIntString,
-        }),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the inclusion tx hash does not match the queued broadcast tx', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
-          inclusion: {
-            txHash: `0x${'ef'.repeat(32)}` as Hex,
-            blockNumber: 77,
-            blockHash: BLOCK_HASH,
-          },
-        }),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the proof merkle root does not match the queued seal', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
-          publishProof: {
-            merkleRoot: `0x${'ba'.repeat(32)}` as Hex,
-            authorAddress: AUTHOR,
-            txIndex: 4,
-          },
-        }),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the transaction author does not match the sealed author', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
-          publishProof: {
-            merkleRoot: SEAL_MERKLE_ROOT,
-            authorAddress: `0x${'11'.repeat(20)}` as Hex,
-            txIndex: 4,
-          },
-        }),
-        chain: seededChain(),
-      }),
-    ).rejects.toMatchObject(REJECTS);
-  });
-
-  it('rejects when the returned publisher address is missing', async () => {
-    await expect(
-      normalizeRecoveredNamedKaPublish({
-        request: baseRequest(),
-        job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, { omitPublisher: true }),
+        recovery,
         chain: seededChain(),
       }),
     ).rejects.toMatchObject(REJECTS);
