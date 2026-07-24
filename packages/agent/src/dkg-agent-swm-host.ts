@@ -3328,7 +3328,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
     });
   }
 
+  vmReconcileLocalWriteGen(this: DKGAgent,
+    candidateNamespaces: VmReconcileSwmNamespace[],
+  ): string | null {
+    const rootDataGraph = candidateNamespaces[0]?.dataGraph;
+    if (!rootDataGraph) return null;
+    const swmSuffix = rootDataGraph.indexOf('/_shared_memory');
+    const graphPrefix = swmSuffix >= 0
+      ? `${rootDataGraph.slice(0, swmSuffix)}/`
+      : rootDataGraph;
+    const writeGen = asGraphWriteGenSource(this.store)?.getWriteGen(graphPrefix);
+    return writeGen === undefined ? null : `local-write-gen:${writeGen}`;
+  }
+
+  async readVmReconcileSwmGenForCachedMode(this: DKGAgent,
+    cachedSwmGen: string,
+    candidateNamespaces: VmReconcileSwmNamespace[],
+  ): Promise<string | null> {
+    if (cachedSwmGen.startsWith('local-write-gen:')) {
+      return this.vmReconcileLocalWriteGen(candidateNamespaces);
+    }
+    return this.readVmReconcileSwmGen(candidateNamespaces);
+  }
+
   vmReconcileSwmGenSupportsDurableNegative(this: DKGAgent, swmGen: string): boolean {
+    // The per-CG write generation is deliberately process-local: it prevents
+    // unrelated CG writes from invalidating a metadata-pending backoff, while a
+    // daemon restart drops the accelerator and performs an authoritative scan.
+    if (swmGen.startsWith('local-write-gen:')) return false;
     // A changelog cursor covers every descendant graph mutation. The fallback
     // fingerprint covers only the bare SWM bucket, so an operation whose data
     // later lands in a per-KA child graph must fail open after restart.
@@ -3444,7 +3471,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const cachedNamespaceKey = this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces);
       if (currentNamespaceKey !== cachedNamespaceKey) {
         if (!currentNamespaces.complete) {
-          const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
+          const currentSwmGen = await this.readVmReconcileSwmGenForCachedMode(
+            cached.swmGen,
+            currentNamespaces.namespaces,
+          );
           if (currentSwmGen === null) {
             this.deleteVmReconcileNegativeCacheEntry(cacheKey);
             return false;
@@ -3460,7 +3490,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.namespaces.map((namespace) => namespace.metaGraph));
       if (!pattern) return true;
-      const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
+      const currentSwmGen = await this.readVmReconcileSwmGenForCachedMode(
+        cached.swmGen,
+        currentNamespaces.namespaces,
+      );
       if (currentSwmGen === null) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
@@ -3531,7 +3564,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       localCgId,
       failures,
       nextRetryAt: Date.now() + backoff,
-      swmGen: state.swmGen,
+      // The node-global changelog head advances for every CG and made a loaded
+      // node invalidate all metadata-pending misses continuously. Prefer the
+      // adapter's per-CG write generation for this process-local accelerator;
+      // target-CG writes still invalidate immediately, while unrelated writes
+      // no longer trigger repeated exact fetches.
+      swmGen: reason === 'metadata_pending'
+        ? this.vmReconcileLocalWriteGen(state.candidateNamespaces) ?? state.swmGen
+        : state.swmGen,
       candidateNamespaces: state.candidateNamespaces,
       peerTopologyKey: state.peerTopologyKey,
     };

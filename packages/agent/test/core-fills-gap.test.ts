@@ -1260,6 +1260,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(metadataPendingCache.size).toBe(1);
     const [metadataPendingKey, firstMetadataPending] =
       [...metadataPendingCache.entries()][0]!;
+    expect(firstMetadataPending.swmGen).toMatch(/^local-write-gen:\d+$/);
     const metadataPendingRetryDelay =
       firstMetadataPending.nextRetryAt - Date.now();
     // A loaded node can take several minutes to traverse all subscribed CGs.
@@ -1285,6 +1286,15 @@ describe('Phase D - VM reconcile damping', () => {
     expect(secondMetadataPending.failures).toBe(2);
     expect(secondMetadataPending.nextRetryAt - Date.now())
       .toBeGreaterThan(metadataPendingRetryDelay);
+
+    // Activity in another CG advances the node-global changelog but must not
+    // invalidate a miss whose target CG has not changed.
+    await internals.store.insert([{
+      subject: 'urn:test:unrelated-activity',
+      predicate: 'http://schema.org/name',
+      object: '"unrelated local evidence"',
+      graph: contextGraphWorkspaceMetaGraphUri('unrelated-cg'),
+    }]);
 
     await expect(internals.reconcileChainOrdinal(
       '68',
