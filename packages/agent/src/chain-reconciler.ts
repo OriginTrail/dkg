@@ -61,10 +61,11 @@ export interface OrdinalRecoveryTarget {
 export interface PendingOrdinalRecoveryResult {
   /** Revalidated outcomes for ordinals that consumed this pass's network budget. */
   outcomes: ReadonlyMap<number, OrdinalOutcome>;
-  /** Whether recovery completed at least one target during this network pass. */
-  madeProgress: boolean;
-  /** Recovery queue after attempted targets were revalidated. */
-  remainingTargets: readonly OrdinalRecoveryTarget[];
+  /**
+   * First remaining target after productive recovery. Its presence requests an
+   * immediate continuation; damped or no-progress recovery deliberately omits it.
+   */
+  nextRecoveryOrdinal?: number;
 }
 
 export interface ChainReconcilerDeps {
@@ -269,9 +270,7 @@ export async function reconcileContextGraph(
         staleTarget = true;
       } else {
         for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
-        if (recovery.madeProgress) {
-          recoveryContinuationOrdinal = recovery.remainingTargets[0]?.ordinal;
-        }
+        recoveryContinuationOrdinal = recovery.nextRecoveryOrdinal;
       }
     }
 
