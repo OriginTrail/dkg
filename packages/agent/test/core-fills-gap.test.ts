@@ -90,6 +90,13 @@ interface AgentInternals {
     watermarkBefore: number;
     watermarkAfter: number;
   }>;
+  executeVmReconcileForCg(localCgId: string, source: 'live' | 'periodic' | 'manual'): Promise<{
+    status: string;
+    attempted: boolean;
+    headOrdinal: number;
+    watermarkBefore: number;
+    watermarkAfter: number;
+  }>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   vmReconcileDispatcher: {
@@ -2009,6 +2016,67 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(scannedOrdinals).toEqual([0, 1, 2]);
     expect(deferredFetches).toEqual([true, true, true]);
     expect(recoveryBatches).toEqual([[1, 2]]);
+  });
+
+  it('yields a pending-only historical slice but immediately chains a productive slice', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillTrailingSliceGate', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const pendingCg = 'pending-historical-slice';
+    const productiveCg = 'productive-historical-slice';
+    internals.subscribedContextGraphs.set(pendingCg, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '325',
+      lastReconciledOrdinal: 0,
+    });
+    internals.subscribedContextGraphs.set(productiveCg, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '326',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 12n;
+
+    let mode: 'pending' | 'productive' = 'pending';
+    (internals as any).reconcileChainOrdinal = async (
+      localCgId: string,
+      _onChainCgId: bigint,
+      ordinal: number,
+    ) => mode === 'productive'
+      ? { status: 'already', blockNumber: 0 }
+      : {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${localCgId}-${ordinal}`,
+            kaId: String(ordinal),
+            reason: 'verified-vm-metadata-pending',
+          },
+        };
+    (internals as any).recoverVmReconcileBatch = async () => new Map();
+
+    const liveTriggered: string[] = [];
+    internals.vmReconcileDispatcher = {
+      triggerLive: (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
+      triggerPeriodic: () => undefined,
+      tryTriggerPeriodic: () => true,
+      dispatch: async () => ({}),
+    };
+
+    const pendingResult = await internals.executeVmReconcileForCg(pendingCg, 'periodic');
+    expect(pendingResult).toMatchObject({
+      attempted: true,
+      watermarkBefore: 0,
+      watermarkAfter: 0,
+    });
+    expect(liveTriggered).toEqual([]);
+
+    mode = 'productive';
+    const productiveResult = await internals.executeVmReconcileForCg(productiveCg, 'periodic');
+    expect(productiveResult.watermarkAfter).toBe(10);
+    expect(liveTriggered).toEqual([productiveCg]);
   });
 
   it('targets the authenticated curator without running the global connection-prime walk', async () => {

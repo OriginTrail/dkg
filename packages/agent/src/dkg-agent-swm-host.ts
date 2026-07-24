@@ -2754,10 +2754,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
     this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
-    // Queue one trailing slice while this key is still active. The dispatcher
-    // places it behind already-waiting live CGs, so a large graph makes steady
-    // progress without monopolising the only VM worker.
-    if (result.hasMore || result.staleTarget) {
+    // Queue one trailing slice while this key is still active only after this
+    // slice proved it can advance. A pending-only historical backlog must
+    // yield to the periodic sweep; otherwise one startup tick drains every
+    // old ordinal immediately, repeatedly exact-fetching content that cannot
+    // repair missing provenance. Productive catch-up still chains slices at
+    // full speed, and a stale target still gets its immediate binding retry.
+    if ((result.hasMore && result.reconciled > 0) || result.staleTarget) {
       this.vmReconcileDispatcher?.triggerLive(localCgId);
     }
     return response;
