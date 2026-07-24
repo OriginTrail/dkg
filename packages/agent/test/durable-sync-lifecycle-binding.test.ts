@@ -119,10 +119,10 @@ describe('durable sync lifecycle chain binding', () => {
     await captureGraphScopedStore({ chainId: 'none' } as ChainAdapter);
 
     const syncContext = mockedRunDurableSync.mock.calls[0]![0];
-    expect(syncContext.createPhaseDeadline('context-graph-fetch', 1))
+    expect(syncContext.createContextGraphFetchDeadline(1))
       .toBe(1_800_000_120_000);
     vi.mocked(Date.now).mockReturnValue(1_800_000_300_000);
-    expect(syncContext.createPhaseDeadline('graph-scoped-authentication', 1))
+    expect(syncContext.createGraphScopedAuthenticationDeadline())
       .toBe(1_800_000_420_000);
   });
 

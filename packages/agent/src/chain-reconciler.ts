@@ -62,7 +62,7 @@ export interface PendingOrdinalRecoveryResult {
   /** Revalidated outcomes for ordinals that consumed this pass's network budget. */
   outcomes: ReadonlyMap<number, OrdinalOutcome>;
   /**
-   * Atomic scheduling decision for the first untouched recovery target.
+   * Atomic scheduling decision for the next target in the maintained recovery queue.
    * Damped recovery retains the cursor without immediately requeueing it.
    */
   resume?: {

@@ -2147,7 +2147,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.resume).toEqual({ ordinal: 2, queueImmediately: true });
   });
 
-  it('damps an unproductive exact batch with the per-CG fetch cooldown', async () => {
+  it('keeps an attempted pending target ahead of deferred targets and damps retries', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmBatchCooldown', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
@@ -2179,19 +2179,26 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       kaId: '7',
       reason: 'no-swm' as const,
     };
+    const deferredTarget = {
+      ordinal: 1,
+      ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8',
+      kaId: '8',
+      reason: 'no-swm' as const,
+    };
     (internals as any).reconcileChainOrdinal = async () => ({
       status: 'pending',
       recovery: target,
     });
 
-    const first = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const targets = [target, deferredTarget];
+    const first = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
     expect(fetchCount).toBe(1);
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
-    expect(first.resume).toBeUndefined();
+    expect(first.resume).toEqual({ ordinal: 0, queueImmediately: false });
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
-    const second = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
     expect(fetchCount).toBe(1);
     expect(second.outcomes.size).toBe(0);
     expect(second.resume).toEqual({ ordinal: 0, queueImmediately: false });

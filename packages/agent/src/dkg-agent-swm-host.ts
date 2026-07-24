@@ -3808,13 +3808,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
-    const firstUntouchedTarget = targets.find((target) => !outcomes.has(target.ordinal));
-    return firstUntouchedTarget
+    const nextRecoveryTarget = remaining[0];
+    return nextRecoveryTarget
       ? {
           outcomes,
           resume: {
-            ordinal: firstUntouchedTarget.ordinal,
-            queueImmediately: attemptedFetch,
+            ordinal: nextRecoveryTarget.ordinal,
+            queueImmediately: recoveredAny,
           },
         }
       : { outcomes };

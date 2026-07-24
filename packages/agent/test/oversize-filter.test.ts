@@ -261,7 +261,8 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
         ctx: createOperationContext('sync'),
         remotePeerId: 'peerR',
         contextGraphIds: ['agents'],
-        createPhaseDeadline: () => Date.now() + 10_000,
+        createContextGraphFetchDeadline: () => Date.now() + 10_000,
+        createGraphScopedAuthenticationDeadline: () => Date.now() + 10_000,
         fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => page(phase),
         processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
           verifiedData: dataQuads,
