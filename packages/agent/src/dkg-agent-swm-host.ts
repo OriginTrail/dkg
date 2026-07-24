@@ -420,6 +420,11 @@ type VmReconcileOrdinalOptions = {
   isTargetCurrent?: () => boolean;
   /** Collect the missing KA for one batch fetch instead of fetching inline. */
   deferActiveFetch?: boolean;
+  /**
+   * Revalidate immediately after an exact batch fetch even when the initial
+   * scan recorded a generation-gated miss for this UAL.
+   */
+  bypassNegativeCache?: boolean;
 };
 
 /**
@@ -3377,6 +3382,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async shouldDeferVmReconcileByNegativeCache(this: DKGAgent,
     cacheKey: string,
     localCgId: string,
+    options: { primeConnections?: boolean } = {},
   ): Promise<boolean> {
     let cached = this.vmReconcileNegativeCache.get(cacheKey);
     if (!cached && !this.vmReconcileNegativeCacheHydrated.has(cacheKey)) {
@@ -3420,11 +3426,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (Date.now() >= cached.nextRetryAt) return false;
 
     try {
-      try {
-        await this.primeCatchupConnections();
-      } catch {
-        // Best effort only; an unchanged connection view can still honor the
-        // cached miss until the backoff expires.
+      if (options.primeConnections !== false) {
+        try {
+          await this.primeCatchupConnections();
+        } catch {
+          // Best effort only; an unchanged connection view can still honor the
+          // cached miss until the backoff expires.
+        }
       }
       if (await this.vmReconcilePeerTopologyKey(localCgId) !== cached.peerTopologyKey) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
@@ -3472,6 +3480,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     cacheKey: string,
     localCgId: string,
     state: VmReconcileSwmCandidateState,
+    reason: 'no_swm' | 'metadata_pending' = 'no_swm',
   ): void {
     if (state.swmGen === null) {
       this.deleteVmReconcileNegativeCacheEntry(cacheKey);
@@ -3494,7 +3503,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     getMetrics().storeRetryAttemptsTotal.add(1, {
       scope: 'vm_reconcile',
-      reason: 'no_swm',
+      reason,
       attempt: Math.min(failures, 16),
     });
     if (previous) {
@@ -3672,13 +3681,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
     if (!isTargetCurrent() || targets.length === 0) return new Map();
 
-    // Damping: the batched path deliberately skips the per-UAL negative cache
-    // (consulting it primes connections to every discovered agent — the walk
-    // this path exists to avoid), so the per-CG active-fetch cooldown is the
-    // only damper between this batch and the network. A wholly unproductive
-    // batch (e.g. the curator is offline) therefore costs one bounded exact
-    // fetch per sweep interval, not one per reconcile pass. Progress clears
-    // the cooldown below so a draining backlog proceeds slice after slice.
+    // Damping: the initial scan records and consults per-UAL generation-gated
+    // misses without priming connections. This per-CG active-fetch cooldown is
+    // a second network-side guard within the current sweep. A wholly
+    // unproductive batch (e.g. the curator is offline) therefore costs one
+    // bounded exact fetch per sweep interval, not one per reconcile pass.
+    // Progress clears the cooldown below so a draining backlog proceeds slice
+    // after slice.
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
       return new Map();
@@ -3787,7 +3796,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
           onChainCgId,
           target.ordinal,
           headBlock,
-          { isTargetCurrent, deferActiveFetch: true },
+          {
+            isTargetCurrent,
+            deferActiveFetch: true,
+            // The initial scan records a generation-gated miss before the
+            // network request. A response may have supplied the missing
+            // provenance, so this one same-pass verification must bypass it.
+            bypassNegativeCache: true,
+          },
         );
         outcomes.set(target.ordinal, outcome);
         if (outcome.status === 'pending' && outcome.recovery) {
@@ -3853,7 +3869,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // cursor advances without redoing chain reads + an SWM scan.
       if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
 
-      if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
+      if (
+        !options.bypassNegativeCache
+        && await this.shouldDeferVmReconcileByNegativeCache(
+          cacheKey,
+          localCgId,
+          // Batched exact recovery deliberately avoids a DHT-wide connection
+          // prime. The cache still fails open when the already-connected
+          // recovery topology or local generation changes, and on expiry.
+          { primeConnections: !options.deferActiveFetch },
+        )
+      ) {
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -3895,6 +3921,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
+        if (!options.bypassNegativeCache) {
+          this.recordVmReconcileNegativeCache(
+            cacheKey,
+            localCgId,
+            await this.collectVmReconcileSwmCandidateState(localCgId),
+            outcome === 'verified-vm-metadata-pending' ? 'metadata_pending' : 'no_swm',
+          );
+        }
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -4019,6 +4053,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: versionBlock };
       case 'no-swm':
+      case 'verified-vm-metadata-pending':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
           this.vmReconcileFetchCooldownAt.delete(localCgId);
         } else {
@@ -4026,6 +4061,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             cacheKey,
             localCgId,
             swmState ?? await this.collectVmReconcileSwmCandidateState(localCgId),
+            outcome === 'verified-vm-metadata-pending' ? 'metadata_pending' : 'no_swm',
           );
         }
         this.emitReplication({
