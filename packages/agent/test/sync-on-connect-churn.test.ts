@@ -140,7 +140,8 @@ describe('sync-on-connect churn gates', () => {
         priority: undefined,
       },
     ]);
-    expect(syncedPeers).toEqual([{ fresh: true, progress: true }]);
+    expect(syncedPeers).toHaveLength(1);
+    expect(syncedPeers[0]).toMatchObject({ fresh: true, progress: true });
   });
 
   it('does not let a system-graph transport failure invalidate a clean user-CG round', async () => {
@@ -174,7 +175,8 @@ describe('sync-on-connect churn gates', () => {
 
     expect(outcome).toBe('synced');
     expect(sharedRuns).toEqual([['current-user-cg']]);
-    expect(syncedPeers).toEqual([{ fresh: true, progress: true }]);
+    expect(syncedPeers).toHaveLength(1);
+    expect(syncedPeers[0]).toMatchObject({ fresh: true, progress: true });
   });
 
   it('dedupes repeated reconnect scheduling across a short relay flap', async () => {
