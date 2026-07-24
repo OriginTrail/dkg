@@ -4,6 +4,7 @@ import {
   filterExactAssetDurablePayload,
   runDurableSync,
 } from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -142,8 +143,7 @@ function makeContext(options: {
       remotePeerId: 'peerR',
       contextGraphIds: options.contextGraphIds ?? ['mfacts'],
       syncAgentsMeta: options.syncAgentsMeta,
-      createContextGraphFetchDeadline: () => Date.now() + 10_000,
-      createGraphScopedAuthenticationDeadline: () => Date.now() + 10_000,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
       fetchSyncPages: async (
         _ctx: unknown,
         _peer: string,

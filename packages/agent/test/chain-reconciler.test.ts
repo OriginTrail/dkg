@@ -284,10 +284,6 @@ describe('reconcileContextGraph — sweep', () => {
             ordinal,
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
-          resume: {
-            ordinal: ordinals[3]!,
-            queueImmediately: true,
-          },
         };
       },
     });
@@ -306,32 +302,52 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
   });
 
-  it('retains the deferred cursor without hot-looping when recovery is damped', async () => {
+  it('advances the fair scan past a damped recovery gap without hot-looping', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
     const { deps } = makeDeps({
       getKCCount: async () => 25,
       maxOrdinalsPerPass: 10,
-      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
-        status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
-      }),
-      recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+            kaId: String(ordinal),
+            reason: 'no-swm',
+          },
+        };
+      },
+      recoverPendingOrdinals: async () => ({
         outcomes: new Map(),
-        resume: {
-          ordinal: targets[0]!.ordinal,
-          queueImmediately: false,
-        },
       }),
     });
     const state = createCursorState(0);
 
-    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(state.scanOrdinal).toBe(10);
 
-    expect(result.hasMore).toBe(false);
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(second.hasMore).toBe(true);
+    expect(state.scanOrdinal).toBe(20);
+
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+      [20, 21, 22, 23, 24],
+    ]);
+    expect(third.watermark).toBe(0);
+    expect(third.pending).toBe(1);
+    expect(third.hasMore).toBe(false);
+    expect(state.ahead.size).toBe(24);
     expect(state.scanOrdinal).toBe(0);
   });
 
