@@ -3489,9 +3489,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.pruneVmReconcileState();
     const previous = this.vmReconcileNegativeCache.get(cacheKey);
     const failures = (previous?.failures ?? 0) + 1;
+    // Metadata-pending means the exact VM payload is already present but its
+    // transaction provenance is not. On a loaded node, a full subscribed-CG
+    // traversal can exceed the one-minute sweep cadence, so a cadence-sized
+    // first backoff expires before the cursor wraps and provides no damping.
+    // New local evidence and connected-peer topology changes already invalidate
+    // this cache immediately; use the bounded ceiling for the timer-only
+    // fallback so unchanged historical gaps are not re-scanned every traversal.
+    const backoffBase = reason === 'metadata_pending'
+      ? DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS
+      : DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS;
     const exponentialBackoff = Math.min(
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
+      backoffBase * 2 ** Math.max(0, failures - 1),
     );
     const jitterSample = createHash('sha256')
       .update(`${this.node.peerId.toString()}\0${cacheKey}\0${failures}`)

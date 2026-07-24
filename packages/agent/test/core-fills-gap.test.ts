@@ -1249,7 +1249,15 @@ describe('Phase D - VM reconcile damping', () => {
       recovery: { reason: 'verified-vm-metadata-pending' },
     });
     expect(handleChainReconciledKC.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+    const metadataPendingCache =
+      (internals as any).vmReconcileNegativeCache as Map<string, { nextRetryAt: number }>;
+    expect(metadataPendingCache.size).toBe(1);
+    const metadataPendingRetryDelay =
+      [...metadataPendingCache.values()][0]!.nextRetryAt - Date.now();
+    // A loaded node can take several minutes to traverse all subscribed CGs.
+    // Pin a first retry horizon that survives that traversal; local generation
+    // or connected-peer topology changes still invalidate it immediately.
+    expect(metadataPendingRetryDelay).toBeGreaterThan(4 * 60_000);
 
     await expect(internals.reconcileChainOrdinal(
       '68',
