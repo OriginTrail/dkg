@@ -58,15 +58,8 @@ export interface OrdinalRecoveryTarget {
   reason: 'no-swm' | 'verified-vm-metadata-pending';
 }
 
-export interface PendingOrdinalRecoveryResult {
-  /** Revalidated outcomes for ordinals that consumed this pass's network budget. */
-  outcomes: ReadonlyMap<number, OrdinalOutcome>;
-  /**
-   * First remaining target after productive recovery. Its presence requests an
-   * immediate continuation; damped or no-progress recovery deliberately omits it.
-   */
-  nextRecoveryOrdinal?: number;
-}
+/** Revalidated outcomes for ordinals that consumed this pass's recovery budget. */
+export type PendingOrdinalRecoveryResult = ReadonlyMap<number, OrdinalOutcome>;
 
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
@@ -269,8 +262,12 @@ export async function reconcileContextGraph(
       if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
         staleTarget = true;
       } else {
-        for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
-        recoveryContinuationOrdinal = recovery.nextRecoveryOrdinal;
+        for (const [ordinal, outcome] of recovery) outcomes.set(ordinal, outcome);
+        const recoveredAny = [...recovery.values()]
+          .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
+        recoveryContinuationOrdinal = recoveredAny
+          ? recoveryTargets.find((target) => !recovery.has(target.ordinal))?.ordinal
+          : undefined;
       }
     }
 

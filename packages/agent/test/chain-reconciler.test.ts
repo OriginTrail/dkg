@@ -245,12 +245,10 @@ describe('reconcileContextGraph — sweep', () => {
       },
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         recoveryCalls.push(targets.map((target) => target.ordinal));
-        return {
-          outcomes: new Map(targets.map((target) => [
-            target.ordinal,
-            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
-          ])),
-        };
+        return new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+        ]));
       },
     });
     const state = createCursorState(0);
@@ -279,13 +277,10 @@ describe('reconcileContextGraph — sweep', () => {
         const ordinals = targets.map((target) => target.ordinal);
         recoveryCalls.push(ordinals);
         const attempted = ordinals.slice(0, 3);
-        return {
-          outcomes: new Map(attempted.map((ordinal) => [
-            ordinal,
-            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
-          ])),
-          nextRecoveryOrdinal: ordinals[3],
-        };
+        return new Map(attempted.map((ordinal) => [
+          ordinal,
+          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+        ]));
       },
     });
     const state = createCursorState(0);
@@ -322,9 +317,7 @@ describe('reconcileContextGraph — sweep', () => {
           },
         };
       },
-      recoverPendingOrdinals: async () => ({
-        outcomes: new Map(),
-      }),
+      recoverPendingOrdinals: async () => new Map(),
     });
     const state = createCursorState(0);
 
@@ -425,12 +418,10 @@ describe('reconcileContextGraph — sweep', () => {
         // The rebind lands while the long recovery await is in flight. The
         // recovered outcomes belong to the OLD binding and must be discarded.
         current = false;
-        return {
-          outcomes: new Map(targets.map((target) => [
-            target.ordinal,
-            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
-          ])),
-        };
+        return new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+        ]));
       },
     });
     const state = createCursorState(0);

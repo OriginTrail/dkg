@@ -76,7 +76,7 @@ export interface DurableSyncBudget {
   graphScopedAuthenticationDeadline: () => number;
 }
 
-interface DurableSyncContext {
+export interface DurableSyncContext {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -154,7 +154,7 @@ interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-interface LegacyDurableSyncContext extends Omit<DurableSyncContext, 'durableSyncBudget'> {
+export interface LegacyDurableSyncContext extends Omit<DurableSyncContext, 'durableSyncBudget'> {
   /**
    * @deprecated Deep-import compatibility for callers from before durable sync
    * split fetch and authentication into separate bounded phases.
@@ -177,16 +177,6 @@ function legacyDurableSyncBudget(
       }
       return currentContextGraphDeadline;
     },
-  };
-}
-
-function normalizeDurableSyncContext(
-  context: DurableSyncContext | LegacyDurableSyncContext,
-): DurableSyncContext {
-  if ('durableSyncBudget' in context) return context;
-  return {
-    ...context,
-    durableSyncBudget: legacyDurableSyncBudget(context.createContextGraphSyncDeadline),
   };
 }
 
@@ -223,13 +213,21 @@ export function filterExactAssetDurablePayload(
   };
 }
 
-export async function runDurableSync(
-  context: DurableSyncContext | LegacyDurableSyncContext,
+/**
+ * Deprecated deep-import compatibility edge for pre-budget callers. The
+ * canonical requester entrypoint below accepts only DurableSyncContext.
+ */
+export async function runLegacyDurableSync(
+  legacyContext: LegacyDurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
-  return runDurableSyncWithBudget(normalizeDurableSyncContext(context));
+  const { createContextGraphSyncDeadline, ...context } = legacyContext;
+  return runDurableSync({
+    ...context,
+    durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),
+  });
 }
 
-async function runDurableSyncWithBudget(
+export async function runDurableSync(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
   const {

@@ -3670,7 +3670,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isTargetCurrent: () => boolean,
   ): Promise<PendingOrdinalRecoveryResult> {
     const ctx = createOperationContext('system');
-    const noRecovery = (): PendingOrdinalRecoveryResult => ({ outcomes: new Map() });
+    const noRecovery = (): PendingOrdinalRecoveryResult => new Map();
     if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
     // Damping: the batched path deliberately skips the per-UAL negative cache
@@ -3800,10 +3800,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
-    const nextRecoveryTarget = recoveredAny ? remaining[0] : undefined;
-    return nextRecoveryTarget
-      ? { outcomes, nextRecoveryOrdinal: nextRecoveryTarget.ordinal }
-      : { outcomes };
+    return outcomes;
   }
 
   /**

@@ -1999,12 +1999,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       targets: readonly Array<{ ordinal: number }>,
     ) => {
       recoveryBatches.push(targets.map((target) => target.ordinal));
-      return {
-        outcomes: new Map(targets.map((target) => [
-          target.ordinal,
-          { status: 'reconciled', blockNumber: 0 } as const,
-        ])),
-      };
+      return new Map(targets.map((target) => [
+        target.ordinal,
+        { status: 'reconciled', blockNumber: 0 } as const,
+      ]));
     };
 
     const result = await internals.runVmReconcileForCg(localCgId, 'manual');
@@ -2083,7 +2081,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(connectionAttempts).toEqual([approvedPeer, registryPeer]);
     expect(protocolPeers[0]).toBe(connected[0]);
     expect(fetches).toEqual([{ peerId: approvedPeer, uals: [ual] }]);
-    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
   });
 
   it('fetches one large recovery KA per peer attempt and defers the rest', async () => {
@@ -2142,8 +2140,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(fetches[1]!.uals).toEqual([targets[1]!.ual]);
     // Revalidation runs only for requested targets, in request order.
     expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
-    expect(result.outcomes.size).toBe(2);
-    expect(result.nextRecoveryOrdinal).toBe(2);
+    expect(result.size).toBe(2);
   });
 
   it('keeps an attempted pending target ahead of deferred targets and damps retries', async () => {
@@ -2197,15 +2194,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const targets = [target, deferredTarget];
     const first = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
     expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
-    expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
-    expect(first.nextRecoveryOrdinal).toBeUndefined();
+    expect(first.get(0)).toMatchObject({ status: 'pending' });
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
     expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
-    expect(second.outcomes.size).toBe(0);
-    expect(second.nextRecoveryOrdinal).toBeUndefined();
+    expect(second.size).toBe(0);
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {
@@ -2301,7 +2296,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const result = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
 
     expect(fetches).toEqual([admittedPeer]);
-    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
   });
 
   it('reports a durable watermark ahead of the chain head without ordinal work', async () => {

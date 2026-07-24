@@ -4,8 +4,10 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
+  runLegacyDurableSync,
   runDurableSync,
   type DurableSyncBudget,
+  type DurableSyncContext,
 } from '../src/sync/requester/durable-sync.js';
 import type {
   GraphScopedMaterializationOutcome,
@@ -63,35 +65,33 @@ function requesterPage(phase: 'data' | 'meta', quads: Quad[]): SyncPageResult {
   };
 }
 
-function runRequesterBudgetHarness(options: {
+function requesterBudgetContext(options: {
   assetCount?: number;
-  durableSyncBudget?: DurableSyncBudget;
-  createContextGraphSyncDeadline?: (remainingContextGraphs: number) => number;
+  durableSyncBudget: DurableSyncBudget;
+  onFetchPhase?: (phase: 'data' | 'meta') => void;
   storeGraphScopedAsset: (
     asset: VerifiedGraphScopedAsset,
     deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
-}) {
+}): DurableSyncContext {
   const fixtures = Array.from(
     { length: options.assetCount ?? 1 },
     (_, index) => requesterFixture(index + 1),
   );
   const dataQuads = fixtures.map((fixture) => fixture.data);
   const metadataQuads = fixtures.flatMap((fixture) => fixture.metadata);
-  const deadlineConfig = options.durableSyncBudget
-    ? { durableSyncBudget: options.durableSyncBudget }
-    : { createContextGraphSyncDeadline: options.createContextGraphSyncDeadline! };
 
-  return runDurableSync({
+  return {
     ctx,
     remotePeerId: 'peer-durable-sync-budget',
     contextGraphIds: [contextGraphId],
-    ...deadlineConfig,
-    fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
-      phase === 'data'
+    durableSyncBudget: options.durableSyncBudget,
+    fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => {
+      options.onFetchPhase?.(phase);
+      return phase === 'data'
         ? requesterPage(phase, dataQuads)
-        : requesterPage(phase, metadataQuads)
-    ),
+        : requesterPage(phase, metadataQuads);
+    },
     processDurableBatchInWorker: async () => ({
       verifiedData: dataQuads,
       verifiedMeta: metadataQuads,
@@ -112,7 +112,13 @@ function runRequesterBudgetHarness(options: {
     logInfo: () => {},
     logWarn: () => {},
     logDebug: () => {},
-  });
+  };
+}
+
+function runRequesterBudgetHarness(
+  options: Parameters<typeof requesterBudgetContext>[0],
+) {
+  return runDurableSync(requesterBudgetContext(options));
 }
 
 describe('durable sync deadline budget', () => {
@@ -187,8 +193,10 @@ describe('durable sync deadline budget', () => {
     ).toBe(1_120_000);
   });
 
-  it('starts graph-scoped authentication with its fresh provider deadline', async () => {
-    const authenticationDeadline = 1_800_000_234_567;
+  it('starts graph-scoped authentication after both fetch phases complete', async () => {
+    let phaseTime = 1_800_000_000_000;
+    const completedFetchPhases: Array<'data' | 'meta'> = [];
+    const graphScopedAuthenticationDeadline = vi.fn(() => phaseTime + 60_000);
     const storeGraphScopedAsset = vi.fn(async (
       _asset: VerifiedGraphScopedAsset,
       _deadline: number,
@@ -196,14 +204,20 @@ describe('durable sync deadline budget', () => {
 
     await runRequesterBudgetHarness({
       durableSyncBudget: {
-        fetchDeadline: () => 1,
-        graphScopedAuthenticationDeadline: () => authenticationDeadline,
+        fetchDeadline: () => phaseTime + 60_000,
+        graphScopedAuthenticationDeadline,
+      },
+      onFetchPhase: (phase) => {
+        completedFetchPhases.push(phase);
+        phaseTime += phase === 'meta' ? 10_000 : 20_000;
       },
       storeGraphScopedAsset,
     });
 
+    expect(completedFetchPhases).toEqual(['meta', 'data']);
+    expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(1_800_000_090_000);
   });
 
   it('shares one provider authentication deadline across the verified page', async () => {
@@ -238,9 +252,16 @@ describe('durable sync deadline budget', () => {
       _deadline: number,
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
-    await runRequesterBudgetHarness({
-      createContextGraphSyncDeadline,
+    const { durableSyncBudget: _budget, ...legacyContext } = requesterBudgetContext({
+      durableSyncBudget: {
+        fetchDeadline: () => deadline,
+        graphScopedAuthenticationDeadline: () => deadline,
+      },
       storeGraphScopedAsset,
+    });
+    await runLegacyDurableSync({
+      ...legacyContext,
+      createContextGraphSyncDeadline,
     });
 
     expect(createContextGraphSyncDeadline).toHaveBeenCalledOnce();
