@@ -11,7 +11,7 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
-  LiftJobBroadcast,
+  LiftJobBroadcastMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { normalizeRecoveredNamedKaPublish } from '../src/named-ka-publish-recovery.js';
 
@@ -101,21 +101,27 @@ function baseRequest(
   };
 }
 
-// The validator only reads job.broadcast.{txHash,merkleRoot}; the rest of the
-// LiftJobBroadcast shape is irrelevant to identity normalization.
-function broadcastJob(): LiftJobBroadcast {
+// The normalizer only reads job.broadcast; its input type is the narrow structural
+// shape, so this fixture is a real contract guard (no cast) rather than a faked job.
+function broadcastJob(): { broadcast: LiftJobBroadcastMetadata } {
   return {
     broadcast: { txHash: TX_HASH, walletId: 'wallet-1', merkleRoot: SEAL_MERKLE_ROOT },
-  } as unknown as LiftJobBroadcast;
+  };
 }
 
+// Typed optional tweaks (no Partial-over-required spread) so the fixture satisfies
+// AsyncKnowledgeAssetVmPublishRecoveryEvidence without a cast.
 function recoveryEvidence(
   ual: string,
-  finalizationOverrides: Partial<AsyncKnowledgeAssetVmPublishRecoveryEvidence['finalization']> = {},
-  overrides: Partial<AsyncKnowledgeAssetVmPublishRecoveryEvidence> = {},
+  opts: {
+    endKAId?: BigIntString;
+    omitPublisher?: boolean;
+    inclusion?: AsyncKnowledgeAssetVmPublishRecoveryEvidence['inclusion'];
+    publishProof?: AsyncKnowledgeAssetVmPublishRecoveryEvidence['publishProof'];
+  } = {},
 ): AsyncKnowledgeAssetVmPublishRecoveryEvidence {
   return {
-    inclusion: {
+    inclusion: opts.inclusion ?? {
       txHash: TX_HASH,
       blockNumber: 77,
       blockHash: BLOCK_HASH,
@@ -127,13 +133,11 @@ function recoveryEvidence(
       ual,
       batchId: RESERVED_KA_ID.toString() as BigIntString,
       startKAId: RESERVED_KA_ID.toString() as BigIntString,
-      endKAId: RESERVED_KA_ID.toString() as BigIntString,
-      publisherAddress: PUBLISHER,
-      ...finalizationOverrides,
+      endKAId: opts.endKAId ?? (RESERVED_KA_ID.toString() as BigIntString),
+      publisherAddress: opts.omitPublisher ? undefined : PUBLISHER,
     },
-    publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4 },
-    ...overrides,
-  } as AsyncKnowledgeAssetVmPublishRecoveryEvidence;
+    publishProof: opts.publishProof ?? { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4 },
+  };
 }
 
 const REJECTS = { code: 'KA_VM_RECOVERY_INCONSISTENT' };
@@ -151,9 +155,9 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
 
     expect(result.reservedKaId).toBe(RESERVED_KA_ID);
     expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
-    // receiptUal carries the resolver-returned form (graph-local here), which is
-    // stamped as publishedUal — matching what a normal named-KA publish records.
-    expect(result.receiptUal).toBe(GRAPH_LOCAL_UAL);
+    // publishedUal carries the resolver-returned form (graph-local here) — the same
+    // identity a normal named-KA publish records.
+    expect(result.publishedUal).toBe(GRAPH_LOCAL_UAL);
     expect(result.txHash).toBe(TX_HASH);
     expect(result.materialization.superseded).toBe(false);
   });
@@ -167,7 +171,7 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     });
 
     expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
-    expect(result.receiptUal).toBe(CONTRACT_RECEIPT_UAL);
+    expect(result.publishedUal).toBe(CONTRACT_RECEIPT_UAL);
   });
 
   it('accepts a graph-local UAL whose author is checksummed (case-insensitive)', async () => {
@@ -285,7 +289,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
       normalizeRecoveredNamedKaPublish({
         request: baseRequest(),
         job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {}, {
+        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
           inclusion: {
             txHash: `0x${'ef'.repeat(32)}` as Hex,
             blockNumber: 77,
@@ -302,7 +306,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
       normalizeRecoveredNamedKaPublish({
         request: baseRequest(),
         job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {}, {
+        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
           publishProof: {
             merkleRoot: `0x${'ba'.repeat(32)}` as Hex,
             authorAddress: AUTHOR,
@@ -319,7 +323,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
       normalizeRecoveredNamedKaPublish({
         request: baseRequest(),
         job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {}, {
+        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
           publishProof: {
             merkleRoot: SEAL_MERKLE_ROOT,
             authorAddress: `0x${'11'.repeat(20)}` as Hex,
@@ -336,7 +340,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
       normalizeRecoveredNamedKaPublish({
         request: baseRequest(),
         job: broadcastJob(),
-        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, { publisherAddress: undefined }),
+        recovery: recoveryEvidence(GRAPH_LOCAL_UAL, { omitPublisher: true }),
         chain: seededChain(),
       }),
     ).rejects.toMatchObject(REJECTS);

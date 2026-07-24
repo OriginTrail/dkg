@@ -9,8 +9,7 @@ import { createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
-  LiftJobBroadcast,
-  LiftJobIncluded,
+  LiftJobBroadcastMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { unpackKnowledgeAssetId } from './ka-identity.js';
 
@@ -20,11 +19,11 @@ export interface RecoveredNamedKaPublish {
    * The recovered published UAL, exactly as returned by the recovery resolver: the graph-local
    * form (author address + low-96 KA number) for named/graph-scoped KAs — matching what a normal
    * publish records — or the contract-address + packed-KA-id form for generic recovery. Validated
-   * to be one of those two representations of {@link reservedKaId}; used only as the stamped
-   * `publishedUal`. The immutable identity is `reservedKaId`, not this string.
+   * to be one of those two representations of {@link reservedKaId}, then stamped verbatim as the
+   * asset's `publishedUal`. The immutable identity is `reservedKaId`, not this string.
    */
-  readonly receiptUal: string;
-  /** Canonical local graph identity: author address + low-96 KA number. */
+  readonly publishedUal: string;
+  /** Canonical local graph identity: author address + low-96 KA number. Drives local materialization. */
   readonly localUal: string;
   readonly txHash: string;
   readonly receiptBlockNumber: number;
@@ -57,7 +56,9 @@ function recoveryInconsistent(name: string, message: string): Error {
  */
 export async function normalizeRecoveredNamedKaPublish(input: {
   readonly request: KnowledgeAssetVmPublishRequest;
-  readonly job: LiftJobBroadcast | LiftJobIncluded;
+  // Only the broadcast metadata (queued tx hash + optional merkle root) is read here; a
+  // structural type keeps the boundary honest instead of taking the whole queue-job union.
+  readonly job: { readonly broadcast: LiftJobBroadcastMetadata };
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
   readonly chain: ChainAdapter;
 }): Promise<RecoveredNamedKaPublish> {
@@ -227,7 +228,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
 
   return {
     reservedKaId,
-    receiptUal: ual,
+    publishedUal: ual,
     localUal,
     txHash: recovery.inclusion.txHash,
     receiptBlockNumber: recovery.inclusion.blockNumber,
