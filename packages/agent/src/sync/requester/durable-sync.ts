@@ -69,6 +69,30 @@ export interface VerifiedFullSnapshot {
   metaFetched: boolean;
 }
 
+export interface DurableSyncDeadlinePolicy {
+  /** Absolute deadline for fetching one Context Graph's metadata and data. */
+  forContextGraphFetch: (remainingContextGraphs: number) => number;
+  /**
+   * Absolute deadline created when graph-scoped chain authentication begins.
+   * One returned deadline is shared by every verified KA in that page.
+   */
+  forGraphScopedAuthentication: () => number;
+}
+
+/**
+ * Boundary adapter for low-level callers whose phase budget does not scale
+ * with the remaining Context Graph count. The factory is invoked afresh when
+ * each phase starts.
+ */
+export function createUniformDurableSyncDeadlinePolicy(
+  createPhaseDeadline: () => number,
+): DurableSyncDeadlinePolicy {
+  return {
+    forContextGraphFetch: createPhaseDeadline,
+    forGraphScopedAuthentication: createPhaseDeadline,
+  };
+}
+
 interface DurableSyncContext {
   ctx: OperationContext;
   remotePeerId: string;
@@ -84,7 +108,7 @@ interface DurableSyncContext {
    */
   onAccessDenied?: (contextGraphId: string) => void;
   syncAgentsMeta?: boolean;
-  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
+  deadlines: DurableSyncDeadlinePolicy;
   fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -106,16 +130,6 @@ interface DurableSyncContext {
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   /** Exact missing KAs for VM recovery; undefined retains normal full/delta sync. */
   exactAssetUalsFor?: (contextGraphId: string) => string[] | undefined;
-  /**
-   * Starts a fresh, bounded chain-authentication phase after the network
-   * payload has been fetched and verified. A single deadline is shared by all
-   * graph-scoped assets in the page so materialization cannot multiply the
-   * caller's authentication budget by the number of KAs.
-   *
-   * Optional for compatibility with lower-level callers; without it the
-   * network deadline remains the fail-closed authentication deadline.
-   */
-  createGraphScopedAuthenticationDeadline?: () => number;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
     dataQuads: Quad[],
@@ -200,11 +214,10 @@ export async function runDurableSync(
     onPhase,
     onAccessDenied,
     syncAgentsMeta = true,
-    createContextGraphSyncDeadline,
+    deadlines,
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
-    createGraphScopedAuthenticationDeadline,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
@@ -281,7 +294,7 @@ export async function runDurableSync(
     try {
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
-      const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
+      const deadline = deadlines.forContextGraphFetch(contextGraphIds.length - index);
       const exactAssetUals = exactAssetUalsFor?.(pid);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -566,7 +579,7 @@ export async function runDurableSync(
         );
       }
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
-        ? createGraphScopedAuthenticationDeadline?.() ?? deadline
+        ? deadlines.forGraphScopedAuthentication()
         : deadline;
       for (const asset of partitioned.assets) {
         const outcome = await storeGraphScopedAsset!(asset, graphScopedAuthenticationDeadline);

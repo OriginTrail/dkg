@@ -58,6 +58,15 @@ export interface OrdinalRecoveryTarget {
   reason: 'no-swm' | 'verified-vm-metadata-pending';
 }
 
+export interface PendingOrdinalRecoveryResult {
+  /** Revalidated outcomes for ordinals that consumed this pass's network budget. */
+  outcomes: ReadonlyMap<number, OrdinalOutcome>;
+  /** Input ordinals deliberately left untouched for the next fair-scan slice. */
+  deferredOrdinals: readonly number[];
+  /** True when recovery reached at least one exact network fetch attempt. */
+  attempted: boolean;
+}
+
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
   getKCCount: (onChainCgId: bigint) => Promise<number>;
@@ -95,7 +104,7 @@ export interface ChainReconcilerDeps {
     onChainCgId: bigint,
     targets: readonly OrdinalRecoveryTarget[],
     headBlock: number | undefined,
-  ) => Promise<ReadonlyMap<number, OrdinalOutcome>>;
+  ) => Promise<PendingOrdinalRecoveryResult>;
   /**
    * Revalidate the local-CG -> on-chain-CG binding between ordinals. An active
    * pass must stop when discovery repairs a stale/reused chain id.
@@ -174,6 +183,8 @@ export async function reconcileContextGraph(
   let reconciled = 0;
   let processed = 0;
   let staleTarget = false;
+  let deferredRecoveryOrdinal: number | undefined;
+  let recoveryAttempted = false;
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -245,7 +256,7 @@ export async function reconcileContextGraph(
       )
       .map((outcome) => outcome.recovery!);
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
-      const recovered = await deps.recoverPendingOrdinals(
+      const recovery = await deps.recoverPendingOrdinals(
         localCgId,
         onChainCgId,
         recoveryTargets,
@@ -258,7 +269,12 @@ export async function reconcileContextGraph(
       if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
         staleTarget = true;
       } else {
-        for (const [ordinal, outcome] of recovered) outcomes.set(ordinal, outcome);
+        for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
+        recoveryAttempted = recovery.attempted;
+        deferredRecoveryOrdinal = recovery.deferredOrdinals.reduce<number | undefined>(
+          (lowest, ordinal) => lowest === undefined ? ordinal : Math.min(lowest, ordinal),
+          undefined,
+        );
       }
     }
 
@@ -284,14 +300,24 @@ export async function reconcileContextGraph(
     }
   }
 
-  if (staleTarget || headUnavailable || !hasUnvisitedCandidates) {
+  if (staleTarget || headUnavailable) {
+    state.scanOrdinal = state.watermark;
+  } else if (deferredRecoveryOrdinal !== undefined) {
+    state.scanOrdinal = Math.max(state.watermark, deferredRecoveryOrdinal);
+  } else if (!hasUnvisitedCandidates) {
     state.scanOrdinal = state.watermark;
   } else if (ordinals.length > 0) {
     state.scanOrdinal = ordinals[ordinals.length - 1]! + 1;
   }
 
   const pending = ordinalsToReconcile(state, head).length;
-  const hasMore = !headUnavailable && !staleTarget && hasUnvisitedCandidates;
+  const hasMore = !headUnavailable
+    && !staleTarget
+    && (
+      deferredRecoveryOrdinal === undefined
+        ? hasUnvisitedCandidates
+        : recoveryAttempted
+    );
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);

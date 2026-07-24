@@ -245,10 +245,14 @@ describe('reconcileContextGraph — sweep', () => {
       },
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         recoveryCalls.push(targets.map((target) => target.ordinal));
-        return new Map(targets.map((target) => [
-          target.ordinal,
-          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
-        ]));
+        return {
+          outcomes: new Map(targets.map((target) => [
+            target.ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          deferredOrdinals: [],
+          attempted: true,
+        };
       },
     });
     const state = createCursorState(0);
@@ -257,6 +261,76 @@ describe('reconcileContextGraph — sweep', () => {
 
     expect(recoveryCalls).toEqual([[1, 2]]);
     expect(result).toMatchObject({ processed: 3, reconciled: 3, watermark: 3 });
+  });
+
+  it('resumes at the first untouched recovery ordinal instead of skipping to the next slice', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: {
+          ordinal,
+          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+          kaId: String(ordinal),
+          reason: 'no-swm',
+        },
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map((target) => target.ordinal);
+        recoveryCalls.push(ordinals);
+        const attempted = ordinals.slice(0, 3);
+        return {
+          outcomes: new Map(attempted.map((ordinal) => [
+            ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          deferredOrdinals: ordinals.slice(3),
+          attempted: true,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(state.watermark).toBe(3);
+    expect(state.scanOrdinal).toBe(3);
+
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    ]);
+  });
+
+  it('retains the deferred cursor without hot-looping when recovery is damped', async () => {
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: {
+          ordinal,
+          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+          kaId: String(ordinal),
+          reason: 'no-swm',
+        },
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
+        outcomes: new Map(),
+        deferredOrdinals: targets.map((target) => target.ordinal),
+        attempted: false,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(result.hasMore).toBe(false);
+    expect(state.scanOrdinal).toBe(0);
   });
 
   it('keeps scanning later slices when an early ordinal remains pending', async () => {
@@ -332,10 +406,14 @@ describe('reconcileContextGraph — sweep', () => {
         // The rebind lands while the long recovery await is in flight. The
         // recovered outcomes belong to the OLD binding and must be discarded.
         current = false;
-        return new Map(targets.map((target) => [
-          target.ordinal,
-          { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
-        ]));
+        return {
+          outcomes: new Map(targets.map((target) => [
+            target.ordinal,
+            { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
+          ])),
+          deferredOrdinals: [],
+          attempted: true,
+        };
       },
     });
     const state = createCursorState(0);

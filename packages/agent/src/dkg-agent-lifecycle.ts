@@ -4406,14 +4406,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(
-        remainingContextGraphs,
-        totalTimeoutMs,
-      ),
-      createGraphScopedAuthenticationDeadline: () => this.createContextGraphSyncDeadline(
-        1,
-        totalTimeoutMs,
-      ),
+      deadlines: {
+        forContextGraphFetch: () => this.createContextGraphSyncDeadline(
+          remainingContextGraphs,
+          totalTimeoutMs,
+        ),
+        forGraphScopedAuthentication: () => (
+          this.createGraphScopedAuthenticationDeadline(totalTimeoutMs)
+        ),
+      },
       fetchSyncPages: (
         opCtx,
         peerId,
@@ -5300,6 +5301,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       Math.floor(normalizedTotalTimeoutMs / divisor),
     );
     return Date.now() + budgetMs;
+  }
+
+  createGraphScopedAuthenticationDeadline(this: DKGAgent,
+    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+  ): number {
+    return Date.now() + normalizeDurableSyncTotalTimeoutMs(totalTimeoutMs);
   }
 
   /**

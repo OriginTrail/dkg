@@ -238,9 +238,9 @@ import {
   VmReconcileDispatcher,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
+  type PendingOrdinalRecoveryResult,
   type OrdinalRecoveryTarget,
 } from './chain-reconciler.js';
-import { MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
@@ -264,13 +264,6 @@ type JoinApprovalRetryEntry = {
 };
 type VmReconcileSwmNamespace = { metaGraph: string; dataGraph: string };
 type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]; complete: boolean };
-/**
- * Recovery assets can approach the sync frame budget individually. Keep each
- * request to one KA so a slow multi-page asset gets the full foreground
- * transfer window and a committed asset is never replayed behind a later
- * timeout. The wire protocol's larger cap remains available to other callers.
- */
-const VM_RECONCILE_EXACT_FETCH_ASSETS = 1;
 type VmReconcileSwmCandidateState = {
   swmGen: string | null;
   candidateNamespaces: VmReconcileSwmNamespace[];
@@ -3675,9 +3668,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     targets: readonly OrdinalRecoveryTarget[],
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
-  ): Promise<ReadonlyMap<number, OrdinalOutcome>> {
+  ): Promise<PendingOrdinalRecoveryResult> {
     const ctx = createOperationContext('system');
-    if (!isTargetCurrent() || targets.length === 0) return new Map();
+    const noRecovery = (): PendingOrdinalRecoveryResult => ({
+      outcomes: new Map(),
+      deferredOrdinals: targets.map((target) => target.ordinal),
+      attempted: false,
+    });
+    if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
     // Damping: the batched path deliberately skips the per-UAL negative cache
     // (consulting it primes connections to every discovered agent — the walk
@@ -3688,7 +3686,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the cooldown below so a draining backlog proceeds slice after slice.
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
-      return new Map();
+      return noRecovery();
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -3734,6 +3732,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ...orderedConnectedPeerIds,
     ])].slice(0, 3);
     const outcomes = new Map<number, OrdinalOutcome>();
+    const attemptedOrdinals = new Set<number>();
     let remaining = [...targets];
     let attemptedFetch = false;
 
@@ -3747,41 +3746,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // unverified or rejected peer.
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'VM exact fetch'))) continue;
 
-      // The wire protocol accepts a larger filter, but recovery deliberately
-      // gives one potentially frame-sized KA the full foreground transfer
-      // budget. Targets past that bounded request stay in `remaining` for a
-      // later peer or pass. Revalidation is likewise restricted to the
-      // requested slice — each revalidated ordinal costs chain reads, and an
-      // unrequested target cannot have changed state.
-      const exactFetchSize = Math.min(
-        MAX_EXACT_SYNC_ASSETS,
-        VM_RECONCILE_EXACT_FETCH_ASSETS,
-      );
-      const requestedTargets = remaining.slice(0, exactFetchSize);
-      const deferredTargets = remaining.slice(exactFetchSize);
-      const requestedUals = [...new Set(requestedTargets.map((target) => target.ual))];
-      for (const target of requestedTargets) {
-        this.emitReplication({
-          contextGraphId: localCgId,
-          onChainCgId: onChainCgId.toString(),
-          action: 'fetch',
-          ordinal: target.ordinal,
-          kaId: target.kaId,
-          ual: target.ual,
-          detail: `exact-batch:${requestedUals.length}`,
-        });
-      }
+      // A recovery target can approach the frame budget by itself. Each peer
+      // attempt therefore consumes at most one queue item; untouched tail
+      // ordinals are surfaced to the outer fair-scan cursor for the next pass.
+      const [target, ...deferredTargets] = remaining;
+      if (!target) break;
+      this.emitReplication({
+        contextGraphId: localCgId,
+        onChainCgId: onChainCgId.toString(),
+        action: 'fetch',
+        ordinal: target.ordinal,
+        kaId: target.kaId,
+        ual: target.ual,
+        detail: 'exact-asset',
+      });
 
       try {
         attemptedFetch = true;
+        attemptedOrdinals.add(target.ordinal);
         const result = await this.syncExactKnowledgeAssetsFromPeer(
           peerId,
           localCgId,
-          requestedUals,
+          [target.ual],
         );
         this.log.info(
           ctx,
-          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${requestedUals.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=1 fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
         );
       } catch (error) {
         this.log.info(
@@ -3790,22 +3780,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
 
-      const stillMissing: OrdinalRecoveryTarget[] = [];
-      for (const target of requestedTargets) {
-        if (!isTargetCurrent()) break;
-        const outcome = await this.reconcileChainOrdinal(
-          localCgId,
-          onChainCgId,
-          target.ordinal,
-          headBlock,
-          { isTargetCurrent, deferActiveFetch: true },
-        );
-        outcomes.set(target.ordinal, outcome);
-        if (outcome.status === 'pending' && outcome.recovery) {
-          stillMissing.push(outcome.recovery);
-        }
+      if (!isTargetCurrent()) break;
+      const outcome = await this.reconcileChainOrdinal(
+        localCgId,
+        onChainCgId,
+        target.ordinal,
+        headBlock,
+        { isTargetCurrent, deferActiveFetch: true },
+      );
+      outcomes.set(target.ordinal, outcome);
+      if (outcome.status === 'pending' && outcome.recovery) {
+        remaining = [outcome.recovery, ...deferredTargets];
+      } else {
+        remaining = deferredTargets;
       }
-      remaining = [...stillMissing, ...deferredTargets];
     }
 
     // Mirror the inline path's cooldown policy: an unreachable network must
@@ -3818,7 +3806,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
-    return outcomes;
+    return {
+      outcomes,
+      deferredOrdinals: targets
+        .filter((target) => !attemptedOrdinals.has(target.ordinal))
+        .map((target) => target.ordinal),
+      attempted: attemptedFetch,
+    };
   }
 
   /**

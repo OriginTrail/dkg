@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  createUniformDurableSyncDeadlinePolicy,
+  runDurableSync,
+} from '../src/sync/requester/durable-sync.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { markSyncTransportFailure } from '../src/sync/error-tags.js';
@@ -92,7 +95,7 @@ describe('sync requester bailout', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['pressured-cg', 'next-cg'],
       stopOnBackoffWorthyFailure: true,
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -127,7 +130,7 @@ describe('sync requester bailout', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['denied-cg', 'next-cg'],
       stopOnBackoffWorthyFailure: true,
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -171,7 +174,7 @@ describe('sync requester bailout', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['slow-cg', 'next-cg'],
       stopOnBackoffWorthyFailure: true,
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},

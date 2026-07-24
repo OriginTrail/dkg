@@ -21,7 +21,6 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
-import { MAX_EXACT_SYNC_ASSETS } from '../src/sync/exact-assets.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
 // implementation, records every argument tuple on `.calls`, and returns the
@@ -51,7 +50,10 @@ import type {
   VmReconcileNegativeRecord,
 } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
-import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import {
+  VmReconcileDispatcher,
+  type PendingOrdinalRecoveryResult,
+} from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 
 interface AgentInternals {
@@ -81,7 +83,7 @@ interface AgentInternals {
     }>,
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
-  ): Promise<ReadonlyMap<number, { status: 'reconciled'; blockNumber: number }>>;
+  ): Promise<PendingOrdinalRecoveryResult>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
   runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
     status: string;
@@ -1997,10 +1999,14 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       targets: readonly Array<{ ordinal: number }>,
     ) => {
       recoveryBatches.push(targets.map((target) => target.ordinal));
-      return new Map(targets.map((target) => [
-        target.ordinal,
-        { status: 'reconciled', blockNumber: 0 } as const,
-      ]));
+      return {
+        outcomes: new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 0 } as const,
+        ])),
+        deferredOrdinals: [],
+        attempted: true,
+      };
     };
 
     const result = await internals.runVmReconcileForCg(localCgId, 'manual');
@@ -2079,7 +2085,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(connectionAttempts).toEqual([approvedPeer, registryPeer]);
     expect(protocolPeers[0]).toBe(connected[0]);
     expect(fetches).toEqual([{ peerId: approvedPeer, uals: [ual] }]);
-    expect(result.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.deferredOrdinals).toEqual([]);
+    expect(result.attempted).toBe(true);
   });
 
   it('fetches one large recovery KA per peer attempt and defers the rest', async () => {
@@ -2122,7 +2130,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       revalidated.push(ordinal);
       return { status: 'reconciled', blockNumber: 100 };
     };
-    const targets = Array.from({ length: MAX_EXACT_SYNC_ASSETS + 2 }, (_, ordinal) => ({
+    const targets = Array.from({ length: 4 }, (_, ordinal) => ({
       ordinal,
       ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
       kaId: String(ordinal),
@@ -2138,7 +2146,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(fetches[1]!.uals).toEqual([targets[1]!.ual]);
     // Revalidation runs only for requested targets, in request order.
     expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
-    expect(result.size).toBe(2);
+    expect(result.outcomes.size).toBe(2);
+    expect(result.deferredOrdinals).toEqual([2, 3]);
+    expect(result.attempted).toBe(true);
   });
 
   it('damps an unproductive exact batch with the per-CG fetch cooldown', async () => {
@@ -2180,13 +2190,17 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const first = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     expect(fetchCount).toBe(1);
-    expect(first.get(0)).toMatchObject({ status: 'pending' });
+    expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
+    expect(first.deferredOrdinals).toEqual([]);
+    expect(first.attempted).toBe(true);
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     expect(fetchCount).toBe(1);
-    expect(second.size).toBe(0);
+    expect(second.outcomes.size).toBe(0);
+    expect(second.deferredOrdinals).toEqual([0]);
+    expect(second.attempted).toBe(false);
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {
@@ -2282,7 +2296,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const result = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
 
     expect(fetches).toEqual([admittedPeer]);
-    expect(result.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
   });
 
   it('reports a durable watermark ahead of the chain head without ordinal work', async () => {
