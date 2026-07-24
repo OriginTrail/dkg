@@ -45,6 +45,7 @@ export default defineConfig({
       "test/sync-durable-worker-wire.test.ts",
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
+      "test/durable-sync-budget.test.ts",
       "test/durable-sync-graph-scoped-materialization.test.ts",
       "test/durable-sync-lifecycle-binding.test.ts",
       "test/durable-progress.test.ts",

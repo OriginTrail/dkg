@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createOperationContext, PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
-import {
-  createUniformDurableSyncDeadlinePolicy,
-  runDurableSync,
-} from '../src/sync/requester/durable-sync.js';
+import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { runOrderedContextGraphSyncs } from '../src/sync/requester/ordered-sync.js';
 import {
@@ -34,7 +31,7 @@ function durableContext(contextGraphIds: string[]) {
     ctx,
     remotePeerId: 'peer',
     contextGraphIds,
-    deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 1_000),
+    createContextGraphSyncDeadline: () => Date.now() + 1_000,
     fetchSyncPages: async (
       _ctx: unknown,
       _peer: string,

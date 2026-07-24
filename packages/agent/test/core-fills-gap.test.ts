@@ -2004,8 +2004,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           target.ordinal,
           { status: 'reconciled', blockNumber: 0 } as const,
         ])),
-        deferredOrdinals: [],
-        attempted: true,
       };
     };
 
@@ -2086,8 +2084,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(protocolPeers[0]).toBe(connected[0]);
     expect(fetches).toEqual([{ peerId: approvedPeer, uals: [ual] }]);
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
-    expect(result.deferredOrdinals).toEqual([]);
-    expect(result.attempted).toBe(true);
+    expect(result.resume).toBeUndefined();
   });
 
   it('fetches one large recovery KA per peer attempt and defers the rest', async () => {
@@ -2147,8 +2144,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     // Revalidation runs only for requested targets, in request order.
     expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
     expect(result.outcomes.size).toBe(2);
-    expect(result.deferredOrdinals).toEqual([2, 3]);
-    expect(result.attempted).toBe(true);
+    expect(result.resume).toEqual({ ordinal: 2, queueImmediately: true });
   });
 
   it('damps an unproductive exact batch with the per-CG fetch cooldown', async () => {
@@ -2191,16 +2187,14 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const first = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     expect(fetchCount).toBe(1);
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
-    expect(first.deferredOrdinals).toEqual([]);
-    expect(first.attempted).toBe(true);
+    expect(first.resume).toBeUndefined();
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     expect(fetchCount).toBe(1);
     expect(second.outcomes.size).toBe(0);
-    expect(second.deferredOrdinals).toEqual([0]);
-    expect(second.attempted).toBe(false);
+    expect(second.resume).toEqual({ ordinal: 0, queueImmediately: false });
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {

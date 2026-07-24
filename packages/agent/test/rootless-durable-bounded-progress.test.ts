@@ -14,10 +14,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   planBoundedGraphScopedDurableBatch,
 } from '../src/sync/durable-integrity.js';
-import {
-  createUniformDurableSyncDeadlinePolicy,
-  runDurableSync,
-} from '../src/sync/requester/durable-sync.js';
+import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type {
   DurableBatchVerificationMode,
@@ -232,7 +229,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -289,7 +286,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -336,7 +333,7 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-partial-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -376,7 +373,7 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-complete-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -418,7 +415,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -471,7 +468,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,

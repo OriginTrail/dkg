@@ -41,4 +41,36 @@ describe('durable sync deadline budget', () => {
       ),
     ).toBe(1_120_000);
   });
+
+  it('uses a caller-supplied bounded graph-scoped authentication budget', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    expect(
+      LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline.call(
+        {} as any,
+        299_000,
+      ),
+    ).toBe(1_299_000);
+  });
+
+  it('clamps oversized graph-scoped authentication budgets to five minutes', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    expect(
+      LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline.call(
+        {} as any,
+        900_000,
+      ),
+    ).toBe(1_300_000);
+  });
+
+  it('preserves the two-minute graph-scoped authentication default', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    expect(
+      LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline.call(
+        {} as any,
+      ),
+    ).toBe(1_120_000);
+  });
 });

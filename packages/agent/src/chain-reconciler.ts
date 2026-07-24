@@ -61,10 +61,14 @@ export interface OrdinalRecoveryTarget {
 export interface PendingOrdinalRecoveryResult {
   /** Revalidated outcomes for ordinals that consumed this pass's network budget. */
   outcomes: ReadonlyMap<number, OrdinalOutcome>;
-  /** Input ordinals deliberately left untouched for the next fair-scan slice. */
-  deferredOrdinals: readonly number[];
-  /** True when recovery reached at least one exact network fetch attempt. */
-  attempted: boolean;
+  /**
+   * Atomic scheduling decision for the first untouched recovery target.
+   * Damped recovery retains the cursor without immediately requeueing it.
+   */
+  resume?: {
+    ordinal: number;
+    queueImmediately: boolean;
+  };
 }
 
 export interface ChainReconcilerDeps {
@@ -183,8 +187,7 @@ export async function reconcileContextGraph(
   let reconciled = 0;
   let processed = 0;
   let staleTarget = false;
-  let deferredRecoveryOrdinal: number | undefined;
-  let recoveryAttempted = false;
+  let recoveryResume: PendingOrdinalRecoveryResult['resume'];
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -270,11 +273,7 @@ export async function reconcileContextGraph(
         staleTarget = true;
       } else {
         for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
-        recoveryAttempted = recovery.attempted;
-        deferredRecoveryOrdinal = recovery.deferredOrdinals.reduce<number | undefined>(
-          (lowest, ordinal) => lowest === undefined ? ordinal : Math.min(lowest, ordinal),
-          undefined,
-        );
+        recoveryResume = recovery.resume;
       }
     }
 
@@ -302,8 +301,8 @@ export async function reconcileContextGraph(
 
   if (staleTarget || headUnavailable) {
     state.scanOrdinal = state.watermark;
-  } else if (deferredRecoveryOrdinal !== undefined) {
-    state.scanOrdinal = Math.max(state.watermark, deferredRecoveryOrdinal);
+  } else if (recoveryResume) {
+    state.scanOrdinal = Math.max(state.watermark, recoveryResume.ordinal);
   } else if (!hasUnvisitedCandidates) {
     state.scanOrdinal = state.watermark;
   } else if (ordinals.length > 0) {
@@ -314,9 +313,9 @@ export async function reconcileContextGraph(
   const hasMore = !headUnavailable
     && !staleTarget
     && (
-      deferredRecoveryOrdinal === undefined
+      recoveryResume === undefined
         ? hasUnvisitedCandidates
-        : recoveryAttempted
+        : recoveryResume.queueImmediately
     );
 
   if (state.watermark !== before) {

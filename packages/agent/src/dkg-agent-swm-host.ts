@@ -3670,11 +3670,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isTargetCurrent: () => boolean,
   ): Promise<PendingOrdinalRecoveryResult> {
     const ctx = createOperationContext('system');
-    const noRecovery = (): PendingOrdinalRecoveryResult => ({
-      outcomes: new Map(),
-      deferredOrdinals: targets.map((target) => target.ordinal),
-      attempted: false,
-    });
+    const noRecovery = (): PendingOrdinalRecoveryResult => {
+      const firstTarget = targets[0];
+      return firstTarget
+        ? {
+            outcomes: new Map(),
+            resume: { ordinal: firstTarget.ordinal, queueImmediately: false },
+          }
+        : { outcomes: new Map() };
+    };
     if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
     // Damping: the batched path deliberately skips the per-UAL negative cache
@@ -3732,7 +3736,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ...orderedConnectedPeerIds,
     ])].slice(0, 3);
     const outcomes = new Map<number, OrdinalOutcome>();
-    const attemptedOrdinals = new Set<number>();
     let remaining = [...targets];
     let attemptedFetch = false;
 
@@ -3763,7 +3766,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       try {
         attemptedFetch = true;
-        attemptedOrdinals.add(target.ordinal);
         const result = await this.syncExactKnowledgeAssetsFromPeer(
           peerId,
           localCgId,
@@ -3806,13 +3808,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
-    return {
-      outcomes,
-      deferredOrdinals: targets
-        .filter((target) => !attemptedOrdinals.has(target.ordinal))
-        .map((target) => target.ordinal),
-      attempted: attemptedFetch,
-    };
+    const firstUntouchedTarget = targets.find((target) => !outcomes.has(target.ordinal));
+    return firstUntouchedTarget
+      ? {
+          outcomes,
+          resume: {
+            ordinal: firstUntouchedTarget.ordinal,
+            queueImmediately: attemptedFetch,
+          },
+        }
+      : { outcomes };
   }
 
   /**

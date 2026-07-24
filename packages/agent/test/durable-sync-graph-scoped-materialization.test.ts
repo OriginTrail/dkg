@@ -20,10 +20,7 @@ import {
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
-import {
-  createUniformDurableSyncDeadlinePolicy,
-  runDurableSync,
-} from '../src/sync/requester/durable-sync.js';
+import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -207,6 +204,11 @@ function runGraphScopedDurableSync(options: {
     asset: VerifiedGraphScopedAsset,
     deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
+  fixtures?: Array<{
+    data: Quad;
+    metadata: Quad[];
+    assertionGraph: string;
+  }>;
   createContextGraphSyncDeadline?: () => number;
   createGraphScopedAuthenticationDeadline?: () => number;
   deleteCheckpoint?: (key: string) => void;
@@ -215,27 +217,30 @@ function runGraphScopedDurableSync(options: {
 }) {
   const v2Data = dataQuad(2);
   const v2Meta = metadata(2);
-  const createFetchDeadline =
-    options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000);
+  const fixtures = options.fixtures ?? [{
+    data: v2Data,
+    metadata: v2Meta,
+    assertionGraph,
+  }];
+  const dataQuads = fixtures.map((fixture) => fixture.data);
+  const metadataQuads = fixtures.flatMap((fixture) => fixture.metadata);
   return runDurableSync({
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
     contextGraphIds: [contextGraphId],
-    deadlines: options.createGraphScopedAuthenticationDeadline
-      ? {
-          forContextGraphFetch: createFetchDeadline,
-          forGraphScopedAuthentication: options.createGraphScopedAuthenticationDeadline,
-        }
-      : createUniformDurableSyncDeadlinePolicy(createFetchDeadline),
+    createContextGraphSyncDeadline:
+      options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000),
+    createGraphScopedAuthenticationDeadline:
+      options.createGraphScopedAuthenticationDeadline,
     fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
-      phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+      phase === 'data' ? page(phase, dataQuads) : page(phase, metadataQuads)
     ),
     processDurableBatchInWorker: async () => ({
-      verifiedData: [v2Data],
-      verifiedMeta: v2Meta,
-      verifiedGraphScopedDataGraphs: [assertionGraph],
-      totalFetchedDataQuads: 1,
-      totalFetchedMetaQuads: v2Meta.length,
+      verifiedData: dataQuads,
+      verifiedMeta: metadataQuads,
+      verifiedGraphScopedDataGraphs: fixtures.map((fixture) => fixture.assertionGraph),
+      totalFetchedDataQuads: dataQuads.length,
+      totalFetchedMetaQuads: metadataQuads.length,
       rejectedKcs: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
@@ -271,7 +276,47 @@ describe('durable graph-scoped KA materialization', () => {
     expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
   });
 
-  it('uses the uniform deadline adapter for direct low-level callers', async () => {
+  it('shares one authentication deadline across every graph-scoped asset in the page', async () => {
+    const secondUal = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/2';
+    const secondGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/0x1111111111111111111111111111111111111111/2`;
+    const secondMetadata = metadata(2).map((quad) => ({
+      ...quad,
+      subject: secondUal,
+      object: quad.predicate === `${DKG}kaUal`
+        ? secondUal
+        : quad.predicate === `${DKG}assertionGraph`
+          ? secondGraph
+          : quad.object,
+    }));
+    const authenticationDeadline = 1_800_000_345_678;
+    const createAuthenticationDeadline = vi.fn(() => authenticationDeadline);
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runGraphScopedDurableSync({
+      fixtures: [
+        { data: dataQuad(2), metadata: metadata(2), assertionGraph },
+        {
+          data: { ...dataQuad(2), subject: 'http://example.com/entity/second', graph: secondGraph },
+          metadata: secondMetadata,
+          assertionGraph: secondGraph,
+        },
+      ],
+      createGraphScopedAuthenticationDeadline: createAuthenticationDeadline,
+      storeGraphScopedAsset,
+    });
+
+    expect(createAuthenticationDeadline).toHaveBeenCalledTimes(1);
+    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(2);
+    expect(storeGraphScopedAsset.mock.calls.map((call) => call[1])).toEqual([
+      authenticationDeadline,
+      authenticationDeadline,
+    ]);
+  });
+
+  it('retains the fetch deadline for direct callers without an authentication hook', async () => {
     const deadline = 1_800_000_123_456;
     const createPhaseDeadline = vi.fn(() => deadline);
     const storeGraphScopedAsset = vi.fn(async (
@@ -284,7 +329,7 @@ describe('durable graph-scoped KA materialization', () => {
       storeGraphScopedAsset,
     });
 
-    expect(createPhaseDeadline).toHaveBeenCalledTimes(2);
+    expect(createPhaseDeadline).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
   });
@@ -670,7 +715,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-lifecycle-pointer',
       contextGraphIds: [contextGraphId],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data'
           ? page(phase, [v2Data])
@@ -744,7 +789,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-invalid-confirmation-kind',
       contextGraphIds: [contextGraphId],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
       ),
@@ -892,7 +937,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-v2',
       contextGraphIds: [contextGraphId],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data'
           ? page(phase, [v2Data])
@@ -1011,7 +1056,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'finalized-vm-source-node',
       contextGraphIds: [contextGraphId],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
       ),
@@ -1093,7 +1138,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'finalized-vm-replay-source',
       contextGraphIds: [contextGraphId],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
       ),
@@ -1187,7 +1232,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-mixed',
       contextGraphIds: [contextGraphId],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data'
           ? page(phase, [v2Data])

@@ -31,10 +31,7 @@ import {
 import { OversizeTombstoneLog } from '../src/sync/oversize-tombstones.js';
 import { runOversizeSweep } from '../src/sync/oversize-sweep.js';
 import { isSyncPermanentRejection, isSyncBackoffWorthyError } from '../src/sync/error-tags.js';
-import {
-  createUniformDurableSyncDeadlinePolicy,
-  runDurableSync,
-} from '../src/sync/requester/durable-sync.js';
+import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 const CG = 'did:dkg:context-graph:agents';
@@ -264,7 +261,7 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
         ctx: createOperationContext('sync'),
         remotePeerId: 'peerR',
         contextGraphIds: ['agents'],
-        deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+        createContextGraphSyncDeadline: () => Date.now() + 10_000,
         fetchSyncPages: async (_c: unknown, _p: string, _cg: string, _swm: boolean, phase: 'data' | 'meta') => page(phase),
         processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
           verifiedData: dataQuads,

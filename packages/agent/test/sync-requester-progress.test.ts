@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import {
-  createUniformDurableSyncDeadlinePolicy,
-  runDurableSync,
-} from '../src/sync/requester/durable-sync.js';
+import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { markSyncTransportFailure } from '../src/sync/error-tags.js';
@@ -102,7 +99,7 @@ describe('sync requester progress accounting', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['pending-join', 'open-cg'],
       onAccessDenied: (cg) => deniedCgs.push(cg),
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -136,7 +133,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['shed-cg', 'next-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -170,7 +167,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['fail-one', 'fail-two', 'next-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -207,7 +204,7 @@ describe('sync requester progress accounting', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['verify-fails', 'next-cg'],
       onPhase: (phase, status) => phases.push(`${phase}:${status}`),
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async (dataQuads) => {
         if (dataQuads.some((q) => q.subject === 'verify-fails')) {
@@ -248,7 +245,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['store-fails', 'next-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async (dataQuads) => ({
         ...durableProcessResult(),
@@ -280,7 +277,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['empty-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx: OperationContext,
         _peer: string,
@@ -306,7 +303,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['resumed-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx: OperationContext,
         _peer: string,
@@ -345,7 +342,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['large-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -378,7 +375,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['missing-meta-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -419,7 +416,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['rejected-integrity-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -467,7 +464,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['meta-only-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -512,7 +509,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-controls'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -555,7 +552,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['partially-discarded-controls'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -598,7 +595,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-non-iri'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -643,7 +640,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-mixed'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -683,7 +680,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['meta-only-complete'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
@@ -730,7 +727,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['verified-private-only-cg'],
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 60_000),
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),

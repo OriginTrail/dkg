@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
-  createUniformDurableSyncDeadlinePolicy,
   filterExactAssetDurablePayload,
   runDurableSync,
 } from '../src/sync/requester/durable-sync.js';
@@ -143,7 +142,7 @@ function makeContext(options: {
       remotePeerId: 'peerR',
       contextGraphIds: options.contextGraphIds ?? ['mfacts'],
       syncAgentsMeta: options.syncAgentsMeta,
-      deadlines: createUniformDurableSyncDeadlinePolicy(() => Date.now() + 10_000),
+      createContextGraphSyncDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (
         _ctx: unknown,
         _peer: string,
