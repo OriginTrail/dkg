@@ -58,8 +58,12 @@ export interface OrdinalRecoveryTarget {
   reason: 'no-swm' | 'verified-vm-metadata-pending';
 }
 
-/** Revalidated outcomes for ordinals that consumed this pass's recovery budget. */
-export type PendingOrdinalRecoveryResult = ReadonlyMap<number, OrdinalOutcome>;
+export interface PendingOrdinalRecoveryResult {
+  /** Revalidated outcomes for ordinals attempted during this recovery pass. */
+  outcomes: ReadonlyMap<number, OrdinalOutcome>;
+  /** Ordinals whose exact-fetch attempts consumed this pass's recovery budget. */
+  attemptedOrdinals: readonly number[];
+}
 
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
@@ -262,11 +266,10 @@ export async function reconcileContextGraph(
       if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
         staleTarget = true;
       } else {
-        for (const [ordinal, outcome] of recovery) outcomes.set(ordinal, outcome);
-        const recoveredAny = [...recovery.values()]
-          .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
-        recoveryContinuationOrdinal = recoveredAny
-          ? recoveryTargets.find((target) => !recovery.has(target.ordinal))?.ordinal
+        for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
+        const attemptedOrdinals = new Set(recovery.attemptedOrdinals);
+        recoveryContinuationOrdinal = attemptedOrdinals.size > 0
+          ? recoveryTargets.find((target) => !attemptedOrdinals.has(target.ordinal))?.ordinal
           : undefined;
       }
     }

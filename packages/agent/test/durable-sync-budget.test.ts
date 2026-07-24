@@ -4,7 +4,6 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
-  runLegacyDurableSync,
   runDurableSync,
   type DurableSyncBudget,
   type DurableSyncContext,
@@ -69,6 +68,7 @@ function requesterBudgetContext(options: {
   assetCount?: number;
   durableSyncBudget: DurableSyncBudget;
   onFetchPhase?: (phase: 'data' | 'meta') => void;
+  onVerify?: () => void;
   storeGraphScopedAsset: (
     asset: VerifiedGraphScopedAsset,
     deadline: number,
@@ -92,19 +92,22 @@ function requesterBudgetContext(options: {
         ? requesterPage(phase, dataQuads)
         : requesterPage(phase, metadataQuads);
     },
-    processDurableBatchInWorker: async () => ({
-      verifiedData: dataQuads,
-      verifiedMeta: metadataQuads,
-      verifiedGraphScopedDataGraphs: fixtures.map((fixture) => fixture.assertionGraph),
-      consumedUnpersistedMetaTriples: 0,
-      totalFetchedDataQuads: dataQuads.length,
-      totalFetchedMetaQuads: metadataQuads.length,
-      rejectedKcs: 0,
-      emptyResponses: 0,
-      metaOnlyResponses: 0,
-      verifiedPrivateOnlyResponses: 0,
-      dataRejectedMissingMeta: 0,
-    }),
+    processDurableBatchInWorker: async () => {
+      options.onVerify?.();
+      return {
+        verifiedData: dataQuads,
+        verifiedMeta: metadataQuads,
+        verifiedGraphScopedDataGraphs: fixtures.map((fixture) => fixture.assertionGraph),
+        consumedUnpersistedMetaTriples: 0,
+        totalFetchedDataQuads: dataQuads.length,
+        totalFetchedMetaQuads: metadataQuads.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      };
+    },
     storeInsert: async () => {},
     storeGraphScopedAsset: options.storeGraphScopedAsset,
     deleteCheckpoint: () => {},
@@ -244,6 +247,34 @@ describe('durable sync deadline budget', () => {
     ]);
   });
 
+  it('starts graph-scoped authentication after durable verification completes', async () => {
+    let phaseTime = 1_800_000_000_000;
+    let verificationComplete = false;
+    const graphScopedAuthenticationDeadline = vi.fn(() => {
+      expect(verificationComplete).toBe(true);
+      return phaseTime + 60_000;
+    });
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: {
+        fetchDeadline: () => phaseTime + 60_000,
+        graphScopedAuthenticationDeadline,
+      },
+      onVerify: () => {
+        phaseTime += 45_000;
+        verificationComplete = true;
+      },
+      storeGraphScopedAsset,
+    });
+
+    expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(1_800_000_105_000);
+  });
+
   it('preserves the legacy single-deadline callback contract', async () => {
     const deadline = 1_800_000_123_456;
     const createContextGraphSyncDeadline = vi.fn(() => deadline);
@@ -259,7 +290,7 @@ describe('durable sync deadline budget', () => {
       },
       storeGraphScopedAsset,
     });
-    await runLegacyDurableSync({
+    await runDurableSync({
       ...legacyContext,
       createContextGraphSyncDeadline,
     });

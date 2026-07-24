@@ -154,7 +154,7 @@ export interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-export interface LegacyDurableSyncContext extends Omit<DurableSyncContext, 'durableSyncBudget'> {
+interface LegacyDurableSyncContext extends Omit<DurableSyncContext, 'durableSyncBudget'> {
   /**
    * @deprecated Deep-import compatibility for callers from before durable sync
    * split fetch and authentication into separate bounded phases.
@@ -177,6 +177,16 @@ function legacyDurableSyncBudget(
       }
       return currentContextGraphDeadline;
     },
+  };
+}
+
+function normalizeDurableSyncContext(
+  context: DurableSyncContext | LegacyDurableSyncContext,
+): DurableSyncContext {
+  if ('durableSyncBudget' in context) return context;
+  return {
+    ...context,
+    durableSyncBudget: legacyDurableSyncBudget(context.createContextGraphSyncDeadline),
   };
 }
 
@@ -213,21 +223,13 @@ export function filterExactAssetDurablePayload(
   };
 }
 
-/**
- * Deprecated deep-import compatibility edge for pre-budget callers. The
- * canonical requester entrypoint below accepts only DurableSyncContext.
- */
-export async function runLegacyDurableSync(
-  legacyContext: LegacyDurableSyncContext,
+export async function runDurableSync(
+  context: DurableSyncContext | LegacyDurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
-  const { createContextGraphSyncDeadline, ...context } = legacyContext;
-  return runDurableSync({
-    ...context,
-    durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),
-  });
+  return runDurableSyncWithBudget(normalizeDurableSyncContext(context));
 }
 
-export async function runDurableSync(
+async function runDurableSyncWithBudget(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
   const {
