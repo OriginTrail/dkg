@@ -4833,7 +4833,7 @@ export class PublishMethods extends DKGAgentBase {
       );
       this.log.info(
         ctx,
-        `Recovered confirmed named KA publish ${recovered.publishedUal} from ${job.status} job ${job.jobId}`
+        `Recovered confirmed named KA publish ${recovered.localUal} from ${job.status} job ${job.jobId}`
           + ' (receipt only; current superseding version left unchanged)',
       );
       return;
@@ -4900,7 +4900,7 @@ export class PublishMethods extends DKGAgentBase {
     if (canStampLifecycle) {
       await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
         request,
-        recovered.publishedUal,
+        recovered.localUal,
         recovered.reservedKaId,
         recovered.materialization.merkleRoot,
       );
@@ -4918,7 +4918,7 @@ export class PublishMethods extends DKGAgentBase {
     // the shared writer-lock cleanup needed to close that wider race.
     this.log.info(
       ctx,
-      `Recovered confirmed named KA publish ${recovered.publishedUal} from ${job.status} job ${job.jobId}`,
+      `Recovered confirmed named KA publish ${recovered.localUal} from ${job.status} job ${job.jobId}`,
     );
   }
 

@@ -154,15 +154,14 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     });
 
     expect(result.reservedKaId).toBe(RESERVED_KA_ID);
+    // The normalized identity is the canonical graph-local UAL — the same value a normal
+    // named-KA publish records and what gets stamped as publishedUal / drives materialization.
     expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
-    // publishedUal carries the resolver-returned form (graph-local here) — the same
-    // identity a normal named-KA publish records.
-    expect(result.publishedUal).toBe(GRAPH_LOCAL_UAL);
     expect(result.txHash).toBe(TX_HASH);
     expect(result.materialization.superseded).toBe(false);
   });
 
-  it('still accepts the canonical contract/packed-ID receipt UAL', async () => {
+  it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
     const result = await normalizeRecoveredNamedKaPublish({
       request: baseRequest(),
       job: broadcastJob(),
@@ -170,8 +169,10 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
       chain: seededChain(),
     });
 
+    // The contract/packed wire form is accepted at the cross-check, but the normalized
+    // identity is still the canonical graph-local UAL — never the raw resolver shape.
+    expect(result.reservedKaId).toBe(RESERVED_KA_ID);
     expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
-    expect(result.publishedUal).toBe(CONTRACT_RECEIPT_UAL);
   });
 
   it('accepts a graph-local UAL whose author is checksummed (case-insensitive)', async () => {

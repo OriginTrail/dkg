@@ -16,14 +16,11 @@ import { unpackKnowledgeAssetId } from './ka-identity.js';
 export interface RecoveredNamedKaPublish {
   readonly reservedKaId: bigint;
   /**
-   * The recovered published UAL, exactly as returned by the recovery resolver: the graph-local
-   * form (author address + low-96 KA number) for named/graph-scoped KAs — matching what a normal
-   * publish records — or the contract-address + packed-KA-id form for generic recovery. Validated
-   * to be one of those two representations of {@link reservedKaId}, then stamped verbatim as the
-   * asset's `publishedUal`. The immutable identity is `reservedKaId`, not this string.
+   * The single canonical graph-local identity of this named KA (author address + low-96 KA
+   * number), derived from the request — never the raw resolver wire form. This is what a normal
+   * publish records, and it is used both to drive local materialization and to stamp the asset's
+   * `publishedUal`. The immutable identity is `reservedKaId`; this is its graph-local rendering.
    */
-  readonly publishedUal: string;
-  /** Canonical local graph identity: author address + low-96 KA number. Drives local materialization. */
   readonly localUal: string;
   readonly txHash: string;
   readonly receiptBlockNumber: number;
@@ -161,17 +158,17 @@ export async function normalizeRecoveredNamedKaPublish(input: {
       `could not resolve the canonical receipt UAL: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  // The recovery resolver returns the published UAL in one of two proven-equivalent
-  // representations of the SAME reserved packed KA id — both already bound to chain
-  // truth by the batchId/startKAId/endKAId === reservedKaId (above) and author-bit /
-  // localScope checks, all of which run before this point and are independent of `ual`:
-  //   - the canonical chain-receipt form (DKGKnowledgeAssets contract + packed id),
-  //     produced by the generic recovery mapper; or
+  // Cross-check the resolver's returned UAL against the SAME reserved packed KA id in either
+  // of its two proven-equivalent wire representations — both already bound to chain truth by
+  // the batchId/startKAId/endKAId === reservedKaId (above) and the author-bit / localScope
+  // checks, all of which run before this point and are independent of `ual`:
+  //   - the canonical chain-receipt form (DKGKnowledgeAssets contract + packed id), produced
+  //     by the generic recovery mapper; or
   //   - the graph-local form (sealed author + low-96 KA number), which the CLI resolver
-  //     deliberately surfaces for named/graph-scoped KAs so the user-facing UAL stays
-  //     graph-local (also what a normal publish records).
-  // Accept EITHER exact form; every other UAL fails closed. This is a representation
-  // cross-check only — the immutable identity is fixed numerically before this line.
+  //     deliberately surfaces for named/graph-scoped KAs.
+  // Accept EITHER exact form; every other UAL fails closed. `ual` is ONLY validated here — it
+  // is never exported; the normalized identity is the canonical graph-local `localUal`, so
+  // callers never have to reason about which wire shape the resolver happened to send.
   if (!sameHex(ual, expectedReceiptUal) && !sameHex(ual, localUal)) {
     throw inconsistent(
       `published receipt UAL ${ual} does not match the canonical receipt UAL ${expectedReceiptUal} or the graph-local UAL ${localUal}`,
@@ -228,7 +225,6 @@ export async function normalizeRecoveredNamedKaPublish(input: {
 
   return {
     reservedKaId,
-    publishedUal: ual,
     localUal,
     txHash: recovery.inclusion.txHash,
     receiptBlockNumber: recovery.inclusion.blockNumber,
