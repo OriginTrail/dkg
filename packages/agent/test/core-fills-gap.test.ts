@@ -1250,14 +1250,41 @@ describe('Phase D - VM reconcile damping', () => {
     });
     expect(handleChainReconciledKC.calls).toHaveLength(1);
     const metadataPendingCache =
-      (internals as any).vmReconcileNegativeCache as Map<string, { nextRetryAt: number }>;
+      (internals as any).vmReconcileNegativeCache as Map<string, {
+        failures: number;
+        nextRetryAt: number;
+        swmGen: string;
+        candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+        peerTopologyKey: string;
+      }>;
     expect(metadataPendingCache.size).toBe(1);
+    const [metadataPendingKey, firstMetadataPending] =
+      [...metadataPendingCache.entries()][0]!;
     const metadataPendingRetryDelay =
-      [...metadataPendingCache.values()][0]!.nextRetryAt - Date.now();
+      firstMetadataPending.nextRetryAt - Date.now();
     // A loaded node can take several minutes to traverse all subscribed CGs.
     // Pin a first retry horizon that survives that traversal; local generation
     // or connected-peer topology changes still invalidate it immediately.
     expect(metadataPendingRetryDelay).toBeGreaterThan(4 * 60_000);
+
+    // Retained retry history must actually grow beyond the ordinary ten-minute
+    // ceiling. Otherwise a traversal longer than that ceiling re-runs the same
+    // unchanged historical gaps forever without ever reaching a cache hit.
+    firstMetadataPending.nextRetryAt = Date.now() - 1;
+    (internals as any).recordVmReconcileNegativeCache(
+      metadataPendingKey,
+      '68',
+      {
+        swmGen: firstMetadataPending.swmGen,
+        candidateNamespaces: firstMetadataPending.candidateNamespaces,
+        peerTopologyKey: firstMetadataPending.peerTopologyKey,
+      },
+      'metadata_pending',
+    );
+    const secondMetadataPending = metadataPendingCache.get(metadataPendingKey)!;
+    expect(secondMetadataPending.failures).toBe(2);
+    expect(secondMetadataPending.nextRetryAt - Date.now())
+      .toBeGreaterThan(metadataPendingRetryDelay);
 
     await expect(internals.reconcileChainOrdinal(
       '68',

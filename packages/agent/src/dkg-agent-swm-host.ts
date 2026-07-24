@@ -3491,16 +3491,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const failures = (previous?.failures ?? 0) + 1;
     // Metadata-pending means the exact VM payload is already present but its
     // transaction provenance is not. On a loaded node, a full subscribed-CG
-    // traversal can exceed the one-minute sweep cadence, so a cadence-sized
-    // first backoff expires before the cursor wraps and provides no damping.
-    // New local evidence and connected-peer topology changes already invalidate
-    // this cache immediately; use the bounded ceiling for the timer-only
-    // fallback so unchanged historical gaps are not re-scanned every traversal.
+    // traversal can exceed the ordinary ten-minute negative-cache ceiling.
+    // Start metadata-pending retries at that ceiling, but let their retained
+    // retry history grow toward a separate one-hour bound. New local evidence,
+    // chain roots, and connected-peer topology changes still invalidate the
+    // entry immediately, so this only damps unchanged historical gaps.
     const backoffBase = reason === 'metadata_pending'
       ? DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS
       : DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS;
+    const backoffMax = reason === 'metadata_pending'
+      ? DKGAgentBase.VM_RECONCILE_METADATA_PENDING_BACKOFF_MAX_MS
+      : DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
     const exponentialBackoff = Math.min(
-      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      backoffMax,
       backoffBase * 2 ** Math.max(0, failures - 1),
     );
     const jitterSample = createHash('sha256')
@@ -3508,7 +3511,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .digest()
       .readUInt32BE(0) / 0x1_0000_0000;
     const backoff = Math.min(
-      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      backoffMax,
       Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
     );
     getMetrics().storeRetryAttemptsTotal.add(1, {

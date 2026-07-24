@@ -900,6 +900,17 @@ export class DKGAgentBase {
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
     Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
+  // Metadata-pending assets already have exact VM content; only transaction
+  // provenance is missing. Keep their retry history on a longer bounded curve
+  // so a loaded node can finish a full subscribed-CG traversal before retrying
+  // unchanged historical gaps. New local evidence, chain roots, and recovery
+  // topology still invalidate these entries immediately.
+  static readonly VM_RECONCILE_METADATA_PENDING_BACKOFF_MAX_MS =
+    Math.max(
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      Number(process.env['DKG_VM_RECONCILE_METADATA_PENDING_BACKOFF_MAX_MS'])
+        || 60 * 60_000,
+    );
   static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
