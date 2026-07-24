@@ -12,6 +12,7 @@ import {
 } from '../src/async-lift-control-plane.js';
 import {
   KA_VM_EXECUTOR_TX_HASH,
+  KA_VM_KA_UAL,
   KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
@@ -111,7 +112,13 @@ describe('KA async VM publish broadcast progress', () => {
     const txHash = `0x${'aa'.repeat(32)}` as `0x${string}`;
     const request = kaVmPublishRequest();
     const kaId = request.seal.reservedKaId!;
-    const ual = `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`;
+    // GH#1966: the production recovery resolver returns the graph-local queued UAL
+    // (author + low-96 KA number) for named/graph-scoped KAs, not the contract/packed
+    // receipt form. finalizeRecovered is stubbed here, so this proves the durable
+    // recover() cycle finalizes exactly once and passes the resolver's graph-local
+    // UAL through faithfully — validator acceptance of that form is covered by the
+    // agent unit + e2e suites (named-ka-publish-recovery.test.ts, e2e-memory-layers).
+    const ual = KA_VM_KA_UAL;
     const finalized: Array<{ jobId: string; status: string }> = [];
     const publisher = createPublisher({
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
@@ -187,6 +194,11 @@ describe('KA async VM publish broadcast progress', () => {
     ]);
     expect(includedJob?.status).toBe('finalized');
     expect(includedJob?.recovery?.recoveredFromStatus).toBe('included');
+
+    // GH#1966: once finalized from the confirmed transaction, a further recovery
+    // sweep must not re-process either job — no second on-chain submission.
+    expect(await publisher.recover()).toBe(0);
+    expect(finalized).toHaveLength(2);
   });
 
   it('keeps confirmed KA jobs tx-bearing while local lifecycle recovery is blocked', async () => {
@@ -205,7 +217,7 @@ describe('KA async VM publish broadcast progress', () => {
         finalization: {
           mode: 'published',
           txHash,
-          ual: `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`,
+          ual: KA_VM_KA_UAL,
           batchId: kaId,
           startKAId: kaId,
           endKAId: kaId,

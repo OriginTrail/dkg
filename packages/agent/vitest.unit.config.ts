@@ -98,6 +98,7 @@ export default defineConfig({
       "test/finalization-handler-defensive-cg-id.test.ts",
       "test/finalization-recovery.test.ts",
       "test/finalization-recovery-sqlite-store.test.ts",
+      "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
       "test/swm-slice-ka-bound.test.ts",
       "test/ka-lifecycle-asset-ual-timeout.test.ts",

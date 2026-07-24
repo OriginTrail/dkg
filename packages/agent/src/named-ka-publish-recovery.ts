@@ -16,7 +16,13 @@ import { unpackKnowledgeAssetId } from './ka-identity.js';
 
 export interface RecoveredNamedKaPublish {
   readonly reservedKaId: bigint;
-  /** Canonical chain receipt identity: contract address + packed KA id. */
+  /**
+   * The recovered published UAL, exactly as returned by the recovery resolver: the graph-local
+   * form (author address + low-96 KA number) for named/graph-scoped KAs — matching what a normal
+   * publish records — or the contract-address + packed-KA-id form for generic recovery. Validated
+   * to be one of those two representations of {@link reservedKaId}; used only as the stamped
+   * `publishedUal`. The immutable identity is `reservedKaId`, not this string.
+   */
   readonly receiptUal: string;
   /** Canonical local graph identity: author address + low-96 KA number. */
   readonly localUal: string;
@@ -154,9 +160,20 @@ export async function normalizeRecoveredNamedKaPublish(input: {
       `could not resolve the canonical receipt UAL: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (ual !== expectedReceiptUal) {
+  // The recovery resolver returns the published UAL in one of two proven-equivalent
+  // representations of the SAME reserved packed KA id — both already bound to chain
+  // truth by the batchId/startKAId/endKAId === reservedKaId (above) and author-bit /
+  // localScope checks, all of which run before this point and are independent of `ual`:
+  //   - the canonical chain-receipt form (DKGKnowledgeAssets contract + packed id),
+  //     produced by the generic recovery mapper; or
+  //   - the graph-local form (sealed author + low-96 KA number), which the CLI resolver
+  //     deliberately surfaces for named/graph-scoped KAs so the user-facing UAL stays
+  //     graph-local (also what a normal publish records).
+  // Accept EITHER exact form; every other UAL fails closed. This is a representation
+  // cross-check only — the immutable identity is fixed numerically before this line.
+  if (!sameHex(ual, expectedReceiptUal) && !sameHex(ual, localUal)) {
     throw inconsistent(
-      `published receipt UAL ${ual} does not match ${expectedReceiptUal}`,
+      `published receipt UAL ${ual} does not match the canonical receipt UAL ${expectedReceiptUal} or the graph-local UAL ${localUal}`,
     );
   }
   if (!publisherAddress || !ethers.isAddress(publisherAddress)) {
