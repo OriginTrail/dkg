@@ -20,7 +20,10 @@ import {
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncDeadlinePhase,
+} from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -209,8 +212,7 @@ function runGraphScopedDurableSync(options: {
     metadata: Quad[];
     assertionGraph: string;
   }>;
-  createContextGraphSyncDeadline?: () => number;
-  createGraphScopedAuthenticationDeadline?: () => number;
+  createPhaseDeadline?: (phase: DurableSyncDeadlinePhase) => number;
   deleteCheckpoint?: (key: string) => void;
   setCheckpoint?: (key: string, offset: number) => void;
   logWarn?: (ctx: OperationContext, message: string) => void;
@@ -228,10 +230,8 @@ function runGraphScopedDurableSync(options: {
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
     contextGraphIds: [contextGraphId],
-    createContextGraphSyncDeadline:
-      options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000),
-    createGraphScopedAuthenticationDeadline:
-      options.createGraphScopedAuthenticationDeadline,
+    createPhaseDeadline:
+      options.createPhaseDeadline ?? (() => Date.now() + 60_000),
     fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
       phase === 'data' ? page(phase, dataQuads) : page(phase, metadataQuads)
     ),
@@ -267,8 +267,11 @@ describe('durable graph-scoped KA materialization', () => {
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
     await runGraphScopedDurableSync({
-      createContextGraphSyncDeadline: () => fetchDeadline,
-      createGraphScopedAuthenticationDeadline: () => authenticationDeadline,
+      createPhaseDeadline: (phase) => (
+        phase === 'graph-scoped-authentication'
+          ? authenticationDeadline
+          : fetchDeadline
+      ),
       storeGraphScopedAsset,
     });
 
@@ -289,7 +292,7 @@ describe('durable graph-scoped KA materialization', () => {
           : quad.object,
     }));
     const authenticationDeadline = 1_800_000_345_678;
-    const createAuthenticationDeadline = vi.fn(() => authenticationDeadline);
+    const createPhaseDeadline = vi.fn(() => authenticationDeadline);
     const storeGraphScopedAsset = vi.fn(async (
       _asset: VerifiedGraphScopedAsset,
       _deadline: number,
@@ -304,11 +307,13 @@ describe('durable graph-scoped KA materialization', () => {
           assertionGraph: secondGraph,
         },
       ],
-      createGraphScopedAuthenticationDeadline: createAuthenticationDeadline,
+      createPhaseDeadline,
       storeGraphScopedAsset,
     });
 
-    expect(createAuthenticationDeadline).toHaveBeenCalledTimes(1);
+    expect(createPhaseDeadline.mock.calls.filter(
+      ([phase]) => phase === 'graph-scoped-authentication',
+    )).toHaveLength(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(2);
     expect(storeGraphScopedAsset.mock.calls.map((call) => call[1])).toEqual([
       authenticationDeadline,
@@ -316,7 +321,7 @@ describe('durable graph-scoped KA materialization', () => {
     ]);
   });
 
-  it('retains the fetch deadline for direct callers without an authentication hook', async () => {
+  it('lets direct callers express one uniform deadline strategy', async () => {
     const deadline = 1_800_000_123_456;
     const createPhaseDeadline = vi.fn(() => deadline);
     const storeGraphScopedAsset = vi.fn(async (
@@ -325,11 +330,14 @@ describe('durable graph-scoped KA materialization', () => {
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
     await runGraphScopedDurableSync({
-      createContextGraphSyncDeadline: createPhaseDeadline,
+      createPhaseDeadline,
       storeGraphScopedAsset,
     });
 
-    expect(createPhaseDeadline).toHaveBeenCalledTimes(1);
+    expect(createPhaseDeadline.mock.calls.map(([phase]) => phase)).toEqual([
+      'context-graph-fetch',
+      'graph-scoped-authentication',
+    ]);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
   });
@@ -715,7 +723,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-lifecycle-pointer',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data'
           ? page(phase, [v2Data])
@@ -789,7 +797,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-invalid-confirmation-kind',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
       ),
@@ -937,7 +945,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-v2',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data'
           ? page(phase, [v2Data])
@@ -1056,7 +1064,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'finalized-vm-source-node',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
       ),
@@ -1138,7 +1146,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'finalized-vm-replay-source',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
       ),
@@ -1232,7 +1240,7 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-mixed',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
         phase === 'data'
           ? page(phase, [v2Data])

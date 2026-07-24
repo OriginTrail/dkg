@@ -229,7 +229,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      createPhaseDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -286,7 +286,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      createPhaseDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -333,7 +333,7 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-partial-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      createPhaseDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -373,7 +373,7 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-complete-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      createPhaseDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -415,7 +415,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      createPhaseDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,
@@ -468,7 +468,7 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      createPhaseDeadline: () => Date.now() + 60_000,
       fetchSyncPages: async (
         _ctx,
         _peer,

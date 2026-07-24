@@ -31,7 +31,7 @@ function durableContext(contextGraphIds: string[]) {
     ctx,
     remotePeerId: 'peer',
     contextGraphIds,
-    createContextGraphSyncDeadline: () => Date.now() + 1_000,
+    createPhaseDeadline: () => Date.now() + 1_000,
     fetchSyncPages: async (
       _ctx: unknown,
       _peer: string,

@@ -142,7 +142,7 @@ function makeContext(options: {
       remotePeerId: 'peerR',
       contextGraphIds: options.contextGraphIds ?? ['mfacts'],
       syncAgentsMeta: options.syncAgentsMeta,
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      createPhaseDeadline: () => Date.now() + 10_000,
       fetchSyncPages: async (
         _ctx: unknown,
         _peer: string,

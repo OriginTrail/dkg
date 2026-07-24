@@ -4406,12 +4406,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(
-        remainingContextGraphs,
-        totalTimeoutMs,
-      ),
-      createGraphScopedAuthenticationDeadline: () => (
-        this.createGraphScopedAuthenticationDeadline(totalTimeoutMs)
+      createPhaseDeadline: (phase) => (
+        phase === 'graph-scoped-authentication'
+          ? this.createGraphScopedAuthenticationDeadline(totalTimeoutMs)
+          : this.createContextGraphSyncDeadline(remainingContextGraphs, totalTimeoutMs)
       ),
       fetchSyncPages: (
         opCtx,
