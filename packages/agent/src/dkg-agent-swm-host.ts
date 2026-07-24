@@ -4329,6 +4329,63 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
   }
 
+  vmReconcilePeerTopologyCanReuse(this: DKGAgent,
+    cachedKey: string,
+    currentKey: string,
+  ): boolean {
+    if (cachedKey === currentKey) return true;
+    if (cachedKey === 'unreadable' || currentKey === 'unreadable') return false;
+    try {
+      type TopologyPeer = {
+        peerId: string;
+        preferred: boolean;
+        core: boolean;
+      };
+      type Topology = {
+        preferredPeerId: string | null;
+        privateOnly: boolean;
+        peers: TopologyPeer[];
+      };
+      const cached = JSON.parse(cachedKey) as Topology;
+      const current = JSON.parse(currentKey) as Topology;
+      if (
+        cached.preferredPeerId !== current.preferredPeerId
+        || cached.privateOnly !== current.privateOnly
+        || !Array.isArray(cached.peers)
+        || !Array.isArray(current.peers)
+      ) {
+        return false;
+      }
+
+      // A provider disappearing cannot make an unchanged historical miss
+      // fetchable. Preserve the backoff when the current ranked providers are
+      // only a capability-preserving subsequence of those already checked.
+      // Additions, reclassification, or ranking changes still fail open to a
+      // fresh fetch so newly useful evidence is never hidden by this cache.
+      let cachedIndex = 0;
+      for (const peer of current.peers) {
+        while (
+          cachedIndex < cached.peers.length
+          && cached.peers[cachedIndex]?.peerId !== peer.peerId
+        ) {
+          cachedIndex++;
+        }
+        const cachedPeer = cached.peers[cachedIndex];
+        if (
+          !cachedPeer
+          || cachedPeer.preferred !== peer.preferred
+          || cachedPeer.core !== peer.core
+        ) {
+          return false;
+        }
+        cachedIndex++;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async readVmReconcileSwmGen(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): Promise<string | null> {
     if (candidateNamespaces.length === 0) return 'empty:0';
     try {
@@ -4567,7 +4624,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Best effort only; an unchanged connection view can still honor the
         // cached miss until the backoff expires.
       }
-      if (await this.vmReconcilePeerTopologyKey(localCgId) !== cached.peerTopologyKey) {
+      const currentPeerTopologyKey = await this.vmReconcilePeerTopologyKey(localCgId);
+      if (!this.vmReconcilePeerTopologyCanReuse(cached.peerTopologyKey, currentPeerTopologyKey)) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.clearVmReconcileActiveFetchCooldown(localCgId);
         return false;

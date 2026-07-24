@@ -1144,6 +1144,37 @@ describe('Phase D - VM reconcile damping', () => {
     expect(expensiveScans).toBe(0);
   });
 
+  it('reuses a negative cache entry when a previously checked peer disappears', async () => {
+    const internals = await boot();
+    const onChainCgId = 58n;
+    registerUnmatchedKC(internals.chain, 9018n, onChainCgId);
+
+    let connectedPeers = ['peer-stable', 'peer-flaky'];
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    const fetchesAfterFirstMiss = fetch.calls.length;
+    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
+    expect(expensiveScans).toBeGreaterThan(0);
+
+    expensiveScans = 0;
+    connectedPeers = ['peer-stable'];
+
+    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
+    expect(expensiveScans).toBe(0);
+  });
+
   it('reuses a negative cache entry when connected peers only reorder', async () => {
     const internals = await boot();
     const onChainCgId = 55n;
