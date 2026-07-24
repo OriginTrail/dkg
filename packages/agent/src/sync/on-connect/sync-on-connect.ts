@@ -11,6 +11,13 @@ type SyncFromPeerResult = number | SyncProgressSummary;
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
   progress?: boolean;
+  /**
+   * The round committed useful progress but also hit a transport/integrity
+   * failure that should retain the ordinary per-peer retry backoff. Without
+   * this signal, every transient connection:open clears the failure history
+   * and immediately replays the full sync scope.
+   */
+  retryBackoff?: boolean;
 }
 
 interface SyncOnConnectContext {
@@ -178,11 +185,12 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       }
       return 'deferred-backpressure';
     }
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
-    if (clearsPeerBackoff) {
+    const recordsPeerAccounting = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
+    if (recordsPeerAccounting) {
       context.onPeerSynced?.(remotePeer, {
         fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
         progress: madeProgress,
+        retryBackoff: sawBackoffWorthyFailure,
       });
     }
     return 'synced';

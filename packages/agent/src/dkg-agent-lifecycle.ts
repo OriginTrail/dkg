@@ -3453,10 +3453,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
-    let syncAccountingClearedBackoff = false;
+    let syncAccounting: SyncOnConnectPeerOutcome | undefined;
     try {
-      const outcome = await this.trySyncFromPeer(remotePeer, () => {
-        syncAccountingClearedBackoff = true;
+      const outcome = await this.trySyncFromPeer(remotePeer, (peerOutcome) => {
+        syncAccounting = peerOutcome;
       });
       if (outcome === 'deferred-backpressure') {
         this.log.info(
@@ -3465,11 +3465,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         return outcome;
       }
-      if (
+      if (syncAccounting?.retryBackoff) {
+        this.recordSyncReconcilerFailure(remotePeer, probe);
+      } else if (
         outcome !== 'skipped-no-sync' &&
         outcome !== 'already-syncing' &&
         outcome !== 'not-started' &&
-        !syncAccountingClearedBackoff &&
+        !syncAccounting &&
         this.lastSuccessfulSyncAt.get(remotePeer) === lastOk &&
         this.lastSyncProgressAt.get(remotePeer) === lastProgress
       ) {
@@ -3564,7 +3566,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.lastSuccessfulSyncAt.set(peerId, progressAt);
         }
         this.skippedNoSyncPeers.delete(peerId);
-        this.syncReconcilerBackoff.delete(peerId);
+        if (!outcome?.retryBackoff) {
+          this.syncReconcilerBackoff.delete(peerId);
+        }
         if (outcome) {
           onSyncAccounting?.(outcome);
         }
