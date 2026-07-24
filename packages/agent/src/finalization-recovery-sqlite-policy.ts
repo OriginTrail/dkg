@@ -90,7 +90,9 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
   ).run(now - policy.rawTtlMs);
   database.prepare(
     `DELETE FROM finalization_inbox_v1
-     WHERE state IN ('SETTLED','SUPERSEDED','REJECTED','UNSUPPORTED') AND updated_at < ?`,
+     WHERE state IN ('SETTLED','SUPERSEDED','REJECTED','UNSUPPORTED')
+       AND publisher_upgrade_pending = 0
+       AND updated_at < ?`,
   ).run(now - policy.terminalTtlMs);
   database.prepare(`
     DELETE FROM finalization_inbox_v1
@@ -104,6 +106,7 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
                ) AS cumulative_bytes
         FROM finalization_inbox_v1
         WHERE state IN ('SETTLED','SUPERSEDED','REJECTED','UNSUPPORTED')
+          AND publisher_upgrade_pending = 0
       )
       WHERE row_number > ? OR cumulative_bytes > ?
     )
@@ -119,7 +122,7 @@ export function hasFinalizationRecoveryCapacity(
   const live = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
     FROM finalization_inbox_v1
-    WHERE state IN ('RECEIVED','VERIFIED','REORGED')
+    WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
       AND (? IS NULL OR key != ?)
   `).get(replacingKey ?? null, replacingKey ?? null);
   if (
@@ -128,14 +131,14 @@ export function hasFinalizationRecoveryCapacity(
   ) return false;
   const graphCount = database.prepare(`
     SELECT COUNT(*) AS count FROM finalization_inbox_v1
-    WHERE state IN ('RECEIVED','VERIFIED','REORGED')
+    WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
       AND context_graph_id = ? AND (? IS NULL OR key != ?)
   `).get(input.contextGraphId, replacingKey ?? null, replacingKey ?? null);
   if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return false;
   if (input.sourcePeerId) {
     const peerCount = database.prepare(`
       SELECT COUNT(*) AS count FROM finalization_inbox_v1
-      WHERE state IN ('RECEIVED','VERIFIED','REORGED')
+      WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
         AND source_peer_id = ? AND (? IS NULL OR key != ?)
     `).get(input.sourcePeerId, replacingKey ?? null, replacingKey ?? null);
     if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return false;
@@ -150,7 +153,8 @@ export function readFinalizationRecoveryCapacity(
   const live = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes,
            MIN(created_at) AS oldest
-    FROM finalization_inbox_v1 WHERE state IN ('RECEIVED','VERIFIED','REORGED')
+    FROM finalization_inbox_v1
+    WHERE state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1
   `).get();
   const liveEntries = Number(live?.count ?? 0);
   const livePayloadBytes = Number(live?.bytes ?? 0);
@@ -158,14 +162,15 @@ export function readFinalizationRecoveryCapacity(
   const graphCapacity = database.prepare(`
     SELECT COALESCE(MAX(count), 0) AS count FROM (
       SELECT COUNT(*) AS count FROM finalization_inbox_v1
-      WHERE state IN ('RECEIVED','VERIFIED','REORGED')
+      WHERE state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1
       GROUP BY context_graph_id
     )
   `).get();
   const peerCapacity = database.prepare(`
     SELECT COALESCE(MAX(count), 0) AS count FROM (
       SELECT COUNT(*) AS count FROM finalization_inbox_v1
-      WHERE state IN ('RECEIVED','VERIFIED','REORGED') AND source_peer_id IS NOT NULL
+      WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
+        AND source_peer_id IS NOT NULL
       GROUP BY source_peer_id
     )
   `).get();

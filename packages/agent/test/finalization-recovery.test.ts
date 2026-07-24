@@ -767,6 +767,7 @@ describe('graph-scoped finalization recovery admission', () => {
       let now = 1_000;
       let missing = false;
       let receiptCalls = 0;
+      let prepareCalls = 0;
       let invalidations = 0;
       store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
       const chain = recoveryChain({
@@ -783,6 +784,10 @@ describe('graph-scoped finalization recovery admission', () => {
         { info: () => {}, warn: () => {} },
         {
           ...recoveryMaterializer(),
+          prepare: async () => {
+            prepareCalls += 1;
+            return recoveryMaterializer().prepare();
+          },
           invalidateVerified: async () => {
             invalidations += 1;
             return 'invalidated' as const;
@@ -792,7 +797,7 @@ describe('graph-scoped finalization recovery admission', () => {
       const liveInput = {
         rawMessage: encodeFinalizationMessage(message()),
         contextGraphId: CONTEXT_GRAPH,
-        sourcePeerId: '12D3KooWPublisher',
+        sourcePeerId: '12D3KooWUntrustedRelay',
         candidate: parsedMessage(),
       };
       await recovery.processLive(liveInput);
@@ -806,11 +811,13 @@ describe('graph-scoped finalization recovery admission', () => {
         lastError: 'settled canonical receipt is not-found',
       });
       expect(receiptCalls).toBe(2);
+      expect(prepareCalls).toBe(2);
 
       for (let duplicate = 0; duplicate < 5; duplicate += 1) {
         await recovery.processLive(liveInput);
       }
       expect(receiptCalls).toBe(2);
+      expect(prepareCalls).toBe(2);
       expect(invalidations).toBe(0);
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',
@@ -821,6 +828,7 @@ describe('graph-scoped finalization recovery admission', () => {
       now = deferred.nextAttemptAt!;
       await recovery.processLive(liveInput);
       expect(receiptCalls).toBe(3);
+      expect(prepareCalls).toBe(3);
       expect(invalidations).toBe(0);
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',

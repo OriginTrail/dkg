@@ -268,22 +268,50 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('atomically rearms settled evidence for the already trusted publisher', async () => {
+  it('durably records and consumes a pending settled publisher upgrade', async () => {
     const directory = await temporaryDirectory();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
       expect((await store.receive(received({
         sourcePeerId: '12D3KooWUntrustedRelay',
       }))).status).toBe('inserted');
-      expect(await store.recordTrustedPublisher(
-        'entry-1',
-        0,
-        '12D3KooWPublisher',
-      )).toBe(true);
       expect((await store.markVerified('entry-1', 0, evidence())).status).toBe('verified');
       expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
       await store.recordAttempt('entry-1', 0, 'old settled retry', 1_000);
 
+      await expect(store.recordSettledPublisherUpgrade(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      )).resolves.toMatchObject({
+        status: 'recorded',
+        entry: {
+          state: 'SETTLED',
+          generation: 0,
+          publisherUpgradePending: true,
+          trustedPublisherPeerId: '12D3KooWPublisher',
+          attemptCount: 1,
+          lastError: 'old settled retry',
+          verifiedEvidence: {
+            accessPolicy: 'ownerOnly',
+          },
+        },
+      });
+      await expect(store.recordSettledPublisherUpgrade(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      )).resolves.toMatchObject({ status: 'existing' });
+      await expect(store.recordSettledPublisherUpgrade(
+        'entry-1',
+        0,
+        '12D3KooWAttacker',
+      )).resolves.toEqual({ status: 'conflict' });
+      await expect(store.recordSettledPublisherUpgrade(
+        'entry-1',
+        1,
+        '12D3KooWPublisher',
+      )).resolves.toEqual({ status: 'conflict' });
       await expect(store.rearmSettledWithTrustedPublisher(
         'entry-1',
         0,
@@ -310,11 +338,28 @@ describe('SQLite finalization recovery store', () => {
         sourcePeerId: '12D3KooWUntrustedRelay',
         trustedPublisherPeerId: '12D3KooWPublisher',
         rawMessage: RAW,
+        publisherUpgradePending: true,
         attemptCount: 0,
         lastError: 'trusted publisher access semantics arrived after settlement',
       });
       expect(rearmed).not.toHaveProperty('verifiedEvidence');
       expect(rearmed).not.toHaveProperty('nextAttemptAt');
+
+      expect((await store.markVerified('entry-1', 1, evidence({
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3KooWReader'],
+      }))).status).toBe('verified');
+      expect(await store.transition('entry-1', 1, 'SETTLED')).toBe(true);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        generation: 1,
+        publisherUpgradePending: false,
+        trustedPublisherPeerId: '12D3KooWPublisher',
+        verifiedEvidence: {
+          accessPolicy: 'allowList',
+          allowedPeers: ['12D3KooWReader'],
+        },
+      }]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -604,6 +649,55 @@ describe('SQLite finalization recovery store', () => {
       const entries = await store.list();
       expect(entries).toHaveLength(2);
       expect(entries.every((entry) => entry.state === 'SUPERSEDED')).toBe(true);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retains a pending settled publisher upgrade outside terminal pruning', async () => {
+    const directory = await temporaryDirectory();
+    let now = 1_000;
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxTerminalEntries: 1,
+        now: () => now,
+      });
+      await store.receive(received());
+      await store.markVerified('entry-1', 0, evidence());
+      await store.transition('entry-1', 0, 'SETTLED');
+      await store.recordSettledPublisherUpgrade(
+        'entry-1',
+        0,
+        '12D3KooWPublisher',
+      );
+
+      for (let index = 2; index <= 3; index += 1) {
+        now += 1;
+        const key = `entry-${index}`;
+        await store.receive(received({
+          key,
+          txHash: `0x${index.toString(16).padStart(64, '0')}`,
+        }));
+        await store.transition(key, 0, 'SUPERSEDED', 'newer assertion');
+      }
+
+      expect(await store.list()).toMatchObject([
+        {
+          key: 'entry-1',
+          state: 'SETTLED',
+          publisherUpgradePending: true,
+        },
+        {
+          key: 'entry-3',
+          state: 'SUPERSEDED',
+          publisherUpgradePending: false,
+        },
+      ]);
+      await expect(store.health()).resolves.toMatchObject({
+        stateCounts: { SETTLED: 1, SUPERSEDED: 1 },
+        livePayloadBytes: RAW.byteLength,
+      });
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

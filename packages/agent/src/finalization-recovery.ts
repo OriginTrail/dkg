@@ -19,6 +19,7 @@ import {
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryHealth,
+  FinalizationRecoverySettledPublisherUpgradeResult,
   FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
 
@@ -652,15 +653,36 @@ export class FinalizationRecovery<
       );
       return undefined;
     }
-    const publisherAuthority = await this.prepareSettledPublisherUpgrade(input, evidence);
-    if (publisherAuthority.status === 'deferred') return undefined;
-    const publisherUpgrade = publisherAuthority.status === 'upgrade'
-      ? publisherAuthority.prepared
+    let publisherUpgradePeerId = entry.publisherUpgradePending
+      ? entry.trustedPublisherPeerId
       : undefined;
+    let publisherUpgradeNewlyRecorded = false;
     const store = this.getStore();
-    // A current publisher delivery is new authoritative information, so it
-    // must not be hidden behind receipt backoff inherited by the settled row.
-    if (!publisherUpgrade && !store?.isAttemptDue(entry)) return undefined;
+    const attemptDue = store?.isAttemptDue(entry) ?? false;
+    const mayIntroducePublisherAuthority = !entry.publisherUpgradePending
+      && entry.trustedPublisherPeerId === undefined
+      && input.sourcePeerId !== undefined
+      && input.sourcePeerId === evidence.publisherPeerId;
+    // A relay or an already recorded publisher cannot add authority. Keep the
+    // persisted retry gate ahead of the store-heavy workspace-head probe.
+    if (!attemptDue && !mayIntroducePublisherAuthority) return undefined;
+    if (!publisherUpgradePeerId) {
+      const publisherAuthority = await this.prepareSettledPublisherUpgrade(input, evidence);
+      if (publisherAuthority.status === 'deferred') return undefined;
+      if (publisherAuthority.status === 'upgrade') {
+        const recorded = await this.recordSettledPublisherUpgrade(
+          entry,
+          publisherAuthority.prepared.publisherPeerId,
+        );
+        if (!recorded) return undefined;
+        entry = recorded.entry;
+        publisherUpgradePeerId = publisherAuthority.prepared.publisherPeerId;
+        publisherUpgradeNewlyRecorded = recorded.status === 'recorded';
+      }
+    }
+    // The first durable authority observation wakes one receipt probe. Once
+    // pending, duplicates must obey the settled row's persisted retry deadline.
+    if (!publisherUpgradeNewlyRecorded && !attemptDue) return undefined;
     const canonical = await this.resolveCanonicalReceipt(
       input.candidate,
       evidence,
@@ -701,11 +723,16 @@ export class FinalizationRecovery<
     );
     if (!placementChanged) {
       if (canonical.status === 'confirmed') {
-        if (publisherUpgrade) {
+        if (publisherUpgradePeerId) {
+          if (!await this.validatePersistedSettledPublisherUpgrade(
+            entry,
+            input.candidate,
+            publisherUpgradePeerId,
+          )) return undefined;
           return this.rearmSettledWithTrustedPublisher(
             input,
             entry,
-            publisherUpgrade.publisherPeerId,
+            publisherUpgradePeerId,
             'trusted publisher access semantics arrived after settlement',
           );
         }
@@ -718,11 +745,16 @@ export class FinalizationRecovery<
       }
       return undefined;
     }
-    if (publisherUpgrade) {
+    if (publisherUpgradePeerId) {
+      if (!await this.validatePersistedSettledPublisherUpgrade(
+        entry,
+        input.candidate,
+        publisherUpgradePeerId,
+      )) return undefined;
       return this.rearmSettledWithTrustedPublisher(
         input,
         entry,
-        publisherUpgrade.publisherPeerId,
+        publisherUpgradePeerId,
         'trusted publisher access semantics and canonical placement changed after settlement',
       );
     }
@@ -765,6 +797,64 @@ export class FinalizationRecovery<
     return { status: 'upgrade', prepared };
   }
 
+  private async recordSettledPublisherUpgrade(
+    entry: FinalizationRecoveryEntry,
+    publisherPeerId: string,
+  ): Promise<
+    Extract<
+      FinalizationRecoverySettledPublisherUpgradeResult,
+      { status: 'recorded' | 'existing' }
+    > | undefined
+  > {
+    const store = this.getStore();
+    if (!store) return undefined;
+    try {
+      const result = await store.recordSettledPublisherUpgrade(
+        entry.key,
+        entry.generation,
+        publisherPeerId,
+      );
+      if (result.status === 'recorded' || result.status === 'existing') return result;
+      this.log.warn(
+        `Finalization recovery inbox refused pending publisher upgrade for `
+          + `${entry.ual}: ${result.status}`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery pending publisher upgrade commit failed for ${entry.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return undefined;
+  }
+
+  private async validatePersistedSettledPublisherUpgrade(
+    entry: FinalizationRecoveryEntry,
+    candidate: ParsedGraphScopedFinalization,
+    publisherPeerId: string,
+  ): Promise<boolean> {
+    try {
+      const prepared = await this.materializer.prepare({
+        rawMessage: entry.rawMessage,
+        contextGraphId: entry.contextGraphId,
+        sourcePeerId: publisherPeerId,
+        candidate,
+      });
+      if (prepared?.publisherPeerId === publisherPeerId) return true;
+    } catch (error) {
+      if (!this.materializer.isRetryableError(error)) throw error;
+    }
+    this.log.info(
+      `Finalization recovery persisted publisher authority check is deferred for `
+        + `${entry.ual}`,
+    );
+    await this.recordSettledRetry(
+      entry,
+      'persisted publisher authority validation is deferred',
+    );
+    return false;
+  }
+
   private async rearmSettledWithTrustedPublisher(
     input: FinalizationRecoveryLiveInput,
     entry: FinalizationRecoveryEntry,
@@ -787,6 +877,7 @@ export class FinalizationRecovery<
         rearmed?.state === 'REORGED'
         && rearmed.generation === entry.generation + 1
         && rearmed.trustedPublisherPeerId === publisherPeerId
+        && rearmed.publisherUpgradePending
       ) return rearmed;
       this.log.warn(
         `Finalization recovery inbox refused trusted publisher rearm for ${entry.ual}`,
@@ -1061,6 +1152,17 @@ export class FinalizationRecovery<
       { acceptCanonicalPlacement: entry.generation > 0 },
     );
     if (canonical.status === 'confirmed') {
+      if (entry.publisherUpgradePending) {
+        const recovered = await this.recoverSettledPublisherUpgrade(
+          entry,
+          candidate,
+          sameCanonicalFinalizationPlacement(canonical.receipt, evidence)
+            ? 'trusted publisher access semantics arrived after settlement'
+            : 'trusted publisher access semantics and canonical placement changed after settlement',
+        );
+        if (!matchesReplayTarget) return 'none';
+        return recovered ? 'recovered' : 'retry-pending';
+      }
       if (!sameCanonicalFinalizationPlacement(canonical.receipt, evidence)) {
         const recovered = await this.recoverSettledReorg(entry, candidate);
         if (!matchesReplayTarget) return 'none';
@@ -1081,6 +1183,15 @@ export class FinalizationRecovery<
         : 'none';
     }
     if (canonical.status === 'reorged') {
+      if (entry.publisherUpgradePending) {
+        const recovered = await this.recoverSettledPublisherUpgrade(
+          entry,
+          candidate,
+          'trusted publisher access semantics and canonical placement changed after settlement',
+        );
+        if (!matchesReplayTarget) return 'none';
+        return recovered ? 'recovered' : 'retry-pending';
+      }
       const recovered = await this.recoverSettledReorg(entry, candidate);
       if (!matchesReplayTarget) return 'none';
       return recovered ? 'recovered' : 'retry-pending';
@@ -1120,6 +1231,44 @@ export class FinalizationRecovery<
       return matchesReplayTarget ? 'retry-pending' : 'none';
     }
     return 'none';
+  }
+
+  private async recoverSettledPublisherUpgrade(
+    entry: FinalizationRecoveryEntry,
+    candidate: ParsedGraphScopedFinalization,
+    reason: string,
+  ): Promise<boolean> {
+    const publisherPeerId = entry.trustedPublisherPeerId;
+    if (
+      !publisherPeerId
+      || !await this.validatePersistedSettledPublisherUpgrade(
+        entry,
+        candidate,
+        publisherPeerId,
+      )
+    ) return false;
+    const recoveryInput: FinalizationRecoveryLiveInput = {
+      rawMessage: entry.rawMessage,
+      contextGraphId: entry.contextGraphId,
+      sourcePeerId: publisherPeerId,
+      candidate,
+    };
+    const rearmed = await this.rearmSettledWithTrustedPublisher(
+      recoveryInput,
+      entry,
+      publisherPeerId,
+      reason,
+    );
+    if (!rearmed) return false;
+    const outcome = await this.materialize(
+      recoveryInput,
+      { kind: 'recovery', entry: rearmed },
+    );
+    if (outcome === 'deferred') {
+      await this.recordDeferred(rearmed, 'settled publisher upgrade recovery deferred');
+      return false;
+    }
+    return this.settleEntry(rearmed, outcome);
   }
 
   private async settledMatchesReplayTarget(

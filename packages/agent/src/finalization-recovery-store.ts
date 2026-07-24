@@ -20,6 +20,7 @@ export interface FinalizationRecoveryEntry {
   contextGraphId: string;
   sourcePeerId?: string;
   trustedPublisherPeerId?: string;
+  publisherUpgradePending: boolean;
   ual: string;
   txHash: string;
   assertionVersion: string;
@@ -67,6 +68,10 @@ export type FinalizationRecoveryVerifyResult =
   | { status: 'missing' }
   | { status: 'closed' };
 
+export type FinalizationRecoverySettledPublisherUpgradeResult =
+  | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'conflict' | 'missing' | 'closed' };
+
 export interface FinalizationRecoveryHealth {
   available: boolean;
   closed: boolean;
@@ -86,6 +91,12 @@ export interface FinalizationRecoveryStore {
     generation: number,
     publisherPeerId: string,
   ): Promise<boolean>;
+  /** Persists validated late-publisher authority without changing settled evidence. */
+  recordSettledPublisherUpgrade(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+  ): Promise<FinalizationRecoverySettledPublisherUpgradeResult>;
   /** Caller-validated authority upgrade; SQLite only enforces monotonic CAS state. */
   rearmSettledWithTrustedPublisher(
     key: string,

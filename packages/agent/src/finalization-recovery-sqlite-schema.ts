@@ -39,6 +39,9 @@ CREATE TABLE finalization_inbox_v1 (
   context_graph_id TEXT NOT NULL,
   source_peer_id TEXT,
   trusted_publisher_peer_id TEXT,
+  publisher_upgrade_pending INTEGER NOT NULL DEFAULT 0 CHECK (
+    publisher_upgrade_pending IN (0, 1)
+  ),
   ual TEXT NOT NULL,
   tx_hash TEXT NOT NULL,
   assertion_version TEXT NOT NULL,
@@ -79,6 +82,13 @@ CREATE TABLE finalization_inbox_v1 (
       AND publisher_address IS NULL
       AND author_address IS NULL
       AND verified_evidence_json IS NULL
+    )
+  ),
+  CHECK (
+    publisher_upgrade_pending = 0
+    OR (
+      trusted_publisher_peer_id IS NOT NULL
+      AND state IN ('VERIFIED','REORGED','SETTLED')
     )
   )
 ) STRICT;

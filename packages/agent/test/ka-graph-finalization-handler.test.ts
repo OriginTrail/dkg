@@ -686,6 +686,133 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('recovers a pending late-publisher receipt check after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-pending-publisher-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    try {
+      const { message } = await stageGraph();
+      const finalization = {
+        ...message,
+        accessPolicy: 'allowList' as const,
+        allowedPeers: ['12D3KooWReader'],
+      };
+      let now = 1_000;
+      let receiptState: 'confirmed' | 'pending' = 'confirmed';
+      let receiptCalls = 0;
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => finalization.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => {
+          receiptCalls += 1;
+          return receiptState === 'confirmed'
+            ? canonicalReceipt(finalization)
+            : { status: 'pending' as const };
+        },
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const recoveringHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      const wire = encodeFinalizationMessage(finalization);
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+
+      await recoveringHandler.handleFinalizationMessage(
+        wire,
+        CG,
+        '12D3KooWUntrustedRelay',
+      );
+      expect(receiptCalls).toBe(1);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'SETTLED',
+        generation: 0,
+        publisherUpgradePending: false,
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        verifiedEvidence: {
+          accessPolicy: 'ownerOnly',
+          allowedPeers: [],
+        },
+      }]);
+
+      receiptState = 'pending';
+      await recoveringHandler.handleFinalizationMessage(
+        wire,
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(receiptCalls).toBe(2);
+      const [pendingUpgrade] = await inbox.list();
+      expect(pendingUpgrade).toMatchObject({
+        state: 'SETTLED',
+        generation: 0,
+        publisherUpgradePending: true,
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
+        attemptCount: 1,
+        nextAttemptAt: 2_000,
+        verifiedEvidence: {
+          accessPolicy: 'ownerOnly',
+          allowedPeers: [],
+        },
+      });
+      await expect(store.query(
+        `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+          + '<http://dkg.io/ontology/accessPolicy> "ownerOnly" } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+
+      await recoveringHandler.handleFinalizationMessage(
+        wire,
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(receiptCalls).toBe(2);
+
+      await inbox.close();
+      inbox = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      now = pendingUpgrade!.nextAttemptAt!;
+      receiptState = 'confirmed';
+      const restartedHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      await expect(restartedHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: finalization.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+      expect(receiptCalls).toBe(4);
+      expect(await inbox.list()).toMatchObject([{
+        state: 'SETTLED',
+        generation: 1,
+        publisherUpgradePending: false,
+        sourcePeerId: '12D3KooWUntrustedRelay',
+        trustedPublisherPeerId: '12D3KooWPublisher',
+        attemptCount: 0,
+        verifiedEvidence: {
+          accessPolicy: 'allowList',
+          allowedPeers: ['12D3KooWReader'],
+        },
+      }]);
+      await expect(store.query(
+        `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+          + '<http://dkg.io/ontology/accessPolicy> "allowList" ; '
+          + '<http://dkg.io/ontology/allowedPeer> "12D3KooWReader" } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    } finally {
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('recovers a late-publisher rearm after restart without another gossip delivery', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-late-publisher-crash-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -1097,6 +1224,8 @@ describe('graph-scoped finalization handler', () => {
         get closed() { return inbox!.closed; },
         receive: inbox.receive.bind(inbox),
         recordTrustedPublisher: inbox.recordTrustedPublisher.bind(inbox),
+        recordSettledPublisherUpgrade:
+          inbox.recordSettledPublisherUpgrade.bind(inbox),
         rearmSettledWithTrustedPublisher:
           inbox.rearmSettledWithTrustedPublisher.bind(inbox),
         markVerified: async () => ({ status: 'closed' }),
@@ -1171,6 +1300,9 @@ describe('graph-scoped finalization handler', () => {
         },
         recordTrustedPublisher: async () => {
           throw new Error('recordTrustedPublisher must not run after failed admission');
+        },
+        recordSettledPublisherUpgrade: async () => {
+          throw new Error('recordSettledPublisherUpgrade must not run after failed admission');
         },
         rearmSettledWithTrustedPublisher: async () => {
           throw new Error('rearmSettledWithTrustedPublisher must not run after failed admission');

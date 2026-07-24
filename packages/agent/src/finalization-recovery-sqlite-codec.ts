@@ -31,6 +31,14 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function asBooleanInteger(value: unknown, field: string): boolean {
+  const integer = asSafeInteger(value, field);
+  if (integer !== 0 && integer !== 1) {
+    throw new Error(`Finalization inbox row has invalid ${field}`);
+  }
+  return integer === 1;
+}
+
 export function finalizationEnvelopeSha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -71,6 +79,19 @@ export function finalizationRecoveryRowToEntry(
   if (state === 'REORGED' && verifiedEvidence) {
     throw new Error('Finalization inbox reorged row retains stale verified evidence');
   }
+  const publisherUpgradePending = asBooleanInteger(
+    row.publisher_upgrade_pending,
+    'publisher_upgrade_pending',
+  );
+  if (
+    publisherUpgradePending
+    && (
+      !optionalString(row.trusted_publisher_peer_id)
+      || (state !== 'VERIFIED' && state !== 'REORGED' && state !== 'SETTLED')
+    )
+  ) {
+    throw new Error('Finalization inbox row has invalid pending publisher upgrade');
+  }
   if (verifiedEvidence) {
     const storedAuthor = optionalString(row.author_address)?.toLowerCase();
     if (
@@ -95,6 +116,7 @@ export function finalizationRecoveryRowToEntry(
     ...(optionalString(row.trusted_publisher_peer_id)
       ? { trustedPublisherPeerId: String(row.trusted_publisher_peer_id) }
       : {}),
+    publisherUpgradePending,
     ual: String(row.ual),
     txHash: String(row.tx_hash),
     assertionVersion: String(row.assertion_version),

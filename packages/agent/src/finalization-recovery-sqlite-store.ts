@@ -7,6 +7,7 @@ import {
   type FinalizationRecoveryHealth,
   type FinalizationRecoveryReceiveInput,
   type FinalizationRecoveryReceiveResult,
+  type FinalizationRecoverySettledPublisherUpgradeResult,
   type FinalizationRecoveryState,
   type FinalizationRecoveryStore,
   type FinalizationRecoveryVerifyResult,
@@ -178,6 +179,64 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
+  recordSettledPublisherUpgrade(
+    key: string,
+    generation: number,
+    publisherPeerId: string,
+  ): Promise<FinalizationRecoverySettledPublisherUpgradeResult> {
+    if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
+    if (
+      publisherPeerId.length === 0
+      || publisherPeerId.trim() !== publisherPeerId
+    ) return Promise.resolve({ status: 'conflict' });
+    return this.mutate(() => {
+      if (this.#closed) return { status: 'closed' };
+      const row = this.database.prepare(
+        'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+      ).get(key);
+      if (!row) return { status: 'missing' };
+      const current = finalizationRecoveryRowToEntry(row);
+      if (
+        current.state !== 'SETTLED'
+        || current.generation !== generation
+        || (
+          current.trustedPublisherPeerId !== undefined
+          && current.trustedPublisherPeerId !== publisherPeerId
+        )
+      ) return { status: 'conflict' };
+      if (current.publisherUpgradePending) {
+        return { status: 'existing', entry: current };
+      }
+      const result = this.database.prepare(`
+        UPDATE finalization_inbox_v1
+        SET trusted_publisher_peer_id = ?,
+            publisher_upgrade_pending = 1,
+            updated_at = ?
+        WHERE key = ? AND generation = ? AND state = 'SETTLED'
+          AND publisher_upgrade_pending = 0
+          AND (
+            trusted_publisher_peer_id IS NULL
+            OR trusted_publisher_peer_id = ?
+          )
+      `).run(
+        publisherPeerId,
+        this.#policy.now(),
+        key,
+        generation,
+        publisherPeerId,
+      );
+      if (result.changes === 0) return { status: 'conflict' };
+      const updated = this.database.prepare(
+        'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+      ).get(key);
+      if (!updated) return { status: 'missing' };
+      return {
+        status: 'recorded',
+        entry: finalizationRecoveryRowToEntry(updated),
+      };
+    });
+  }
+
   rearmSettledWithTrustedPublisher(
     key: string,
     generation: number,
@@ -211,10 +270,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               last_error = ?,
               updated_at = ?
           WHERE key = ? AND generation = ? AND state = 'SETTLED'
-            AND (
-              trusted_publisher_peer_id IS NULL
-              OR trusted_publisher_peer_id = ?
-            )
+            AND publisher_upgrade_pending = 1
+            AND trusted_publisher_peer_id = ?
         `).run(
           publisherPeerId,
           lastError,
@@ -347,6 +404,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
           SET state = 'REJECTED',
+              publisher_upgrade_pending = 0,
               next_attempt_at = NULL,
               last_error = ?,
               updated_at = ?
@@ -413,6 +471,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         const result = this.database.prepare(`
           UPDATE finalization_inbox_v1
           SET state = ?,
+              publisher_upgrade_pending = 0,
               attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
               last_error = ?,
               next_attempt_at = NULL,
