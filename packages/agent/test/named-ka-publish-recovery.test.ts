@@ -73,6 +73,24 @@ function seededChain(): MockChainAdapter {
   return chain;
 }
 
+/**
+ * `getDKGKnowledgeAssetsAddress` is OPTIONAL on the ChainAdapter contract, and the
+ * graph-local path must neither require nor consult it — the contract address is only
+ * needed to build the canonical receipt form. Returns a seeded chain whose resolver
+ * throws if called, plus the call counter, so a test can prove non-invocation rather
+ * than merely tolerate absence.
+ */
+function chainThatRejectsContractLookup(): { chain: MockChainAdapter; calls: () => number } {
+  const chain = seededChain();
+  let calls = 0;
+  (chain as unknown as { getDKGKnowledgeAssetsAddress: () => Promise<string> })
+    .getDKGKnowledgeAssetsAddress = () => {
+      calls += 1;
+      throw new Error('the graph-local path must not resolve the DKGKnowledgeAssets address');
+    };
+  return { chain, calls: () => calls };
+}
+
 function baseRequest(
   overrides: Partial<KnowledgeAssetVmPublishRequest> = {},
 ): KnowledgeAssetVmPublishRequest {
@@ -204,6 +222,41 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
       chain: seededChain(),
     });
     expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
+  });
+
+  it('resolves the graph-local UAL without requiring the optional contract-address resolver', async () => {
+    // The graph-local form is the production shape, and it is self-sufficient: the
+    // DKGKnowledgeAssets address is only needed to build the canonical receipt form.
+    // Pins that contract — a regression hoisting the lookup above the representation
+    // branch would fail here even though every other positive case would still pass.
+    const { chain, calls } = chainThatRejectsContractLookup();
+    const result = await normalizeRecoveredNamedKaPublish({
+      request: baseRequest(),
+      job: broadcastJob(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+      chain,
+    });
+
+    expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
+    expect(calls()).toBe(0);
+  });
+
+  it('still requires the contract-address resolver to accept the contract/packed form', async () => {
+    // The mirror of the case above: the receipt form cannot be validated without the
+    // contract address, so it must fail closed rather than be waved through.
+    const { chain, calls } = chainThatRejectsContractLookup();
+    await expect(
+      normalizeRecoveredNamedKaPublish({
+        request: baseRequest(),
+        job: broadcastJob(),
+        recovery: recoveryEvidence(CONTRACT_RECEIPT_UAL),
+        chain,
+      }),
+    ).rejects.toMatchObject({
+      code: 'KA_VM_RECOVERY_INCONSISTENT',
+      message: expect.stringMatching(/could not resolve the canonical receipt UAL/),
+    });
+    expect(calls()).toBe(1);
   });
 
   it('resolver-preserved kaUal canonicalizes to the validator-derived localUal (seam guard)', () => {
