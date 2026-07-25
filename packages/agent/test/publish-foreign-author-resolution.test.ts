@@ -436,6 +436,37 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     expect(historyAgent).toBe(MEMBER);
   });
 
+  // The predicate has TWO independent true-paths: a custodial key, and the author being the
+  // publisher EOA itself (the finalize-time fallback). The custodial one is covered above;
+  // this covers the fallback-equality one, which no other fixture reaches because they all
+  // return a publisher EOA that differs from the selected author.
+  it('still enqueues a selected-author UPDATE when that author IS the publisher EOA', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    agent.getCustodialAgentPrivateKey = () => undefined; // no custodial key at all
+    const PAST_THE_GATE = new Error('reached the share-marker check past the re-sign gate');
+    agent.publisher = {
+      // The publisher EOA IS the selected author, so the node can re-sign for it.
+      publisherFallbackAuthorAddress: async () => MEMBER,
+      hasSwmShareComplete: async () => { throw PAST_THE_GATE; },
+    };
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          vmCurrentAssertion: `0x${'ab'.repeat(32)}`,
+          swmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+        }),
+      },
+      configurable: true,
+    });
+
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toBe(PAST_THE_GATE);
+  });
+
   // The preflight is deliberately ADVISORY: when capability cannot be determined it must
   // let the enqueue through and leave the worker authoritative. That is a documented
   // design choice, so it needs pinning — otherwise removing the catch (letting the lookup
