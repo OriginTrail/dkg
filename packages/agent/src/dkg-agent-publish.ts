@@ -184,7 +184,10 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
-import { resolveFinalizedAssertionAuthor } from './finalized-assertion-author.js';
+import {
+  resolveFinalizedAssertionAuthor,
+  type ResolveFinalizedAssertionAuthorParams,
+} from './finalized-assertion-author.js';
 import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -453,6 +456,24 @@ export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
 
 const ROOTLESS_UPDATE_DKG_NS = 'http://dkg.io/ontology/';
 const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+
+/**
+ * GH#1786 — a curator can MINT a selected foreign author's KA (the author's own sealed
+ * attestation is replayed) but cannot re-sign the UPDATE attestation without that
+ * author's key. Coded so the daemon answers an actionable 409 instead of an opaque 500,
+ * and raised from one place so the sync signer and the async pre-enqueue preflight
+ * report it identically.
+ */
+function updateAttestationNotCustodialError(authorAddress: string): Error {
+  return Object.assign(
+    new Error(
+      `cannot re-sign UpdateAuthorAttestation for author ${authorAddress} — no custodial key ` +
+        `on file and it is not the publisher EOA. Use the /api/update route with a pre-signed ` +
+        `UpdateAuthorAttestation instead.`,
+    ),
+    { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+  );
+}
 
 function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Error {
   return new RootlessUpdateError(code, message);
@@ -4118,16 +4139,16 @@ export class PublishMethods extends DKGAgentBase {
   async resolveAssertionAuthor(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    subGraphName?: string,
-    callerAgentAddress?: string,
-    selectedAuthorAgentAddress?: string,
+    // GH#1786 — named, not positional: `callerAgentAddress` and
+    // `selectedAuthorAgentAddress` are both optional strings with deliberately
+    // OPPOSITE meanings (caller identity vs resident-author selection), so adjacent
+    // positional slots would let a caller silently transpose them.
+    opts?: Omit<ResolveFinalizedAssertionAuthorParams, 'contextGraphId' | 'name'>,
   ): Promise<string | undefined> {
     return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
-      subGraphName,
-      callerAgentAddress,
-      selectedAuthorAgentAddress,
+      ...opts,
     });
   }
 
@@ -4188,9 +4209,11 @@ export class PublishMethods extends DKGAgentBase {
     }
     if (opts?.agentAddress) return opts.agentAddress;
     const callerHint = opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    return (await this.resolveAssertionAuthor(
-      contextGraphId, name, opts?.subGraphName, callerHint, opts?.selectedAuthorAgentAddress,
-    )) ?? callerHint;
+    return (await this.resolveAssertionAuthor(contextGraphId, name, {
+      subGraphName: opts?.subGraphName,
+      callerAgentAddress: callerHint,
+      selectedAuthorAgentAddress: opts?.selectedAuthorAgentAddress,
+    })) ?? callerHint;
   }
 
   /**
@@ -4249,6 +4272,22 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error(
         `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
       );
+    }
+    // GH#1786 — an UPDATE of an author this node cannot re-sign for is a permanent
+    // caller condition, and the async worker only discovers it AFTER the job is
+    // accepted (the client would get 202 and then a doomed job). Surface it here as
+    // the same 409 the sync lane returns. Advisory only: if the capability cannot be
+    // determined we enqueue as before and the worker stays authoritative.
+    if (history.vmCurrentAssertion) {
+      let canReSign = true;
+      try {
+        canReSign = await this._canReSignUpdateAttestationForAuthor(
+          agentAddress, opts?.publisherOverride,
+        );
+      } catch {
+        canReSign = true; // undeterminable — do not block the enqueue
+      }
+      if (!canReSign) throw updateAttestationNotCustodialError(agentAddress);
     }
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
@@ -6085,6 +6124,24 @@ export class PublishMethods extends DKGAgentBase {
    * the daemon doesn't hold must use the explicit `/api/update` route with a
    * pre-signed attestation.
    */
+  /**
+   * GH#1786 — can this node re-sign an `UpdateAuthorAttestation` on behalf of
+   * `authorAddress`? True when the author's key is custodial here, or when the author
+   * IS the publisher EOA (the finalize-time fallback). The single source of truth for
+   * both the update signer below and the async lane's pre-enqueue preflight, so the
+   * two cannot drift apart.
+   */
+  async _canReSignUpdateAttestationForAuthor(
+    this: DKGAgent,
+    authorAddress: string,
+    publisherOverride?: DKGPublisher,
+  ): Promise<boolean> {
+    if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
+    const publisher = publisherOverride ?? this.publisher;
+    const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
+    return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
+  }
+
   async _buildPrecomputedUpdateAttestationForSeal(
     this: DKGAgent,
     kaId: bigint,
@@ -6100,6 +6157,12 @@ export class PublishMethods extends DKGAgentBase {
       schemeVersion: seal.authorSchemeVersion,
     });
     const custodialKey = this.getCustodialAgentPrivateKey(seal.authorAddress);
+    // GH#1786 — one predicate owns "can this node re-sign for that author", shared with
+    // the pre-enqueue preflight on the async lane so the two cannot drift.
+    if (!custodialKey
+      && !(await this._canReSignUpdateAttestationForAuthor(seal.authorAddress, publisherOverride))) {
+      throw updateAttestationNotCustodialError(seal.authorAddress);
+    }
     let r: Uint8Array;
     let vs: Uint8Array;
     if (custodialKey) {
@@ -6110,22 +6173,6 @@ export class PublishMethods extends DKGAgentBase {
       vs = ethers.getBytes(sig.yParityAndS);
     } else {
       const publisher = publisherOverride ?? this.publisher;
-      const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
-      if (!fallbackAddress || fallbackAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
-        // GH#1786 — coded so the daemon can answer this as an actionable 409 rather
-        // than an opaque 500. It is a permanent caller-side condition, and it is
-        // reachable on the SECOND publish of a selected foreign author's KA: a
-        // curator can mint one (the author's own seal signature is replayed) but
-        // cannot re-sign the UPDATE attestation without a custodial key.
-        throw Object.assign(
-          new Error(
-            `publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author ` +
-              `${seal.authorAddress} — no custodial key on file and it is not the publisher EOA. ` +
-              `Use the /api/update route with a pre-signed UpdateAuthorAttestation instead.`,
-          ),
-          { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
-        );
-      }
       const compact = await publisher.signAuthorAttestationAsPublisher(typedData);
       r = compact.r;
       vs = compact.vs;

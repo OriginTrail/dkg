@@ -81,7 +81,7 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));
     const agent = stubAgent(store, CURATOR);
-    const resolved = await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR);
+    const resolved = await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR });
     expect(resolved).toBe(MEMBER); // exact stored (checksum) case
   });
 
@@ -89,7 +89,7 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert([...sealFor(MEMBER), ...sealFor(CURATOR)]);
     const agent = stubAgent(store, CURATOR);
-    const resolved = await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR);
+    const resolved = await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR });
     expect(resolved).toBe(CURATOR);
   });
 
@@ -97,11 +97,11 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
     const agent = stubAgent(store, CURATOR);
-    await expect(agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).rejects.toMatchObject({
+    await expect(agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR })).rejects.toMatchObject({
       code: 'AMBIGUOUS_ASSERTION_AUTHOR',
     });
     try {
-      await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR);
+      await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR });
     } catch (e: any) {
       expect(e.candidates).toHaveLength(2);
     }
@@ -117,7 +117,7 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const agent = stubAgent(store, CURATOR);
     // Simulate the effective-identity caller hint the publish sites now pass.
     const effectiveCaller = CURATOR; // opts?.agentAddress ?? defaultAgentAddress
-    const resolved = await agent.resolveAssertionAuthor(CG, NAME, undefined, effectiveCaller);
+    const resolved = await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: effectiveCaller });
     expect(resolved).toBe(CURATOR);
   });
 
@@ -125,7 +125,7 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));
     const agent = stubAgent(store, CURATOR);
-    expect(await agent.resolveAssertionAuthor(CG, 'no-such-name', undefined, CURATOR)).toBeUndefined();
+    expect(await agent.resolveAssertionAuthor(CG, 'no-such-name', { callerAgentAddress: CURATOR })).toBeUndefined();
   });
 
   it('resolves the subgraph member and does NOT fall back to a same-named root seal', async () => {
@@ -135,9 +135,9 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert([...sealAt(CG, MEMBER, NAME, 'wing-a'), ...sealAt(CG, OTHER, NAME)]);
     const agent = stubAgent(store, CURATOR);
-    expect(await agent.resolveAssertionAuthor(CG, NAME, 'wing-a', CURATOR)).toBe(MEMBER);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, { subGraphName: 'wing-a', callerAgentAddress: CURATOR })).toBe(MEMBER);
     // ...and the root scope resolves the root author, not the wing-a member.
-    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(OTHER);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBe(OTHER);
   });
 
   it('resolves a foreign author for a slash-containing (wallet-scoped) context graph id', async () => {
@@ -147,7 +147,7 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert(sealAt(slashCg, MEMBER, NAME));
     const agent = stubAgent(store, CURATOR);
-    expect(await agent.resolveAssertionAuthor(slashCg, NAME, undefined, CURATOR)).toBe(MEMBER);
+    expect(await agent.resolveAssertionAuthor(slashCg, NAME, { callerAgentAddress: CURATOR })).toBe(MEMBER);
   });
 
   // A subject with ONLY dkg:assertionMerkleRoot (a stale/partial/peer-supplied
@@ -166,14 +166,14 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     await store.insert([...sealFor(MEMBER), partialSealOnly(OTHER)]);
     const agent = stubAgent(store, CURATOR);
     // The partial OTHER subject must not create false ambiguity.
-    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(MEMBER);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBe(MEMBER);
   });
 
   it('treats a partial-only name as not finalized (returns undefined, no unusable author)', async () => {
     const store = new OxigraphStore();
     await store.insert([partialSealOnly(OTHER)]);
     const agent = stubAgent(store, CURATOR);
-    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBeUndefined();
+    expect(await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBeUndefined();
   });
 
   // A complete seal at MEMBER's coordinate but whose authorAddress/kaUal name a
@@ -207,14 +207,14 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const agent = stubAgent(store, CURATOR);
     // Neither MEMBER (URI) nor OTHER (seal) is resolved — the subject is not a
     // self-consistent candidate, so it is treated as not finalized.
-    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBeUndefined();
+    expect(await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBeUndefined();
   });
 
   it('resolves the aligned seal and ignores a coordinate-mismatched one at the same name', async () => {
     const store = new OxigraphStore();
     await store.insert([...sealFor(MEMBER), ...mismatchedSeal(OTHER, `0x${'33'.repeat(20)}`)]);
     const agent = stubAgent(store, CURATOR);
-    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(MEMBER);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, { callerAgentAddress: CURATOR })).toBe(MEMBER);
   });
 
   it('does not cross-match a name that is a suffix of another (different authors make it observable)', async () => {
@@ -226,7 +226,7 @@ describe('GH#1778 resolveAssertionAuthor', () => {
     const store = new OxigraphStore();
     await store.insert([...sealFor(MEMBER, 'asset'), ...sealFor(OTHER, 'myasset')]);
     const agent = stubAgent(store, CURATOR);
-    expect(await agent.resolveAssertionAuthor(CG, 'asset', undefined, CURATOR)).toBe(MEMBER);
+    expect(await agent.resolveAssertionAuthor(CG, 'asset', { callerAgentAddress: CURATOR })).toBe(MEMBER);
   });
 });
 
@@ -330,6 +330,68 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: MEMBER,
     })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT', candidates: [] });
+  });
+
+  // The route maps PUBLISH_AUTHOR_NOT_CUSTODIAL to an actionable 409, but that mapping
+  // is only meaningful if the PRODUCTION update path actually attaches the code. This
+  // pins the emitter, so a regression to a bare Error (HTTP 500) is caught here rather
+  // than passing because a route test stubbed the code in.
+  it('codes a foreign-author update refusal as PUBLISH_AUTHOR_NOT_CUSTODIAL', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    // No custodial key for MEMBER, and the publisher EOA is somebody else.
+    // (Synchronous by contract — an async stub would resolve to a truthy Promise.)
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    const publisherOverride = {
+      publisherFallbackAuthorAddress: async () => CURATOR,
+      signAuthorAttestationAsPublisher: async () => ({
+        r: `0x${'34'.repeat(32)}`,
+        vs: `0x${'56'.repeat(32)}`,
+      }),
+    } as any;
+    const seal = {
+      chainId: 31337n,
+      kav10Address: '0x1234567890123456789012345678901234567890',
+      authorAddress: MEMBER,
+      merkleRoot: MERKLE,
+      authorSchemeVersion: 1,
+      assertionVersion: 2,
+    } as any;
+
+    await expect(
+      agent._buildPrecomputedUpdateAttestationForSeal(RESERVED_KA_ID, seal, publisherOverride),
+    ).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' });
+  });
+
+  // The async lane resolves the intent BEFORE enqueueing, and the worker only discovers
+  // a non-custodial update after the job is accepted. This pins that the intent path
+  // refuses up front, so a curator gets the 409 instead of a 202 + doomed job.
+  it('refuses to enqueue a foreign-author UPDATE it cannot re-sign, before accepting the job', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    agent.publisher = {
+      // The publisher EOA is the curator, not the selected member.
+      publisherFallbackAuthorAddress: async () => CURATOR,
+      hasSwmShareComplete: async () => true,
+    };
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          // Already on VM ⇒ the next publish is an UPDATE.
+          vmCurrentAssertion: `0x${'ab'.repeat(32)}`,
+          swmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+        }),
+      },
+      configurable: true,
+    });
+
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' });
   });
 
   it('rejects supplying both agentAddress (override) and selectedAuthorAgentAddress (selection)', async () => {

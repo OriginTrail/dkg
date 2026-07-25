@@ -821,7 +821,10 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
-      ...(selectedAuthorAgentAddress ? { selectedAuthorAgentAddress } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -837,7 +840,10 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
-      ...(selectedAuthorAgentAddress ? { selectedAuthorAgentAddress } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }

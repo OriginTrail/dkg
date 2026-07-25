@@ -1001,16 +1001,22 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(res.body.candidates).toEqual(candidates);
       });
 
-      it(`${lane} answers a non-custodial foreign-author update with 409`, async () => {
+      it(`${lane} answers a non-custodial foreign-author update with 409 and enqueues nothing`, async () => {
         const notCustodial = () => {
           throw Object.assign(
             new Error('cannot re-sign UpdateAuthorAttestation for author'),
             { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
           );
         };
+        const enqueued: unknown[] = [];
         await startWith({}, {
           publishFromFinalizedAssertion: notCustodial,
           resolveFinalizedAssertionVmPublishIntent: notCustodial,
+        }, {}, {
+          enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+            enqueued.push(intent);
+            return 'job-should-not-exist';
+          },
         });
 
         const res = await post(lane, {
@@ -1020,6 +1026,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('PUBLISH_AUTHOR_NOT_CUSTODIAL');
+        // The async lane must refuse BEFORE accepting a job that is known to fail.
+        expect(enqueued).toHaveLength(0);
       });
 
       it(`${lane} rejects a malformed selector`, async () => {
