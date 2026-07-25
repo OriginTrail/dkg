@@ -4120,12 +4120,14 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     subGraphName?: string,
     callerAgentAddress?: string,
+    selectedAuthorAgentAddress?: string,
   ): Promise<string | undefined> {
     return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
       subGraphName,
       callerAgentAddress,
+      selectedAuthorAgentAddress,
     });
   }
 
@@ -4142,11 +4144,23 @@ export class PublishMethods extends DKGAgentBase {
    * the curator-publishes-a-member-KA flow. With neither, the effective node
    * identity (default agent → peer) is the caller hint, and resolution prefers
    * the node's OWN same-named KA before any resident foreign seal.
+   *
+   * GH#1786 — `opts.selectedAuthorAgentAddress` is a third, narrower mode: it
+   * SELECTS among the authors already resident at this coordinate so a curator can
+   * act on an `AMBIGUOUS_ASSERTION_AUTHOR` response. Unlike `agentAddress` it
+   * coexists with `callerAgentAddress` (the caller remains the identity used for CG
+   * registration and curator stamping) and it fails closed rather than falling
+   * through when it names no resident author.
    */
   async resolveFinalizedAssertionPublishAuthor(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: { subGraphName?: string; agentAddress?: string; callerAgentAddress?: string },
+    opts?: {
+      subGraphName?: string;
+      agentAddress?: string;
+      callerAgentAddress?: string;
+      selectedAuthorAgentAddress?: string;
+    },
   ): Promise<string> {
     // The two identity fields are mutually exclusive modes: `agentAddress` is an
     // authoritative author selector, `callerAgentAddress` a resolution hint.
@@ -4160,10 +4174,22 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' },
       );
     }
+    // An authoritative override and a resident-candidate selection are contradictory
+    // requests. Not reachable over HTTP (the publish routes never send
+    // `agentAddress` on the standalone lanes), but enforced for direct callers.
+    if (opts?.agentAddress && opts?.selectedAuthorAgentAddress) {
+      throw Object.assign(
+        new Error(
+          'agentAddress (authoritative author selector) and selectedAuthorAgentAddress ' +
+            '(resident-candidate selection) are mutually exclusive on a VM publish',
+        ),
+        { code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' },
+      );
+    }
     if (opts?.agentAddress) return opts.agentAddress;
     const callerHint = opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
     return (await this.resolveAssertionAuthor(
-      contextGraphId, name, opts?.subGraphName, callerHint,
+      contextGraphId, name, opts?.subGraphName, callerHint, opts?.selectedAuthorAgentAddress,
     )) ?? callerHint;
   }
 
@@ -4192,6 +4218,11 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress?: string;
       /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
       callerAgentAddress?: string;
+      /**
+       * GH#1786 — selects among the authors already resident at this coordinate.
+       * Coexists with `callerAgentAddress`; never becomes the persisted caller.
+       */
+      selectedAuthorAgentAddress?: string;
       publishEpochs?: number;
       clearSharedMemoryAfter?: boolean;
       accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
@@ -5438,6 +5469,11 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress?: string;
       /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
       callerAgentAddress?: string;
+      /**
+       * GH#1786 — selects among the authors already resident at this coordinate.
+       * Coexists with `callerAgentAddress`; never changes the caller identity.
+       */
+      selectedAuthorAgentAddress?: string;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherNodeIdentityIdOverride?: bigint;
@@ -6076,10 +6112,18 @@ export class PublishMethods extends DKGAgentBase {
       const publisher = publisherOverride ?? this.publisher;
       const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
       if (!fallbackAddress || fallbackAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
-        throw new Error(
-          `publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author ` +
-            `${seal.authorAddress} — no custodial key on file and it is not the publisher EOA. ` +
-            `Use the /api/update route with a pre-signed UpdateAuthorAttestation instead.`,
+        // GH#1786 — coded so the daemon can answer this as an actionable 409 rather
+        // than an opaque 500. It is a permanent caller-side condition, and it is
+        // reachable on the SECOND publish of a selected foreign author's KA: a
+        // curator can mint one (the author's own seal signature is replayed) but
+        // cannot re-sign the UPDATE attestation without a custodial key.
+        throw Object.assign(
+          new Error(
+            `publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author ` +
+              `${seal.authorAddress} — no custodial key on file and it is not the publisher EOA. ` +
+              `Use the /api/update route with a pre-signed UpdateAuthorAttestation instead.`,
+          ),
+          { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
         );
       }
       const compact = await publisher.signAuthorAttestationAsPublisher(typedData);

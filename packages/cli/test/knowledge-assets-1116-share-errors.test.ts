@@ -869,6 +869,217 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
   });
 
+  // GH#1786 — the resident-author selector. The load-bearing property is that it can
+  // never be silently dropped: a dropped selector publishes the WRONG author with a
+  // success status and real TRAC/gas spent.
+  describe('GH#1786 selectedAuthorAgentAddress', () => {
+    const SELECTED = '0x00000000000000000000000000000000000000b7';
+    const selectorToken = 'curator-token';
+    const curatorAddress = '0x00000000000000000000000000000000000000c1';
+
+    it('vm/publish forwards the selector AND still forwards the token as the caller', async () => {
+      const seen: any[] = [];
+      await startWith({}, {
+        resolveAgentByToken: (t?: string) => (t === selectorToken ? curatorAddress : undefined),
+        publishFromFinalizedAssertion: async (_cg: string, _n: string, opts: any) => {
+          seen.push(opts);
+          return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+        },
+      }, { requestToken: selectorToken, requestAgentAddress: curatorAddress });
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(200);
+      // Both identities present: the selector picks the AUTHOR while the token stays
+      // the CALLER, so CG registration / curator stamping is unchanged (GH#1778).
+      expect(seen[0]).toMatchObject({
+        selectedAuthorAgentAddress: SELECTED,
+        callerAgentAddress: curatorAddress,
+      });
+    });
+
+    it('keeps the selector on the CG-registration retry, not just the first attempt', async () => {
+      // The retry re-runs author resolution from scratch, so a per-call-site selector
+      // would be dropped here and publish the wrong author with HTTP 200 — and this is
+      // precisely a curator's FIRST publish into a not-yet-registered CG.
+      const seen: any[] = [];
+      let attempts = 0;
+      await startWith({}, {
+        resolveAgentByToken: (t?: string) => (t === selectorToken ? curatorAddress : undefined),
+        ensureRegisteredForPublish: async () => {},
+        publishFromFinalizedAssertion: async (_cg: string, _n: string, opts: any) => {
+          seen.push(opts);
+          attempts += 1;
+          if (attempts === 1) {
+            throw Object.assign(new Error('cg not registered'), { code: 'CG_NOT_REGISTERED' });
+          }
+          return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+        },
+      }, { requestToken: selectorToken, requestAgentAddress: curatorAddress });
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(200);
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toMatchObject({
+        selectedAuthorAgentAddress: SELECTED,
+        callerAgentAddress: curatorAddress,
+      });
+    });
+
+    it('vm/publish-async forwards the selector and echoes the resolved author', async () => {
+      const seen: any[] = [];
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
+          seen.push(opts);
+          return {
+            contextGraphId: CG_ID,
+            name: ASSERTION_NAME,
+            agentAddress: SELECTED,
+            shareOperationId: 'share-selected',
+            roots: ['urn:test:selected-root'],
+            seal: {
+              merkleRoot: `0x${'12'.repeat(32)}`,
+              authorAddress: SELECTED,
+              signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+              schemeVersion: 1,
+            },
+            sealChainId: '31337',
+            sealKav10Address: '0x2222222222222222222222222222222222222222',
+            sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+            sealMerkleRoot: `0x${'12'.repeat(32)}`,
+            intentKey: `sha256:${'cb'.repeat(32)}`,
+          };
+        },
+        preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async () => 'job-selected',
+      });
+
+      const res = await post('vm/publish-async', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(202);
+      expect(seen[0]).toMatchObject({ selectedAuthorAgentAddress: SELECTED });
+      // Echoed so a client can verify who will be published, and can detect a daemon
+      // that ignored the selector entirely.
+      expect(res.body.agentAddress).toBe(SELECTED);
+    });
+
+    for (const lane of ['vm/publish', 'vm/publish-async'] as const) {
+      it(`${lane} answers a non-resident selection with 409 + candidates, not a generic 500`, async () => {
+        const candidates = [SELECTED, '0x00000000000000000000000000000000000000b8'];
+        const notResident = () => {
+          // The message deliberately contains "is not finalized" and "Invalid" so a
+          // MIS-ORDERED mapping would be swallowed by the precondition branch (sync)
+          // or the message-keyed 400 (async) and this test would fail.
+          throw Object.assign(
+            new Error('selected author is not finalized — Invalid selection'),
+            { code: 'ASSERTION_AUTHOR_NOT_RESIDENT', candidates },
+          );
+        };
+        await startWith({}, {
+          publishFromFinalizedAssertion: notResident,
+          resolveFinalizedAssertionVmPublishIntent: notResident,
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: SELECTED,
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
+        expect(res.body.candidates).toEqual(candidates);
+      });
+
+      it(`${lane} answers a non-custodial foreign-author update with 409`, async () => {
+        const notCustodial = () => {
+          throw Object.assign(
+            new Error('cannot re-sign UpdateAuthorAttestation for author'),
+            { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+          );
+        };
+        await startWith({}, {
+          publishFromFinalizedAssertion: notCustodial,
+          resolveFinalizedAssertionVmPublishIntent: notCustodial,
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: SELECTED,
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('PUBLISH_AUTHOR_NOT_CUSTODIAL');
+      });
+
+      it(`${lane} rejects a malformed selector`, async () => {
+        await startWith({});
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: 'not-an-address',
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/must be a 0x-prefixed 20-byte EVM address/);
+      });
+
+      it(`${lane} rejects a selector nested inside "options" instead of silently dropping it`, async () => {
+        const calls: any[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: async (_cg: string, _n: string, opts: any) => {
+            calls.push(opts);
+            return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+          },
+          resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
+            calls.push(opts);
+            throw new Error('should not be reached');
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          options: { selectedAuthorAgentAddress: SELECTED },
+        });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/must be supplied at the top level/);
+        // Refused before any publish attempt — no wrong-author spend.
+        expect(calls).toHaveLength(0);
+      });
+    }
+
+    it('create+alsoPublishVm rejects the selector in both positions', async () => {
+      await startWith({});
+      const topLevel = await postRoot({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"' }],
+        alsoPublishVm: true,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+      expect(topLevel.status).toBe(400);
+      expect(topLevel.body.error).toMatch(/not accepted when creating a knowledge asset/);
+
+      const nested = await postRoot({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"' }],
+        alsoPublishVm: { selectedAuthorAgentAddress: SELECTED },
+      });
+      expect(nested.status).toBe(400);
+      expect(nested.body.error).toMatch(/not accepted when creating a knowledge asset/);
+    });
+  });
+
   it('rejects the retired create promote flag before mutation', async () => {
     for (const promote of [true, false]) {
       let mutations = 0;

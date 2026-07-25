@@ -809,13 +809,19 @@ export class ApiClient {
   async knowledgeAssetPublish(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: { subGraphName?: string; selectedAuthorAgentAddress?: string }
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    // GH#1786 — `selectedAuthorAgentAddress` is destructured out alongside
+    // `subGraphName` for two reasons: the daemon reads it at the TOP level of the
+    // body, and `finalizedPublishOptionsPayload` throws on any key outside its
+    // allowlist, so leaving it in would break every publish that supplies it.
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      ...(selectedAuthorAgentAddress ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -823,13 +829,15 @@ export class ApiClient {
   async knowledgeAssetPublishAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: { subGraphName?: string; selectedAuthorAgentAddress?: string }
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      ...(selectedAuthorAgentAddress ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }

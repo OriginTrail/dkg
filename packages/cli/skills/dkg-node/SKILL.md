@@ -313,10 +313,25 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 
 **Canonical publish (the agent path):** `POST /api/knowledge-assets/{name}/vm/publish`.
 Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
-select the assertion and encode the author, so this endpoint takes **no selector** —
-`assertionName`, author overrides, and any `selection` other than `"all"` are
-rejected `400`. It is multi-root-safe (the seal commits the whole assertion).
-Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+select the assertion and encode the author, so authorship cannot be **overridden** here:
+`assertionName`, `authorAgentAddress`, `preSignedAuthorAttestation`, and any `selection`
+other than `"all"` are rejected `400`. It is multi-root-safe (the seal commits the whole
+assertion).
+Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "selectedAuthorAgentAddress"?: "0x...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+
+**Choosing among several authors (GH#1786).** When two or more OTHER members have a
+finalized assertion with this name, publish returns
+`409 { code: "AMBIGUOUS_ASSERTION_AUTHOR", candidates: [...] }`. Retry with
+`selectedAuthorAgentAddress` set to one of those `candidates` to publish that member's KA;
+the authenticated caller remains the identity used for context-graph registration and
+curator stamping. The field **selects among authors that already have a finalized
+assertion** — it never confers authorship. It must be **top level** (inside `options` it is
+rejected `400`), and an address that is not a resident candidate is rejected
+`409 { code: "ASSERTION_AUTHOR_NOT_RESIDENT", candidates: [...] }` rather than publishing
+anything. Publishing another author's KA works for the initial **mint** (their sealed
+attestation is replayed), but an **update** of a foreign author's KA returns
+`409 PUBLISH_AUTHOR_NOT_CUSTODIAL` unless that author's key is custodial on this node — use
+`/api/update` with a pre-signed `UpdateAuthorAttestation` instead.
 **Preconditions:** the assertion must be finalized **and** present in SWM (else
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the

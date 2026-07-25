@@ -268,6 +268,81 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
   });
 });
 
+describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', () => {
+  it('resolves an ambiguous coordinate to the selected candidate', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    // Without a selector this same fixture throws AMBIGUOUS_ASSERTION_AUTHOR.
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: OTHER,
+    })).toBe(OTHER);
+  });
+
+  it('returns the STORED case even when the selector is supplied lowercased', async () => {
+    const store = new OxigraphStore();
+    // Two candidates, so the single-author rule cannot be what returns the
+    // checksummed address — only the selector can. MEMBER is the mixed-case constant.
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    const resolved = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER.toLowerCase(),
+    });
+    // Stored case, NOT the caller's lowercased input: contextGraphAssertionUri does
+    // not canonicalise address case, so a lowercased author would miss the seal.
+    expect(resolved).toBe(MEMBER);
+    expect(resolved).not.toBe(MEMBER.toLowerCase());
+  });
+
+  it('outranks the caller-own preference so a curator can publish a member KA', async () => {
+    const store = new OxigraphStore();
+    // The curator ALSO owns a same-named KA: rule 1 then silently returns the
+    // curator's own and no ambiguity is ever reported to the client.
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+    })).toBe(CURATOR);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).toBe(MEMBER);
+  });
+
+  it('fails closed when the selected author has no finalized KA at this name', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: `0x${'99'.repeat(20)}`,
+    })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT' });
+  });
+
+  it('fails closed when NO author is resident (never silently ignored)', async () => {
+    const store = new OxigraphStore();
+    // A seal exists, but under a different assertion name.
+    await store.insert(sealFor(MEMBER, 'some-other-name'));
+    const agent = stubAgent(store, CURATOR);
+    await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT', candidates: [] });
+  });
+
+  it('rejects supplying both agentAddress (override) and selectedAuthorAgentAddress (selection)', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      agentAddress: OTHER,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
+  });
+});
+
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
   it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
     const store = new OxigraphStore();
@@ -332,6 +407,55 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
     expect(publishCalls).toHaveLength(1);
     // The forwarded seal carries the MEMBER's attestation (never re-signed by
     // the curator). kaUal is canonicalised to lowercase by the scope helper.
+    expect(publishCalls[0]?.opts).toMatchObject({
+      kaUal: KA_UAL.toLowerCase(),
+      precomputedAttestation: { authorAddress: MEMBER, reservedKaId: RESERVED_KA_ID },
+    });
+  });
+
+  // GH#1786 — acceptance criterion proven at the layer where money is spent: the
+  // seal actually forwarded to the publisher is the SELECTED member's. Also covers
+  // the rule-1 override (the curator owns a same-named KA) and the stored-case trap
+  // (the selector is supplied lowercased) in the same run.
+  it('a selected member author is the one whose seal reaches the publisher, over the curator own KA', async () => {
+    const store = new OxigraphStore();
+    const exactGraph = `${contextGraphSharedMemoryUri(CG)}/${MEMBER}/7`;
+    await store.insert([
+      ...sealFor(CURATOR), // the curator ALSO owns this name — rule 1 would win
+      ...sealFor(MEMBER),
+      { ...PUBLIC_QUAD, graph: exactGraph },
+    ]);
+
+    const publishCalls: Array<{ opts: any }> = [];
+    const agent = stubAgent(store, CURATOR);
+    agent.chain = {};
+    agent.publisher = {
+      hasSwmShareComplete: async (_cg: string, _n: string, agentAddress: string) =>
+        agentAddress === MEMBER,
+      clearSwmShareComplete: async () => {},
+      clearRemainingSharedMemory: async () => {},
+    };
+    agent.publishFromSharedMemory = async (_cg: string, _sel: any, opts: any) => {
+      publishCalls.push({ opts });
+      return {
+        kaId: RESERVED_KA_ID,
+        ual: 'did:dkg:test/31337/7',
+        merkleRoot: MERKLE,
+        kaManifest: [],
+        status: 'confirmed',
+        publicQuads: [],
+      };
+    };
+
+    const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER.toLowerCase(),
+    });
+
+    // The MEMBER's coordinate + the MEMBER's own attestation — not the curator's.
+    expect(result.assertionUri).toBe(contextGraphAssertionUri(CG, MEMBER, NAME));
+    expect(result.seal.authorAddress).toBe(MEMBER);
+    expect(publishCalls).toHaveLength(1);
     expect(publishCalls[0]?.opts).toMatchObject({
       kaUal: KA_UAL.toLowerCase(),
       precomputedAttestation: { authorAddress: MEMBER, reservedKaId: RESERVED_KA_ID },
