@@ -157,6 +157,12 @@ export interface KnowledgeAssetPublishAsyncResponse {
   privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
+  /**
+   * GH#1786 — the RESOLVED author this job will publish. Lets a caller verify which
+   * author was selected before the job runs, and detect a daemon that ignored a
+   * supplied `selectedAuthorAgentAddress` (older daemons omit it).
+   */
+  agentAddress?: string;
 }
 
 export type KnowledgeAssetShareJobState =

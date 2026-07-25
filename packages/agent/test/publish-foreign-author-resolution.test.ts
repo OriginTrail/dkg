@@ -405,25 +405,34 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     agent.getCustodialAgentPrivateKey = (addr: string) =>
       (addr?.toLowerCase() === MEMBER.toLowerCase() ? `0x${'ab'.repeat(32)}` : undefined);
     let historyAgent: string | undefined;
+    // A distinctive marker thrown at the FIRST boundary after the preflight. If the gate
+    // wrongly refused we would see PUBLISH_AUTHOR_NOT_CUSTODIAL instead, so asserting the
+    // marker proves the custodial key was honoured and execution got past the gate.
+    // (A `history: null` fixture would NOT prove this: the intent throws "not finalized"
+    // BEFORE the preflight runs, so the gate would never be exercised at all.)
+    const PAST_THE_GATE = new Error('reached the share-marker check past the re-sign gate');
     agent.publisher = {
       publisherFallbackAuthorAddress: async () => CURATOR,
-      hasSwmShareComplete: async () => true,
+      hasSwmShareComplete: async () => { throw PAST_THE_GATE; },
     };
     Object.defineProperty(agent, 'assertion', {
       value: {
         history: async (_cg: string, _n: string, o: { agentAddress: string }) => {
           historyAgent = o.agentAddress;
-          return null; // early-exit after the author resolution + preflight
+          // Already on VM ⇒ the next publish is an UPDATE, which is what arms the gate.
+          return {
+            vmCurrentAssertion: `0x${'ab'.repeat(32)}`,
+            swmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+          };
         },
       },
       configurable: true,
     });
 
-    // Rejects for "not finalized" (history null), NOT for PUBLISH_AUTHOR_NOT_CUSTODIAL.
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: MEMBER,
-    })).rejects.toThrow(/is not finalized or does not exist/);
+    })).rejects.toBe(PAST_THE_GATE);
     expect(historyAgent).toBe(MEMBER);
   });
 

@@ -184,10 +184,21 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
-import {
-  resolveFinalizedAssertionAuthor,
-  type ResolveFinalizedAssertionAuthorParams,
-} from './finalized-assertion-author.js';
+import { resolveFinalizedAssertionAuthor } from './finalized-assertion-author.js';
+
+/**
+ * Public options for {@link DKGAgentPublishMixin.resolveAssertionAuthor}. Declared
+ * explicitly rather than derived from the store resolver's own params type: this is
+ * exported agent surface, and deriving it would silently publish any future
+ * resolver-only option as part of the agent API.
+ */
+export interface ResolveAssertionAuthorOptions {
+  subGraphName?: string;
+  /** Caller/token identity used only as a resolution hint. NOT an author selector. */
+  callerAgentAddress?: string;
+  /** GH#1786 — selects among authors already resident at this coordinate. */
+  selectedAuthorAgentAddress?: string;
+}
 import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -4147,7 +4158,7 @@ export class PublishMethods extends DKGAgentBase {
     // method is on the exported DKGAgent surface: an untyped JS caller passing a string
     // third argument would otherwise silently lose BOTH the sub-graph scope and the
     // caller preference, resolving against the wrong coordinate.
-    subGraphNameOrOpts?: string | null | Omit<ResolveFinalizedAssertionAuthorParams, 'contextGraphId' | 'name'>,
+    subGraphNameOrOpts?: string | null | ResolveAssertionAuthorOptions,
     legacyCallerAgentAddress?: string,
   ): Promise<string | undefined> {
     // `null` is treated as the legacy form too: it is the common JS placeholder for an
