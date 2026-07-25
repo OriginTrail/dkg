@@ -485,6 +485,21 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
       selectedAuthorAgentAddress: MEMBER,
     })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
   });
+
+  it('rejects a PRESENT-but-malformed selector even when agentAddress would short-circuit', async () => {
+    // The conflict guard runs before the `agentAddress` fast path and tests PRESENCE, so a
+    // contradictory request cannot be silently resolved under the authoritative override
+    // just because the selector happens to be falsy.
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    for (const malformed of ['', null, 'not-an-address'] as const) {
+      await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+        agentAddress: OTHER,
+        selectedAuthorAgentAddress: malformed as unknown as string,
+      })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
+    }
+  });
 });
 
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {

@@ -4221,7 +4221,11 @@ export class PublishMethods extends DKGAgentBase {
     // An authoritative override and a resident-candidate selection are contradictory
     // requests. Not reachable over HTTP (the publish routes never send
     // `agentAddress` on the standalone lanes), but enforced for direct callers.
-    if (opts?.agentAddress && opts?.selectedAuthorAgentAddress) {
+    // Presence, NOT truthiness, and BEFORE the `agentAddress` fast path below: a caller
+    // that supplied both keys made a contradictory request, and a malformed selector ('' or
+    // null from untyped JS) must not be dropped so the publish quietly proceeds under the
+    // authoritative override. Same presence rule as the resolver and the HTTP boundary.
+    if (opts?.agentAddress && opts?.selectedAuthorAgentAddress !== undefined) {
       throw Object.assign(
         new Error(
           'agentAddress (authoritative author selector) and selectedAuthorAgentAddress ' +

@@ -1529,7 +1529,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
           ...publishCallerHintLane(writePreflightCallerAgentAddress),
-          ...(asyncSelectedAuthor.value
+          ...(asyncSelectedAuthor.value !== undefined
             ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
             : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
@@ -1619,7 +1619,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // exactly the curator's first publish of a member KA).
         const publishStorageLane = {
           ...publishCallerHintLane(writePreflightCallerAgentAddress),
-          ...(selectedAuthor.value ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
+          ...(selectedAuthor.value !== undefined ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
         };
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
