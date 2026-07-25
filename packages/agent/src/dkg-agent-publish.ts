@@ -4300,21 +4300,31 @@ export class PublishMethods extends DKGAgentBase {
         `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
       );
     }
-    // GH#1786 — an UPDATE of an author this node cannot re-sign for is a permanent
-    // caller condition, and the async worker only discovers it AFTER the job is
-    // accepted (the client would get 202 and then a doomed job). Surface it here as
-    // the same 409 the sync lane returns. Advisory only: if the capability cannot be
-    // determined we enqueue as before and the worker stays authoritative.
-    if (history.vmCurrentAssertion) {
-      let canReSign = true;
-      try {
-        canReSign = await this._canReSignUpdateAttestationForAuthor(
-          agentAddress, opts?.publisherOverride,
-        );
-      } catch {
-        canReSign = true; // undeterminable — do not block the enqueue
+    // GH#1786 — an UPDATE of an author this node cannot re-sign for is a permanent caller
+    // condition that the async worker only discovers AFTER the job is accepted (the client
+    // would get 202 and then a doomed job). Refuse it here instead — but ONLY on evidence
+    // that is sound at ENQUEUE time.
+    //
+    // Custodial keys are node-global (`localAgents`), so their ABSENCE is sound here. The
+    // publisher-EOA fallback is NOT: the async lane defers wallet selection, so whichever
+    // wallet later claims the job brings its own scoped publisher with its own EOA. Judging
+    // capability from this node's default publisher would both accept jobs a different
+    // wallet cannot sign AND — worse — reject updates that the claiming wallet could have
+    // signed. So the EOA arm is only consulted when the caller named the publisher that
+    // will actually execute (`publisherOverride`); otherwise capability is INDETERMINATE and
+    // the enqueue proceeds with the worker authoritative, exactly as when the lookup fails.
+    if (history.vmCurrentAssertion && !this.getCustodialAgentPrivateKey(agentAddress)) {
+      let refuse = false;
+      if (opts?.publisherOverride) {
+        try {
+          refuse = !(await this._canReSignUpdateAttestationForAuthor(
+            agentAddress, opts.publisherOverride,
+          ));
+        } catch {
+          refuse = false; // undeterminable — do not block the enqueue
+        }
       }
-      if (!canReSign) throw updateAttestationNotCustodialError(agentAddress);
+      if (refuse) throw updateAttestationNotCustodialError(agentAddress);
     }
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(

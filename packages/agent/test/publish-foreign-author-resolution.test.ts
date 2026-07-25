@@ -388,9 +388,12 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
       configurable: true,
     });
 
+    // publisherOverride names the publisher that will execute, which is what makes the
+    // publisher-EOA arm sound evidence at enqueue time.
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: MEMBER,
+      publisherOverride: agent.publisher,
     })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' });
   });
 
@@ -436,6 +439,39 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     expect(historyAgent).toBe(MEMBER);
   });
 
+  // Deferred wallet selection (the async lane's normal mode): whichever publisher wallet
+  // later claims the job brings its own scoped signer, so this node's DEFAULT publisher EOA
+  // is not evidence about the executing signer. The preflight must therefore NOT refuse —
+  // refusing here would block an update that the claiming wallet could have signed, which is
+  // a worse failure than the late job error the preflight exists to avoid.
+  it('does not refuse an UPDATE on default-publisher evidence when the wallet is not yet chosen', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    const PAST_THE_GATE = new Error('reached the share-marker check past the re-sign gate');
+    agent.publisher = {
+      // Default publisher cannot sign for MEMBER — but a different wallet might.
+      publisherFallbackAuthorAddress: async () => CURATOR,
+      hasSwmShareComplete: async () => { throw PAST_THE_GATE; },
+    };
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          vmCurrentAssertion: `0x${'ab'.repeat(32)}`,
+          swmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+        }),
+      },
+      configurable: true,
+    });
+
+    // No publisherOverride ⇒ executing signer unknown ⇒ capability indeterminate ⇒ proceed.
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toBe(PAST_THE_GATE);
+  });
+
   // The predicate has TWO independent true-paths: a custodial key, and the author being the
   // publisher EOA itself (the finalize-time fallback). The custodial one is covered above;
   // this covers the fallback-equality one, which no other fixture reaches because they all
@@ -464,6 +500,7 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: MEMBER,
+      publisherOverride: agent.publisher,
     })).rejects.toBe(PAST_THE_GATE);
   });
 
@@ -496,6 +533,7 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: MEMBER,
+      publisherOverride: agent.publisher,
     })).rejects.toBe(PAST_THE_GATE);
   });
 
