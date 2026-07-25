@@ -1081,8 +1081,18 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       });
     }
 
-    it('create+alsoPublishVm rejects the selector in both positions', async () => {
-      await startWith({});
+    it('create+alsoPublishVm rejects the selector in both positions, before any mutation', async () => {
+      // A 400 returned AFTER creating/finalizing would be a much worse regression than no
+      // 400 at all, and status-only assertions cannot tell the two apart.
+      const sideEffects: string[] = [];
+      await startWith({}, {
+        createAssertion: async () => { sideEffects.push('create'); return {}; },
+        writeAssertion: async () => { sideEffects.push('write'); return {}; },
+        finalizeAssertion: async () => { sideEffects.push('finalize'); return {}; },
+        promoteAssertion: async () => { sideEffects.push('promote'); return {}; },
+        shareAssertionToSharedMemory: async () => { sideEffects.push('share'); return {}; },
+        publishFromFinalizedAssertion: async () => { sideEffects.push('publish'); return {}; },
+      });
       const topLevel = await postRoot({
         contextGraphId: CG_ID,
         name: ASSERTION_NAME,
@@ -1101,6 +1111,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       });
       expect(nested.status).toBe(400);
       expect(nested.body.error).toMatch(/not accepted when creating a knowledge asset/);
+      // Refused as a request-shape error: nothing was created, finalized or published.
+      expect(sideEffects).toEqual([]);
     });
   });
 

@@ -315,10 +315,32 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     const store = new OxigraphStore();
     await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
     const agent = stubAgent(store, CURATOR);
+    // Assert the real candidates PAYLOAD, not just the code: this is the array clients
+    // retry with, and only the resolver can produce it — the route test supplies its own
+    // stubbed array, so it cannot prove the resolver emits one.
+    const err = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: `0x${'99'.repeat(20)}`,
+    }).then(() => null, (e: any) => e);
+    expect(err?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
+    // Membership + stored (checksum) case. Order is deliberately NOT asserted: it follows
+    // the SPARQL result order, which is not part of the contract — the client picks one.
+    expect([...(err.candidates as string[])].sort()).toEqual([MEMBER, OTHER].sort());
+  });
+
+  it('reports de-duplicated stored-case candidates when the same author is resident twice', async () => {
+    const store = new OxigraphStore();
+    // Same author at the same coordinate in both cases — case-insensitive de-dup must
+    // collapse them to ONE entry, in the stored case.
+    await store.insert([...sealFor(MEMBER), ...sealFor(MEMBER)]);
+    const agent = stubAgent(store, CURATOR);
     await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: `0x${'99'.repeat(20)}`,
-    })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT' });
+    })).rejects.toMatchObject({
+      code: 'ASSERTION_AUTHOR_NOT_RESIDENT',
+      candidates: [MEMBER],
+    });
   });
 
   it('fails closed when NO author is resident (never silently ignored)', async () => {
