@@ -436,6 +436,38 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     expect(historyAgent).toBe(MEMBER);
   });
 
+  // The preflight is deliberately ADVISORY: when capability cannot be determined it must
+  // let the enqueue through and leave the worker authoritative. That is a documented
+  // design choice, so it needs pinning — otherwise removing the catch (letting the lookup
+  // error propagate) or turning it into a refusal would both pass unnoticed.
+  it('still enqueues when the re-sign capability cannot be determined', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    const PAST_THE_GATE = new Error('reached the share-marker check past the re-sign gate');
+    agent.publisher = {
+      // Transient signer/fallback lookup failure ⇒ capability indeterminate.
+      publisherFallbackAuthorAddress: async () => { throw new Error('rpc unavailable'); },
+      hasSwmShareComplete: async () => { throw PAST_THE_GATE; },
+    };
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          vmCurrentAssertion: `0x${'ab'.repeat(32)}`,
+          swmCurrentAssertion: `0x${'cd'.repeat(32)}`,
+        }),
+      },
+      configurable: true,
+    });
+
+    // Neither PUBLISH_AUTHOR_NOT_CUSTODIAL nor the raw lookup error: it proceeds.
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toBe(PAST_THE_GATE);
+  });
+
   // GH#1786 review round 2 — `resolveAssertionAuthor` is on the exported DKGAgent
   // surface, so the legacy positional form must keep resolving identically; otherwise an
   // untyped caller silently loses both the sub-graph scope and the caller preference.
