@@ -6147,24 +6147,6 @@ export class PublishMethods extends DKGAgentBase {
    * the daemon doesn't hold must use the explicit `/api/update` route with a
    * pre-signed attestation.
    */
-  /**
-   * GH#1786 — can this node re-sign an `UpdateAuthorAttestation` on behalf of
-   * `authorAddress`? True when the author's key is custodial here, or when the author
-   * IS the publisher EOA (the finalize-time fallback). The single source of truth for
-   * both the update signer below and the async lane's pre-enqueue preflight, so the
-   * two cannot drift apart.
-   */
-  async _canReSignUpdateAttestationForAuthor(
-    this: DKGAgent,
-    authorAddress: string,
-    publisherOverride?: DKGPublisher,
-  ): Promise<boolean> {
-    if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
-    const publisher = publisherOverride ?? this.publisher;
-    const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
-    return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
-  }
-
   async _buildPrecomputedUpdateAttestationForSeal(
     this: DKGAgent,
     kaId: bigint,
@@ -6206,6 +6188,24 @@ export class PublishMethods extends DKGAgentBase {
       signature: { r, vs },
       schemeVersion: seal.authorSchemeVersion,
     };
+  }
+
+  /**
+   * GH#1786 — can this node re-sign an `UpdateAuthorAttestation` on behalf of
+   * `authorAddress`? True when the author's key is custodial here, or when the author
+   * IS the publisher EOA (the finalize-time fallback). The single source of truth for
+   * both the update signer above and the async lane's pre-enqueue preflight, so the
+   * two cannot drift apart.
+   */
+  async _canReSignUpdateAttestationForAuthor(
+    this: DKGAgent,
+    authorAddress: string,
+    publisherOverride?: DKGPublisher,
+  ): Promise<boolean> {
+    if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
+    const publisher = publisherOverride ?? this.publisher;
+    const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
+    return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }
 
   /**
