@@ -695,9 +695,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
         finalization: {
           mode: 'published',
           txHash,
-          // Production recovery resolver shape: contract + packed KA id. The
-          // finalizer must keep using intent.kaUal for the local exact graph.
-          ual: receiptUal,
+          // GH#1966: for graph-scoped named KAs the production CLI recovery
+          // resolver overrides finalization.ual with the graph-local queued UAL
+          // (author + low-96 KA number) — the same identity a normal publish
+          // records — NOT the contract/packed-id receipt form. Recovery must
+          // accept it; the finalizer keeps using intent.kaUal for the local graph.
+          ual: intent.kaUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -826,7 +829,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
     expect(history?.status).toBe('vm-confirmed');
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
-    expect(history?.publishedUal).toBe(receiptUal);
+    // GH#1966: recovery stamps the graph-local UAL the resolver returned, matching
+    // what a normal named-KA publish records (not the contract/packed receipt form).
+    expect(history?.publishedUal).toBe(intent.kaUal);
     expect(history?.assertionGraph).toBe(contextGraphLayerUri(
       CG_ID,
       MemoryLayer.VerifiableMemory,
