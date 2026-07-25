@@ -47,6 +47,17 @@ function recoveryInconsistent(name: string, message: string): Error {
 }
 
 /**
+ * Case-insensitive comparison, named for exactly what it does. It is the right test for both
+ * kinds of evidence compared here: hex evidence (tx hashes, merkle roots) whose casing is not
+ * significant, and the two published-UAL representations, whose only case-variable segment is
+ * the embedded hex address — every other segment is already canonical by construction
+ * (`buildKnowledgeAssetUal` lowercases, `createGraphKnowledgeAssetScope` canonicalizes).
+ */
+function equalsIgnoreCase(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+/**
  * Validate immutable transaction evidence, then separately resolve the chain's
  * current version for local materialization. A later update must never make the
  * original confirmed publish unrecoverable or regress the VM pointer.
@@ -61,20 +72,16 @@ export async function normalizeRecoveredNamedKaPublish(input: {
 }): Promise<RecoveredNamedKaPublish> {
   const { request, job, recovery, chain } = input;
   const inconsistent = (message: string): Error => recoveryInconsistent(request.name, message);
-  // Hash equality (merkle roots, tx hashes) vs UAL identity equality are distinct concepts;
-  // give each its own name so the boundary check does not read as a hex-hash comparison.
-  const sameHex = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
-  const sameUal = (left: string, right: string): boolean => left.toLowerCase() === right.toLowerCase();
 
-  if (!sameHex(job.broadcast.txHash, recovery.inclusion.txHash)) {
+  if (!equalsIgnoreCase(job.broadcast.txHash, recovery.inclusion.txHash)) {
     throw inconsistent(
       `resolved inclusion tx ${recovery.inclusion.txHash} does not match queued tx ${job.broadcast.txHash}`,
     );
   }
-  if (!recovery.finalization.txHash || !sameHex(job.broadcast.txHash, recovery.finalization.txHash)) {
+  if (!recovery.finalization.txHash || !equalsIgnoreCase(job.broadcast.txHash, recovery.finalization.txHash)) {
     throw inconsistent('resolved finalization is not bound to the queued transaction hash');
   }
-  if (job.broadcast.merkleRoot && !sameHex(job.broadcast.merkleRoot, request.sealMerkleRoot)) {
+  if (job.broadcast.merkleRoot && !equalsIgnoreCase(job.broadcast.merkleRoot, request.sealMerkleRoot)) {
     throw inconsistent(
       `queued broadcast merkle root ${job.broadcast.merkleRoot} does not match seal ${request.sealMerkleRoot}`,
     );
@@ -154,7 +161,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   // canonical chain-receipt form (DKGKnowledgeAssets contract + packed id) the generic mapper
   // produces — so the common named-KA path never needs the contract address. Every other UAL
   // fails closed; `ual` is validated here and never exported.
-  if (!sameUal(ual, localUal)) {
+  if (!equalsIgnoreCase(ual, localUal)) {
     let expectedReceiptUal: string;
     try {
       if (!chain.getDKGKnowledgeAssetsAddress) {
@@ -171,7 +178,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
         `could not resolve the canonical receipt UAL: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (!sameUal(ual, expectedReceiptUal)) {
+    if (!equalsIgnoreCase(ual, expectedReceiptUal)) {
       throw inconsistent(
         `published receipt UAL ${ual} does not match the graph-local UAL ${localUal} or the canonical receipt UAL ${expectedReceiptUal}`,
       );
@@ -187,7 +194,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
   if (!blockHash || !/^0x[0-9a-fA-F]{64}$/.test(blockHash)) {
     throw inconsistent('chain recovery did not return a valid canonical block hash');
   }
-  if (!sameHex(proof.merkleRoot, request.sealMerkleRoot)) {
+  if (!equalsIgnoreCase(proof.merkleRoot, request.sealMerkleRoot)) {
     throw inconsistent(
       `transaction merkle root ${proof.merkleRoot} does not match queued seal ${request.sealMerkleRoot}`,
     );
@@ -209,7 +216,7 @@ export async function normalizeRecoveredNamedKaPublish(input: {
     throw inconsistent('the configured chain adapter cannot resolve the current KA merkle root');
   }
   const latestMerkleRoot = ethers.hexlify(await chain.getLatestMerkleRoot(reservedKaId));
-  const superseded = !sameHex(latestMerkleRoot, proof.merkleRoot);
+  const superseded = !equalsIgnoreCase(latestMerkleRoot, proof.merkleRoot);
   let materializationAuthor = transactionAuthor;
   let materializationPublisher = transactionPublisher;
   let versionBlock = recovery.inclusion.blockNumber;

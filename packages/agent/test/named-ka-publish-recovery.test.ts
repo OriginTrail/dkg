@@ -42,7 +42,9 @@ const ASSERTION_VERSION = '1';
 const SEAL_MERKLE_ROOT = `0x${'12'.repeat(32)}` as Hex;
 const TX_HASH = `0x${'ab'.repeat(32)}` as Hex;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}` as Hex;
-const PUBLISHER = AUTHOR;
+// Deliberately NOT the author: the publisher is a distinct identity in the returned
+// evidence, so reusing the author here would let an author/publisher swap pass unnoticed.
+const PUBLISHER = `0x${'22'.repeat(20)}` as Hex;
 
 // MockChainAdapter.getDKGKnowledgeAssetsAddress() is a fixed constant.
 const KNOWLEDGE_ASSETS_ADDRESS = ethers.getAddress(
@@ -158,7 +160,24 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
     // named-KA publish records and what gets stamped as publishedUal / drives materialization.
     expect(result.localUal).toBe(GRAPH_LOCAL_UAL);
     expect(result.txHash).toBe(TX_HASH);
-    expect(result.materialization.superseded).toBe(false);
+    expect(result.receiptBlockNumber).toBe(77);
+    // Author and publisher are distinct identities and must not be transposed.
+    expect(result.transaction).toEqual({
+      merkleRoot: SEAL_MERKLE_ROOT,
+      authorAddress: ethers.getAddress(AUTHOR),
+      publisherAddress: ethers.getAddress(PUBLISHER),
+      blockHash: BLOCK_HASH,
+      txIndex: 4,
+    });
+    // Not superseded (the seeded chain's latest root equals the seal), so the
+    // materialized version is the recovered transaction's own block and identities.
+    expect(result.materialization).toEqual({
+      merkleRoot: SEAL_MERKLE_ROOT,
+      authorAddress: ethers.getAddress(AUTHOR),
+      publisherAddress: ethers.getAddress(PUBLISHER),
+      versionBlock: 77,
+      superseded: false,
+    });
   });
 
   it('still accepts the canonical contract/packed-ID receipt UAL and normalizes to graph-local', async () => {
@@ -197,76 +216,119 @@ describe('normalizeRecoveredNamedKaPublish — accepted representations (GH#1966
   });
 });
 
-// Declarative boundary matrix: each row names the one invalid condition and supplies the
-// request/recovery it mutates; everything else stays canonical. `job` and a freshly seeded
-// non-superseded `chain` are constant, so a row that reaches the normalizer must be rejected
-// for its named reason alone.
+// Request-side rows mutate `request.kaUal`, from which `localUal` is DERIVED. Feeding the
+// canonical UAL as the resolver's returned value would make such a row fail at the
+// representation cross-check instead of at the guard it is named for — leaving the guard
+// mutation-blind (deletable with the suite green). So each request-side row returns the SAME
+// mutated UAL: the cross-check then agrees, and only the named guard can reject.
+const WRONG_CHAIN_UAL = `did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}`;
+const WRONG_AUTHOR_UAL = `did:dkg:${CHAIN_ID}/0x${'11'.repeat(20)}/${KA_NUMBER}`;
+const WRONG_NUMBER_UAL = `did:dkg:${CHAIN_ID}/${AUTHOR}/7`;
+
+// Declarative boundary matrix: each row names the one invalid condition, supplies only what it
+// mutates, and pins the guard that must reject it via `expected`. `job` and a freshly seeded
+// non-superseded `chain` are constant.
 const REJECT_CASES: ReadonlyArray<{
   readonly name: string;
+  readonly expected: RegExp;
   readonly request?: KnowledgeAssetVmPublishRequest;
   readonly recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence;
 }> = [
   {
     name: 'returned UAL is neither the receipt nor the graph-local form',
+    expected: /does not match the graph-local UAL/,
     recovery: recoveryEvidence(`did:dkg:${CHAIN_ID}/${AUTHOR}/999`),
   },
   {
     name: 'returned contract-form UAL has the wrong contract address',
+    expected: /does not match the graph-local UAL/,
     recovery: recoveryEvidence(
       buildKnowledgeAssetUal(CHAIN_ID, ethers.getAddress(`0x${'99'.repeat(20)}`), RESERVED_KA_ID),
     ),
   },
   {
     name: 'returned UAL is on the wrong chain',
-    recovery: recoveryEvidence(`did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}`),
+    expected: /does not match the graph-local UAL/,
+    recovery: recoveryEvidence(WRONG_CHAIN_UAL),
   },
   {
     name: 'queued graph UAL is bound to a different chain',
-    request: baseRequest({ kaUal: `did:dkg:evm:9999/${AUTHOR}/${KA_NUMBER}` }),
-    recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+    expected: /queued graph UAL is not bound to the recovery chain/,
+    request: baseRequest({ kaUal: WRONG_CHAIN_UAL }),
+    recovery: recoveryEvidence(WRONG_CHAIN_UAL),
   },
   {
     name: 'queued graph UAL author does not match the reserved KA id',
-    request: baseRequest({ kaUal: `did:dkg:${CHAIN_ID}/0x${'11'.repeat(20)}/${KA_NUMBER}` }),
-    recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+    expected: /does not identify reserved KA id/,
+    request: baseRequest({ kaUal: WRONG_AUTHOR_UAL }),
+    recovery: recoveryEvidence(WRONG_AUTHOR_UAL),
   },
   {
     name: 'queued graph UAL KA number does not match the reserved KA id',
-    request: baseRequest({ kaUal: `did:dkg:${CHAIN_ID}/${AUTHOR}/7` }),
+    expected: /does not identify reserved KA id/,
+    request: baseRequest({ kaUal: WRONG_NUMBER_UAL }),
+    recovery: recoveryEvidence(WRONG_NUMBER_UAL),
+  },
+  {
+    name: 'reserved KA id author bits do not match the sealed author',
+    expected: /author bits do not match the signed author address/,
+    // The seal names a different author than the packed reserved id encodes.
+    request: baseRequest({
+      seal: { ...baseRequest().seal, authorAddress: `0x${'33'.repeat(20)}` as Hex },
+    }),
     recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
   },
   {
     name: 'returned singleton range does not equal the reserved KA id',
+    expected: /does not match reserved KA id/,
     recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
       endKAId: (RESERVED_KA_ID + 1n).toString() as BigIntString,
     }),
   },
   {
     name: 'inclusion tx hash does not match the queued broadcast tx',
+    expected: /does not match queued tx/,
     recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
       inclusion: { txHash: `0x${'ef'.repeat(32)}` as Hex, blockNumber: 77, blockHash: BLOCK_HASH },
     }),
   },
   {
+    name: 'canonical block hash is malformed',
+    expected: /did not return a valid canonical block hash/,
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+      inclusion: { txHash: TX_HASH, blockNumber: 77, blockHash: '0xnotahash' as Hex },
+    }),
+  },
+  {
     name: 'proof merkle root does not match the queued seal',
+    expected: /does not match queued seal/,
     recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
       publishProof: { merkleRoot: `0x${'ba'.repeat(32)}` as Hex, authorAddress: AUTHOR, txIndex: 4 },
     }),
   },
   {
+    name: 'transaction index is not a valid non-negative integer',
+    expected: /did not return a valid transaction index/,
+    recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
+      publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: -1 },
+    }),
+  },
+  {
     name: 'transaction author does not match the sealed author',
+    expected: /does not match sealed author/,
     recovery: recoveryEvidence(GRAPH_LOCAL_UAL, {
       publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: `0x${'11'.repeat(20)}` as Hex, txIndex: 4 },
     }),
   },
   {
     name: 'returned publisher address is missing',
+    expected: /did not return a valid publisher address/,
     recovery: recoveryEvidence(GRAPH_LOCAL_UAL, { omitPublisher: true }),
   },
 ];
 
 describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', () => {
-  it.each(REJECT_CASES)('rejects when the $name', async ({ request, recovery }) => {
+  it.each(REJECT_CASES)('rejects when the $name', async ({ request, recovery, expected }) => {
     await expect(
       normalizeRecoveredNamedKaPublish({
         request: request ?? baseRequest(),
@@ -274,7 +336,7 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
         recovery,
         chain: seededChain(),
       }),
-    ).rejects.toMatchObject(REJECTS);
+    ).rejects.toMatchObject({ ...REJECTS, message: expect.stringMatching(expected) });
   });
 });
 
