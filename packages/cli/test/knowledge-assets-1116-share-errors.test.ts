@@ -1030,15 +1030,31 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(enqueued).toHaveLength(0);
       });
 
-      it(`${lane} rejects a malformed selector`, async () => {
-        await startWith({});
-        const res = await post(lane, {
-          contextGraphId: CG_ID,
-          selectedAuthorAgentAddress: 'not-an-address',
+      // `null` included deliberately: a present-but-null selector is a common client
+      // serialization of "nothing selected", and treating it as absent would fall back
+      // to normal author resolution and could publish a different author with 200.
+      for (const malformed of ['not-an-address', null, 42, {}] as const) {
+        it(`${lane} rejects a malformed selector (${JSON.stringify(malformed)})`, async () => {
+          const calls: unknown[] = [];
+          await startWith({}, {
+            publishFromFinalizedAssertion: async () => {
+              calls.push('published');
+              return { status: 'confirmed', seal: { authorAddress: SELECTED } };
+            },
+            resolveFinalizedAssertionVmPublishIntent: async () => {
+              calls.push('enqueued');
+              throw new Error('should not be reached');
+            },
+          });
+          const res = await post(lane, {
+            contextGraphId: CG_ID,
+            selectedAuthorAgentAddress: malformed,
+          });
+          expect(res.status).toBe(400);
+          expect(res.body.error).toMatch(/must be a 0x-prefixed 20-byte EVM address/);
+          expect(calls).toHaveLength(0);
         });
-        expect(res.status).toBe(400);
-        expect(res.body.error).toMatch(/must be a 0x-prefixed 20-byte EVM address/);
-      });
+      }
 
       it(`${lane} rejects a selector nested inside "options" instead of silently dropping it`, async () => {
         const calls: any[] = [];

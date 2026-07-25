@@ -4139,12 +4139,20 @@ export class PublishMethods extends DKGAgentBase {
   async resolveAssertionAuthor(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    // GH#1786 — named, not positional: `callerAgentAddress` and
-    // `selectedAuthorAgentAddress` are both optional strings with deliberately
-    // OPPOSITE meanings (caller identity vs resident-author selection), so adjacent
-    // positional slots would let a caller silently transpose them.
-    opts?: Omit<ResolveFinalizedAssertionAuthorParams, 'contextGraphId' | 'name'>,
+    // GH#1786 — the named form is preferred: `callerAgentAddress` and
+    // `selectedAuthorAgentAddress` are both optional strings with deliberately OPPOSITE
+    // meanings (caller identity vs resident-author selection), so adjacent positional
+    // slots would let a caller silently transpose them. The legacy positional form
+    // `(cg, name, subGraphName?, callerAgentAddress?)` is still accepted because this
+    // method is on the exported DKGAgent surface: an untyped JS caller passing a string
+    // third argument would otherwise silently lose BOTH the sub-graph scope and the
+    // caller preference, resolving against the wrong coordinate.
+    subGraphNameOrOpts?: string | Omit<ResolveFinalizedAssertionAuthorParams, 'contextGraphId' | 'name'>,
+    legacyCallerAgentAddress?: string,
   ): Promise<string | undefined> {
+    const opts = typeof subGraphNameOrOpts === 'string' || subGraphNameOrOpts === undefined
+      ? { subGraphName: subGraphNameOrOpts, callerAgentAddress: legacyCallerAgentAddress }
+      : subGraphNameOrOpts;
     return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,

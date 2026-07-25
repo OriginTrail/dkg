@@ -672,7 +672,11 @@ function resolveSelectedAuthorAgentAddress(
   source: Record<string, unknown>,
 ): { ok: true; value?: string } | { ok: false } {
   const raw = source[SELECTED_AUTHOR_FIELD];
-  if (raw === undefined || raw === null) return { ok: true };
+  // Only `undefined` counts as absent. A PRESENT `null` (a common client
+  // serialization of "nothing selected") must fail closed like any other malformed
+  // value — treating it as absent would fall back to normal author resolution and
+  // could publish a different author with 200 instead of a request-shape error.
+  if (raw === undefined) return { ok: true };
   if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(raw)) {
     jsonResponse(ctx.res, 400, {
       error: `"${SELECTED_AUTHOR_FIELD}" must be a 0x-prefixed 20-byte EVM address`,

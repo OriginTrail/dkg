@@ -394,6 +394,54 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' });
   });
 
+  // The pre-enqueue gate must not over-refuse: a selected foreign author whose key IS
+  // custodial here is a valid update, and a regression that ignored custodial keys would
+  // turn working updates into 409s with no other test catching it.
+  it('still enqueues a selected foreign-author UPDATE when the author key is custodial here', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(MEMBER), ...sealFor(OTHER)]);
+    const agent = stubAgent(store, CURATOR);
+    // MEMBER's key IS held by this node.
+    agent.getCustodialAgentPrivateKey = (addr: string) =>
+      (addr?.toLowerCase() === MEMBER.toLowerCase() ? `0x${'ab'.repeat(32)}` : undefined);
+    let historyAgent: string | undefined;
+    agent.publisher = {
+      publisherFallbackAuthorAddress: async () => CURATOR,
+      hasSwmShareComplete: async () => true,
+    };
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async (_cg: string, _n: string, o: { agentAddress: string }) => {
+          historyAgent = o.agentAddress;
+          return null; // early-exit after the author resolution + preflight
+        },
+      },
+      configurable: true,
+    });
+
+    // Rejects for "not finalized" (history null), NOT for PUBLISH_AUTHOR_NOT_CUSTODIAL.
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).rejects.toThrow(/is not finalized or does not exist/);
+    expect(historyAgent).toBe(MEMBER);
+  });
+
+  // GH#1786 review round 2 — `resolveAssertionAuthor` is on the exported DKGAgent
+  // surface, so the legacy positional form must keep resolving identically; otherwise an
+  // untyped caller silently loses both the sub-graph scope and the caller preference.
+  it('accepts the legacy positional (subGraphName, callerAgentAddress) form', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealAt(CG, MEMBER, NAME, 'wing-a'), ...sealAt(CG, OTHER, NAME)]);
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, 'wing-a', CURATOR)).toBe(MEMBER);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR)).toBe(OTHER);
+    // ...and the named form is equivalent.
+    expect(await agent.resolveAssertionAuthor(CG, NAME, {
+      subGraphName: 'wing-a', callerAgentAddress: CURATOR,
+    })).toBe(MEMBER);
+  });
+
   it('rejects supplying both agentAddress (override) and selectedAuthorAgentAddress (selection)', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));
