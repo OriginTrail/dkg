@@ -442,6 +442,31 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     })).toBe(MEMBER);
   });
 
+  it('keeps the caller hint when a legacy positional call passes null for subGraphName', async () => {
+    // `null` is the common JS placeholder for an omitted positional argument. Reading it
+    // as an options object would drop the caller hint that follows it and turn a
+    // caller-preferred resolution into an ambiguity error for the same inputs.
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    const agent = stubAgent(store, CURATOR);
+    expect(await agent.resolveAssertionAuthor(CG, NAME, null, CURATOR)).toBe(CURATOR);
+  });
+
+  it('fails closed on a present-but-empty selector from a direct agent caller', async () => {
+    // The HTTP boundary 400s this, but the agent API is public too: an explicitly
+    // supplied empty selector must not degrade into "no selector" and let the
+    // caller-own preference publish a different author.
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    const agent = stubAgent(store, CURATOR);
+    for (const empty of ['', null] as const) {
+      await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+        callerAgentAddress: CURATOR,
+        selectedAuthorAgentAddress: empty as unknown as string,
+      })).rejects.toMatchObject({ code: 'ASSERTION_AUTHOR_NOT_RESIDENT' });
+    }
+  });
+
   it('rejects supplying both agentAddress (override) and selectedAuthorAgentAddress (selection)', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));

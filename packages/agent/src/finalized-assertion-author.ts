@@ -143,7 +143,12 @@ export async function resolveFinalizedAssertionAuthor(
   // supplied selector can never be silently ignored — a dropped selector spends real
   // TRAC/gas on the wrong author. Matching is case-insensitive but the STORED case is
   // returned, because `contextGraphAssertionUri` does not canonicalise address case.
-  if (selectedAuthorAgentAddress) {
+  // Presence, NOT truthiness: a caller supplying `''` — or `null` from untyped JS — has
+  // still SUPPLIED a selector, and silently falling back to normal resolution is the exact
+  // silent-drop this option exists to prevent. Only `undefined` is absent, matching the
+  // HTTP boundary, which 400s every other malformed value. Anything present that names no
+  // resident candidate fails closed below.
+  if (selectedAuthorAgentAddress !== undefined) {
     const selected = candidates.find(
       (a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthorAgentAddress),
     );

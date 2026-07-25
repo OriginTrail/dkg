@@ -4147,11 +4147,15 @@ export class PublishMethods extends DKGAgentBase {
     // method is on the exported DKGAgent surface: an untyped JS caller passing a string
     // third argument would otherwise silently lose BOTH the sub-graph scope and the
     // caller preference, resolving against the wrong coordinate.
-    subGraphNameOrOpts?: string | Omit<ResolveFinalizedAssertionAuthorParams, 'contextGraphId' | 'name'>,
+    subGraphNameOrOpts?: string | null | Omit<ResolveFinalizedAssertionAuthorParams, 'contextGraphId' | 'name'>,
     legacyCallerAgentAddress?: string,
   ): Promise<string | undefined> {
-    const opts = typeof subGraphNameOrOpts === 'string' || subGraphNameOrOpts === undefined
-      ? { subGraphName: subGraphNameOrOpts, callerAgentAddress: legacyCallerAgentAddress }
+    // `null` is treated as the legacy form too: it is the common JS placeholder for an
+    // omitted positional argument, and reading it as an options object would drop the
+    // caller hint that follows it — turning a caller-preferred resolution into an
+    // AMBIGUOUS_ASSERTION_AUTHOR for the same inputs.
+    const opts = typeof subGraphNameOrOpts === 'string' || subGraphNameOrOpts == null
+      ? { subGraphName: subGraphNameOrOpts ?? undefined, callerAgentAddress: legacyCallerAgentAddress }
       : subGraphNameOrOpts;
     return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
