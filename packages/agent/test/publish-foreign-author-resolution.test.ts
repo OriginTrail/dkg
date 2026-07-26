@@ -328,6 +328,44 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     expect([...(err.candidates as string[])].sort()).toEqual([MEMBER, OTHER].sort());
   });
 
+  // GH#1786 review round 7 — the selector and `subGraphName` are each covered, but not
+  // TOGETHER. Scoping happens strictly upstream of selection (the coordinate bounds in
+  // phase 1 plus the `coordinate.scope !== expectedScope` filter), so a regression that
+  // dropped `subGraphName` only on the selector path would still pass every other test
+  // here — and spend real TRAC/gas on the wrong coordinate's author.
+  it('keeps a selected author scoped to the requested subgraph', async () => {
+    const store = new OxigraphStore();
+    // Same NAME at two DIFFERENT coordinates, each with a different sole author.
+    await store.insert([...sealAt(CG, OTHER, NAME), ...sealAt(CG, MEMBER, NAME, 'wing-a')]);
+    const agent = stubAgent(store, CURATOR);
+
+    // Selecting the subgraph's author resolves inside the subgraph.
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      subGraphName: 'wing-a',
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    })).toBe(MEMBER);
+
+    // Selecting the ROOT author for a subgraph request must fail closed, not fall through
+    // to the root coordinate: `candidates` proves the resolver only ever saw the subgraph's
+    // candidate set, i.e. the scope was not widened by the presence of a selector.
+    const scopedErr = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      subGraphName: 'wing-a',
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: OTHER,
+    }).then(() => null, (e: any) => e);
+    expect(scopedErr?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
+    expect(scopedErr.candidates).toEqual([MEMBER]);
+
+    // And the mirror direction — a ROOT request must not reach into the subgraph.
+    const rootErr = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    }).then(() => null, (e: any) => e);
+    expect(rootErr?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
+    expect(rootErr.candidates).toEqual([OTHER]);
+  });
+
   it('reports de-duplicated candidates when one author is resident under two address casings', async () => {
     const store = new OxigraphStore();
     // Two DISTINCT seal subjects — the same author written in different address case, so the
