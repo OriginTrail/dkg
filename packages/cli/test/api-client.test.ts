@@ -1104,10 +1104,11 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
   // a typed SDK caller holding only `publishFromFinalizedAssertion` would otherwise have to
   // cast to `any` to send the very field the AMBIGUOUS_ASSERTION_AUTHOR 409 tells it to
   // retry with. Be precise about what this test can and cannot prove: no tsconfig in this
-  // repo includes `test/` (every package is `include: ["src"]`), so REMOVING the field from
-  // the wrapper's options type would not fail HERE — that half is guarded by
-  // `_SelectorReachableFromBothPublishEntryPoints` at the bottom of `src/api-client.ts`,
-  // which the package typecheck compiles. What this DOES pin is the forwarding: the wrapper currently passes
+  // repo includes `test/` (every package is `include: ["src"]`), so nothing HERE guards the
+  // TYPE. That is structural instead — all three public entry points take their selector
+  // from the one `KnowledgeAssetPublishAuthorSelection` contract, so it cannot go missing
+  // from one of them, and deleting it outright fails the package typecheck at the
+  // destructures. What this DOES pin is the forwarding: the wrapper currently passes
   // `options` straight through, but the sibling `publishAssertion` builds its downstream
   // options from an explicit key-by-key spread, and a refactor of this wrapper into that
   // shape would silently drop the selector and publish a different author with a 200.

@@ -428,6 +428,24 @@ function requireDaemonStatusResponse(value: unknown, expectedName?: string): Dae
   return value;
 }
 
+/**
+ * GH#1786 — the author-selection coordinate shared by every public publish entry point.
+ * Declared ONCE and reused, so `selectedAuthorAgentAddress` cannot drift between the two
+ * lanes and the older `publishFromFinalizedAssertion` wrapper: the invariant is structural
+ * rather than asserted after the fact.
+ */
+export interface KnowledgeAssetPublishAuthorSelection {
+  subGraphName?: string;
+  /**
+   * The resident author to publish, for retrying an `AMBIGUOUS_ASSERTION_AUTHOR` 409.
+   * Serialized at the TOP level of the body (never inside `options`, where
+   * `parseHttpFinalizedPublishOptions` would silently ignore it and publish a different
+   * author). Sent on PRESENCE, not truthiness, so a malformed value reaches the daemon's
+   * 400 instead of being dropped client-side.
+   */
+  selectedAuthorAgentAddress?: string;
+}
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
@@ -815,7 +833,7 @@ export class ApiClient {
   async knowledgeAssetPublish(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; selectedAuthorAgentAddress?: string }
+    options?: KnowledgeAssetPublishAuthorSelection
       & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
     // GH#1786 — `selectedAuthorAgentAddress` is destructured out alongside
@@ -838,7 +856,7 @@ export class ApiClient {
   async knowledgeAssetPublishAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; selectedAuthorAgentAddress?: string }
+    options?: KnowledgeAssetPublishAuthorSelection
       & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
     const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
@@ -955,15 +973,10 @@ export class ApiClient {
   async publishFromFinalizedAssertion(
     contextGraphId: string,
     assertionName: string,
-    options?: {
-      subGraphName?: string;
-      /**
-       * GH#1786 — the resident author to publish, for retrying an
-       * `AMBIGUOUS_ASSERTION_AUTHOR` 409. Present on BOTH public entry points that wrap
-       * this endpoint: a typed SDK caller holding only this older wrapper would
-       * otherwise have to cast to `any` to pass the very field the 409 tells it to send.
-       */
-      selectedAuthorAgentAddress?: string;
+    // The selector comes from the SHARED contract — a typed SDK caller holding only this
+    // older wrapper must be able to pass the field the 409 tells it to retry with. The
+    // finalized-option subset stays deliberately narrower than the standalone lanes'.
+    options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
       publisherNodeIdentityIdOverride?: bigint;
@@ -2288,26 +2301,3 @@ function inferUploadContentType(filePath: string): string | undefined {
   }
   return undefined;
 }
-
-/**
- * GH#1786 — compile-time guard that BOTH public publish entry points keep accepting the
- * author selector. This lives in `src` deliberately: no tsconfig in this repo includes
- * `test/` (every package is `include: ["src"]`), so a runtime serialization test cannot
- * protect a TYPE. Dropping the field from either options bag makes `AssertTrue<false>`
- * violate its constraint and fails `tsc` on the package build.
- *
- * `keyof`, not `extends` against an object shape: an object type missing an OPTIONAL
- * property still structurally extends one that declares it, so the obvious
- * `Params extends { selectedAuthorAgentAddress?: string }` form is vacuously true and
- * would pass after the regression it is meant to catch. Type-level `extends` also does
- * not apply excess-property checking, so no assignability form works here.
- *
- * Pure types — nothing is emitted.
- */
-type AssertTrue<T extends true> = T;
-type SelectorKeyOf<T> = 'selectedAuthorAgentAddress' extends keyof NonNullable<T> ? true : false;
-export type _SelectorReachableFromBothPublishEntryPoints = AssertTrue<
-  SelectorKeyOf<Parameters<ApiClient['knowledgeAssetPublish']>[2]> extends true
-    ? SelectorKeyOf<Parameters<ApiClient['publishFromFinalizedAssertion']>[2]>
-    : false
->;
