@@ -330,6 +330,63 @@ describe('#1689 publish admission — "cannot determine" is not "denied" [CH-168
       .resolves.toEqual([pool[0]]);
   });
 
+  // The THIRD consumer of the same distinction. `poolHasFundableSigner` reduced
+  // admission to `.admitted`, so an inconclusive probe looked identical to "this
+  // wallet is not admissible" — and its sole caller turns that into a TERMINAL
+  // `NO_FUNDED_PUBLISHER_WALLET`. Same permanently-dead job, same transient blip,
+  // one layer over from the two rejection sites already fixed.
+  //
+  // Driven at `enrichInsufficientPublisherFundsError` rather than through
+  // `createKnowledgeAssets` ON PURPOSE: the wiring (public publish → enrich, with the
+  // author carried) is already pinned by the S3 far-end test, and what changed here
+  // is this function's own logic. Chain and unit get one test each; neither alone
+  // would cover both.
+  it('an INCONCLUSIVE admission during enrichment does not become terminal NO_FUNDED', async () => {
+    const { a, pool } = makeAdapter([AUTHOR.toLowerCase()], transportFailure(), {
+      extraKeys: [PK_B],
+    });
+    const [pinned] = pool;
+    // Selected wallet is broke; the other could cover it — so a reroute exists, and
+    // the pool must not be declared unfundable on an answer we could not obtain.
+    a.getWalletFunding = async (address: string) => (
+      address.toLowerCase() === pinned.address.toLowerCase()
+        ? { native: 10n ** 18n, trac: 0n }
+        : { native: 10n ** 18n, trac: 10n ** 18n }
+    );
+    a.isWalletPublishFundable = async (address: string) =>
+      address.toLowerCase() !== pinned.address.toLowerCase();
+    a.snapshotPublisherWalletBalances = async () => [];
+
+    const original = new Error('ERC20: transfer amount exceeds balance');
+    const result = await a.enrichInsufficientPublisherFundsError(
+      original, pinned, CG, 1_000n, AUTHOR,
+    );
+
+    // The ORIGINAL error survives, so the job stays retryable and can reroute.
+    expect(result).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(result).toBe(original);
+  });
+
+  it('a GENUINELY unfundable pool is still TERMINAL NO_FUNDED (author consulted and refused)', async () => {
+    // The control. Without it, "never emit NO_FUNDED" would satisfy the row above
+    // while quietly destroying the terminal diagnosis the enrichment exists to
+    // produce. Here the version reads fine and the author is genuinely unauthorized,
+    // so the answer IS determined — and it is a real denial.
+    const { a, pool } = makeAdapter([], ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION, {
+      extraKeys: [PK_B],
+    });
+    const [pinned] = pool;
+    a.getWalletFunding = async () => ({ native: 10n ** 18n, trac: 0n });
+    a.isWalletPublishFundable = async () => false;
+    a.snapshotPublisherWalletBalances = async () => [];
+
+    const result = await a.enrichInsufficientPublisherFundsError(
+      new Error('ERC20: transfer amount exceeds balance'), pinned, CG, 1_000n, AUTHOR,
+    );
+
+    expect(result).toBeInstanceOf(InsufficientPublisherFundsError);
+  });
+
   it('a DETERMINISTIC unreadable version stays a TERMINAL authorization denial', async () => {
     // `BAD_DATA` is the "this lifecycle has no version() to decode" case. It is a
     // stable answer, so it must NOT be rethrown as retryable — that would re-open
