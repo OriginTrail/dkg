@@ -107,6 +107,7 @@ import {
   getMetrics,
   assertQuadLiteralsMutf8Safe,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -4216,7 +4217,7 @@ export class PublishMethods extends DKGAgentBase {
           'agentAddress (authoritative author selector) and callerAgentAddress ' +
             '(resolution hint) are mutually exclusive on a VM publish',
         ),
-        { code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' },
+        { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
       );
     }
     // An authoritative override and a resident-candidate selection are contradictory
@@ -4232,7 +4233,7 @@ export class PublishMethods extends DKGAgentBase {
           'agentAddress (authoritative author selector) and selectedAuthorAgentAddress ' +
             '(resident-candidate selection) are mutually exclusive on a VM publish',
         ),
-        { code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' },
+        { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
       );
     }
     if (opts?.agentAddress) return opts.agentAddress;

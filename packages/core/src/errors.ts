@@ -38,6 +38,18 @@ export const NO_FUNDED_PUBLISHER_WALLET_CODE = 'NO_FUNDED_PUBLISHER_WALLET';
  */
 export const PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE = 'PUBLISH_AUTHOR_NOT_CUSTODIAL';
 
+/**
+ * The rest of the publish-author-selection error protocol (GH#1778, GH#1786). Same reason as
+ * the code above: the agent raises these, the daemon route turns each into a specific 409
+ * body, and clients branch on the wire code. They were literals on both sides of that
+ * boundary — a rename or typo in the agent would silently bypass the daemon mapper and fall
+ * through to an opaque 500, with no compiler or test to catch it. The VALUES are the wire
+ * contract and must not change; the names are what consumers should import.
+ */
+export const AMBIGUOUS_ASSERTION_AUTHOR_CODE = 'AMBIGUOUS_ASSERTION_AUTHOR';
+export const ASSERTION_AUTHOR_NOT_RESIDENT_CODE = 'ASSERTION_AUTHOR_NOT_RESIDENT';
+export const PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE = 'PUBLISH_AUTHOR_SELECTION_CONFLICT';
+
 /** The literal prefix every InsufficientPublisherFundsError message starts with.
  *  The chain formatter builds the message from this; consumers that only have a
  *  (possibly re-wrapped, code-stripped) message string match on it via

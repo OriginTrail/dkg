@@ -75,7 +75,13 @@ import {
 } from "./shared-assertion-helpers.js";
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import {
+  validateAssertionName,
+  contextGraphAssertionUri,
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+} from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
   parseHttpFinalizedPublishOptions,
@@ -165,9 +171,9 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * the response) when it handled the error, `false` otherwise.
  */
 function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== "AMBIGUOUS_ASSERTION_AUTHOR") return false;
+  if (e?.code !== AMBIGUOUS_ASSERTION_AUTHOR_CODE) return false;
   jsonResponse(res, 409, {
-    code: "AMBIGUOUS_ASSERTION_AUTHOR",
+    code: AMBIGUOUS_ASSERTION_AUTHOR_CODE,
     error: e.message ?? String(e),
     candidates: e.candidates ?? [],
   });
@@ -188,7 +194,10 @@ function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): bo
  *    which the node cannot re-sign without that author's custodial key.
  */
 function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== "ASSERTION_AUTHOR_NOT_RESIDENT" && e?.code !== "PUBLISH_AUTHOR_NOT_CUSTODIAL") {
+  if (
+    e?.code !== ASSERTION_AUTHOR_NOT_RESIDENT_CODE
+    && e?.code !== PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+  ) {
     return false;
   }
   jsonResponse(res, 409, {

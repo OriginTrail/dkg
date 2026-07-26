@@ -1,4 +1,6 @@
 import {
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   ASSERTION_SEAL_PREDICATES,
   assertSafeIri,
   contextGraphAssertionQueryBounds,
@@ -159,7 +161,7 @@ export async function resolveFinalizedAssertionAuthor(
           `${selectedAuthorAgentAddress} has no finalized knowledge asset with this name.`,
       ),
       {
-        code: 'ASSERTION_AUTHOR_NOT_RESIDENT',
+        code: ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
         candidates: distinctAuthors(candidates),
       },
     );
@@ -178,6 +180,6 @@ export async function resolveFinalizedAssertionAuthor(
         `${distinct.length} authors have a knowledge asset with this name. ` +
         `Publish is unambiguous only for a single author.`,
     ),
-    { code: 'AMBIGUOUS_ASSERTION_AUTHOR', candidates: distinct },
+    { code: AMBIGUOUS_ASSERTION_AUTHOR_CODE, candidates: distinct },
   );
 }
