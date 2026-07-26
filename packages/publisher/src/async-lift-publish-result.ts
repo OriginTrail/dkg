@@ -2,6 +2,7 @@ import {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublishAuthorNotCustodial,
 } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
@@ -170,9 +171,10 @@ export function mapPublishExceptionToLiftJobFailure(
   // finalize. Classified as an AUTHORITY failure rather than a transport one; only forced
   // from 'broadcast', which is where the executor raises it — mid-publish, before any
   // transaction is sent. Message fallback mirrors the funded-wallet handling above, for
-  // re-wrapped errors that lost `.code`.
+  // re-wrapped errors that lost `.code` — via the SHARED core matcher, so the agent's
+  // message formatter and this classifier cannot drift apart.
   const isAuthorNotCustodial = errorCode === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
-    || lower.includes('cannot re-sign updateauthorattestation');
+    || messageIndicatesPublishAuthorNotCustodial(lower);
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
   const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'

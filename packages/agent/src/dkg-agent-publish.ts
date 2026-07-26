@@ -107,6 +107,7 @@ import {
   getMetrics,
   assertQuadLiteralsMutf8Safe,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
@@ -477,12 +478,11 @@ const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
  * report it identically.
  */
 function updateAttestationNotCustodialError(authorAddress: string): Error {
+  // Message from the shared core formatter, not inline text: the publisher's async-job
+  // classifier keys its code-stripped fallback off the same marker, so a re-wording here
+  // cannot silently drop the failure back into the retryable `rpc_unavailable` default.
   return Object.assign(
-    new Error(
-      `cannot re-sign UpdateAuthorAttestation for author ${authorAddress} — no custodial key ` +
-        `on file and it is not the publisher EOA. Use the /api/update route with a pre-signed ` +
-        `UpdateAuthorAttestation instead.`,
-    ),
+    new Error(formatPublishAuthorNotCustodialMessage(authorAddress)),
     { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
   );
 }

@@ -320,7 +320,10 @@ export {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
   messageIndicatesNoFundedPublisherWallet,
+  messageIndicatesPublishAuthorNotCustodial,
+  formatPublishAuthorNotCustodialMessage,
 } from './errors.js';
 export {
   dkgHomeDir,

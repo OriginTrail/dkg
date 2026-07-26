@@ -56,6 +56,33 @@ export function messageIndicatesNoFundedPublisherWallet(message: unknown): boole
   return typeof message === 'string' && NO_FUNDED_PUBLISHER_WALLET_MARKER.test(message);
 }
 
+/** The literal fragment every non-custodial-author publish message contains. The agent
+ *  builds its message from {@link formatPublishAuthorNotCustodialMessage}; consumers holding
+ *  only a (possibly re-wrapped, code-stripped) message match on it via
+ *  {@link messageIndicatesPublishAuthorNotCustodial}. Emitter and classifier share this
+ *  constant so re-wording the message can never silently un-classify the failure. */
+export const PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER =
+  'cannot re-sign UpdateAuthorAttestation';
+
+const PUBLISH_AUTHOR_NOT_CUSTODIAL_MARKER = new RegExp(
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER,
+  'i',
+);
+
+/** The canonical message for {@link PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE}. Built here, beside
+ *  the marker it must keep containing, rather than inline at the throw site. */
+export function formatPublishAuthorNotCustodialMessage(authorAddress: string): string {
+  return `${PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER} for author ${authorAddress} — no `
+    + `custodial key on file and it is not the publisher EOA. Use the /api/update route with `
+    + `a pre-signed UpdateAuthorAttestation instead.`;
+}
+
+/** True iff a message string indicates a non-custodial-author publish failure — the
+ *  fallback used when the structured `.code` was lost to a re-wrap. */
+export function messageIndicatesPublishAuthorNotCustodial(message: unknown): boolean {
+  return typeof message === 'string' && PUBLISH_AUTHOR_NOT_CUSTODIAL_MARKER.test(message);
+}
+
 /**
  * An error caused by invalid user input or a pre-condition that the user
  * can fix. CLI handlers can show these messages directly without a stack trace.
