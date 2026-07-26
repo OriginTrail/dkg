@@ -2288,3 +2288,26 @@ function inferUploadContentType(filePath: string): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * GH#1786 — compile-time guard that BOTH public publish entry points keep accepting the
+ * author selector. This lives in `src` deliberately: no tsconfig in this repo includes
+ * `test/` (every package is `include: ["src"]`), so a runtime serialization test cannot
+ * protect a TYPE. Dropping the field from either options bag makes `AssertTrue<false>`
+ * violate its constraint and fails `tsc` on the package build.
+ *
+ * `keyof`, not `extends` against an object shape: an object type missing an OPTIONAL
+ * property still structurally extends one that declares it, so the obvious
+ * `Params extends { selectedAuthorAgentAddress?: string }` form is vacuously true and
+ * would pass after the regression it is meant to catch. Type-level `extends` also does
+ * not apply excess-property checking, so no assignability form works here.
+ *
+ * Pure types — nothing is emitted.
+ */
+type AssertTrue<T extends true> = T;
+type SelectorKeyOf<T> = 'selectedAuthorAgentAddress' extends keyof NonNullable<T> ? true : false;
+export type _SelectorReachableFromBothPublishEntryPoints = AssertTrue<
+  SelectorKeyOf<Parameters<ApiClient['knowledgeAssetPublish']>[2]> extends true
+    ? SelectorKeyOf<Parameters<ApiClient['publishFromFinalizedAssertion']>[2]>
+    : false
+>;
