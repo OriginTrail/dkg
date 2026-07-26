@@ -27,6 +27,8 @@ import {
   generateEd25519Keypair,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MAX_UINT72_DECIMAL,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import {
   AsyncLiftJobConflictError,
@@ -1409,6 +1411,125 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(String((publisherOverrides[0] as { publisherAddress?: string }).publisherAddress).toLowerCase()).toBe(
         wallet.address.toLowerCase(),
       );
+    } finally {
+      await runtime.stop();
+      await store.close();
+    }
+  });
+
+  // GH#1786 — the PRODUCTION handler boundary for the post-202 contract. The
+  // publisher-level test in async-lift-broadcast-durability.test.ts injects its own
+  // `execute` stub, so a regression inside `createKnowledgeAssetVmPublishHandler`
+  // (dropping or re-wrapping the structured code on the rethrow path) would leave that
+  // test green while the real worker mis-classified the failure as retryable. This drives
+  // the REAL handler: only `publishQueuedKnowledgeAssetVmPublish` is faked.
+  it('queued vm/publish-async records a non-custodial author as terminal authority_forbidden, never retried', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-ka-vm-not-custodial-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const rootless = await seedRootlessPublicSnapshot(store, {
+      shareOperationId: 'share-not-custodial-rootless',
+      subject: 'urn:test:not-custodial-subject',
+      object: '"Not Custodial Rootless"',
+    });
+
+    const SELECTED_AUTHOR = '0x00000000000000000000000000000000000000b2';
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      // The SELECTED foreign author (GH#1786); the curator enqueued it.
+      agentAddress: SELECTED_AUTHOR,
+      callerAgentAddress: '0x00000000000000000000000000000000000000c3',
+      shareOperationId: rootless.shareOperationId,
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: rootless.kaUal,
+      assertionVersion: '1',
+      publicTripleCount: rootless.publicTripleCount,
+      privateTripleCount: 0,
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: ROOTLESS_AUTHOR as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'ab'.repeat(32)}`,
+      kaNumber: rootless.kaNumber,
+      reservedUal: rootless.kaUal,
+    };
+
+    let publishAttempts = 0;
+    let registerAttempts = 0;
+    const fakeAgent = {
+      getDefaultAgentAddress: () => '0x00000000000000000000000000000000000000a1',
+      async ensureRegisteredForPublish() {
+        registerAttempts += 1;
+      },
+      async publishQueuedKnowledgeAssetVmPublish() {
+        publishAttempts += 1;
+        // Exactly what the agent raises when the claiming wallet is neither custodial for
+        // the selected author nor the publisher EOA — coded, message from the shared core
+        // formatter plus this surface's remediation.
+        throw Object.assign(
+          new Error(
+            `${formatPublishAuthorNotCustodialMessage(SELECTED_AUTHOR)} Use the /api/update `
+              + `route with a pre-signed UpdateAuthorAttestation instead.`,
+          ),
+          { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
+        );
+      },
+    };
+
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      pollIntervalMs: 10,
+      errorBackoffMs: 10,
+      knowledgeAssetVmPublishHandler: {
+        execute: createKnowledgeAssetVmPublishHandler(fakeAgent as unknown as DKGAgent).execute,
+      },
+    });
+
+    try {
+      const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await runtime.publisher.processNext(wallet.address);
+
+      expect(processed?.jobId).toBe(jobId);
+      expect(processed?.status).toBe('failed');
+      // Authority, not transport — and explicitly NOT the retryable default.
+      expect(processed?.failure?.code).toBe('authority_forbidden');
+      expect(processed?.failure?.code).not.toBe('rpc_unavailable');
+      expect(processed?.failure?.retryable).toBe(false);
+      expect(processed?.failure?.resolution).toBe('fail_job');
+
+      // The real handler rethrew VERBATIM instead of treating this as the
+      // CG-not-registered case: one publish attempt, no auto-registration.
+      expect(publishAttempts).toBe(1);
+      expect(registerAttempts).toBe(0);
+
+      // Stored-job readback — what an operator polling the job actually sees.
+      const persisted = await runtime.publisher.getStatus(jobId);
+      expect(persisted?.status).toBe('failed');
+      expect(persisted?.failure?.code).toBe('authority_forbidden');
+      expect(persisted?.failure?.retryable).toBe(false);
+      expect(persisted?.failure?.resolution).toBe('fail_job');
+
+      // Never retried: nothing to recover, and the job stays terminal.
+      expect(await runtime.publisher.recover()).toBe(0);
+      expect((await runtime.publisher.getStatus(jobId))?.status).toBe('failed');
+      expect(publishAttempts).toBe(1);
     } finally {
       await runtime.stop();
       await store.close();
