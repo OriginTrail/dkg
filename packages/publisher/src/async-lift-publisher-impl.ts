@@ -3,9 +3,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
-  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   createGraphKnowledgeAssetScope,
-  messageIndicatesPublishAuthorNotCustodial,
 } from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
@@ -50,6 +48,7 @@ import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
+  isPermanentAuthorCapabilityFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
@@ -838,18 +837,18 @@ export class TripleStoreAsyncLiftPublisher
     if (
       anyError?.code === 'PUBLISH_NOT_FULL_SHARE' ||
       anyError?.code === 'PUBLISH_INTENT_STALE' ||
-      anyError?.code === 'CG_NOT_REGISTERED' ||
-      // GH#1786 — the node cannot re-sign the selected author's UpdateAuthorAttestation.
-      // Raised while BUILDING the attestation, strictly before onPhase reaches
-      // recordDurableBroadcastBeforeSend, so no transaction was ever sent: the job is
-      // still 'validated' and recording 'broadcast' would publish a false claim that a
-      // broadcast occurred (and mislabel the phase with it).
-      anyError?.code === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+      anyError?.code === 'CG_NOT_REGISTERED'
     ) {
       return true;
     }
+    // GH#1786 — the node cannot re-sign the selected author's UpdateAuthorAttestation.
+    // Raised while BUILDING the attestation, strictly before onPhase reaches
+    // recordDurableBroadcastBeforeSend, so no transaction was ever sent: the job is still
+    // 'validated' and recording 'broadcast' would publish a false claim that a broadcast
+    // occurred (and mislabel the phase with it). Shared predicate — the same one decides the
+    // failure CODE on both the validated and broadcast paths.
+    if (isPermanentAuthorCapabilityFailure(error)) return true;
     const message = String(anyError?.message ?? error);
-    if (messageIndicatesPublishAuthorNotCustodial(message)) return true;
     return /is not finalized/i.test(message)
       || /No quads in shared memory/i.test(message)
       || /has no private payload/i.test(message)
@@ -1490,8 +1489,7 @@ export class TripleStoreAsyncLiftPublisher
         // of its keywords, and not even 'authority' — "UpdateAuthorAttestation" carries
         // "author", not "authority". Terminal either way, but the code is what clients
         // branch on and what tells an operator the publish is unfixable by retrying.
-        errorCode === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
-        || messageIndicatesPublishAuthorNotCustodial(lower)
+        isPermanentAuthorCapabilityFailure(error)
           ? 'authority_forbidden'
         : errorCode === 'PUBLISH_INTENT_STALE'
           ? 'publish_intent_stale'

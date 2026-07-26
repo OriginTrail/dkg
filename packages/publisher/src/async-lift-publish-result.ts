@@ -140,12 +140,43 @@ function readPublishErrorFacts(error: unknown): { code: unknown; message: string
   }
   let message = '';
   try {
-    const raw = error instanceof Error ? error.message : String(error);
+    // Prefer a string `.message` even on a NON-Error throw (cross-realm errors, serialized
+    // errors from a worker, some RPC clients): `String(error)` on such a value yields
+    // '[object Object]', which classifies as nothing. `isKnowledgeAssetPublishPreconditionFailure`
+    // read `String(err?.message ?? err)` before it shared this extractor, so keeping the
+    // `.message` preference is parity with the caller it absorbed, not new behaviour.
+    const own = (error as { message?: unknown } | null | undefined)?.message;
+    const raw = error instanceof Error
+      ? error.message
+      : typeof own === 'string' ? own : String(error);
     if (typeof raw === 'string') message = raw;
   } catch {
     message = '';
   }
   return { code, message, lowerMessage: message.toLowerCase() };
+}
+
+/**
+ * GH#1786 — is this a PERMANENT author-capability refusal? The node cannot re-sign the
+ * selected author's `UpdateAuthorAttestation` (no custodial key on file, and the author is
+ * not the publisher EOA).
+ *
+ * One canonical predicate because THREE independent decisions key off it, and a copy that
+ * drifted would silently change the outcome depending on where the error surfaced:
+ *   1. the failed-from STATE (`isKnowledgeAssetPublishPreconditionFailure`) — this is raised
+ *      before any send, so the job must fail from 'validated', not 'broadcast';
+ *   2. the failure CODE on that validated path (`recordExecutionFailure`), whose keyword
+ *      chain would otherwise reach `canonicalization_failed`;
+ *   3. the failure CODE on the broadcast path ({@link mapPublishExceptionToLiftJobFailure}),
+ *      whose default is the RETRYABLE `rpc_unavailable` — the forever-retry trap.
+ *
+ * Reads through the throw-safe extractor, so a null-prototype throw or a throwing `.code`
+ * accessor cannot break a failure-recording path.
+ */
+export function isPermanentAuthorCapabilityFailure(error: unknown): boolean {
+  const { code, lowerMessage } = readPublishErrorFacts(error);
+  return code === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+    || messageIndicatesPublishAuthorNotCustodial(lowerMessage);
 }
 
 export function mapPublishExceptionToLiftJobFailure(
@@ -173,8 +204,7 @@ export function mapPublishExceptionToLiftJobFailure(
   // transaction is sent. Message fallback mirrors the funded-wallet handling above, for
   // re-wrapped errors that lost `.code` — via the SHARED core matcher, so the agent's
   // message formatter and this classifier cannot drift apart.
-  const isAuthorNotCustodial = errorCode === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
-    || messageIndicatesPublishAuthorNotCustodial(lower);
+  const isAuthorNotCustodial = isPermanentAuthorCapabilityFailure(input.error);
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
   const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'

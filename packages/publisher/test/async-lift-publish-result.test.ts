@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  isPermanentAuthorCapabilityFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
 } from '../src/async-lift-publish-result.js';
@@ -253,6 +254,45 @@ describe('async lift publish result mapping', () => {
 
     expect(failure.code).toBe('insufficient_funds');
     expect(failure.retryable).toBe(false);
+  });
+
+  // GH#1786 — the ONE predicate behind three decisions: the failed-from STATE (no send
+  // happened, so 'validated'), the failure code on that validated path, and the failure code
+  // on the broadcast fallback. A drifted copy would change the outcome depending on where the
+  // error surfaced, so it is pinned directly here as well as through each call site.
+  describe('isPermanentAuthorCapabilityFailure', () => {
+    it('recognizes the coded refusal and the code-stripped message', () => {
+      expect(isPermanentAuthorCapabilityFailure(
+        Object.assign(new Error('wrapped and reworded'), { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' }),
+      )).toBe(true);
+      expect(isPermanentAuthorCapabilityFailure(
+        new Error('publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc'),
+      )).toBe(true);
+    });
+
+    it('does not claim unrelated publish failures', () => {
+      expect(isPermanentAuthorCapabilityFailure(new Error('RPC submit timed out after 30s'))).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(
+        new Error('No operational wallet has enough funds to publish to Verifiable Memory'),
+      )).toBe(false);
+    });
+
+    it('is throw-safe on hostile error values', () => {
+      // This predicate now gates a failure-RECORDING path (the failed-from state), not just
+      // classification, so an error whose `.code` getter throws — or which is not an Error at
+      // all — must not blow up mid-record. Centralizing on the guarded fact reader is what
+      // gives the state decision this property; its previous inline copy read `.code` raw.
+      const hostile = { get code(): never { throw new Error('boom'); }, message: 'x' };
+      expect(() => isPermanentAuthorCapabilityFailure(hostile)).not.toThrow();
+      expect(isPermanentAuthorCapabilityFailure(hostile)).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(Object.create(null))).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(undefined)).toBe(false);
+      expect(isPermanentAuthorCapabilityFailure(null)).toBe(false);
+      // ...and still recognizes it when only a hostile-ish shape carries the marker.
+      expect(isPermanentAuthorCapabilityFailure(
+        { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
+      )).toBe(true);
+    });
   });
 
   it('classifies confirmation mismatches on included jobs', () => {
