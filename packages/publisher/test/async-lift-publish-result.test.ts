@@ -9,7 +9,10 @@ import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
 } from '../src/async-lift-publish-result.js';
-import { PublisherNotAuthorizedForContextGraphError } from '@origintrail-official/dkg-chain';
+import {
+  ChainRpcTransportError,
+  PublisherNotAuthorizedForContextGraphError,
+} from '@origintrail-official/dkg-chain';
 import { QuorumUnmetError } from '../src/ack-errors.js';
 import { isOccupyingLifecycleJob } from '../src/async-lift-publisher-utils.js';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
@@ -487,6 +490,81 @@ describe('#1689 publish-authorization rejection is terminal', () => {
       failedFromState: 'broadcast',
       errorPayloadRef: 'urn:error:cg-publish-authz-pool-rewrapped',
     })).toMatchObject({ code: 'authority_forbidden', retryable: false, resolution: 'fail_job' });
+  });
+
+  // #1689 round 4 — the CONSUMER half of a cross-package claim. chain-dev's fix
+  // stops a transient RPC failure being converted into an authorization verdict
+  // and rethrows the transport error as itself. That is necessary but NOT
+  // sufficient: this mapper then classifies by message text, and a transport
+  // error's message is not its own — `RPC_ENDPOINTS_EXHAUSTED` splices the
+  // underlying node text in verbatim. The chain-side test cannot assert any of
+  // this (publisher depends on chain, not the reverse), so the property is only
+  // provable here.
+  describe('a proven transport failure is never classified as a MINED outcome', () => {
+    const exhausted = (underlying: string) => new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
+      `eth_call transaction preparation failed on all configured RPC endpoints `
+      + `(a.example, b.example): ${underlying}`,
+      { rpcUrls: ['https://a.example', 'https://b.example'] },
+    );
+
+    const classify = (error: unknown) => mapPublishExceptionToLiftJobFailure({
+      error,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:transport',
+    });
+
+    it('"missing revert data" — the modal eth_call failure — stays retryable, not tx_reverted', () => {
+      // THE load-bearing row. `version()` is an `eth_call`, and `missing revert
+      // data` is the standard geth/ethers reply when one fails — so this is the
+      // MOST LIKELY text on the exact read #1689 added, not an edge case. Before
+      // the transport-code branch it classified `tx_reverted`: terminal,
+      // `fail_job`, and untouched by both `retry()` and the auto-retry sweep, so
+      // a single 503 permanently killed a job the chain would have accepted.
+      const failure = classify(exhausted('missing revert data'));
+
+      expect(failure.code).toBe('rpc_unavailable');
+      expect(failure.mode).toBe('retryable');
+      expect(failure.retryable).toBe(true);
+      expect(failure.resolution).toBe('reset_to_accepted');
+    });
+
+    it('"chain id mismatch" stays retryable, not confirmation_mismatch', () => {
+      // The second terminal outcome reachable by spliced node text.
+      const failure = classify(exhausted('chain id mismatch'));
+
+      expect(failure.code).toBe('rpc_unavailable');
+      expect(failure.retryable).toBe(true);
+      expect(failure.resolution).toBe('reset_to_accepted');
+    });
+
+    it('leaves the TIMEOUT path untouched — #1851 double-submit safety is not widened', () => {
+      // Deliberately NOT suppressed. A genuine RPC timeout during send may have
+      // reached the mempool, so it must keep `check_chain_then_finalize_or_reset`
+      // rather than being flattened to a plain retry. If this row ever flips to
+      // `rpc_unavailable`, the narrow fix has become a blanket one.
+      const failure = mapPublishExceptionToLiftJobFailure({
+        error: new ChainRpcTransportError('RPC_TIMEOUT', 'chain RPC request timeout after 30s'),
+        failedFromState: 'broadcast',
+        errorPayloadRef: 'urn:error:transport-timeout',
+        timeout: { timeoutMs: 30_000, timeoutAt: 1, handling: 'check_chain_then_finalize_or_reset' },
+      });
+
+      expect(failure.code).toBe('tx_submit_timeout');
+      expect(failure.retryable).toBe(true);
+      expect(failure.resolution).toBe('check_chain_then_finalize_or_reset');
+    });
+
+    it('does NOT rescue a genuine on-chain revert that carries no transport code', () => {
+      // The control that keeps this from being a blanket "reverts are retryable"
+      // rule. Only a STRUCTURED transport code earns the suppression; a real
+      // mined revert must stay terminal.
+      const failure = classify(new Error('execution reverted: UnauthorizedPublisher'));
+
+      expect(failure.code).toBe('tx_reverted');
+      expect(failure.mode).toBe('terminal');
+      expect(failure.retryable).toBe(false);
+    });
   });
 
   it('leaves an unrelated broadcast error on the retryable rpc_unavailable default', () => {

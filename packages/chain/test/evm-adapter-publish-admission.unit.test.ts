@@ -26,6 +26,10 @@ import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import {
+  ChainRpcTransportError,
+  isChainRpcTransportError,
+} from '../src/chain-rpc-transport-error.js';
+import {
   EVMChainAdapter,
   InsufficientPublisherFundsError,
   PublisherNotAuthorizedForContextGraphError,
@@ -244,7 +248,10 @@ describe('#1689 publish admission — fails closed on EVERY path [CH-1689-F]', (
 
   it('no lifecycle bound at all → author branch is NOT consulted, and no read is attempted', async () => {
     const { a, counts } = makeAdapter([AUTHOR.toLowerCase()], '10.9.9', { noLifecycle: true });
-    expect(await a.deployedKnowledgeAssetsLifecycleVersion()).toBeNull();
+    // No lifecycle bound is a stable answer, not a transport failure: `version` is
+    // null and `transportError` is absent, so this stays a terminal denial.
+    expect(await a.deployedKnowledgeAssetsLifecycleVersion())
+      .toEqual({ version: null });
     expect(await a.attestedAuthorPublishAuthorizationSupported()).toBe(false);
     expect(counts.version).toBe(0);
 
@@ -261,6 +268,85 @@ describe('#1689 publish admission — fails closed on EVERY path [CH-1689-F]', (
     expect(admission).toEqual({ admitted: false, authorConsulted: false, deployedVersion: null });
     expect(counts.isAuthorizedPublisher).toBe(0);
     expect(counts.version).toBe(0);
+  });
+});
+
+describe('#1689 publish admission — "cannot determine" is not "denied" [CH-1689-T]', () => {
+  // The gate fails closed on ANY unreadable version — but the two reasons a version
+  // can be unreadable have to reach the caller as different ERROR CLASSES:
+  //
+  //   deterministic (no `version()` to decode, garbage value) → a stable answer;
+  //       reporting it as an authorization denial is correct and TERMINAL is right.
+  //   transport exhaustion (503, ECONNRESET, timeout)         → no answer at all;
+  //       reporting it as a denial is a false claim, and downstream it becomes a
+  //       terminal `authority_forbidden` that no retry revisits — so one blip on a
+  //       single-RPC node permanently kills a publish the chain would have accepted.
+  //
+  // Admission itself is unchanged in both cases: still false, still no transaction.
+  // Only the class of the thrown error differs, and only on proven transport failure.
+  const transportFailure = () => new ChainRpcTransportError(
+    'RPC_ENDPOINTS_EXHAUSTED', 'all endpoints failed',
+  );
+
+  it('a TRANSPORT failure on the version read is rethrown raw, NOT as an authz denial', async () => {
+    const { a } = makeAdapter([AUTHOR.toLowerCase()], transportFailure());
+    const payer = a.signerPool[0].address;
+
+    const error = await caught(() => a.resolvePinnedPublisherSigner(CG, payer, AUTHOR));
+
+    // The transport error itself reaches the classifier, exactly as a transport
+    // failure on the PAYER read already does — so the publisher can retry it.
+    expect(isChainRpcTransportError(error)).toBe(true);
+    expect(error.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(error).not.toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+    expect(error.code).not.toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
+  });
+
+  it('the same transport failure on the POOL branch is rethrown, not reported as a denial', async () => {
+    const { a, pool } = makeAdapter([AUTHOR.toLowerCase()], transportFailure(), {
+      extraKeys: [PK_B],
+    });
+
+    const error = await caught(() => a._authorizedPublisherSigners(pool, CG, AUTHOR));
+
+    expect(isChainRpcTransportError(error)).toBe(true);
+    expect(error).not.toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+  });
+
+  it('a payer-authorized publish is UNAFFECTED by a version-read transport failure', async () => {
+    // The author probe runs before the payer loop, so raising the transport error
+    // where it is computed would break a publish that never needed the author.
+    // It must only surface when we are actually about to reject.
+    const { a, pool } = makeAdapter([], transportFailure(), { extraKeys: [PK_B] });
+    const payerAuthorized = [pool[0].address.toLowerCase()];
+    a.readContract = async (_c: unknown, _l: string, method: string, ...args: unknown[]) => {
+      if (method === 'isAuthorizedPublisher') {
+        return payerAuthorized.includes(String(args[1]).toLowerCase());
+      }
+      throw transportFailure();
+    };
+
+    await expect(a._authorizedPublisherSigners(pool, CG, AUTHOR))
+      .resolves.toEqual([pool[0]]);
+  });
+
+  it('a DETERMINISTIC unreadable version stays a TERMINAL authorization denial', async () => {
+    // `BAD_DATA` is the "this lifecycle has no version() to decode" case. It is a
+    // stable answer, so it must NOT be rethrown as retryable — that would re-open
+    // the forever-retry trap this PR closes. This is the row that fails if the
+    // discriminator is widened from `isChainRpcTransportError` to
+    // `isRetryableRpcError` (which counts BAD_DATA as retryable).
+    const decodeFailure = Object.assign(new Error('could not decode result data'), {
+      code: 'BAD_DATA',
+    });
+    const { a } = makeAdapter([AUTHOR.toLowerCase()], decodeFailure);
+    const payer = a.signerPool[0].address;
+
+    const error = await caught(() => a.resolvePinnedPublisherSigner(CG, payer, AUTHOR));
+
+    expect(error).toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+    expect(error.code).toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
+    expect(isChainRpcTransportError(error)).toBe(false);
   });
 });
 

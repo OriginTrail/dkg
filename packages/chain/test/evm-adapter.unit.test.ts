@@ -4222,7 +4222,15 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       expect(version.calls.length).toBeGreaterThan(0);
     });
 
-    it('(d) REJECTS when version() THROWS — unknown must behave exactly like unsupported', async () => {
+    // Which flavour of "unknown" this pins: a DETERMINISTIC unreadable version —
+    // here an uncoded `Error`. Admission fails closed and the rejection stays a
+    // TERMINAL authorization denial. Note the message text mentions RPC while the
+    // error carries no transport code, and the CODE is what decides: only a
+    // `ChainRpcTransportError` proves the read never reached the chain. A genuine
+    // transport exhaustion is rethrown raw instead, so a transient blip is never
+    // reported as a policy denial — see the `[CH-1689-T]` group in
+    // `evm-adapter-publish-admission.unit.test.ts`.
+    it('(d) REJECTS when version() THROWS — a DETERMINISTIC unknown behaves exactly like unsupported', async () => {
       const { a, walletA } = fundedAdapter();
       authorizeOnly(a, AUTHOR);
       stubLifecycleVersion(a, async () => { throw new Error('RPC endpoint unreachable'); });

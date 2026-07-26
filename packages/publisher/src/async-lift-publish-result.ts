@@ -6,6 +6,7 @@ import {
   messageIndicatesPublishAuthorNotCustodial,
   messageIndicatesPublisherNotAuthorizedForCg,
 } from '@origintrail-official/dkg-core';
+import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import {
@@ -234,6 +235,11 @@ export function mapPublishExceptionToLiftJobFailure(
   // keeps the position it had in its own PR to keep both diffs minimal. Both
   // resolve to `authority_forbidden`, which is why the allowed-states entry for
   // that code lists 'broadcast' for two independent reasons.
+  //
+  // `transportSafeClassification` wraps ONLY the message-text fall-through. The
+  // structured branches above are already correct verdicts keyed on a `.code`, so
+  // running the transport correction over them could only ever downgrade a known
+  // answer to a guess.
   const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'
     ? 'authority_forbidden'
     : isNoFundedWallet && input.failedFromState === 'broadcast'
@@ -244,7 +250,11 @@ export function mapPublishExceptionToLiftJobFailure(
           isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')
         )
           ? 'quorum_unmet'
-          : classifyPublishFailureCode(lower, input.failedFromState);
+          : transportSafeClassification(
+            classifyPublishFailureCode(lower, input.failedFromState),
+            input.error,
+            input.failedFromState,
+          );
 
   return createLiftJobFailureMetadata({
     failedFromState: input.failedFromState,
@@ -299,6 +309,51 @@ export function isDefinitivePreAcceptanceSendFailure(error: unknown): boolean {
   if (messageIndicatesNoFundedPublisherWallet(lowerMessage)) return true;
   if (lowerMessage.includes('revert')) return false;
   return lowerMessage.includes('insufficient funds');
+}
+
+/**
+ * #1689 — a PROVEN chain-RPC transport failure must never be classified as a
+ * MINED outcome.
+ *
+ * `classifyPublishFailureCode` reads message text, and a transport error's
+ * message is not its own: `ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', …)`
+ * splices the underlying node text in verbatim
+ * (`rpc-failover-client.ts` — "…failed on all configured RPC endpoints (…): <node text>").
+ * `missing revert data` is the STANDARD geth/ethers reply to a failed `eth_call`,
+ * and the deployed-lifecycle `version()` probe this PR added IS an `eth_call` — so
+ * the single most likely text on the read we care about used to classify as
+ * `tx_reverted`: terminal, `fail_job`, untouched by `retry()` or the auto-retry
+ * sweep. One 503 during a curator author-publish permanently killed a job the
+ * chain would have accepted. `chain id mismatch` reached `confirmation_mismatch`
+ * the same way.
+ *
+ * Both are wrong BY CONSTRUCTION, not merely undesirable: a transport failure
+ * means no transaction was ever mined, so there is nothing to have reverted and
+ * no confirmation to have mismatched. That principled boundary — rather than a
+ * heuristic about which words are safe — is what this narrows.
+ *
+ * Matched on the STRUCTURED code (`isChainRpcTransportError` over the
+ * chain-namespaced `RPC_*` codes), never on message text, mirroring the
+ * NO_FUNDED_PUBLISHER_WALLET and PUBLISHER_NOT_AUTHORIZED_FOR_CG cases above.
+ *
+ * DELIBERATELY NARROW — only these two outcomes are suppressed:
+ *   - The TIMEOUT path is left exactly as it is. A genuine `RPC_TIMEOUT` during
+ *     SEND must stay `tx_submit_timeout` → `check_chain_then_finalize_or_reset`,
+ *     or #1851's double-submit hole re-opens. `RPC_ENDPOINTS_EXHAUSTED` is itself
+ *     thrown from inside broadcast loops, so it is NOT unambiguously pre-send and
+ *     must not be blanket-mapped to a non-chain-checking resolution.
+ *   - Gated to 'broadcast'. From 'included' the transaction WAS mined, so the
+ *     by-construction argument does not hold — and `rpc_unavailable` is not a
+ *     legal code from that state anyway.
+ */
+function transportSafeClassification(
+  classified: LiftJobFailureMetadata['code'],
+  error: unknown,
+  failedFromState: AsyncLiftPublishFailureInput['failedFromState'],
+): LiftJobFailureMetadata['code'] {
+  if (failedFromState !== 'broadcast') return classified;
+  if (classified !== 'tx_reverted' && classified !== 'confirmation_mismatch') return classified;
+  return isChainRpcTransportError(error) ? 'rpc_unavailable' : classified;
 }
 
 function classifyPublishFailureCode(

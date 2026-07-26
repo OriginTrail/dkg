@@ -28,7 +28,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, PublisherNotAuthorizedForContextGraphError, formatPublisherNotAuthorizedForCgMessage, type PublisherNotAuthorizedForCgDetails, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { ChainRpcTransportError, isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
@@ -225,9 +225,31 @@ export const ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION = '10.1.7';
  * is not an authorized publisher" for an author that was never consulted, sending
  * an operator to rewrite a publish policy over a transient RPC fault.
  */
+/** Outcome of reading the deployed lifecycle's `_VERSION`. */
+export interface DeployedLifecycleVersionRead {
+  /** The deployed `_VERSION`, or `null` when it could not be read. */
+  version: string | null;
+  /**
+   * Set ONLY when `version` is null *because the RPC transport failed* — a proven
+   * `ChainRpcTransportError`, never a deterministic decode. Its presence is what
+   * lets a caller distinguish "policy denied" (terminal) from "could not determine
+   * whether policy denies" (retryable). Absent for an un-versioned lifecycle, an
+   * unparseable version, or an absent contract: those are real, stable answers.
+   */
+  transportError?: unknown;
+}
+
 export interface CgPublishAdmission {
   /** True iff the CG's on-chain publish policy admits this publish. */
   admitted: boolean;
+  /**
+   * Present only when admission could not be DETERMINED because the deployed-version
+   * read failed at the transport layer. `admitted` is still false (fail-closed), but
+   * a caller about to reject MUST rethrow this instead of reporting an authorization
+   * verdict — a transient 503 is not a policy denial, and classifying it as one makes
+   * a recoverable job permanently terminal.
+   */
+  versionReadError?: unknown;
   /** True iff the attested author was actually carried to an `isAuthorizedPublisher`
    *  read. False when no author was supplied, or when the deployed lifecycle does
    *  not consult authors (including "version unreadable"). */
@@ -1380,19 +1402,34 @@ export class EVMChainAdapterBase {
    * ever consulted on a path that is already rejecting, so the extra read is free
    * in the common case.
    */
-  protected async deployedKnowledgeAssetsLifecycleVersion(): Promise<string | null> {
+  protected async deployedKnowledgeAssetsLifecycleVersion(): Promise<DeployedLifecycleVersionRead> {
     const lifecycle = this.contracts.knowledgeAssetsLifecycle;
-    if (!lifecycle) return null;
+    if (!lifecycle) return { version: null };
     try {
       const key = (await lifecycle.getAddress()).toLowerCase();
-      return await this.deployedLifecycleVersionCache.getOrLoad(key, key, async () => String(
+      const version = await this.deployedLifecycleVersionCache.getOrLoad(key, key, async () => String(
         await this.readContract<string>(
           lifecycle, 'knowledgeAssetsLifecycle.version', 'version',
         ),
       ));
-    } catch {
-      /* unknown / pre-versioned lifecycle / read failure → caller fails closed */
-      return null;
+      return { version };
+    } catch (err) {
+      // Callers still fail closed on `version: null` — nothing is admitted on an
+      // unknown version and no transaction is ever built. But WHY it is null
+      // decides whether the eventual rejection may be reported as TERMINAL: a
+      // proven transport exhaustion means "could not determine whether policy
+      // denies", which is not the same claim as "policy denied".
+      //
+      // Discriminate on `isChainRpcTransportError`, NOT `isRetryableRpcError` —
+      // the latter counts `BAD_DATA` as retryable, and `BAD_DATA` is exactly the
+      // "this lifecycle has no `version()` to decode" case that MUST stay
+      // terminal, or the forever-retry trap this PR closes re-opens. Deterministic
+      // errors are rethrown raw by the failover loop and carry no transport code,
+      // so any unrecognised shape defaults to the safe terminal verdict.
+      return {
+        version: null,
+        ...(isChainRpcTransportError(err) ? { transportError: err } : {}),
+      };
     }
   }
 
@@ -1410,7 +1447,7 @@ export class EVMChainAdapterBase {
    * `clearAgents` gate in `getPcaContractContext`.
    */
   protected async attestedAuthorPublishAuthorizationSupported(): Promise<boolean> {
-    const version = await this.deployedKnowledgeAssetsLifecycleVersion();
+    const { version } = await this.deployedKnowledgeAssetsLifecycleVersion();
     if (version === null) return false;
     return contractVersionAtLeast(version, ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
   }
@@ -1448,11 +1485,23 @@ export class EVMChainAdapterBase {
       || attestedAuthorAddress === ethers.ZeroAddress) return notWeighed;
     const contextGraphs = this.contracts.contextGraphs;
     if (!contextGraphs) return notWeighed;
-    const deployedVersion = await this.deployedKnowledgeAssetsLifecycleVersion();
+    const { version: deployedVersion, transportError } =
+      await this.deployedKnowledgeAssetsLifecycleVersion();
     if (deployedVersion === null
       || !contractVersionAtLeast(deployedVersion, ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION)) {
       // The author is NOT consulted on an un-rotated (or unreadable) lifecycle.
-      return { admitted: false, authorConsulted: false, deployedVersion };
+      // `versionReadError` rides along ONLY when the version was unreadable because
+      // the transport failed, so a caller about to reject can tell "policy denied"
+      // from "could not determine". Omitted (not set to undefined) otherwise, so the
+      // exact-shape assertions on this object stay unchanged.
+      return {
+        admitted: false,
+        authorConsulted: false,
+        deployedVersion,
+        ...(deployedVersion === null && transportError !== undefined
+          ? { versionReadError: transportError }
+          : {}),
+      };
     }
     const admitted = Boolean(await this.readContract(
       contextGraphs, 'contextGraphs.isAuthorizedPublisher',
@@ -1560,6 +1609,13 @@ export class EVMChainAdapterBase {
       contextGraphId, selected.address, attestedAuthorAddress,
     );
     if (!admission.admitted) {
+      // A transport failure on the version read means admission was never
+      // DETERMINED. Reporting that as an authorization verdict would be a false
+      // claim, and downstream it becomes a TERMINAL `authority_forbidden` that no
+      // retry will revisit — so one 503 would permanently kill a publish the chain
+      // would have accepted. Rethrow the transport error raw, exactly as a
+      // transport failure on the PAYER read already propagates.
+      if (admission.versionReadError !== undefined) throw admission.versionReadError;
       throw this._publishAuthorizationRejection(
         contextGraphId, selected.address, attestedAuthorAddress, admission,
       );
@@ -2220,6 +2276,13 @@ export class EVMChainAdapterBase {
       }
     }
     if (eligible.length === 0) {
+      // Only here, and only when we are actually about to reject: if the author
+      // probe could not reach the chain, we do not know whether the author would
+      // have admitted this publish, so we must not report an authorization verdict.
+      // Deliberately NOT raised where `authorAdmission` is computed — the payer loop
+      // below it can still find an eligible wallet, and failing early would break a
+      // payer-authorized publish that never needed the author at all.
+      if (authorAdmission.versionReadError !== undefined) throw authorAdmission.versionReadError;
       if (attestedAuthorAddress && ordered.length > 0) {
         throw this._publishAuthorizationRejection(
           contextGraphId,
