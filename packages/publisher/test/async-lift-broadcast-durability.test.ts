@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core';
+import { NO_FUNDED_PUBLISHER_WALLET_CODE, PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
@@ -278,6 +278,56 @@ describe('async lift publisher broadcast durability', () => {
     expect(processed?.failure?.code).toBe('insufficient_funds');
     // Terminal funding failure, off the chain-recovery track (no tx was sent).
     expect(processed?.failure?.resolution).not.toBe('retry_recovery');
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  // GH#1786 (@lupuszr on PR #1969) — the full late-worker proof, not just the mapper unit.
+  // The async lane deliberately ACCEPTS a selected foreign-author UPDATE while wallet
+  // selection is still deferred, so "this node cannot re-sign for that author" is only
+  // discovered here, in the worker. It must be recorded as a PERMANENT authority failure:
+  // before the fix it mapped to retryable `rpc_unavailable`, so the queue reset and retried a
+  // job that can never finalize — the forever-retry trap #1013/#1121 fixed for unfundable
+  // publishes. Drives the real cycle (enqueue → processNext → stored-job readback) rather
+  // than asserting the classifier in isolation.
+  it('records a non-custodial selected-author UPDATE as a TERMINAL authority failure, never retried', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => {
+          // Exactly what _buildPrecomputedUpdateAttestationForSeal raises when the claiming
+          // wallet is neither custodial for the author nor the publisher EOA.
+          throw Object.assign(
+            new Error(
+              'publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation '
+              + 'for author 0xA32f1cc125401B55911678847426759094055B2d — no custodial key on file '
+              + 'and it is not the publisher EOA.',
+            ),
+            { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
+          );
+        },
+      },
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    // Authority, not transport — and explicitly NOT the retryable default it used to get.
+    expect(processed?.failure?.code).toBe('authority_forbidden');
+    expect(processed?.failure?.code).not.toBe('rpc_unavailable');
+    expect(processed?.failure?.retryable).toBe(false);
+    expect(processed?.failure?.resolution).toBe('fail_job');
+
+    // Stored-job readback: the persisted record carries the same terminal classification,
+    // which is what an operator polling /api/publisher/job actually sees.
+    const persisted = await publisher.getStatus(jobId);
+    expect(persisted?.status).toBe('failed');
+    expect(persisted?.failure?.code).toBe('authority_forbidden');
+    expect(persisted?.failure?.retryable).toBe(false);
+    expect(persisted?.failure?.resolution).toBe('fail_job');
+
+    // No tx was sent, so recovery must not adopt it, and it must not be reset for retry.
     expect(await publisher.recover()).toBe(0);
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
   });
