@@ -2776,17 +2776,40 @@ export class EVMChainAdapterBase {
     requiredTracWei: bigint,
     attestedAuthorAddress?: string,
   ): Promise<boolean> {
+    // Captured rather than thrown from inside the map: throwing there would reject
+    // the whole `Promise.all` and could mask a different in-flight rejection. Collect
+    // first, decide after — so any genuine probe failure still propagates unchanged.
+    let versionReadError: unknown;
     const checks = await Promise.all(
       this.signerPool.map(async (s) => {
         // No ContextGraphs surface ⇒ every operational wallet is a candidate
         // (mirrors nextAuthorizedSigner); that fail-open lives in `_cgPublishAdmits`.
-        if (!(await this._cgPublishAdmits(contextGraphId, s.address, attestedAuthorAddress)).admitted) {
+        const admission = await this._cgPublishAdmits(
+          contextGraphId, s.address, attestedAuthorAddress,
+        );
+        if (!admission.admitted) {
+          if (admission.versionReadError !== undefined) {
+            versionReadError = admission.versionReadError;
+          }
           return false;
         }
         return this.isWalletPublishFundable(s.address, await this.getWalletFunding(s.address), requiredTracWei);
       }),
     );
-    return checks.some(Boolean);
+    const fundable = checks.some(Boolean);
+    // THIRD consumer of "inconclusive is not denied". `.admitted === false` alone
+    // cannot distinguish "this wallet may not publish" from "I could not determine
+    // whether it may" — and the sole caller turns a `false` here into a TERMINAL
+    // `NO_FUNDED_PUBLISHER_WALLET`, killing a recoverable job because one `version()`
+    // read hit a transient fault while the memo was cold.
+    //
+    // So when nothing was fundable AND some wallet's admission was inconclusive,
+    // throw: `enrichInsufficientPublisherFundsError`'s existing catch converts that
+    // into "return the ORIGINAL funds error", which is exactly right — a retry can
+    // still reroute. No new plumbing, and no behaviour change when `versionReadError`
+    // is absent (no author ⇒ no version read ⇒ never set).
+    if (!fundable && versionReadError !== undefined) throw versionReadError;
+    return fundable;
   }
 
   /**
