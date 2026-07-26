@@ -4175,10 +4175,22 @@ export class PublishMethods extends DKGAgentBase {
     const opts = typeof subGraphNameOrOpts === 'string' || subGraphNameOrOpts == null
       ? { subGraphName: subGraphNameOrOpts ?? undefined, callerAgentAddress: legacyCallerAgentAddress }
       : subGraphNameOrOpts;
+    // Forward an ALLOW-LIST, never `...opts`. A spread here lands after the positional
+    // coordinate and would let an untyped JS caller — or a widened object — smuggle
+    // `contextGraphId`/`name` through options and resolve against a DIFFERENT assertion
+    // than the one the caller named, on the exported DKGAgent surface. The required
+    // coordinate must always win, and a future option added to the params type must be
+    // forwarded deliberately rather than by accident.
     return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
-      ...opts,
+      subGraphName: opts.subGraphName,
+      callerAgentAddress: opts.callerAgentAddress,
+      // Presence, not truthiness: '' / null are SUPPLIED selectors and must fail closed
+      // downstream, not silently fall back to normal resolution.
+      ...(opts.selectedAuthorAgentAddress !== undefined
+        ? { selectedAuthorAgentAddress: opts.selectedAuthorAgentAddress }
+        : {}),
     });
   }
 

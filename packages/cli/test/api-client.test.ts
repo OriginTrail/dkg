@@ -1100,6 +1100,39 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
   });
 
+  // GH#1786 — the OLDER public wrapper over the same endpoint must expose the selector too:
+  // a typed SDK caller holding only `publishFromFinalizedAssertion` would otherwise have to
+  // cast to `any` to send the very field the AMBIGUOUS_ASSERTION_AUTHOR 409 tells it to
+  // retry with. Be precise about what this test can and cannot prove: no tsconfig in this
+  // repo includes `test/` (every package is `include: ["src"]`), so REMOVING the field from
+  // the wrapper's options type would not fail here — that half is verified by typechecking
+  // this file directly. What this DOES pin is the forwarding: the wrapper currently passes
+  // `options` straight through, but the sibling `publishAssertion` builds its downstream
+  // options from an explicit key-by-key spread, and a refactor of this wrapper into that
+  // shape would silently drop the selector and publish a different author with a 200.
+  it('publishFromFinalizedAssertion forwards the selector top-level, like knowledgeAssetPublish', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+    const calls = track({ kaId: '7', status: 'confirmed' });
+
+    await client.publishFromFinalizedAssertion('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      subGraphName: 'notes',
+      publishEpochs: 12,
+    });
+
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
+    const body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    // Same nesting hazard as the direct lane: a selector inside `options` is silently
+    // ignored by parseHttpFinalizedPublishOptions and would publish a different author.
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
   it('forwards an explicitly empty selector so the daemon can reject it, and omits it when absent', async () => {
     // Presence, not truthiness: silently dropping a malformed selector client-side
     // would let normal author resolution publish a DIFFERENT author with 200 instead

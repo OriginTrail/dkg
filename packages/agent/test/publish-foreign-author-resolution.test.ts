@@ -642,6 +642,34 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     }
   });
 
+  // GH#1786 review round 9 — `resolveAssertionAuthor` is on the exported DKGAgent surface,
+  // so an untyped JS caller (or a widened object) can put `contextGraphId`/`name` INSIDE the
+  // options bag. When the implementation spread `...opts` after the positional coordinate,
+  // those keys won and the resolver inspected a DIFFERENT assertion than the caller named —
+  // silently resolving, and then publishing, the wrong coordinate's author.
+  it('ignores coordinate keys smuggled through the options object', async () => {
+    const store = new OxigraphStore();
+    // MEMBER is the sole author at the REAL coordinate; OTHER is the sole author at the
+    // smuggled one. If the smuggle took effect, selecting MEMBER there has no resident
+    // candidate and the call throws instead of resolving.
+    await store.insert([...sealAt(CG, MEMBER, NAME), ...sealAt('decoy-cg', OTHER, 'decoyName')]);
+    const agent = stubAgent(store, CURATOR);
+
+    expect(await agent.resolveAssertionAuthor(CG, NAME, {
+      contextGraphId: 'decoy-cg',
+      name: 'decoyName',
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
+    } as any)).toBe(MEMBER);
+
+    // And the reverse direction: the decoy coordinate really does hold a DIFFERENT author,
+    // so the assertion above could not have passed by both coordinates agreeing.
+    expect(await agent.resolveAssertionAuthor('decoy-cg', 'decoyName', {
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: OTHER,
+    })).toBe(OTHER);
+  });
+
   it('rejects supplying both agentAddress (override) and selectedAuthorAgentAddress (selection)', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));

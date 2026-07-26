@@ -957,6 +957,13 @@ export class ApiClient {
     assertionName: string,
     options?: {
       subGraphName?: string;
+      /**
+       * GH#1786 — the resident author to publish, for retrying an
+       * `AMBIGUOUS_ASSERTION_AUTHOR` 409. Present on BOTH public entry points that wrap
+       * this endpoint: a typed SDK caller holding only this older wrapper would
+       * otherwise have to cast to `any` to pass the very field the 409 tells it to send.
+       */
+      selectedAuthorAgentAddress?: string;
       clearAfter?: boolean;
       publishEpochs?: number;
       publisherNodeIdentityIdOverride?: bigint;
