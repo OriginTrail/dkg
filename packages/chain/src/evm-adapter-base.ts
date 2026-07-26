@@ -1528,10 +1528,9 @@ export class EVMChainAdapterBase {
       deployedLifecycleVersion: admission.deployedVersion,
       minLifecycleVersion: ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION,
     };
-    return new PublisherNotAuthorizedForContextGraphError(
-      formatPublisherNotAuthorizedForCgMessage(details),
-      details,
-    );
+    // Message derived inside the constructor from exactly these details — see the
+    // constructor doc; there is no way to hand it text that disagrees with them.
+    return new PublisherNotAuthorizedForContextGraphError(details);
   }
 
   /**

@@ -455,12 +455,21 @@ export class PublisherNotAuthorizedForContextGraphError extends Error {
    */
   readonly details: PublisherNotAuthorizedForCgDetails;
 
+  /**
+   * Constructed from `details` ALONE — the message is DERIVED here, never supplied.
+   *
+   * A `(message, details)` signature let a caller build an error whose text does not
+   * describe its own facts — precisely the invariant this type exists to hold, and
+   * our own test defeated it that way. Deriving internally makes "the message
+   * describes these details" structural rather than a convention every future call
+   * site has to remember. A caller wanting arbitrary text should throw a plain
+   * `Error`; this type is for the one rejection whose text is a function of its facts.
+   */
   constructor(
-    message: string,
     details: PublisherNotAuthorizedForCgDetails,
     options?: { cause?: unknown },
   ) {
-    super(message, options);
+    super(formatPublisherNotAuthorizedForCgMessage(details), options);
     this.name = 'PublisherNotAuthorizedForContextGraphError';
     this.details = Object.freeze({
       ...details,
