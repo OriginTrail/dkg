@@ -531,11 +531,26 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *
      *      View-only — no state mutations.
      *
-     *      N17 note: the external signature intentionally takes the paying
-     *      principal as `publisher` rather than the recovered publisher-node
-     *      signer. The matching caller-side fix lives in `KnowledgeAssetsV10`
-     *      Phase 8 — `_executePublishCore` and `_executeUpdateCore` both pass
-     *      `msg.sender` here instead of the recovered node wallet.
+     *      Principal-agnostic: this function answers "is THIS address allowed to
+     *      publish into THIS CG" for whatever address the caller hands it. It
+     *      does not know, and must not assume, which role that address plays in
+     *      the calling transaction. Deciding WHICH principal(s) to ask about is
+     *      the lifecycle's job.
+     *
+     *      N17 note: the external signature intentionally never takes the
+     *      recovered publisher-node signer. The matching caller-side fix lives in
+     *      `KnowledgeAssetsV10` Phase 8 — `_executePublishCore` passes real
+     *      transaction principals here, never the recovered node wallet. It is
+     *      the ONLY caller: `isAuthorizedPublisher` has exactly two call sites
+     *      repo-wide, both inside `_executePublishCore`.
+     *
+     *      #1689: `_executePublishCore` now calls this with BOTH principals a
+     *      publish carries — the paying principal (`msg.sender`) and, only if
+     *      that one is not authorized, the EIP-712-attested author
+     *      (`p.authorAddress`) — and authorizes when EITHER returns true. No
+     *      change was needed here; the widening lives entirely in the lifecycle.
+     *      `_executeUpdateCore` is unaffected (updates are owner-only and do not
+     *      consult CG publish policy at all).
      */
     function isAuthorizedPublisher(
         uint256 contextGraphId,

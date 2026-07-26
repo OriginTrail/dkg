@@ -71,7 +71,15 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * is now a self-claimed attribution field (RFC-001 §3.6).
  *
  * Authorization:
- *   - publish: N17 closure — `isAuthorizedPublisher(msg.sender)` via facade.
+ *   - publish: satisfied by EITHER principal the publish carries —
+ *              `isAuthorizedPublisher(msg.sender)` (the paying principal, N17
+ *              closure) OR `isAuthorizedPublisher(p.authorAddress)` (the
+ *              EIP-712-attested author, proven by `_verifyAuthorAttestation`
+ *              before the gate). #1689: a curated-CG curator can delegate
+ *              payment to a distinct funded wallet without sharing their key.
+ *              Authorization only — payer-of-record, the CG registration
+ *              escrow, the PCA discount and every TRAC transfer stay keyed to
+ *              `msg.sender`.
  *   - update:  enforced in `_executeUpdateCore` as owner-only — the
  *              EIP-712-attested author MUST equal `ownerOf(kaId)`, independent
  *              of CG publish policy. There is no curator/PCA delegation on the
@@ -169,7 +177,17 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     //          and paid one epoch past the purchased lifetime. Also rejects
     //          epochs == 0 (ZeroEpochs) before mutating/paying. PATCH bump — no
     //          ACK / EIP-712 change.
-    string private constant _VERSION = "10.1.6";
+    // 10.1.7 — #1689: the publish authorization gate in `_executePublishCore`
+    //          accepts EITHER the paying principal (`msg.sender`) OR the
+    //          EIP-712-attested author (`p.authorAddress`), instead of the payer
+    //          alone. Pure widening — the accepted set is a strict superset, so
+    //          an OLD client against this contract is unaffected. Payer-of-
+    //          record, the OT-RFC-53 escrow, the PCA discount and all TRAC
+    //          transfers remain keyed to `msg.sender`. PATCH bump — no ABI, ACK
+    //          or EIP-712 change. Clients gate their matching client-side
+    //          relaxation on `version() >= 10.1.7`, so this exact string is a
+    //          capability signal and must not be reused for anything else.
+    string private constant _VERSION = "10.1.7";
 
     /// @notice OT-RFC-49 / WS-B Trap 3: domain-separation version prepended to the
     ///         RAW publish/update ACK preimage (`abi.encodePacked`, later wrapped by
@@ -845,13 +863,52 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // H7: SafeCast guards the uint96 cast in _validateTokenAmount.
         _validateTokenAmount(p.byteSize, p.epochs, p.tokenAmount, false);
 
-        // N17: pass the PAYING PRINCIPAL (msg.sender of this tx — the
-        // publishing agent) to `isAuthorizedPublisher`, NOT the recovered
-        // node signer. The pre-rewrite implementation authorized against
-        // the wrong principal — a paying agent could be rejected if their
-        // node ran the signing, and a non-authorized agent could be
-        // approved if a node it didn't control signed off.
-        if (!contextGraphs.isAuthorizedPublisher(p.contextGraphId, msg.sender)) {
+        // #1689: publish authorization is satisfied by EITHER of the two
+        // principals this publish carries — it is NOT a single-principal gate.
+        //
+        //   1. `msg.sender` — the PAYING principal. Checked FIRST because it is
+        //      the common, already-working case, so the second `eth_call` into
+        //      the facade is only made when the payer alone does not suffice.
+        //   2. `p.authorAddress` — the EIP-712-ATTESTED AUTHOR. It is proven
+        //      immediately above by `_verifyAuthorAttestation` (non-zero via
+        //      `AuthorRequired`, then ECDSA-recovered for EOAs or ERC-1271-
+        //      validated for contract wallets). A forged author claim has
+        //      already reverted, so the author is exactly as trustworthy an
+        //      authorization principal here as `msg.sender` is.
+        //
+        // Why: `isAuthorizedPublisher` requires exact equality with the single
+        // stored authority for a curated CG in EOA/Safe mode. A curator whose
+        // agent identity is wallet `A` could therefore only publish from `A`
+        // itself — any distinct funded operational / async-publisher wallet `P`
+        // was rejected, so delegating payment meant sharing the curator key.
+        //
+        // This SUPERSEDES, and deliberately does NOT revert, the N17 closure.
+        // N17 addressed a DIFFERENT axis — recovered node signer vs paying
+        // principal — and its conclusion is retained verbatim below: we pass the
+        // paying principal, never the node signer, because authorizing the node
+        // signer both rejected a paying agent whose node happened to run the
+        // signing and approved a non-authorized agent that a node it did not
+        // control had signed off. #1689 only ADDS a second accepted principal on
+        // top of that. It is a pure widening: every publish that authorized
+        // before still authorizes, so the shipped #1778 flow (author is a CG
+        // member, the authorized curator pays) is untouched.
+        //
+        // Scope is AUTHORIZATION ONLY. Everything economic and every attribution
+        // stays keyed to `msg.sender` and is intentionally unchanged here:
+        // publisher-of-record (`createKnowledgeAsset(msg.sender, ...)` below),
+        // the OT-RFC-53 CG registration escrow (`_useCgEscrow`), the PCA
+        // discount lookup (`agentToAccountId(msg.sender)` in `publish`), and
+        // every TRAC transfer. Re-keying any of those to the author would let a
+        // holder of an author attestation spend the AUTHOR's escrow or discount,
+        // turning an attacker-funded action into a victim-funded one.
+        //
+        // The revert argument stays `msg.sender` — the ABI is unchanged. The
+        // richer two-principal diagnosis is produced client-side, where
+        // operators actually read it.
+        if (
+            !contextGraphs.isAuthorizedPublisher(p.contextGraphId, msg.sender) &&
+            !contextGraphs.isAuthorizedPublisher(p.contextGraphId, p.authorAddress)
+        ) {
             revert KnowledgeAssetsLib.UnauthorizedPublisher(p.contextGraphId, msg.sender);
         }
 
