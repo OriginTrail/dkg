@@ -29,8 +29,6 @@ import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 
-<<<<<<< HEAD
-=======
 /** Latest-family `eth_getBlockByNumber` block tags that are TIP reads (must stay
  *  preference-transparent). A concrete hex block number or `earliest` is a fixed
  *  block → sticky (prefer the endpoint that already has it). */
@@ -101,7 +99,6 @@ function classifyPcaRead(method: PcaRpcMethod, params: readonly unknown[]): PcaR
   }
 }
 
->>>>>>> c5e4210af (fix(chain): guard createKnowledgeAssets author threading, one version comparator, single-source error facts (#1689))
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
   identityId?: unknown;
