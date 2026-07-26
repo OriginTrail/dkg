@@ -18,30 +18,46 @@
  *   - `evm-adapter-conviction.ts` — PCA `clearAgents` support
  */
 
+/** A parsed contract version: exactly `[major, minor, patch]`. */
+export type VersionTriple = readonly [number, number, number];
+
 /**
- * Parse a `major.minor.patch` contract `_VERSION` string into a numeric triple.
+ * Full-string dotted-integer match, or `null`.
  *
- * Missing or non-numeric components read as 0, so a pre-versioned, empty, or
- * oddly-formatted value sorts BELOW every real release rather than throwing —
- * "unparseable" and "too old" must reach callers as the same answer, since both
- * mean "do not enable the capability". Note this is deliberately NOT semver:
- * pre-release/build suffixes are truncated by `parseInt` (`10.0.6-rc.1` reads as
- * `10.0.6`), which is correct for contract `_VERSION` literals — they are plain
- * dotted integers by convention.
+ * STRICT on purpose. The obvious implementation — `split('.')` plus `parseInt` —
+ * accepts garbage in the direction that reads as a NEWER version: `'11.garbage'`
+ * parses as `11.0.0` and `'10.1.7junk'` as `10.1.7`, so both would ENABLE a
+ * capability gate. Unreachable today because every `_VERSION` is a hardcoded
+ * literal, but this is the one canonical helper future gates will reuse, and a
+ * parser that turns malformed input into a confident "yes" is the wrong thing for
+ * a capability boundary to inherit.
+ *
+ * `null` means "not a version I can read", which callers MUST treat exactly like
+ * "too old" — see {@link contractVersionAtLeast}. Deliberately NOT semver: no
+ * pre-release or build suffixes, because contract `_VERSION` literals are plain
+ * dotted integers by convention and reading `10.0.6-rc.1` as `10.0.6` would be
+ * guessing at intent.
  */
-export function parseContractVersionTriple(raw: string): [number, number, number] {
-  const parts = String(raw).split('.').map((n) => parseInt(n, 10) || 0);
-  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+export function parseContractVersion(raw: string): VersionTriple | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(raw));
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
 
 /**
  * True iff contract version `raw` is at least `minimum`, compared major → minor →
- * patch. Callers gate capabilities on this and MUST fail closed (treat an
- * unreadable version as unsupported) — see the consumers listed above.
+ * patch.
+ *
+ * FAILS CLOSED: an unparseable `raw` (or `minimum`) yields `false`, so "I cannot
+ * read this version" and "this version is too old" reach a capability gate as the
+ * same answer — the only safe conflation, since both mean "do not enable".
  */
 export function contractVersionAtLeast(raw: string, minimum: string): boolean {
-  const [maj, min, pat] = parseContractVersionTriple(raw);
-  const [minMaj, minMin, minPat] = parseContractVersionTriple(minimum);
+  const version = parseContractVersion(raw);
+  const floor = parseContractVersion(minimum);
+  if (version === null || floor === null) return false;
+  const [maj, min, pat] = version;
+  const [minMaj, minMin, minPat] = floor;
   if (maj !== minMaj) return maj > minMaj;
   if (min !== minMin) return min > minMin;
   return pat >= minPat;

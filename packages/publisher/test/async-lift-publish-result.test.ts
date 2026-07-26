@@ -403,16 +403,24 @@ describe('#1689 publish-authorization rejection is terminal', () => {
     // row would still pass through the message fallback even if `.code` broke, so
     // it would not prove what it claims — this isolates the structured-code path
     // as the only thing that can classify it.
-    const error = new PublisherNotAuthorizedForContextGraphError(
-      'context graph publish policy declined this publish',
-      {
-        contextGraphId: 75n,
-        payerAddress: '0x2222222222222222222222222222222222222222',
-        attestedAuthorAddress: '0x1111111111111111111111111111111111111111',
-        attestedAuthorConsidered: true,
-        minLifecycleVersion: '10.1.7',
-      },
-    );
+    // The class now DERIVES its message from `details` (chain round 3): a
+    // `(message, details)` signature allowed an error whose text contradicted its
+    // own facts. Constructing the real class therefore always yields the marker
+    // prefix, so isolating the structured-code path takes an explicit message
+    // override rather than a constructor argument. Intent of this row is unchanged:
+    // the real class, classified with NO marker in its message.
+    const error = new PublisherNotAuthorizedForContextGraphError({
+      contextGraphId: 75n,
+      payerAddress: '0x2222222222222222222222222222222222222222',
+      attestedAuthorAddress: '0x1111111111111111111111111111111111111111',
+      attestedAuthorConsidered: true,
+      minLifecycleVersion: '10.1.7',
+    });
+    Object.defineProperty(error, 'message', {
+      value: 'context graph publish policy declined this publish',
+      configurable: true,
+      writable: true,
+    });
     // The class must carry the shared code — this is the whole cross-package contract.
     expect(error.code).toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
 
@@ -441,8 +449,11 @@ describe('#1689 publish-authorization rejection is terminal', () => {
       + '0x1111111111111111111111111111111111111111 is an authorized publisher for '
       + 'context graph 7.';
 
-    // (a) the real class, carrying the pool shape (`payerPoolAddresses`).
-    const poolError = new PublisherNotAuthorizedForContextGraphError(poolMessage, {
+    // (a) the real class, carrying the pool shape (`payerPoolAddresses`). Its
+    // message is now DERIVED from these details rather than passed in, so this
+    // exercises the production pool wording instead of a restatement of it — and
+    // the assertion below pins that the derived text really is the pool shape.
+    const poolError = new PublisherNotAuthorizedForContextGraphError({
       contextGraphId: 7n,
       payerAddress: '0x2222222222222222222222222222222222222222',
       payerPoolAddresses: [
@@ -453,6 +464,10 @@ describe('#1689 publish-authorization rejection is terminal', () => {
       attestedAuthorConsidered: true,
       minLifecycleVersion: '10.1.7',
     });
+    expect(poolError.message).toContain(
+      'neither any of the 2 operational wallets in the signer pool',
+    );
+    expect(poolError.message.startsWith(PUBLISHER_NOT_AUTHORIZED_FOR_CG_MESSAGE_PREFIX)).toBe(true);
     expect(mapPublishExceptionToLiftJobFailure({
       error: poolError,
       failedFromState: 'broadcast',

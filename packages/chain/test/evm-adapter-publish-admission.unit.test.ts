@@ -484,13 +484,16 @@ describe('#1689 publish admission — cross-package version coupling [CH-1689-V]
 
 describe('#1689 publish admission — error predicate is throw-safe [CH-1689-P]', () => {
   it('classifies by code and by message marker', () => {
-    const err = new PublisherNotAuthorizedForContextGraphError('boom', {
+    const err = new PublisherNotAuthorizedForContextGraphError({
       contextGraphId: CG,
       payerAddress: AUTHOR,
       attestedAuthorConsidered: false,
       minLifecycleVersion: ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION,
     });
     expect(isPublisherNotAuthorizedForCgError(err)).toBe(true);
+    // Constructing from details ALONE is now the only shape: the message is
+    // derived, so an error whose text contradicts its own facts is unconstructible.
+    expect(err.message).toBe(formatPublisherNotAuthorizedForCgMessage(err.details));
     // Code stripped by a re-wrap → the message prefix still classifies it.
     expect(isPublisherNotAuthorizedForCgError(
       new Error(formatPublisherNotAuthorizedForCgMessage({
