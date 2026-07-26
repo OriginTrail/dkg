@@ -1001,7 +1001,11 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(res.body.candidates).toEqual(candidates);
       });
 
-      it(`${lane} answers a non-custodial foreign-author update with 409 and enqueues nothing`, async () => {
+      // NOTE: this pins the route's error MAPPING (given the agent raises the code, the lane
+      // answers 409 and enqueues nothing). It does NOT claim the async lane detects the
+      // condition in production — with wallet selection deferred the agent deliberately does
+      // not raise it there, which the `does not pre-refuse` test below pins instead.
+      it(`${lane} maps a raised PUBLISH_AUTHOR_NOT_CUSTODIAL to 409 and enqueues nothing`, async () => {
         const notCustodial = () => {
           throw Object.assign(
             new Error('cannot re-sign UpdateAuthorAttestation for author'),
@@ -1080,6 +1084,56 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(calls).toHaveLength(0);
       });
     }
+
+    // Production-path counterpart to the mapping test above. The async route does not pass a
+    // publisherOverride, so with wallet selection deferred the agent cannot soundly judge the
+    // signer and deliberately does NOT pre-refuse: the lane accepts (202) and a non-signable
+    // foreign-author update surfaces later as a worker failure. Pinning the accept keeps the
+    // documented contract honest — the immediate 409 is a SYNC-lane guarantee only.
+    it('vm/publish-async accepts (202) a foreign-author update it cannot pre-judge, rather than pre-refusing', async () => {
+      const enqueued: unknown[] = [];
+      await startWith({}, {
+        // The real intent path: no throw — it cannot determine the eventual signer.
+        resolveFinalizedAssertionVmPublishIntent: async (_cg: string, _n: string, opts: any) => {
+          expect(opts.selectedAuthorAgentAddress).toBe(SELECTED);
+          // The route never supplies one, which is exactly why the gate stays silent.
+          expect(opts.publisherOverride).toBeUndefined();
+          return {
+            contextGraphId: CG_ID,
+            name: ASSERTION_NAME,
+            agentAddress: SELECTED,
+            shareOperationId: 'share-deferred',
+            roots: ['urn:test:deferred-root'],
+            seal: {
+              merkleRoot: `0x${'12'.repeat(32)}`,
+              authorAddress: SELECTED,
+              signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+              schemeVersion: 1,
+            },
+            sealChainId: '31337',
+            sealKav10Address: '0x2222222222222222222222222222222222222222',
+            sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+            sealMerkleRoot: `0x${'12'.repeat(32)}`,
+            intentKey: `sha256:${'cc'.repeat(32)}`,
+          };
+        },
+        preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+          enqueued.push(intent);
+          return 'job-deferred';
+        },
+      });
+
+      const res = await post('vm/publish-async', {
+        contextGraphId: CG_ID,
+        selectedAuthorAgentAddress: SELECTED,
+      });
+
+      expect(res.status).toBe(202);
+      expect(res.body.agentAddress).toBe(SELECTED);
+      expect(enqueued).toHaveLength(1);
+    });
 
     it('create+alsoPublishVm rejects the selector in both positions, before any mutation', async () => {
       // A 400 returned AFTER creating/finalizing would be a much worse regression than no

@@ -329,9 +329,17 @@ assertion** — it never confers authorship. It must be **top level** (inside `o
 rejected `400`), and an address that is not a resident candidate is rejected
 `409 { code: "ASSERTION_AUTHOR_NOT_RESIDENT", candidates: [...] }` rather than publishing
 anything. Publishing another author's KA works for the initial **mint** (their sealed
-attestation is replayed), but an **update** of a foreign author's KA returns
-`409 PUBLISH_AUTHOR_NOT_CUSTODIAL` unless that author's key is custodial on this node — use
-`/api/update` with a pre-signed `UpdateAuthorAttestation` instead.
+attestation is replayed), but an **update** of a foreign author's KA needs that author's key
+to be custodial on this node — otherwise use `/api/update` with a pre-signed
+`UpdateAuthorAttestation`.
+
+How that surfaces differs by lane, deliberately. On the **synchronous** `vm/publish` the node
+knows the signer, so it answers `409 PUBLISH_AUTHOR_NOT_CUSTODIAL` immediately. On
+**`vm/publish-async`** the publisher wallet is chosen later by whichever worker claims the
+job, so at accept time the node cannot know which signer will run it; rather than refuse a
+publish a different wallet could have made, it accepts (`202`) and the condition surfaces as
+a job failure carrying the same code. Poll `/api/publisher/job` — or read the `agentAddress`
+echoed in the 202 body to confirm which author was selected before the job runs.
 **Preconditions:** the assertion must be finalized **and** present in SWM (else
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the

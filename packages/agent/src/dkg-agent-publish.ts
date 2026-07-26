@@ -6179,7 +6179,10 @@ export class PublishMethods extends DKGAgentBase {
     // GH#1786 — one predicate owns "can this node re-sign for that author", shared with
     // the pre-enqueue preflight on the async lane so the two cannot drift.
     if (!custodialKey
-      && !(await this._canReSignUpdateAttestationForAuthor(seal.authorAddress, publisherOverride))) {
+      // Sync signing path: the publisher resolved here IS the one about to sign.
+      && !(await this._canReSignUpdateAttestationForAuthor(
+        seal.authorAddress, publisherOverride ?? this.publisher,
+      ))) {
       throw updateAttestationNotCustodialError(seal.authorAddress);
     }
     let r: Uint8Array;
@@ -6214,10 +6217,14 @@ export class PublishMethods extends DKGAgentBase {
   async _canReSignUpdateAttestationForAuthor(
     this: DKGAgent,
     authorAddress: string,
-    publisherOverride?: DKGPublisher,
+    // REQUIRED, deliberately: the answer is only meaningful for the signer actually being
+    // asked about. Defaulting to `this.publisher` would silently give an async caller — where
+    // wallet selection is deferred and the claiming wallet brings its own signer — a
+    // confident answer about the wrong EOA. That was a real bug (GH#1786 review); making the
+    // argument explicit stops the same call from being written again.
+    publisher: DKGPublisher,
   ): Promise<boolean> {
     if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
-    const publisher = publisherOverride ?? this.publisher;
     const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
     return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }
