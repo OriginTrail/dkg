@@ -90,6 +90,10 @@ describe('publish-author-not-custodial cross-package message contract', () => {
     expect(messageIndicatesPublishAuthorNotCustodial(message)).toBe(true);
     // The address is in the message: it is the actionable part for the operator.
     expect(message).toContain('0xA32f1cc125401B55911678847426759094055B2d');
+    // Transport-neutral: this package is shared with non-HTTP consumers, so the CONDITION
+    // lives here but naming a route to call instead is the throw site's presentation. A
+    // regression that folds remediation back into core would fail here.
+    expect(message).not.toContain('/api/');
   });
 
   it('still matches when the message is re-wrapped with a prefix and lowercased', () => {

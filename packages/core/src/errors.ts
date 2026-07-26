@@ -81,12 +81,16 @@ const PUBLISH_AUTHOR_NOT_CUSTODIAL_MARKER = new RegExp(
   'i',
 );
 
-/** The canonical message for {@link PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE}. Built here, beside
- *  the marker it must keep containing, rather than inline at the throw site. */
+/** The canonical CONDITION sentence for {@link PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE}: what is
+ *  true, and why. Built here, beside the marker it must keep containing, rather than inline at
+ *  the throw site — so a re-wording cannot un-classify the failure downstream.
+ *
+ *  Deliberately transport-neutral. Remediation ("call X instead") is presentation owned by the
+ *  layer that has an endpoint to name; this package is shared with non-HTTP consumers and
+ *  must not encode one API's route names. Throw sites append their own guidance. */
 export function formatPublishAuthorNotCustodialMessage(authorAddress: string): string {
   return `${PUBLISH_AUTHOR_NOT_CUSTODIAL_MESSAGE_MARKER} for author ${authorAddress} — no `
-    + `custodial key on file and it is not the publisher EOA. Use the /api/update route with `
-    + `a pre-signed UpdateAuthorAttestation instead.`;
+    + `custodial key on file and it is not the publisher EOA.`;
 }
 
 /** True iff a message string indicates a non-custodial-author publish failure — the

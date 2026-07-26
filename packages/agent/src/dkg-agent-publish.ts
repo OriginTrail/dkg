@@ -479,11 +479,16 @@ const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
  * report it identically.
  */
 function updateAttestationNotCustodialError(authorAddress: string): Error {
-  // Message from the shared core formatter, not inline text: the publisher's async-job
-  // classifier keys its code-stripped fallback off the same marker, so a re-wording here
+  // CONDITION from the shared core formatter, not inline text: the publisher's async-job
+  // classifier keys its code-stripped fallback off the same marker, so a re-wording there
   // cannot silently drop the failure back into the retryable `rpc_unavailable` default.
+  // REMEDIATION is composed here, because naming a route is presentation and core is shared
+  // with non-HTTP consumers — it is this API surface's contract, not the error contract's.
   return Object.assign(
-    new Error(formatPublishAuthorNotCustodialMessage(authorAddress)),
+    new Error(
+      `${formatPublishAuthorNotCustodialMessage(authorAddress)} Use the /api/update route `
+        + `with a pre-signed UpdateAuthorAttestation instead.`,
+    ),
     { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
   );
 }
