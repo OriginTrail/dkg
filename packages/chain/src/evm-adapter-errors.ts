@@ -455,12 +455,6 @@ export class PublisherNotAuthorizedForContextGraphError extends Error {
    */
   readonly details: PublisherNotAuthorizedForCgDetails;
 
-  // Flattened conveniences, retained so existing consumers keep compiling.
-  readonly contextGraphId: bigint;
-  readonly payerAddress: string;
-  readonly payerPoolAddresses?: readonly string[];
-  readonly attestedAuthorAddress?: string;
-
   constructor(
     message: string,
     details: PublisherNotAuthorizedForCgDetails,
@@ -474,10 +468,29 @@ export class PublisherNotAuthorizedForContextGraphError extends Error {
         ? Object.freeze([...details.payerPoolAddresses])
         : undefined,
     });
-    this.contextGraphId = details.contextGraphId;
-    this.payerAddress = details.payerAddress;
-    this.payerPoolAddresses = this.details.payerPoolAddresses;
-    this.attestedAuthorAddress = details.attestedAuthorAddress;
+  }
+
+  // Flattened accessors over the SINGLE source of state above. Getters rather than
+  // copied fields so the two representations cannot drift apart — the same failure
+  // the `message === format(details)` assertion forecloses one layer up, closed
+  // here at the field layer, and one less decision ("one place or two?") for every
+  // field added later.
+  //
+  // Safe as getters specifically because nothing spreads or JSON-serializes this
+  // error: the publisher classifier reads `.code`/`.message` by plain property
+  // access (`readPublishErrorFacts`), and `errorMessage()` takes its
+  // `err instanceof Error` branch before any `JSON.stringify` fallback. Were that
+  // to change, these would need to go back to own enumerable properties.
+  get contextGraphId(): bigint { return this.details.contextGraphId; }
+
+  get payerAddress(): string { return this.details.payerAddress; }
+
+  get payerPoolAddresses(): readonly string[] | undefined {
+    return this.details.payerPoolAddresses;
+  }
+
+  get attestedAuthorAddress(): string | undefined {
+    return this.details.attestedAuthorAddress;
   }
 }
 
