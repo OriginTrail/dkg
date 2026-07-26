@@ -67,6 +67,13 @@ export interface LiftJobTimeoutMetadata {
 export interface LiftJobFailurePolicy {
   readonly code: LiftJobFailureCode;
   readonly phase: LiftJobFailurePhase;
+  /**
+   * Phase override for codes reachable from states in DIFFERENT phases. `phase` is persisted
+   * and returned by the publisher job APIs, so a single fixed value would contradict
+   * `failedFromState` for one of them. Absent for single-phase codes, which keep `phase`
+   * verbatim.
+   */
+  readonly phaseByState?: Readonly<Partial<Record<LiftJobActiveState, LiftJobFailurePhase>>>;
   readonly mode: LiftJobFailureMode;
   readonly retryable: boolean;
   readonly resolution: LiftJobFailureResolution;
@@ -96,7 +103,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
   publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
-  authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  authority_forbidden: { code: 'authority_forbidden', phase: 'validation', phaseByState: { broadcast: 'broadcast' }, mode: 'terminal', retryable: false, resolution: 'fail_job' },
   validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
   wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
   wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
@@ -179,7 +186,9 @@ export function createLiftJobFailureMetadata(
 
   return {
     ...params,
-    phase: policy.phase,
+    // Per-state phase where the code spans phases, so the persisted `phase` can never
+    // contradict the persisted `failedFromState`.
+    phase: policy.phaseByState?.[params.failedFromState] ?? policy.phase,
     mode: policy.mode,
     retryable: policy.retryable,
     resolution: policy.resolution,

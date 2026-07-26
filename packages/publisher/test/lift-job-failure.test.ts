@@ -43,6 +43,39 @@ describe('LiftJob failure classification', () => {
     expect(isRetryableLiftJobFailure('authority_forbidden')).toBe(false);
   });
 
+  // GH#1786 — `authority_forbidden` became reachable from `broadcast` (the worker discovers
+  // mid-publish that it cannot re-sign the selected author's UpdateAuthorAttestation), so it
+  // now spans two phases. `phase` is persisted and returned by the job APIs, so it must
+  // follow the state rather than a fixed policy value — otherwise an operator filtering by
+  // phase sees a broadcast-time failure labelled validation.
+  it('derives the authority_forbidden phase from the state it failed from', () => {
+    const fromValidated = createLiftJobFailureMetadata({
+      code: 'authority_forbidden',
+      failedFromState: 'validated',
+      errorPayloadRef: 'urn:error:not-custodial-validated',
+    });
+    expect(fromValidated.phase).toBe('validation');
+
+    const fromClaimed = createLiftJobFailureMetadata({
+      code: 'authority_forbidden',
+      failedFromState: 'claimed',
+      errorPayloadRef: 'urn:error:not-custodial-claimed',
+    });
+    expect(fromClaimed.phase).toBe('validation');
+
+    const fromBroadcast = createLiftJobFailureMetadata({
+      code: 'authority_forbidden',
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:not-custodial-broadcast',
+    });
+    expect(fromBroadcast.phase).toBe('broadcast');
+    // Terminal either way — the override changes only the reported phase.
+    expect(fromBroadcast.retryable).toBe(false);
+    expect(fromBroadcast.resolution).toBe('fail_job');
+    // The POLICY default is untouched, so single-phase codes keep reading `phase` verbatim.
+    expect(getLiftJobFailurePolicy('authority_forbidden').phase).toBe('validation');
+  });
+
   it('classifies ambiguous broadcast timeouts as chain-check recoverable', () => {
     const policy = getLiftJobFailurePolicy('tx_submit_timeout');
 

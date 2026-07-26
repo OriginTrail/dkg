@@ -1513,6 +1513,13 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(processed?.failure?.code).not.toBe('rpc_unavailable');
       expect(processed?.failure?.retryable).toBe(false);
       expect(processed?.failure?.resolution).toBe('fail_job');
+      // No transaction was ever sent — the refusal happens while building the attestation,
+      // before the pre-send write-ahead. State and phase must both say validation, and the
+      // record must carry no broadcast/tx metadata claiming otherwise.
+      expect(processed?.failure?.failedFromState).toBe('validated');
+      expect(processed?.failure?.phase).toBe('validation');
+      expect(processed?.broadcast).toBeUndefined();
+      expect(processed?.inclusion).toBeUndefined();
 
       // The real handler rethrew VERBATIM instead of treating this as the
       // CG-not-registered case: one publish attempt, no auto-registration.
@@ -1525,6 +1532,10 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(persisted?.failure?.code).toBe('authority_forbidden');
       expect(persisted?.failure?.retryable).toBe(false);
       expect(persisted?.failure?.resolution).toBe('fail_job');
+      expect(persisted?.failure?.failedFromState).toBe('validated');
+      expect(persisted?.failure?.phase).toBe('validation');
+      expect(persisted?.broadcast).toBeUndefined();
+      expect(persisted?.inclusion).toBeUndefined();
 
       // Never retried: nothing to recover, and the job stays terminal.
       expect(await runtime.publisher.recover()).toBe(0);

@@ -318,6 +318,13 @@ describe('async lift publisher broadcast durability', () => {
     expect(processed?.failure?.code).not.toBe('rpc_unavailable');
     expect(processed?.failure?.retryable).toBe(false);
     expect(processed?.failure?.resolution).toBe('fail_job');
+    // The refusal is raised while BUILDING the attestation, strictly before the write-ahead
+    // records 'broadcast', so NO transaction was sent. The record must say so: recording
+    // 'broadcast' here would publish a phantom broadcast (and mislabel the phase with it).
+    expect(processed?.failure?.failedFromState).toBe('validated');
+    expect(processed?.failure?.phase).toBe('validation');
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.inclusion).toBeUndefined();
 
     // Stored-job readback: the persisted record carries the same terminal classification,
     // which is what an operator polling /api/publisher/job actually sees.
@@ -326,6 +333,11 @@ describe('async lift publisher broadcast durability', () => {
     expect(persisted?.failure?.code).toBe('authority_forbidden');
     expect(persisted?.failure?.retryable).toBe(false);
     expect(persisted?.failure?.resolution).toBe('fail_job');
+    expect(persisted?.failure?.failedFromState).toBe('validated');
+    expect(persisted?.failure?.phase).toBe('validation');
+    // No tx metadata anywhere in the persisted record.
+    expect(persisted?.broadcast).toBeUndefined();
+    expect(persisted?.inclusion).toBeUndefined();
 
     // No tx was sent, so recovery must not adopt it, and it must not be reset for retry.
     expect(await publisher.recover()).toBe(0);
