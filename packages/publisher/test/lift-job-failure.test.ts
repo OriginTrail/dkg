@@ -43,37 +43,47 @@ describe('LiftJob failure classification', () => {
     expect(isRetryableLiftJobFailure('authority_forbidden')).toBe(false);
   });
 
-  // GH#1786 — `authority_forbidden` became reachable from `broadcast` (the worker discovers
-  // mid-publish that it cannot re-sign the selected author's UpdateAuthorAttestation), so it
-  // now spans two phases. `phase` is persisted and returned by the job APIs, so it must
-  // follow the state rather than a fixed policy value — otherwise an operator filtering by
-  // phase sees a broadcast-time failure labelled validation.
-  it('derives the authority_forbidden phase from the state it failed from', () => {
-    const fromValidated = createLiftJobFailureMetadata({
+  // GH#1786 — `authority_forbidden` became reachable from `broadcast` as a defensive
+  // fallback (if a re-wrap hides the marker from the no-send precondition check, the mapper
+  // is the last thing between a permanent failure and the retryable rpc_unavailable default).
+  // Widening the ALLOWED STATES must not change the reported phase: `phase` is the CONCERN
+  // that failed, not a mirror of the state. Author capability is a validation concern from
+  // every state, exactly as `wallet_claim_timeout` stays a 'broadcast' concern when raised
+  // from 'accepted'. Expected values are written out here rather than derived from the
+  // production policy, so a wrong policy cannot make this test agree with it.
+  it('keeps authority_forbidden a validation concern from every state it is allowed from', () => {
+    for (const state of ['claimed', 'validated', 'broadcast'] as const) {
+      const failure = createLiftJobFailureMetadata({
+        code: 'authority_forbidden',
+        failedFromState: state,
+        errorPayloadRef: `urn:error:not-custodial-${state}`,
+      });
+      expect(failure.failedFromState).toBe(state);
+      expect(failure.phase).toBe('validation');
+      // Terminal from every origin — the widening is about REACHABILITY, not policy.
+      expect(failure.retryable).toBe(false);
+      expect(failure.resolution).toBe('fail_job');
+    }
+    // 'accepted' is still rejected: nothing has tried to sign yet.
+    expect(() => createLiftJobFailureMetadata({
       code: 'authority_forbidden',
-      failedFromState: 'validated',
-      errorPayloadRef: 'urn:error:not-custodial-validated',
-    });
-    expect(fromValidated.phase).toBe('validation');
+      failedFromState: 'accepted',
+      errorPayloadRef: 'urn:error:not-custodial-accepted',
+    })).toThrow(/Invalid LiftJob failure state for code authority_forbidden/);
+  });
 
-    const fromClaimed = createLiftJobFailureMetadata({
-      code: 'authority_forbidden',
-      failedFromState: 'claimed',
-      errorPayloadRef: 'urn:error:not-custodial-claimed',
+  // The concern-vs-state distinction, stated on a PRE-EXISTING code so the rule is pinned
+  // independently of GH#1786: claiming a wallet is a broadcast concern even when the job is
+  // still 'accepted'. A future change that derives phase from the state would break here.
+  it('reports the concern phase, not the state phase, for wallet_claim_timeout', () => {
+    const failure = createLiftJobFailureMetadata({
+      code: 'wallet_claim_timeout',
+      failedFromState: 'accepted',
+      errorPayloadRef: 'urn:error:wallet-claim',
+      timeout: { timeoutMs: 1000, timeoutAt: 1, handling: 'reset_to_accepted' },
     });
-    expect(fromClaimed.phase).toBe('validation');
-
-    const fromBroadcast = createLiftJobFailureMetadata({
-      code: 'authority_forbidden',
-      failedFromState: 'broadcast',
-      errorPayloadRef: 'urn:error:not-custodial-broadcast',
-    });
-    expect(fromBroadcast.phase).toBe('broadcast');
-    // Terminal either way — the override changes only the reported phase.
-    expect(fromBroadcast.retryable).toBe(false);
-    expect(fromBroadcast.resolution).toBe('fail_job');
-    // The POLICY default is untouched, so single-phase codes keep reading `phase` verbatim.
-    expect(getLiftJobFailurePolicy('authority_forbidden').phase).toBe('validation');
+    expect(failure.failedFromState).toBe('accepted');
+    expect(failure.phase).toBe('broadcast');
   });
 
   it('classifies ambiguous broadcast timeouts as chain-check recoverable', () => {

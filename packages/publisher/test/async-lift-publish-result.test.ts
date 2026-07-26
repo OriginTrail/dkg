@@ -220,11 +220,11 @@ describe('async lift publish result mapping', () => {
     expect(failure.code).toBe('authority_forbidden');
     expect(failure.retryable).toBe(false);
     expect(failure.resolution).toBe('fail_job');
-    // `phase` is persisted and returned by the job APIs, so it must not contradict
-    // `failedFromState`: this code is also reachable from claimed/validated, where the
-    // phase IS 'validation'. A fixed policy phase would report this broadcast-time
-    // failure as validation to anyone filtering by phase.
-    expect(failure.phase).toBe('broadcast');
+    // 'validation' even though this mapper only sees the broadcast origin: `phase` names the
+    // CONCERN that failed, not the state. Author capability is a validation concern wherever
+    // it surfaces — the same way wallet_claim_timeout stays a 'broadcast' concern when raised
+    // from 'accepted'. `failedFromState` is what says where the job stopped.
+    expect(failure.phase).toBe('validation');
   });
 
   it('classifies a code-stripped non-custodial author error (message marker only) as terminal', () => {
@@ -240,7 +240,7 @@ describe('async lift publish result mapping', () => {
 
     expect(failure.code).toBe('authority_forbidden');
     expect(failure.retryable).toBe(false);
-    expect(failure.phase).toBe('broadcast');
+    expect(failure.phase).toBe('validation');
   });
 
   it('classifies a code-stripped funds error (message marker only) as terminal insufficient_funds from broadcast', () => {
