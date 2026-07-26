@@ -189,6 +189,16 @@ describe('#1689 publish admission — diagnostic accuracy [CH-1689-D]', () => {
 
     // Frozen: one error's diagnosis cannot be mutated into disagreeing with its text.
     expect(Object.isFrozen(error.details)).toBe(true);
+
+    // The flattened accessors are VIEWS over `details`, not copies. Assert they
+    // agree with it, or a getter could quietly return something else and the
+    // "single source of state" this shape exists to guarantee would be a fiction.
+    // (Found by mutation: returning a constant from `payerAddress` was invisible
+    // to every assertion above.)
+    expect(error.payerAddress).toBe(error.details.payerAddress);
+    expect(error.contextGraphId).toBe(error.details.contextGraphId);
+    expect(error.attestedAuthorAddress).toBe(error.details.attestedAuthorAddress);
+    expect(error.payerPoolAddresses).toBe(error.details.payerPoolAddresses);
   });
 
   it('carries the pool facts on a signer-pool rejection, author consulted and refused', async () => {
@@ -205,6 +215,9 @@ describe('#1689 publish admission — diagnostic accuracy [CH-1689-D]', () => {
       .toBe(ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
     expect(error.details.payerPoolAddresses).toEqual(pool.map((w) => w.address));
     expect(error.message).toBe(formatPublisherNotAuthorizedForCgMessage(error.details));
+    // Accessor agrees with the single source, including on the pool shape.
+    expect(error.payerPoolAddresses).toBe(error.details.payerPoolAddresses);
+    expect(error.payerAddress).toBe(error.details.payerAddress);
   });
 });
 
@@ -292,6 +305,87 @@ describe('#1689 publish admission — one condition, one error contract [CH-1689
     );
     await expect(a._authorizedPublisherSigners(pool, CG, AUTHOR)).resolves.toEqual(pool);
     expect(counts.isAuthorizedPublisher).toBe(1);
+  });
+});
+
+describe('#1689 publish admission — createKnowledgeAssets threads the author [CH-1689-K]', () => {
+  // The gates are mutation-proven, and the publisher forwards the author to the
+  // PLANNER — but nothing asserted that `createKnowledgeAssets` itself passes
+  // `params.author.address` into the gates it calls. Remove that threading and the
+  // direct/sync publish path pre-rejects whenever only the author is authorized,
+  // while planner tests, contract tests, protected-helper tests and publisher
+  // forwarding all stay green. A line whose deletion nothing notices.
+  //
+  // So these drive the PUBLIC method and assert selection was REACHED: the
+  // lifecycle handle throws a sentinel the instant a signer has been chosen, so
+  // seeing the sentinel proves the gate admitted the publish, and seeing a
+  // publish-authorization error proves it did not.
+  const SENTINEL = 'SELECTION_REACHED_SENTINEL';
+
+  function makePublishAdapter(authorized: string[], opts: { extraKeys?: string[] } = {}) {
+    const { a, counts, pool } = makeAdapter(
+      authorized, ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION, opts,
+    );
+    // Reached immediately after selection (`lifecycle.connect(txSigner)` then
+    // `.getAddress()`), and before any transaction is built or sent.
+    a.contracts.knowledgeAssetsLifecycle = {
+      getAddress: async () => '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa',
+      connect: () => ({ getAddress: async () => { throw new Error(SENTINEL); } }),
+    };
+    // Funding-aware selection must not be what rejects.
+    a.getWalletFunding = async () => ({ native: 10n ** 18n, trac: 10n ** 18n });
+    a.isWalletPublishFundable = async () => true;
+    a.quoteRequiredPublishTokenAmount = async () => 0n;
+    return { a, counts, pool };
+  }
+
+  const publishParams = (author: string, publisherAddress?: string) => ({
+    publishOperationId: `0x${'ab'.repeat(32)}`,
+    contextGraphId: CG,
+    merkleRoot: new Uint8Array(32),
+    knowledgeAssetsAmount: 1,
+    byteSize: 128n,
+    epochs: 1,
+    tokenAmount: 0n,
+    isImmutable: false,
+    merkleLeafCount: 1,
+    publisherNodeIdentityId: 1n,
+    author: {
+      address: author,
+      signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      schemeVersion: 1,
+    },
+    ackSignatures: [],
+    ...(publisherAddress ? { publisherAddress } : {}),
+  });
+
+  it('PINNED payer: an authorized author admits a payer the CG does not authorize', async () => {
+    // Only the attested author is authorized — the pinned wallet is not.
+    const { a, pool } = makePublishAdapter([AUTHOR.toLowerCase()]);
+    const error = await caught(() => a.createKnowledgeAssets(
+      publishParams(AUTHOR, pool[0].address),
+    ));
+    // Reaching the sentinel means the gate admitted and a signer was selected.
+    expect(error.message).toBe(SENTINEL);
+    expect(error).not.toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+  });
+
+  it('UNPINNED pool: an authorized author admits the pool for funding-aware selection', async () => {
+    const { a } = makePublishAdapter([AUTHOR.toLowerCase()], { extraKeys: [PK_B] });
+    const error = await caught(() => a.createKnowledgeAssets(publishParams(AUTHOR)));
+    expect(error.message).toBe(SENTINEL);
+    expect(error).not.toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+  });
+
+  it('PINNED payer: with NEITHER principal authorized it still rejects (gate not simply bypassed)', async () => {
+    // Guards the two above from passing for the wrong reason — if the threading
+    // were replaced by "skip the gate", this would reach the sentinel too.
+    const { a, pool } = makePublishAdapter([]);
+    const error = await caught(() => a.createKnowledgeAssets(
+      publishParams(AUTHOR, pool[0].address),
+    ));
+    expect(error).toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+    expect(error.code).toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
   });
 });
 

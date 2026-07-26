@@ -62,6 +62,7 @@ import {
   AbortableKeyedSingleFlight,
   ReadThroughTtlCache,
 } from './keyed-ttl-single-flight-cache.js';
+import { contractVersionAtLeast } from './contract-version.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
@@ -264,17 +265,6 @@ export const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
 export const ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION = '10.1.7';
 
 /**
- * Parse a `major.minor.patch` contract `_VERSION` string into a numeric triple.
- * Missing or non-numeric components read as 0 — the same tolerance as the PCA
- * `clearAgents` version gate (`evm-adapter-conviction.ts`), so a pre-versioned or
- * oddly-formatted contract sorts BELOW every real release rather than throwing.
- */
-function parseContractVersionTriple(raw: string): [number, number, number] {
-  const parts = String(raw).split('.').map((n) => parseInt(n, 10) || 0);
-  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
-}
-
-/**
  * What the context-graph publish gate decided AND the facts it used (GH#1689).
  *
  * Returned instead of a bare boolean so a rejection is explained from the single
@@ -293,15 +283,6 @@ export interface CgPublishAdmission {
   authorConsulted: boolean;
   /** Deployed lifecycle version observed while deciding; `null` when unread or not needed. */
   deployedVersion: string | null;
-}
-
-/** True iff contract version `raw` is at least `minimum`, compared major → minor → patch. */
-function contractVersionAtLeast(raw: string, minimum: string): boolean {
-  const [maj, min, pat] = parseContractVersionTriple(raw);
-  const [minMaj, minMin, minPat] = parseContractVersionTriple(minimum);
-  if (maj !== minMaj) return maj > minMaj;
-  if (min !== minMin) return min > minMin;
-  return pat >= minPat;
 }
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';

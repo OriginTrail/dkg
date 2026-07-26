@@ -10,6 +10,7 @@
  */
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { contractVersionAtLeast } from './contract-version.js';
 import { ethers, Contract } from 'ethers';
 import type {
   TxResult,
@@ -28,6 +29,79 @@ import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 
+<<<<<<< HEAD
+=======
+/** Latest-family `eth_getBlockByNumber` block tags that are TIP reads (must stay
+ *  preference-transparent). A concrete hex block number or `earliest` is a fixed
+ *  block → sticky (prefer the endpoint that already has it). */
+const PCA_TIP_BLOCK_TAGS = new Set<string>(['latest', 'pending', 'safe', 'finalized']);
+
+/**
+ * Lowest DEPLOYED `PublishingConviction` version exposing `clearAgents`. The
+ * wallet-connect UI gate reads the deployed contract's `version()` against this,
+ * failing closed, so the button enables itself once the upgrade is live.
+ *
+ * Exported so the comparator's equivalence test can couple to the production value
+ * instead of re-typing the literal — the same idiom as
+ * `ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION`.
+ */
+export const CLEAR_AGENTS_MIN_PCA_VERSION = '10.0.6';
+
+type PcaReadStrategy = 'tipTransparent' | 'tipNullableTransparent' | 'stickyNullable' | 'sticky';
+
+/**
+ * Classify a PCA proxy read by (method, params) into its endpoint-freshness +
+ * nullability strategy — pure and total over {@link PcaRpcMethod}. Lifting the
+ * routing rules out of `requestPublishingConvictionRpc` keeps the transport
+ * dispatch declarative. The tip block-tag POSITION differs by method:
+ * `eth_getBlockByNumber` → params[0]; `eth_call` → params[1] (params[0] is the
+ * call object, and an OMITTED tag defaults to `latest`). A concrete hex block is
+ * NOT tip.
+ *   - `tipTransparent`         — `eth_blockNumber` (never null) or a latest-family
+ *     `eth_call` (reads current contract state a lagging backend would stale):
+ *     canonical-fresh, preference-transparent, non-nullable.
+ *   - `tipNullableTransparent` — a latest-family `eth_getBlockByNumber`: tip
+ *     (transparent) BUT nullable — a lagging/partially-synced primary can return
+ *     null for a block a backup already has, so fail over on null before returning.
+ *   - `stickyNullable`         — receipt / tx / a CONCRETE block: prefer the
+ *     endpoint that already observed it, but a `null` ("not here yet") fails over
+ *     rather than terminating the lookup or reinforcing a preference.
+ *   - `sticky`                 — `eth_call` at a concrete block / `eth_chainId`: a
+ *     null-ish answer is a valid result that can't change, so plain sticky.
+ */
+function classifyPcaRead(method: PcaRpcMethod, params: readonly unknown[]): PcaReadStrategy {
+  const isLatestFamilyTag = (t: unknown): boolean => typeof t === 'string' && PCA_TIP_BLOCK_TAGS.has(t);
+  switch (method) {
+    // Never-null tip: the current head.
+    case 'eth_blockNumber':
+      return 'tipTransparent';
+    // Reads CURRENT contract state (tip) when the block tag (params[1]) is omitted
+    // (defaults to `latest`) or latest-family; a CONCRETE block is a fixed answer.
+    case 'eth_call':
+      return params[1] === undefined || isLatestFamilyTag(params[1]) ? 'tipTransparent' : 'sticky';
+    // Latest-family block = tip but NULLABLE (a lagging primary may lack it); a
+    // concrete block is fixed but still nullable ("not here yet" must fail over).
+    case 'eth_getBlockByNumber':
+      return isLatestFamilyTag(params[0]) ? 'tipNullableTransparent' : 'stickyNullable';
+    // Receipt / tx lookups: prefer the endpoint that already saw it; a `null` means
+    // "not here yet" and fails over rather than terminating the lookup.
+    case 'eth_getTransactionReceipt':
+    case 'eth_getTransactionByHash':
+      return 'stickyNullable';
+    // Chain id: a fixed answer that can't change → plain sticky.
+    case 'eth_chainId':
+      return 'sticky';
+    default: {
+      // Exhaustive over PcaRpcMethod: a newly-added method must pick a strategy
+      // HERE (a conscious routing decision) or this is a compile error (TS2322) —
+      // never a silent `sticky` fallback.
+      const _exhaustive: never = method;
+      return _exhaustive;
+    }
+  }
+}
+
+>>>>>>> c5e4210af (fix(chain): guard createKnowledgeAssets author threading, one version comparator, single-source error facts (#1689))
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
   identityId?: unknown;
@@ -616,11 +690,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     // DEPLOYED version so the button only enables once the upgrade is live —
     // self-healing (no node software redeploy needed when the contract is
     // upgraded). Fail closed (unsupported) if the version can't be read.
+    //
+    // Uses the shared `contractVersionAtLeast` rather than an inline parse/compare:
+    // this was the second copy of that logic, and a version gate is a capability
+    // boundary where drift is silent. The migration is behaviour-preserving —
+    // `test/contract-version.unit.test.ts` pins the shared comparator against the
+    // exact expression this replaced, across the full edge-case matrix.
     let clearAgentsSupported = false;
     try {
-      const v = String(await logic.version()).split('.').map((n) => parseInt(n, 10) || 0);
-      const [maj, min, pat] = [v[0] ?? 0, v[1] ?? 0, v[2] ?? 0];
-      clearAgentsSupported = maj > 10 || (maj === 10 && (min > 0 || (min === 0 && pat >= 6)));
+      clearAgentsSupported = contractVersionAtLeast(
+        String(await logic.version()),
+        CLEAR_AGENTS_MIN_PCA_VERSION,
+      );
     } catch {
       /* unknown / pre-versioned contract → treat as unsupported */
     }
