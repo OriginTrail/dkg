@@ -25,6 +25,19 @@ export class DKGError extends Error {
  */
 export const NO_FUNDED_PUBLISHER_WALLET_CODE = 'NO_FUNDED_PUBLISHER_WALLET';
 
+/**
+ * GH#1786 — the node cannot re-sign an `UpdateAuthorAttestation` for this author (no
+ * custodial key on file, and the author is not the publisher EOA).
+ *
+ * Shared here for the same reason as the funded-wallet code above: it crosses packages. The
+ * agent raises it, the daemon route maps it to a 409, and the publisher's async-job
+ * classifier must recognise it as a PERMANENT author-capability failure. Without that last
+ * consumer it falls through to the retryable `rpc_unavailable` default and the queue keeps
+ * resetting a job that can never finalize — the forever-retry trap #1013/#1121 fixed for
+ * unfundable publishes.
+ */
+export const PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE = 'PUBLISH_AUTHOR_NOT_CUSTODIAL';
+
 /** The literal prefix every InsufficientPublisherFundsError message starts with.
  *  The chain formatter builds the message from this; consumers that only have a
  *  (possibly re-wrapped, code-stripped) message string match on it via

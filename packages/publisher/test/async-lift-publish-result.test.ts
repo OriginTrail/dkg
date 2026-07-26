@@ -198,6 +198,44 @@ describe('async lift publish result mapping', () => {
     expect(failure.retryable).toBe(false);
   });
 
+  it('classifies PUBLISH_AUTHOR_NOT_CUSTODIAL as a TERMINAL authority_forbidden failure (not retryable)', () => {
+    // GH#1786: the async worker discovers mid-publish that it cannot re-sign this author's
+    // UpdateAuthorAttestation. That is PERMANENT — before this mapping it fell through to the
+    // retryable rpc_unavailable default and the queue reset a job that can never finalize,
+    // the same forever-retry trap #1013/#1121 fixed for unfundable publishes.
+    const err = Object.assign(
+      new Error(
+        'cannot re-sign UpdateAuthorAttestation for author 0xA32f1cc125401B55911678847426759094055B2d — '
+        + 'no custodial key on file and it is not the publisher EOA.',
+      ),
+      { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+    );
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: err,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:author-not-custodial',
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.retryable).toBe(false);
+    expect(failure.resolution).toBe('fail_job');
+  });
+
+  it('classifies a code-stripped non-custodial author error (message marker only) as terminal', () => {
+    // Same robustness as the funds path below: a re-wrap can drop .code but keep the message.
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error(
+        'publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc — '
+        + 'no custodial key on file and it is not the publisher EOA.',
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:author-not-custodial-nocode',
+    });
+
+    expect(failure.code).toBe('authority_forbidden');
+    expect(failure.retryable).toBe(false);
+  });
+
   it('classifies a code-stripped funds error (message marker only) as terminal insufficient_funds from broadcast', () => {
     // A re-wrap could drop .code but preserve the message — the marker fallback
     // must still keep it terminal (mirrors the daemon + node-ui robustness).

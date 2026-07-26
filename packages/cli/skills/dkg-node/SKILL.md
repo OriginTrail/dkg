@@ -337,9 +337,13 @@ How that surfaces differs by lane, deliberately. On the **synchronous** `vm/publ
 knows the signer, so it answers `409 PUBLISH_AUTHOR_NOT_CUSTODIAL` immediately. On
 **`vm/publish-async`** the publisher wallet is chosen later by whichever worker claims the
 job, so at accept time the node cannot know which signer will run it; rather than refuse a
-publish a different wallet could have made, it accepts (`202`) and the condition surfaces as
-a job failure carrying the same code. Poll `/api/publisher/job` — or read the `agentAddress`
-echoed in the 202 body to confirm which author was selected before the job runs.
+publish a different wallet could have made, it accepts (`202`) and the condition surfaces
+when the worker runs — as a **terminal** job failure with
+`code: "authority_forbidden"` (`retryable: false`, `resolution: "fail_job"`), carrying the
+signer's message. It is deliberately *not* retried: no amount of retrying makes the node able
+to sign for that author. Poll `/api/publisher/job` for that failure, or read the
+`agentAddress` echoed in the 202 body to confirm which author was selected before the job
+runs.
 **Preconditions:** the assertion must be finalized **and** present in SWM (else
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the

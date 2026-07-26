@@ -319,6 +319,7 @@ export {
   hasErrorCode,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   messageIndicatesNoFundedPublisherWallet,
 } from './errors.js';
 export {

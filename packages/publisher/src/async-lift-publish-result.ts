@@ -1,4 +1,8 @@
-import { NO_FUNDED_PUBLISHER_WALLET_CODE, messageIndicatesNoFundedPublisherWallet } from '@origintrail-official/dkg-core';
+import {
+  NO_FUNDED_PUBLISHER_WALLET_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  messageIndicatesNoFundedPublisherWallet,
+} from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import {
@@ -159,9 +163,21 @@ export function mapPublishExceptionToLiftJobFailure(
   // same forever-retry trap #1013/#1121 fixed). `insufficient_funds` is only
   // valid from the 'broadcast' state, so only force it there — funded selection
   // is a broadcast-phase concern; any other state falls back to the classifier.
+  // GH#1786 — the same trap, one class over. The node cannot re-sign this author's
+  // UpdateAuthorAttestation (no custodial key on file, and the author is not the publisher
+  // EOA). That is PERMANENT, so without recognising it here it falls through to the
+  // retryable `rpc_unavailable` default and the queue keeps resetting a job that can never
+  // finalize. Classified as an AUTHORITY failure rather than a transport one; only forced
+  // from 'broadcast', which is where the executor raises it — mid-publish, before any
+  // transaction is sent. Message fallback mirrors the funded-wallet handling above, for
+  // re-wrapped errors that lost `.code`.
+  const isAuthorNotCustodial = errorCode === PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+    || lower.includes('cannot re-sign updateauthorattestation');
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
-  const code = isNoFundedWallet && input.failedFromState === 'broadcast'
+  const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'
+    ? 'authority_forbidden'
+    : isNoFundedWallet && input.failedFromState === 'broadcast'
     ? 'insufficient_funds'
     : input.failedFromState === 'broadcast' && (
       isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')

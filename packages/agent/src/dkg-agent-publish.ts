@@ -106,6 +106,7 @@ import {
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
@@ -482,7 +483,7 @@ function updateAttestationNotCustodialError(authorAddress: string): Error {
         `on file and it is not the publisher EOA. Use the /api/update route with a pre-signed ` +
         `UpdateAuthorAttestation instead.`,
     ),
-    { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+    { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
   );
 }
 
