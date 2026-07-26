@@ -434,13 +434,33 @@ export interface PublisherNotAuthorizedForCgDetails {
  * `authority_forbidden` instead of falling through to the retryable
  * `rpc_unavailable` default that made this failure loop to `maxRetries`. Same
  * shape and convention as {@link InsufficientPublisherFundsError}.
+ *
+ * Carries the FULL {@link PublisherNotAuthorizedForCgDetails} it was built from, not
+ * just the fields the message happens to render. The gate computes those facts
+ * exactly once at throw time; without them on the object, a consumer asking the very
+ * next question — *"is this chain simply not rotated yet, or was the author checked
+ * and refused?"* — would have to parse `message`. This PR exists to remove exactly
+ * that coupling, so re-introducing it one question later would be self-defeating.
+ * The message stays the human surface; `details` is the machine surface.
  */
 export class PublisherNotAuthorizedForContextGraphError extends Error {
   readonly code = PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE;
+
+  /**
+   * The exact facts the message was rendered from — frozen, so a consumer cannot
+   * mutate one error's diagnosis and have it disagree with its own text.
+   * `attestedAuthorConsidered` + `deployedLifecycleVersion` are the pair worth
+   * reading: together they separate "author refused" from "author never weighed
+   * because the lifecycle predates the capability (or its version was unreadable)".
+   */
+  readonly details: PublisherNotAuthorizedForCgDetails;
+
+  // Flattened conveniences, retained so existing consumers keep compiling.
   readonly contextGraphId: bigint;
   readonly payerAddress: string;
   readonly payerPoolAddresses?: readonly string[];
   readonly attestedAuthorAddress?: string;
+
   constructor(
     message: string,
     details: PublisherNotAuthorizedForCgDetails,
@@ -448,9 +468,15 @@ export class PublisherNotAuthorizedForContextGraphError extends Error {
   ) {
     super(message, options);
     this.name = 'PublisherNotAuthorizedForContextGraphError';
+    this.details = Object.freeze({
+      ...details,
+      payerPoolAddresses: details.payerPoolAddresses
+        ? Object.freeze([...details.payerPoolAddresses])
+        : undefined,
+    });
     this.contextGraphId = details.contextGraphId;
     this.payerAddress = details.payerAddress;
-    this.payerPoolAddresses = details.payerPoolAddresses;
+    this.payerPoolAddresses = this.details.payerPoolAddresses;
     this.attestedAuthorAddress = details.attestedAuthorAddress;
   }
 }
