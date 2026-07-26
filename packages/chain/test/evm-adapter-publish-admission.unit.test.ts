@@ -377,6 +377,84 @@ describe('#1689 publish admission — createKnowledgeAssets threads the author [
     expect(error).not.toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
   });
 
+  // S3 — the site the class sweep found unguarded. `createKnowledgeAssets` passes
+  // the author into `enrichInsufficientPublisherFundsError`, which decides whether a
+  // funding failure is the TERMINAL `NO_FUNDED_PUBLISHER_WALLET` or a recoverable
+  // wrong-pick. Removing that argument left every one of 883 chain tests green.
+  //
+  // Why the earlier test missed it: it called `enrichInsufficientPublisherFundsError`
+  // DIRECTLY, so it pinned the inner hop (enrich → poolHasFundableSigner) and proved
+  // nothing about whether anything calls it with the author. Per publisher-dev's rule
+  // — for pass-through threading the only binding test asserts the value at the FAR
+  // END of the chain through the public entry point — this drives the public method
+  // and asserts the decision that threading actually changes.
+  it('S3 far-end: an authorized author keeps the pool a viable reroute through the PUBLIC publish path', async () => {
+    // Only the AUTHOR is authorized; the pinned payer is not (so admission comes via
+    // the author) and the pinned payer is broke while another pool wallet is funded.
+    const { a, pool } = makePublishAdapter([AUTHOR.toLowerCase()], { extraKeys: [PK_B] });
+    const [pinned] = pool;
+    // Unlike the selection tests above, this one must run PAST selection to the send,
+    // so the lifecycle handle resolves normally instead of throwing the sentinel.
+    a.contracts.knowledgeAssetsLifecycle = {
+      getAddress: async () => '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa',
+      connect: () => ({ getAddress: async () => '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa' }),
+    };
+    a.getWalletFunding = async (address: string) => (
+      address.toLowerCase() === pinned.address.toLowerCase()
+        ? { native: 10n ** 18n, trac: 0n }
+        : { native: 10n ** 18n, trac: 10n ** 18n }
+    );
+    a.isWalletPublishFundable = async (address: string) =>
+      address.toLowerCase() !== pinned.address.toLowerCase();
+    a.snapshotPublisherWalletBalances = async () => [];
+    // Fail the send with a funds-shaped revert so the enrichment branch runs. This is
+    // the last hop before `.catch()` → `enrichInsufficientPublisherFundsError`.
+    const sendFailure = new Error('ERC20: transfer amount exceeds balance');
+    a.dispatchSerializedV10Write = async () => { throw sendFailure; };
+
+    const error = await caught(() => a.createKnowledgeAssets({
+      ...publishParams(AUTHOR, pinned.address),
+      // OT-RFC-43 Option-1 packed id: high 160 bits MUST be the author.
+      reservedKaId: (BigInt(AUTHOR) << 96n) | 1n,
+    }));
+
+    // The author admits the pool, so a funded wallet IS a viable reroute: the original
+    // error must survive so a retry can reroute. Drop the author at :3955 and this
+    // becomes a TERMINAL NO_FUNDED — a recoverable job reported as unfixable.
+    expect(error).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(error).toBe(sendFailure);
+  });
+
+  // S8 — the bot's round-2 finding, confirmed unguarded by a clean class-sweep
+  // measurement: removing the author from the planner's POOL branch left all 884
+  // chain tests green. The pinned planner branch (S7) and the pool branch are
+  // separate call sites; the existing planner coverage exercised the pinned one.
+  //
+  // Far-end assertion through the PUBLIC planner: with only the author authorized,
+  // an UNPINNED plan must resolve. Drop the author at `evm-adapter-publish.ts:157`
+  // and the pool narrows to payer-authorized wallets, finds none, and throws.
+  it('S8 far-end: an authorized author lets the UNPINNED public planner resolve a plan', async () => {
+    const { a, pool } = makeAdapter(
+      [AUTHOR.toLowerCase()], ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION, { extraKeys: [PK_B] },
+    );
+    a.quoteRequiredPublishTokenAmount = async () => 0n;
+    a.getWalletFunding = async () => ({ native: 10n ** 18n, trac: 10n ** 18n });
+    a.isWalletPublishFundable = async () => true;
+    a.selectFundedSignerOrThrow = async (candidates: any[]) => candidates[0];
+    a._selectFundedCandidateOrThrow = async (plans: any[]) => plans[0];
+
+    const plan = await a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 2,
+      defaultPublishEpochs: 12,
+      // No publisherAddress ⇒ the POOL branch.
+      attestedAuthorAddress: AUTHOR,
+    });
+
+    expect(pool.map((w) => w.address)).toContain(plan.publisherAddress);
+  });
+
   it('PINNED payer: with NEITHER principal authorized it still rejects (gate not simply bypassed)', async () => {
     // Guards the two above from passing for the wrong reason — if the threading
     // were replaced by "skip the gate", this would reach the sentinel too.
