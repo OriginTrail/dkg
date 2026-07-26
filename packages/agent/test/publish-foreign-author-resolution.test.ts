@@ -328,19 +328,24 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     expect([...(err.candidates as string[])].sort()).toEqual([MEMBER, OTHER].sort());
   });
 
-  it('reports de-duplicated stored-case candidates when the same author is resident twice', async () => {
+  it('reports de-duplicated candidates when one author is resident under two address casings', async () => {
     const store = new OxigraphStore();
-    // Same author at the same coordinate in both cases — case-insensitive de-dup must
-    // collapse them to ONE entry, in the stored case.
-    await store.insert([...sealFor(MEMBER), ...sealFor(MEMBER)]);
+    // Two DISTINCT seal subjects — the same author written in different address case, so the
+    // store cannot collapse them and the resolver really does collect two candidates. (Two
+    // identical `sealFor(MEMBER)` inserts would be deduplicated by the RDF store itself, so
+    // that fixture would never exercise `distinctAuthors` at all.)
+    await store.insert([...sealAt(CG, MEMBER, NAME), ...sealAt(CG, MEMBER.toLowerCase(), NAME)]);
     const agent = stubAgent(store, CURATOR);
-    await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+    const dupErr = await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
       callerAgentAddress: CURATOR,
       selectedAuthorAgentAddress: `0x${'99'.repeat(20)}`,
-    })).rejects.toMatchObject({
-      code: 'ASSERTION_AUTHOR_NOT_RESIDENT',
-      candidates: [MEMBER],
-    });
+    }).then(() => null, (e: any) => e);
+    expect(dupErr?.code).toBe('ASSERTION_AUTHOR_NOT_RESIDENT');
+    // The contract is the COLLAPSE: one author ⇒ one candidate. Which of the two stored
+    // casings survives is first-seen order (i.e. SPARQL order) and is not contractual, so
+    // assert the count and the identity case-insensitively rather than a specific casing.
+    expect(dupErr.candidates).toHaveLength(1);
+    expect(String(dupErr.candidates[0]).toLowerCase()).toBe(MEMBER.toLowerCase());
   });
 
   it('fails closed when NO author is resident (never silently ignored)', async () => {
