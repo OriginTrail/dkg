@@ -1067,6 +1067,91 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(publishAsyncBody.options).not.toHaveProperty('subGraphName');
   });
 
+  // GH#1786 — the selector must be serialized TOP-LEVEL and must never end up inside
+  // `options`: `parseHttpFinalizedPublishOptions` ignores unknown nested keys, so a
+  // nested selector would be silently dropped and publish a different author.
+  it('serializes selectedAuthorAgentAddress top-level on both publish lanes', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+
+    let calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      publishEpochs: 12,
+    });
+    let body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      publishEpochs: 12,
+    });
+    body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  // GH#1786 — the OLDER public wrapper over the same endpoint must expose the selector too:
+  // a typed SDK caller holding only `publishFromFinalizedAssertion` would otherwise have to
+  // cast to `any` to send the very field the AMBIGUOUS_ASSERTION_AUTHOR 409 tells it to
+  // retry with. Be precise about what this test can and cannot prove: no tsconfig in this
+  // repo includes `test/` (every package is `include: ["src"]`), so nothing HERE guards the
+  // TYPE. That is structural instead — all three public entry points take their selector
+  // from the one `KnowledgeAssetPublishAuthorSelection` contract, so it cannot go missing
+  // from one of them, and deleting it outright fails the package typecheck at the
+  // destructures. What this DOES pin is the forwarding: the wrapper currently passes
+  // `options` straight through, but the sibling `publishAssertion` builds its downstream
+  // options from an explicit key-by-key spread, and a refactor of this wrapper into that
+  // shape would silently drop the selector and publish a different author with a 200.
+  it('publishFromFinalizedAssertion forwards the selector top-level, like knowledgeAssetPublish', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+    const calls = track({ kaId: '7', status: 'confirmed' });
+
+    await client.publishFromFinalizedAssertion('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      subGraphName: 'notes',
+      publishEpochs: 12,
+    });
+
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
+    const body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    // Same nesting hazard as the direct lane: a selector inside `options` is silently
+    // ignored by parseHttpFinalizedPublishOptions and would publish a different author.
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  it('forwards an explicitly empty selector so the daemon can reject it, and omits it when absent', async () => {
+    // Presence, not truthiness: silently dropping a malformed selector client-side
+    // would let normal author resolution publish a DIFFERENT author with 200 instead
+    // of the daemon's 400.
+    let calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', { selectedAuthorAgentAddress: '' });
+    expect(JSON.parse(calls[0].opts.body as string)).toHaveProperty('selectedAuthorAgentAddress', '');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', { selectedAuthorAgentAddress: '' });
+    expect(JSON.parse(calls[0].opts.body as string)).toHaveProperty('selectedAuthorAgentAddress', '');
+
+    calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', {});
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
   it('knowledgeAssetShare rejects root selection and unsealed sharing before HTTP serialization', async () => {
     const calls = track({ swmShared: true, promotedCount: 1 });
     await expect(client.knowledgeAssetShare('cg', 'f', {

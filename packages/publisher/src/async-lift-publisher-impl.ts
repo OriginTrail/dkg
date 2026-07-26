@@ -48,6 +48,7 @@ import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
   isDefinitivePreAcceptanceSendFailure,
+  isPermanentAuthorCapabilityFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
@@ -840,6 +841,13 @@ export class TripleStoreAsyncLiftPublisher
     ) {
       return true;
     }
+    // GH#1786 — the node cannot re-sign the selected author's UpdateAuthorAttestation.
+    // Raised while BUILDING the attestation, strictly before onPhase reaches
+    // recordDurableBroadcastBeforeSend, so no transaction was ever sent: the job is still
+    // 'validated' and recording 'broadcast' would publish a false claim that a broadcast
+    // occurred (and mislabel the phase with it). Shared predicate — the same one decides the
+    // failure CODE on both the validated and broadcast paths.
+    if (isPermanentAuthorCapabilityFailure(error)) return true;
     const message = String(anyError?.message ?? error);
     return /is not finalized/i.test(message)
       || /No quads in shared memory/i.test(message)
@@ -1475,7 +1483,15 @@ export class TripleStoreAsyncLiftPublisher
       const lower = message.toLowerCase();
       const errorCode = (error as { code?: unknown })?.code;
       const code =
-        errorCode === 'PUBLISH_INTENT_STALE'
+        // GH#1786 — a no-send author-capability refusal, recognized by CODE (with the shared
+        // marker fallback for a re-wrap that lost it) BEFORE the message chain below. That
+        // chain would otherwise reach `canonicalization_failed`: this message contains none
+        // of its keywords, and not even 'authority' — "UpdateAuthorAttestation" carries
+        // "author", not "authority". Terminal either way, but the code is what clients
+        // branch on and what tells an operator the publish is unfixable by retrying.
+        isPermanentAuthorCapabilityFailure(error)
+          ? 'authority_forbidden'
+        : errorCode === 'PUBLISH_INTENT_STALE'
           ? 'publish_intent_stale'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'

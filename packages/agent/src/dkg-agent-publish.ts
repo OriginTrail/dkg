@@ -106,6 +106,9 @@ import {
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
@@ -185,6 +188,20 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
 import { resolveFinalizedAssertionAuthor } from './finalized-assertion-author.js';
+
+/**
+ * Public options for {@link DKGAgentPublishMixin.resolveAssertionAuthor}. Declared
+ * explicitly rather than derived from the store resolver's own params type: this is
+ * exported agent surface, and deriving it would silently publish any future
+ * resolver-only option as part of the agent API.
+ */
+export interface ResolveAssertionAuthorOptions {
+  subGraphName?: string;
+  /** Caller/token identity used only as a resolution hint. NOT an author selector. */
+  callerAgentAddress?: string;
+  /** GH#1786 — selects among authors already resident at this coordinate. */
+  selectedAuthorAgentAddress?: string;
+}
 import { RootlessUpdateError, type RootlessUpdateErrorCode } from './rootless-update-error.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -453,6 +470,28 @@ export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
 
 const ROOTLESS_UPDATE_DKG_NS = 'http://dkg.io/ontology/';
 const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+
+/**
+ * GH#1786 — a curator can MINT a selected foreign author's KA (the author's own sealed
+ * attestation is replayed) but cannot re-sign the UPDATE attestation without that
+ * author's key. Coded so the daemon answers an actionable 409 instead of an opaque 500,
+ * and raised from one place so the sync signer and the async pre-enqueue preflight
+ * report it identically.
+ */
+function updateAttestationNotCustodialError(authorAddress: string): Error {
+  // CONDITION from the shared core formatter, not inline text: the publisher's async-job
+  // classifier keys its code-stripped fallback off the same marker, so a re-wording there
+  // cannot silently drop the failure back into the retryable `rpc_unavailable` default.
+  // REMEDIATION is composed here, because naming a route is presentation and core is shared
+  // with non-HTTP consumers — it is this API surface's contract, not the error contract's.
+  return Object.assign(
+    new Error(
+      `${formatPublishAuthorNotCustodialMessage(authorAddress)} Use the /api/update route `
+        + `with a pre-signed UpdateAuthorAttestation instead.`,
+    ),
+    { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
+  );
+}
 
 function rootlessUpdateError(code: RootlessUpdateErrorCode, message: string): Error {
   return new RootlessUpdateError(code, message);
@@ -4118,14 +4157,40 @@ export class PublishMethods extends DKGAgentBase {
   async resolveAssertionAuthor(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    subGraphName?: string,
-    callerAgentAddress?: string,
+    // GH#1786 — the named form is preferred: `callerAgentAddress` and
+    // `selectedAuthorAgentAddress` are both optional strings with deliberately OPPOSITE
+    // meanings (caller identity vs resident-author selection), so adjacent positional
+    // slots would let a caller silently transpose them. The legacy positional form
+    // `(cg, name, subGraphName?, callerAgentAddress?)` is still accepted because this
+    // method is on the exported DKGAgent surface: an untyped JS caller passing a string
+    // third argument would otherwise silently lose BOTH the sub-graph scope and the
+    // caller preference, resolving against the wrong coordinate.
+    subGraphNameOrOpts?: string | null | ResolveAssertionAuthorOptions,
+    legacyCallerAgentAddress?: string,
   ): Promise<string | undefined> {
+    // `null` is treated as the legacy form too: it is the common JS placeholder for an
+    // omitted positional argument, and reading it as an options object would drop the
+    // caller hint that follows it — turning a caller-preferred resolution into an
+    // AMBIGUOUS_ASSERTION_AUTHOR for the same inputs.
+    const opts = typeof subGraphNameOrOpts === 'string' || subGraphNameOrOpts == null
+      ? { subGraphName: subGraphNameOrOpts ?? undefined, callerAgentAddress: legacyCallerAgentAddress }
+      : subGraphNameOrOpts;
+    // Forward an ALLOW-LIST, never `...opts`. A spread here lands after the positional
+    // coordinate and would let an untyped JS caller — or a widened object — smuggle
+    // `contextGraphId`/`name` through options and resolve against a DIFFERENT assertion
+    // than the one the caller named, on the exported DKGAgent surface. The required
+    // coordinate must always win, and a future option added to the params type must be
+    // forwarded deliberately rather than by accident.
     return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
-      subGraphName,
-      callerAgentAddress,
+      subGraphName: opts.subGraphName,
+      callerAgentAddress: opts.callerAgentAddress,
+      // Presence, not truthiness: '' / null are SUPPLIED selectors and must fail closed
+      // downstream, not silently fall back to normal resolution.
+      ...(opts.selectedAuthorAgentAddress !== undefined
+        ? { selectedAuthorAgentAddress: opts.selectedAuthorAgentAddress }
+        : {}),
     });
   }
 
@@ -4142,11 +4207,23 @@ export class PublishMethods extends DKGAgentBase {
    * the curator-publishes-a-member-KA flow. With neither, the effective node
    * identity (default agent → peer) is the caller hint, and resolution prefers
    * the node's OWN same-named KA before any resident foreign seal.
+   *
+   * GH#1786 — `opts.selectedAuthorAgentAddress` is a third, narrower mode: it
+   * SELECTS among the authors already resident at this coordinate so a curator can
+   * act on an `AMBIGUOUS_ASSERTION_AUTHOR` response. Unlike `agentAddress` it
+   * coexists with `callerAgentAddress` (the caller remains the identity used for CG
+   * registration and curator stamping) and it fails closed rather than falling
+   * through when it names no resident author.
    */
   async resolveFinalizedAssertionPublishAuthor(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: { subGraphName?: string; agentAddress?: string; callerAgentAddress?: string },
+    opts?: {
+      subGraphName?: string;
+      agentAddress?: string;
+      callerAgentAddress?: string;
+      selectedAuthorAgentAddress?: string;
+    },
   ): Promise<string> {
     // The two identity fields are mutually exclusive modes: `agentAddress` is an
     // authoritative author selector, `callerAgentAddress` a resolution hint.
@@ -4157,14 +4234,32 @@ export class PublishMethods extends DKGAgentBase {
           'agentAddress (authoritative author selector) and callerAgentAddress ' +
             '(resolution hint) are mutually exclusive on a VM publish',
         ),
-        { code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' },
+        { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
+      );
+    }
+    // An authoritative override and a resident-candidate selection are contradictory
+    // requests. Not reachable over HTTP (the publish routes never send
+    // `agentAddress` on the standalone lanes), but enforced for direct callers.
+    // Presence, NOT truthiness, and BEFORE the `agentAddress` fast path below: a caller
+    // that supplied both keys made a contradictory request, and a malformed selector ('' or
+    // null from untyped JS) must not be dropped so the publish quietly proceeds under the
+    // authoritative override. Same presence rule as the resolver and the HTTP boundary.
+    if (opts?.agentAddress && opts?.selectedAuthorAgentAddress !== undefined) {
+      throw Object.assign(
+        new Error(
+          'agentAddress (authoritative author selector) and selectedAuthorAgentAddress ' +
+            '(resident-candidate selection) are mutually exclusive on a VM publish',
+        ),
+        { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
       );
     }
     if (opts?.agentAddress) return opts.agentAddress;
     const callerHint = opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
-    return (await this.resolveAssertionAuthor(
-      contextGraphId, name, opts?.subGraphName, callerHint,
-    )) ?? callerHint;
+    return (await this.resolveAssertionAuthor(contextGraphId, name, {
+      subGraphName: opts?.subGraphName,
+      callerAgentAddress: callerHint,
+      selectedAuthorAgentAddress: opts?.selectedAuthorAgentAddress,
+    })) ?? callerHint;
   }
 
   /**
@@ -4192,6 +4287,11 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress?: string;
       /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
       callerAgentAddress?: string;
+      /**
+       * GH#1786 — selects among the authors already resident at this coordinate.
+       * Coexists with `callerAgentAddress`; never becomes the persisted caller.
+       */
+      selectedAuthorAgentAddress?: string;
       publishEpochs?: number;
       clearSharedMemoryAfter?: boolean;
       accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
@@ -4218,6 +4318,32 @@ export class PublishMethods extends DKGAgentBase {
       throw new Error(
         `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
       );
+    }
+    // GH#1786 — an UPDATE of an author this node cannot re-sign for is a permanent caller
+    // condition that the async worker only discovers AFTER the job is accepted (the client
+    // would get 202 and then a doomed job). Refuse it here instead — but ONLY on evidence
+    // that is sound at ENQUEUE time.
+    //
+    // Custodial keys are node-global (`localAgents`), so their ABSENCE is sound here. The
+    // publisher-EOA fallback is NOT: the async lane defers wallet selection, so whichever
+    // wallet later claims the job brings its own scoped publisher with its own EOA. Judging
+    // capability from this node's default publisher would both accept jobs a different
+    // wallet cannot sign AND — worse — reject updates that the claiming wallet could have
+    // signed. So the EOA arm is only consulted when the caller named the publisher that
+    // will actually execute (`publisherOverride`); otherwise capability is INDETERMINATE and
+    // the enqueue proceeds with the worker authoritative, exactly as when the lookup fails.
+    if (history.vmCurrentAssertion && !this.getCustodialAgentPrivateKey(agentAddress)) {
+      let refuse = false;
+      if (opts?.publisherOverride) {
+        try {
+          refuse = !(await this._canReSignUpdateAttestationForAuthor(
+            agentAddress, opts.publisherOverride,
+          ));
+        } catch {
+          refuse = false; // undeterminable — do not block the enqueue
+        }
+      }
+      if (refuse) throw updateAttestationNotCustodialError(agentAddress);
     }
     if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
@@ -5438,6 +5564,11 @@ export class PublishMethods extends DKGAgentBase {
       agentAddress?: string;
       /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
       callerAgentAddress?: string;
+      /**
+       * GH#1786 — selects among the authors already resident at this coordinate.
+       * Coexists with `callerAgentAddress`; never changes the caller identity.
+       */
+      selectedAuthorAgentAddress?: string;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherNodeIdentityIdOverride?: bigint;
@@ -6064,6 +6195,15 @@ export class PublishMethods extends DKGAgentBase {
       schemeVersion: seal.authorSchemeVersion,
     });
     const custodialKey = this.getCustodialAgentPrivateKey(seal.authorAddress);
+    // GH#1786 — one predicate owns "can this node re-sign for that author", shared with
+    // the pre-enqueue preflight on the async lane so the two cannot drift.
+    if (!custodialKey
+      // Sync signing path: the publisher resolved here IS the one about to sign.
+      && !(await this._canReSignUpdateAttestationForAuthor(
+        seal.authorAddress, publisherOverride ?? this.publisher,
+      ))) {
+      throw updateAttestationNotCustodialError(seal.authorAddress);
+    }
     let r: Uint8Array;
     let vs: Uint8Array;
     if (custodialKey) {
@@ -6074,14 +6214,6 @@ export class PublishMethods extends DKGAgentBase {
       vs = ethers.getBytes(sig.yParityAndS);
     } else {
       const publisher = publisherOverride ?? this.publisher;
-      const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
-      if (!fallbackAddress || fallbackAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
-        throw new Error(
-          `publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author ` +
-            `${seal.authorAddress} — no custodial key on file and it is not the publisher EOA. ` +
-            `Use the /api/update route with a pre-signed UpdateAuthorAttestation instead.`,
-        );
-      }
       const compact = await publisher.signAuthorAttestationAsPublisher(typedData);
       r = compact.r;
       vs = compact.vs;
@@ -6092,6 +6224,28 @@ export class PublishMethods extends DKGAgentBase {
       signature: { r, vs },
       schemeVersion: seal.authorSchemeVersion,
     };
+  }
+
+  /**
+   * GH#1786 — can this node re-sign an `UpdateAuthorAttestation` on behalf of
+   * `authorAddress`? True when the author's key is custodial here, or when the author
+   * IS the publisher EOA (the finalize-time fallback). The single source of truth for
+   * both the update signer above and the async lane's pre-enqueue preflight, so the
+   * two cannot drift apart.
+   */
+  async _canReSignUpdateAttestationForAuthor(
+    this: DKGAgent,
+    authorAddress: string,
+    // REQUIRED, deliberately: the answer is only meaningful for the signer actually being
+    // asked about. Defaulting to `this.publisher` would silently give an async caller — where
+    // wallet selection is deferred and the claiming wallet brings its own signer — a
+    // confident answer about the wrong EOA. That was a real bug (GH#1786 review); making the
+    // argument explicit stops the same call from being written again.
+    publisher: DKGPublisher,
+  ): Promise<boolean> {
+    if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
+    const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
+    return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }
 
   /**

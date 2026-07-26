@@ -157,6 +157,12 @@ export interface KnowledgeAssetPublishAsyncResponse {
   privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
+  /**
+   * GH#1786 — the RESOLVED author this job will publish. Lets a caller verify which
+   * author was selected before the job runs, and detect a daemon that ignored a
+   * supplied `selectedAuthorAgentAddress` (older daemons omit it).
+   */
+  agentAddress?: string;
 }
 
 export type KnowledgeAssetShareJobState =
@@ -420,6 +426,24 @@ function requireDaemonStatusResponse(value: unknown, expectedName?: string): Dae
     );
   }
   return value;
+}
+
+/**
+ * GH#1786 — the author-selection coordinate shared by every public publish entry point.
+ * Declared ONCE and reused, so `selectedAuthorAgentAddress` cannot drift between the two
+ * lanes and the older `publishFromFinalizedAssertion` wrapper: the invariant is structural
+ * rather than asserted after the fact.
+ */
+export interface KnowledgeAssetPublishAuthorSelection {
+  subGraphName?: string;
+  /**
+   * The resident author to publish, for retrying an `AMBIGUOUS_ASSERTION_AUTHOR` 409.
+   * Serialized at the TOP level of the body (never inside `options`, where
+   * `parseHttpFinalizedPublishOptions` would silently ignore it and publish a different
+   * author). Sent on PRESENCE, not truthiness, so a malformed value reaches the daemon's
+   * 400 instead of being dropped client-side.
+   */
+  selectedAuthorAgentAddress?: string;
 }
 
 export class ApiClient {
@@ -809,13 +833,22 @@ export class ApiClient {
   async knowledgeAssetPublish(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: KnowledgeAssetPublishAuthorSelection
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    // GH#1786 — `selectedAuthorAgentAddress` is destructured out alongside
+    // `subGraphName` for two reasons: the daemon reads it at the TOP level of the
+    // body, and `finalizedPublishOptionsPayload` throws on any key outside its
+    // allowlist, so leaving it in would break every publish that supplies it.
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -823,13 +856,18 @@ export class ApiClient {
   async knowledgeAssetPublishAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: KnowledgeAssetPublishAuthorSelection
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -935,8 +973,10 @@ export class ApiClient {
   async publishFromFinalizedAssertion(
     contextGraphId: string,
     assertionName: string,
-    options?: {
-      subGraphName?: string;
+    // The selector comes from the SHARED contract — a typed SDK caller holding only this
+    // older wrapper must be able to pass the field the 409 tells it to retry with. The
+    // finalized-option subset stays deliberately narrower than the standalone lanes'.
+    options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
       publisherNodeIdentityIdOverride?: bigint;
