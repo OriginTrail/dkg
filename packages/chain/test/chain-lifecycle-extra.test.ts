@@ -484,9 +484,17 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       const contextGraphId = await createTestContextGraph(adapter);
       expect(contextGraphId).toBeGreaterThan(0n);
 
-      // The CG was created with publishPolicy=0 (Open) so every wallet
-      // should be an authorized publisher — sanity check the helper
-      // didn't accidentally use `1` and orphan subsequent publishes.
+      // The CG was created with the helper's DEFAULTS, which are accessPolicy=1
+      // and therefore publishPolicy=0 — i.e. CURATED, not open
+      // (`evm-test-context.ts`: `publishPolicy = accessPolicy === 0 ? 1 : 0`).
+      // The polarity is easy to invert when reading: on-chain, `policy == 1` is
+      // the OPEN branch that authorizes any non-zero address, and `0` is curated
+      // (`ContextGraphs.isAuthorizedPublisher`); the daemon route states the same
+      // mapping as `"publishPolicy" must be 0 (curated) or 1 (open)`.
+      // So this asserts the CURATED path: the creator is the stored publish
+      // authority and is authorized by exact match — NOT "every wallet is
+      // authorized". Sanity-checks that the helper still pins the creator as the
+      // authority and doesn't orphan subsequent publishes.
       const cg = await adapter.getContract('ContextGraphs');
       const ok = await cg.isAuthorizedPublisher(contextGraphId, adapter.getSignerAddress());
       expect(ok).toBe(true);

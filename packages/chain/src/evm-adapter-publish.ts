@@ -124,9 +124,14 @@ export class PublishMethods extends EVMChainAdapterBase {
     };
 
     if (request.publisherAddress) {
+      // #1689: the pinned branch is the one the async publisher lane always takes
+      // (every per-wallet publisher pins its own wallet), so the attested author
+      // MUST reach the admission gate here — a curator's KA is authorized through
+      // its author, not through the operational wallet that pays for it.
       const signer = await this.resolvePinnedPublisherSigner(
         request.contextGraphId,
         request.publisherAddress,
+        request.attestedAuthorAddress,
       );
       const plan = await this._publisherCandidatePlan(signer, request, quote);
       await this.selectFundedSignerOrThrow(
@@ -148,7 +153,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
 
     const selectedPlan = await this._withSignerSelection(async (ordered) => {
-      const authorized = await this._authorizedPublisherSigners(ordered, request.contextGraphId);
+      const authorized = await this._authorizedPublisherSigners(
+        ordered, request.contextGraphId, request.attestedAuthorAddress,
+      );
       // Resolve in cursor order so one candidate's transient PCA quote can be
       // retried through its direct-spend phase before another candidate consumes
       // the same lifetime. The shared quote cache still avoids duplicate reads

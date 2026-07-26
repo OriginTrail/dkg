@@ -69,6 +69,15 @@ export interface PublisherPlanningFinalizeInput {
   explicitPublishEpochs: number | undefined;
   effectiveByteSize: bigint;
   ctx: OperationContext;
+  /**
+   * GH#1689 — the EIP-712-attested KA author, already resolved by the caller
+   * (`PublishOptions.precomputedAttestation.authorAddress`). Threaded to the
+   * chain adapter's publish-plan request because a curated CG authorizes EITHER
+   * the paying wallet or the attested author; without it the planner rejects a
+   * publish the chain would accept. Pass-through only — planning never resolves
+   * or re-derives an author.
+   */
+  attestedAuthorAddress?: string;
 }
 
 /** The only planning surface the large publish flow needs to retain. */
@@ -241,6 +250,7 @@ export class PublisherPlanner {
     pinnedPublisherLabel?: string;
     explicitPublishEpochs: number | undefined;
     effectiveByteSize: bigint;
+    attestedAuthorAddress?: string;
     ctx: OperationContext;
   }): Promise<{
     signer: PublisherSigner;
@@ -273,6 +283,7 @@ export class PublisherPlanner {
       explicitPublishEpochs: input.explicitPublishEpochs,
       defaultPublishEpochs: DEFAULT_PUBLISH_EPOCHS,
       publisherAddress: pinnedPublisherAddress,
+      attestedAuthorAddress: input.attestedAuthorAddress,
     });
     const plannedAddress = coercePublisherAddress(resolvedPlan.publisherAddress);
     if (!plannedAddress) {
@@ -321,6 +332,7 @@ export class PublisherPlanner {
       pinnedPublisherLabel: state.selection.planningPinLabel,
       explicitPublishEpochs: input.explicitPublishEpochs,
       effectiveByteSize: input.effectiveByteSize,
+      attestedAuthorAddress: input.attestedAuthorAddress,
       ctx: input.ctx,
     });
     return { kind: 'on-chain', ...plan };

@@ -1,8 +1,10 @@
 import {
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
+  messageIndicatesPublisherNotAuthorizedForCg,
 } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
@@ -207,15 +209,42 @@ export function mapPublishExceptionToLiftJobFailure(
   const isAuthorNotCustodial = isPermanentAuthorCapabilityFailure(input.error);
   const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
     || messageIndicatesNoFundedPublisherWallet(lower);
+  // #1689 — the context-graph publish-policy rejection (dkg-chain, code
+  // `PUBLISHER_NOT_AUTHORIZED_FOR_CG`) is a PERMANENT authorization failure:
+  // neither the paying wallet nor the attested author is an authorized
+  // publisher for the target CG, and nothing about retrying changes that. Its
+  // message deliberately contains none of the substrings
+  // `classifyPublishFailureCode` matches, so without code-based recognition it
+  // fell through to the retryable `rpc_unavailable` default — which made every
+  // curator re-publish silently RE-ACCEPT the same poisoned job (a retryable
+  // failed job still "occupies" its lifecycle subject, see
+  // `isOccupyingLifecycleJob`) and burn retryCount toward maxRetries while
+  // failing identically. Recognized by structured code, with a message-marker
+  // fallback for a code-stripped re-wrap, exactly like NO_FUNDED_PUBLISHER_WALLET
+  // above. Terminal reclassification is durability-safe: this is thrown at PLAN
+  // time, before a signer is picked, so no transaction is ever signed or sent
+  // (`broadcastRecorder.outcome === 'not-reached'`). Only forced from
+  // 'broadcast' — the state this pre-send rejection is attributed to; any other
+  // state falls back to the classifier.
+  const isPublisherNotAuthorizedForCg = errorCode === PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE
+    || messageIndicatesPublisherNotAuthorizedForCg(lower);
+  // PRECEDENCE (GH#1786 + GH#1689 merge): the two author/authority branches are
+  // mutually exclusive in practice — distinct structured codes and disjoint
+  // message markers — so their relative order does not change any outcome. Each
+  // keeps the position it had in its own PR to keep both diffs minimal. Both
+  // resolve to `authority_forbidden`, which is why the allowed-states entry for
+  // that code lists 'broadcast' for two independent reasons.
   const code = isAuthorNotCustodial && input.failedFromState === 'broadcast'
     ? 'authority_forbidden'
     : isNoFundedWallet && input.failedFromState === 'broadcast'
-    ? 'insufficient_funds'
-    : input.failedFromState === 'broadcast' && (
-      isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')
-    )
-      ? 'quorum_unmet'
-      : classifyPublishFailureCode(lower, input.failedFromState);
+      ? 'insufficient_funds'
+      : isPublisherNotAuthorizedForCg && input.failedFromState === 'broadcast'
+        ? 'authority_forbidden'
+        : input.failedFromState === 'broadcast' && (
+          isQuorumUnmetError(input.error) || lower.includes('quorumunmeterror')
+        )
+          ? 'quorum_unmet'
+          : classifyPublishFailureCode(lower, input.failedFromState);
 
   return createLiftJobFailureMetadata({
     failedFromState: input.failedFromState,

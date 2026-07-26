@@ -3048,6 +3048,11 @@ export class DKGPublisher implements Publisher {
     const finalizedPublisherPlan = await publisherPlanning.finalize({
       explicitPublishEpochs,
       effectiveByteSize,
+      // GH#1689 — the attested author is a publish-authorization principal
+      // alongside the paying wallet, so the planner must see it BEFORE it picks
+      // (and rejects) a signer. Already resolved on `options` from the start of
+      // publish(); this is a pass-through, never a re-resolution.
+      attestedAuthorAddress: options.precomputedAttestation?.authorAddress,
       ctx,
     });
     const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'

@@ -36,6 +36,11 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   formatNoFundedPublisherWalletMessage,
+  PublisherNotAuthorizedForContextGraphError,
+  isPublisherNotAuthorizedForCgError,
+  PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+  formatPublisherNotAuthorizedForCgMessage,
+  type PublisherNotAuthorizedForCgDetails,
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {

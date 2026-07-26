@@ -91,6 +91,19 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextAuthorizedSigner',
   'findSignerByAddress',
   'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool
+  // #1689 context-graph publish admission: the single predicate every EVM publish
+  // gate routes through (payer OR EIP-712-attested author), its author-only half,
+  // the structured-rejection builder, and the deployed-lifecycle version gate the
+  // author branch is held behind. All read `ContextGraphs.isAuthorizedPublisher` /
+  // `KnowledgeAssetsLifecycle.version()` — the mock has neither contract and
+  // authorizes its single signerAddress unconditionally. (The `_`-prefixed three
+  // are skipped by the comparisons below anyway; listed so the whole family stays
+  // documented in one place.)
+  '_cgPublishAdmits',
+  '_cgAdmitsAttestedAuthor',
+  '_publishAuthorizationRejection',
+  'attestedAuthorPublishAuthorizationSupported',
+  'deployedKnowledgeAssetsLifecycleVersion',
   'selectFundedSignerOrThrow', // strict funding diagnostic used by EVM publish planning
   'quoteRequiredPublishTokenAmount', // shared protected AskStorage quote behind EVM reads/planning
   'resolveFundedPublisherPublishPlan', // protected EVM pool/PCA planning state machine

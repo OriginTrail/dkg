@@ -9,6 +9,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+// The REAL planner, by source path — `PublisherPlanner` is not re-exported from
+// the publisher package index. Cross-package `../../<pkg>/(src|test)/` imports
+// are established in this suite (see `agent.shared.ts`).
+import { PublisherPlanner } from '../../publisher/src/publisher-planning.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 /**
@@ -813,5 +817,102 @@ describe('GH#1778 publishFromFinalizedAssertion auto-resolves the member author'
       kaUal: KA_UAL.toLowerCase(),
       precomputedAttestation: { authorAddress: MEMBER, reservedKaId: RESERVED_KA_ID },
     });
+  });
+});
+
+/**
+ * GH#1689 — the second half of the same journey. The test above pins that the
+ * curator's publish carries the MEMBER as `precomputedAttestation.authorAddress`;
+ * this one pins that the SAME value survives planning and reaches the chain
+ * adapter as `attestedAuthorAddress` on the publish-plan request.
+ *
+ * That hand-off is what makes payer ≠ author work at all: a curated CG's on-chain
+ * gate admits either the paying wallet or the attested author, so a planner that
+ * dropped the author would reject — before building any transaction — a publish
+ * the chain would have accepted. This is the #1778 flow (curator pays for a
+ * member-authored KA) driven through the REAL `PublisherPlanner`, with only the
+ * chain adapter recorded.
+ */
+describe('#1689 the resolved author reaches the chain publish-plan request', () => {
+  const PAYER = `0x${'44'.repeat(20)}`;
+  const CONTEXT_GRAPH_ID = 75n;
+
+  function makePlanner(planRequests: Array<Record<string, unknown>>) {
+    const signer = {
+      address: PAYER,
+      source: 'publisherPrivateKey' as const,
+      signMessage: async () => '0x',
+      signTypedData: async () => '0x',
+    };
+    const chain = {
+      chainId: 'evm:31337',
+      isV10Ready: () => true,
+      // The recorded boundary. Returning the pinned payer keeps the planner's
+      // reservation-mismatch guard satisfied, so the test fails on the author
+      // being dropped rather than on unrelated plumbing.
+      resolvePublisherPublishPlan: async (request: Record<string, unknown>) => {
+        planRequests.push(request);
+        return { publisherAddress: PAYER, publishEpochs: 2, tokenAmount: 1_000n };
+      },
+    };
+    return new PublisherPlanner({
+      chain: chain as never,
+      resolvePublisherAddressSelection: async () => ({
+        address: PAYER,
+        planningPin: PAYER,
+        planningPinLabel: 'publisherPrivateKey' as const,
+      }),
+      resolvePublisherSigner: async () => signer,
+      localTentativePublisherAddress: () => PAYER,
+      log: { info() {}, warn() {} },
+    });
+  }
+
+  it('threads the author the agent resolved into resolvePublisherPublishPlan, with a DISTINCT payer', async () => {
+    // Resolve the author exactly the way the publish path does, rather than
+    // hardcoding MEMBER — so this asserts the two halves are actually connected.
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const agent = stubAgent(store, CURATOR);
+    const resolvedAuthor = await agent.resolveAssertionAuthor(CG, NAME, undefined, CURATOR);
+    expect(resolvedAuthor).toBe(MEMBER);
+
+    const planRequests: Array<Record<string, unknown>> = [];
+    const prepared = await makePlanner(planRequests).prepare(CONTEXT_GRAPH_ID);
+    const plan = await prepared.finalize({
+      explicitPublishEpochs: 2,
+      effectiveByteSize: 256n,
+      // The value `dkg-publisher` forwards from
+      // `options.precomputedAttestation?.authorAddress`.
+      attestedAuthorAddress: resolvedAuthor,
+      ctx: {} as never,
+    });
+
+    expect(planRequests).toHaveLength(1);
+    expect(planRequests[0]).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      attestedAuthorAddress: MEMBER,
+      publisherAddress: PAYER,
+    });
+    // The whole point of #1689: the two principals are DIFFERENT, and both
+    // arrive. The author is an authorization principal; the payer still pays.
+    expect(planRequests[0].attestedAuthorAddress).not.toBe(planRequests[0].publisherAddress);
+    expect(plan).toMatchObject({ kind: 'on-chain', publisherAddress: PAYER });
+  });
+
+  it('omits attestedAuthorAddress entirely when no attestation was precomputed', async () => {
+    // Routes that plan without a precomputed attestation (local/tentative
+    // publishes, legacy callers) must leave the field absent so the adapter's
+    // admission gate degrades to the payer-only check — and issues no extra read.
+    const planRequests: Array<Record<string, unknown>> = [];
+    const prepared = await makePlanner(planRequests).prepare(CONTEXT_GRAPH_ID);
+    await prepared.finalize({
+      explicitPublishEpochs: 2,
+      effectiveByteSize: 256n,
+      ctx: {} as never,
+    });
+
+    expect(planRequests).toHaveLength(1);
+    expect(planRequests[0].attestedAuthorAddress).toBeUndefined();
   });
 });

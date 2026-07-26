@@ -15,10 +15,16 @@ import {
   InsufficientPublisherFundsError,
   isNoFundedPublisherWalletError,
   isTooLowAllowanceError,
+  PublisherNotAuthorizedForContextGraphError,
   resolveRpcUrls,
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
   type EVMAdapterConfig,
 } from '../src/evm-adapter.js';
+// #1689 — the deployed-lifecycle version threshold the author-side admission is
+// gated on. Imported from the module that OWNS it, never re-typed as a literal,
+// so a change to the production constant cannot silently un-pin these tests.
+import { ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION } from '../src/evm-adapter-base.js';
+import { PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_APPROVAL_POLICY,
   DEFAULT_REPLENISH_TARGET_ALLOWANCE,
@@ -4091,21 +4097,246 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     })).resolves.toMatchObject({ publisherAddress: walletA.address, publishEpochs: 2, tokenAmount: 1_000n });
   });
 
-  it('rejects a funded but unauthorized explicitly pinned publisher', async () => {
-    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
-    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
-    tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
-    (a as any).contracts.contextGraphs.isAuthorizedPublisher = recorder(async (_cg: bigint, addr: string) =>
-      addr.toLowerCase() !== walletA.address.toLowerCase());
-    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+  // ==========================================================================
+  // #1689 — publish admission is satisfied by EITHER principal a publish
+  // carries: the PAYING wallet, or the EIP-712-attested AUTHOR. This group
+  // replaces a single test that encoded the old payer-only policy.
+  //
+  // The author half is held behind the DEPLOYED lifecycle's `version()`, not the
+  // node's own software version, so a node on new code against an un-rotated
+  // chain keeps rejecting locally instead of broadcasting a transaction that is
+  // certain to revert on chain and burn gas. "Unknown" must therefore behave
+  // exactly like "unsupported" — the negative rows below are the load-bearing
+  // ones.
+  // ==========================================================================
+  describe('#1689 publish admission — payer OR attested author', () => {
+    const AUTHOR = '0x1111111111111111111111111111111111111111';
 
-    await expect(a.resolvePublisherPublishPlan({
-      contextGraphId: CG,
-      effectiveByteSize: 100n,
-      explicitPublishEpochs: 2,
-      defaultPublishEpochs: 12,
-      publisherAddress: walletA.address,
-    })).rejects.toThrow(/publisherAddress .* is not authorized.*context graph/i);
+    // Derived from the production constant rather than written as `10.1.6`, so
+    // if the threshold ever moves this stays "one patch below it" instead of
+    // silently becoming a second ACCEPTING version and gutting the negative row.
+    const BELOW_THRESHOLD = (() => {
+      const [major, minor, patch] = ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION
+        .split('.').map(Number);
+      // Guard the derivation itself: a 0 patch would wrap to -1 and read as a
+      // NEWER version under semver comparison, inverting the test's meaning.
+      expect(patch).toBeGreaterThan(0);
+      return `${major}.${minor}.${patch - 1}`;
+    })();
+
+    /**
+     * Give the adapter a lifecycle handle whose `version()` the REAL read path
+     * reaches (`readContract` → rebind → `c.version()`), so the semver compare,
+     * the address-keyed memo and the fail-closed catch are all exercised rather
+     * than stubbed over. Returns the recorder so a test can assert how many
+     * times the gate actually went to the chain.
+     */
+    function stubLifecycleVersion(a: any, impl: () => Promise<string>) {
+      const version = recorder(impl);
+      a.contracts.knowledgeAssetsLifecycle = connectable({
+        getAddress: recorder(async () => PARITY_KA_ADDRESS),
+        version,
+      });
+      return version;
+    }
+
+    /** `isAuthorizedPublisher` that authorizes exactly the listed addresses. */
+    function authorizeOnly(a: any, ...authorized: string[]) {
+      const permitted = new Set(authorized.map(lc));
+      const isAuthorizedPublisher = recorder(async (_cg: bigint, addr: string) =>
+        permitted.has(lc(String(addr))));
+      a.contracts.contextGraphs = connectable({ isAuthorizedPublisher });
+      return isAuthorizedPublisher;
+    }
+
+    /** Every wallet funded, so ONLY authorization can decide these tests. */
+    function fundedAdapter() {
+      const h = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      for (const w of [h.walletA, h.walletB]) {
+        h.nativeByAddr.set(lc(w.address), ONE);
+        h.tracByAddr.set(lc(w.address), 2_000n);
+      }
+      (h.a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+      return h;
+    }
+
+    /** The pinned lane — the one the async publisher always takes. */
+    const pinnedPlan = (a: any, payer: string, attestedAuthorAddress?: string) =>
+      a.resolvePublisherPublishPlan({
+        contextGraphId: CG,
+        effectiveByteSize: 100n,
+        explicitPublishEpochs: 2,
+        defaultPublishEpochs: 12,
+        publisherAddress: payer,
+        ...(attestedAuthorAddress ? { attestedAuthorAddress } : {}),
+      });
+
+    /** Addresses the CG policy was actually asked about, in order. */
+    const asked = (rec: { calls: unknown[][] }) => rec.calls.map((c) => lc(String(c[1])));
+
+    it('(a) rejects when NEITHER the payer nor the attested author is authorized', async () => {
+      const { a, walletA } = fundedAdapter();
+      const isAuthorizedPublisher = authorizeOnly(a); // nobody is authorized
+      stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      await expect(pinnedPlan(a, walletA.address, AUTHOR)).rejects.toMatchObject({
+        code: PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+      });
+      // Both principals were genuinely consulted — the rejection is not the
+      // author branch being skipped.
+      expect(asked(isAuthorizedPublisher)).toContain(lc(walletA.address));
+      expect(asked(isAuthorizedPublisher)).toContain(lc(AUTHOR));
+    });
+
+    it('(b) ACCEPTS when only the attested author is authorized and the deployed lifecycle is at the threshold', async () => {
+      const { a, walletA } = fundedAdapter();
+      const isAuthorizedPublisher = authorizeOnly(a, AUTHOR);
+      stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      await expect(pinnedPlan(a, walletA.address, AUTHOR)).resolves.toMatchObject({
+        publisherAddress: walletA.address,
+        publishEpochs: 2,
+        tokenAmount: 1_000n,
+      });
+      // Payer asked FIRST and refused; the author is what admitted the publish.
+      // Order matters: it is what keeps the already-working payer case at one read.
+      expect(asked(isAuthorizedPublisher)).toEqual([lc(walletA.address), lc(AUTHOR)]);
+    });
+
+    it('(c) REJECTS the same publish when the deployed lifecycle is one patch BELOW the threshold', async () => {
+      const { a, walletA } = fundedAdapter();
+      authorizeOnly(a, AUTHOR); // author authorized — only the version differs from (b)
+      const version = stubLifecycleVersion(a, async () => BELOW_THRESHOLD);
+
+      const error = await pinnedPlan(a, walletA.address, AUTHOR).then(
+        () => { throw new Error('expected the un-rotated lifecycle to reject'); },
+        (e: unknown) => e as PublisherNotAuthorizedForContextGraphError,
+      );
+
+      expect(error).toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+      expect(error.code).toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
+      // The operator must be able to tell "author unauthorized" from "chain not
+      // rotated yet" — the message has to name the version, not just refuse.
+      expect(error.message).toContain(ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+      expect(error.message).toContain(BELOW_THRESHOLD);
+      expect(version.calls.length).toBeGreaterThan(0);
+    });
+
+    it('(d) REJECTS when version() THROWS — unknown must behave exactly like unsupported', async () => {
+      const { a, walletA } = fundedAdapter();
+      authorizeOnly(a, AUTHOR);
+      stubLifecycleVersion(a, async () => { throw new Error('RPC endpoint unreachable'); });
+
+      const error = await pinnedPlan(a, walletA.address, AUTHOR).then(
+        () => { throw new Error('expected an unreadable version to fail CLOSED'); },
+        (e: unknown) => e as PublisherNotAuthorizedForContextGraphError,
+      );
+
+      expect(error.code).toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
+      expect(error.message).toContain('the deployed version could not be read');
+    });
+
+    it('(d2) a FAILED version() read is not memoized — the gate recovers on the next attempt', async () => {
+      // Pins the "deliberately NOT memoized" contract in
+      // `deployedKnowledgeAssetsLifecycleVersion`. If a rejection were cached, a
+      // single RPC blip would pin the node to legacy behaviour for a whole TTL
+      // window and the #1689 fix would look intermittently broken in production.
+      const { a, walletA } = fundedAdapter();
+      authorizeOnly(a, AUTHOR);
+      let attempt = 0;
+      stubLifecycleVersion(a, async () => {
+        if (++attempt === 1) throw new Error('transient RPC blip');
+        return ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION;
+      });
+
+      await expect(pinnedPlan(a, walletA.address, AUTHOR)).rejects.toMatchObject({
+        code: PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+      });
+      await expect(pinnedPlan(a, walletA.address, AUTHOR)).resolves.toMatchObject({
+        publisherAddress: walletA.address,
+      });
+    });
+
+    it('(e) the rejection carries the structured code and both principals', async () => {
+      const { a, walletA } = fundedAdapter();
+      authorizeOnly(a);
+      stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      const error = await pinnedPlan(a, walletA.address, AUTHOR).then(
+        () => { throw new Error('expected a rejection'); },
+        (e: unknown) => e as PublisherNotAuthorizedForContextGraphError,
+      );
+
+      // `code` is the whole point: the publisher's async classifier matches on
+      // it to reach terminal `authority_forbidden` instead of the retryable
+      // `rpc_unavailable` default. Message text is NOT the contract.
+      expect(error.code).toBe(PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE);
+      expect(error.code).toBe('PUBLISHER_NOT_AUTHORIZED_FOR_CG');
+      expect(error).toBeInstanceOf(PublisherNotAuthorizedForContextGraphError);
+      expect(error.contextGraphId).toBe(CG);
+      expect(lc(error.payerAddress)).toBe(lc(walletA.address));
+      expect(lc(String(error.attestedAuthorAddress))).toBe(lc(AUTHOR));
+      expect(error.message).toContain(walletA.address);
+      expect(error.message).toContain(AUTHOR);
+    });
+
+    it('(f) payer authorized and NO author supplied: accepts with no version() read and exactly one policy read', async () => {
+      // The read-for-read regression guard. Every caller that predates #1689
+      // omits the author, and that path must stay identical to before — the fix
+      // must not add an RPC round-trip to the common publish.
+      const { a, walletA } = fundedAdapter();
+      const isAuthorizedPublisher = authorizeOnly(a, walletA.address);
+      const version = stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      await expect(pinnedPlan(a, walletA.address)).resolves.toMatchObject({
+        publisherAddress: walletA.address,
+      });
+
+      expect(version.calls).toHaveLength(0);
+      expect(asked(isAuthorizedPublisher)).toEqual([lc(walletA.address)]);
+    });
+
+    it('(f2) an author IDENTICAL to the payer adds no reads either', async () => {
+      // The gate short-circuits rather than asking the chain the same
+      // (cg, address) question twice.
+      const { a, walletA } = fundedAdapter();
+      const isAuthorizedPublisher = authorizeOnly(a); // payer not authorized
+      const version = stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      await expect(pinnedPlan(a, walletA.address, walletA.address)).rejects.toMatchObject({
+        code: PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE,
+      });
+
+      expect(asked(isAuthorizedPublisher)).toEqual([lc(walletA.address)]);
+      expect(version.calls).toHaveLength(0);
+    });
+
+    it('(g) leaves the signer pool UNNARROWED when the attested author admits', async () => {
+      // When the author admits, the on-chain gate accepts ANY payer, so narrowing
+      // the pool would reject wallets the chain would have taken — and would cost
+      // one read per wallet instead of one for the whole pool.
+      const { a, wallets } = fundedAdapter();
+      const isAuthorizedPublisher = authorizeOnly(a, AUTHOR); // no WALLET is authorized
+      stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      const eligible = await (a as any)._authorizedPublisherSigners(wallets, CG, AUTHOR);
+
+      expect(eligible).toEqual(wallets);
+      expect(asked(isAuthorizedPublisher)).toEqual([lc(AUTHOR)]);
+    });
+
+    it('(g2) still throws the exact legacy pool message when neither principal admits', async () => {
+      // The no-author path keeps its byte-identical wording — `chain-lifecycle-extra`
+      // pins this string from source, and callers in publisher/agent/cli match on it.
+      const { a, wallets } = fundedAdapter();
+      authorizeOnly(a);
+      stubLifecycleVersion(a, async () => ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+
+      await expect((a as any)._authorizedPublisherSigners(wallets, CG)).rejects.toThrow(
+        `No authorized publisher wallet found in signer pool for context graph ${CG.toString()}. `
+        + 'Ensure at least one configured wallet is permitted by on-chain publish authority.',
+      );
+    });
   });
 
   it('expires the funding cache past the TTL: a newly funded wallet is re-read and selected', async () => {
