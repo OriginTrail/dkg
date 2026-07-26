@@ -27,6 +27,7 @@ import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import {
   EVMChainAdapter,
+  InsufficientPublisherFundsError,
   PublisherNotAuthorizedForContextGraphError,
   isPublisherNotAuthorizedForCgError,
   formatPublisherNotAuthorizedForCgMessage,
@@ -39,6 +40,7 @@ import { PUBLISHER_NOT_AUTHORIZED_FOR_CG_CODE } from '@origintrail-official/dkg-
 
 const CG = 7n;
 const AUTHOR = '0x1111111111111111111111111111111111111111';
+const lc = (s: string) => s.toLowerCase();
 const PK_A = `0x${'1'.repeat(64)}`;
 const PK_B = `0x${'2'.repeat(64)}`;
 
@@ -162,6 +164,48 @@ describe('#1689 publish admission — diagnostic accuracy [CH-1689-D]', () => {
     );
     expect(error.message).toContain(`deployed version is ${BELOW_THRESHOLD}`);
   });
+
+  // The facts are computed ONCE at throw time. If they live only in the rendered
+  // message, the next consumer question — "not rotated yet, or author refused?" —
+  // forces message-parsing, which is the exact coupling this PR removes. So the
+  // thrown object must expose what the formatter was given, and the two must agree.
+  it('the thrown error carries the structured facts its message was rendered from', async () => {
+    const { a } = makeAdapter([AUTHOR.toLowerCase()], BELOW_THRESHOLD);
+    const payer = a.signerPool[0].address;
+
+    const error = await caught(() => a.resolvePinnedPublisherSigner(CG, payer, AUTHOR));
+
+    // The two fields that answer the question without touching `message`.
+    expect(error.details.attestedAuthorConsidered).toBe(false);
+    expect(error.details.deployedLifecycleVersion).toBe(BELOW_THRESHOLD);
+    expect(error.details.minLifecycleVersion).toBe(ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+    expect(error.details.contextGraphId).toBe(CG);
+    expect(lc(error.details.payerAddress)).toBe(lc(payer));
+    expect(error.details.attestedAuthorAddress).toBe(AUTHOR);
+
+    // Facts and text must describe the same rejection — a message rendered from
+    // different values than the object reports would be worse than either alone.
+    expect(error.message).toBe(formatPublisherNotAuthorizedForCgMessage(error.details));
+
+    // Frozen: one error's diagnosis cannot be mutated into disagreeing with its text.
+    expect(Object.isFrozen(error.details)).toBe(true);
+  });
+
+  it('carries the pool facts on a signer-pool rejection, author consulted and refused', async () => {
+    const { a, pool } = makeAdapter([], ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION, {
+      extraKeys: [PK_B],
+    });
+
+    const error = await caught(() => a._authorizedPublisherSigners(pool, CG, AUTHOR));
+
+    // Author WAS weighed here (supported lifecycle) and refused — the opposite
+    // diagnosis to the version-gated case above, distinguishable without parsing.
+    expect(error.details.attestedAuthorConsidered).toBe(true);
+    expect(error.details.deployedLifecycleVersion)
+      .toBe(ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION);
+    expect(error.details.payerPoolAddresses).toEqual(pool.map((w) => w.address));
+    expect(error.message).toBe(formatPublisherNotAuthorizedForCgMessage(error.details));
+  });
 });
 
 describe('#1689 publish admission — fails closed on EVERY path [CH-1689-F]', () => {
@@ -248,6 +292,66 @@ describe('#1689 publish admission — one condition, one error contract [CH-1689
     );
     await expect(a._authorizedPublisherSigners(pool, CG, AUTHOR)).resolves.toEqual(pool);
     expect(counts.isAuthorizedPublisher).toBe(1);
+  });
+});
+
+describe('#1689 publish admission — author-aware NO_FUNDED enrichment [CH-1689-E]', () => {
+  // `enrichInsufficientPublisherFundsError` decides whether a funding failure is the
+  // TERMINAL `NO_FUNDED_PUBLISHER_WALLET` ("no wallet is a viable reroute") or a
+  // recoverable wrong-pick. It answers that with `poolHasFundableSigner`, which must
+  // be asked on the SAME two-principal rule the publish is held to: an attested
+  // author the CG authorizes makes every funded wallet admissible.
+  //
+  // Nothing else guards the author argument at that call site. Drop it and the
+  // payer-only NO_FUNDED tests still pass, while a recoverable reroute is
+  // misreported as terminal — a misclassification in the same family as the bug
+  // this PR fixes. Mutation-proven: removing the argument fails exactly this test.
+  it('an authorized author keeps a fundable pool wallet a viable reroute (NOT terminal NO_FUNDED)', async () => {
+    const { a, pool } = makeAdapter(
+      // ONLY the attested author is authorized — no wallet in the pool is.
+      [AUTHOR.toLowerCase()],
+      ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION,
+      { extraKeys: [PK_B] },
+    );
+    const [pinned, other] = pool;
+    // The pinned payer is short on TRAC; the other pool wallet can cover the cost.
+    a.getWalletFunding = async (address: string) => (
+      address.toLowerCase() === pinned.address.toLowerCase()
+        ? { native: 10n ** 18n, trac: 0n }
+        : { native: 10n ** 18n, trac: 10n ** 18n }
+    );
+    a.isWalletPublishFundable = async (address: string) =>
+      address.toLowerCase() !== pinned.address.toLowerCase();
+    a.snapshotPublisherWalletBalances = async () => [];
+
+    // A TRAC shortfall surfaces as a funds-shaped transferFrom revert.
+    const original = new Error('ERC20: transfer amount exceeds balance');
+    const enriched = await a.enrichInsufficientPublisherFundsError(
+      original, pinned, CG, 1_000n, AUTHOR,
+    );
+
+    expect(enriched).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    // The original error is preserved so a retry can reroute to the funded wallet.
+    expect(enriched).toBe(original);
+    void other;
+  });
+
+  it('with no author, an unauthorized-and-unfunded pool is still terminal NO_FUNDED (unchanged)', async () => {
+    // The payer-only behaviour this must not disturb: nothing admissible is
+    // fundable, so the whole-pool diagnosis is correct and stays terminal.
+    const { a, pool } = makeAdapter([], ATTESTED_AUTHOR_PUBLISH_AUTHZ_MIN_KAL_VERSION, {
+      extraKeys: [PK_B],
+    });
+    const [pinned] = pool;
+    a.getWalletFunding = async () => ({ native: 10n ** 18n, trac: 0n });
+    a.isWalletPublishFundable = async () => false;
+    a.snapshotPublisherWalletBalances = async () => [];
+
+    const enriched = await a.enrichInsufficientPublisherFundsError(
+      new Error('ERC20: transfer amount exceeds balance'), pinned, CG, 1_000n,
+    );
+
+    expect(enriched).toBeInstanceOf(InsufficientPublisherFundsError);
   });
 });
 
