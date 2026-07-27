@@ -248,10 +248,13 @@ describe('durable sync lifecycle chain binding', () => {
     };
     mockedRunDurableSync.mockImplementationOnce(async () => {
       controller.abort(new Error('whole operation cancelled'));
-      return {} as Awaited<ReturnType<typeof runDurableSync>>;
+      return {
+        complete: true,
+        completedPhases: 2,
+      } as Awaited<ReturnType<typeof runDurableSync>>;
     });
 
-    await LifecycleSyncMethods.prototype.runLegacyDurableSync.call(
+    const result = await LifecycleSyncMethods.prototype.runLegacyDurableSync.call(
       agentLike,
       ctx,
       'peer-operation-abort',
@@ -265,6 +268,10 @@ describe('durable sync lifecycle chain binding', () => {
     expect(controller.signal.aborted).toBe(true);
     expect(admittedContextGraphs).toEqual(['cg-a']);
     expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      complete: false,
+      completedPhases: 2,
+    });
   });
 
   it('forwards the operation signal through the lifecycle store bridge', async () => {

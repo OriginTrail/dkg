@@ -4387,6 +4387,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
         return markDurableTerminalBoundary(summary, false);
       },
+      // Preserve already-merged progress, but record that cancellation left
+      // requested Context Graphs unvisited so the aggregate cannot finalize
+      // as complete.
+      markSkipped: (summary) => markDurableTerminalBoundary(summary, false),
       shouldContinue: () => !operationBoundary.signal?.aborted,
       shouldStop: (part) => Boolean(
         stopOnBackoffWorthyFailure
