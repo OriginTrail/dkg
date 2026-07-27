@@ -588,7 +588,6 @@ function syncPageFetchCoalescingKey(params: {
   recovery?: boolean;
   forceFreshSession?: boolean;
   assetUals?: readonly string[];
-  callerDeadline?: number;
 }): string {
   return JSON.stringify([
     params.remotePeerId,
@@ -601,7 +600,6 @@ function syncPageFetchCoalescingKey(params: {
     params.recovery === true,
     params.forceFreshSession === true,
     params.assetUals ?? null,
-    params.callerDeadline ?? null,
   ]);
 }
 
@@ -4389,6 +4387,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
         return markDurableTerminalBoundary(summary, false);
       },
+      shouldContinue: () => !operationBoundary.signal?.aborted,
       shouldStop: (part) => Boolean(
         stopOnBackoffWorthyFailure
         && durableSyncAccumulatorHasBackoffWorthyFailure(part),
@@ -4920,29 +4919,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // responder-session identities so offsets can never cross asset batches.
     assetUals?: string[],
   ): Promise<SyncPageResult> {
-    const coalescingKey = syncPageFetchCoalescingKey({
-      remotePeerId,
-      contextGraphId,
-      includeSharedMemory,
-      phase,
-      graphUri,
-      snapshotRef,
-      sinceBatchId,
-      recovery,
-      forceFreshSession,
-      assetUals,
-      // Background fetches intentionally share across equivalent derived
-      // deadlines. Signal-bounded callers own an operation-specific deadline,
-      // so incompatible cancellation contracts must not share a page stream.
-      callerDeadline: signal ? deadline : undefined,
-    });
+    // A caller signal defines an operation-owned cancellation contract. Do not
+    // place those fetches in the shared page map: even equal wall-clock
+    // deadlines do not make independently abortable operations compatible.
+    const coalescingKey = signal
+      ? null
+      : syncPageFetchCoalescingKey({
+        remotePeerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        snapshotRef,
+        sinceBatchId,
+        recovery,
+        forceFreshSession,
+        assetUals,
+      });
     const inFlight = inFlightSyncPageFetchesFor(this);
-    const existing = inFlight.get(coalescingKey);
+    const existing = coalescingKey ? inFlight.get(coalescingKey) : undefined;
     if (existing) {
       if (!existing.controller.signal.aborted) {
         return waitForSyncPageFetch(existing, signal);
       }
-      inFlight.delete(coalescingKey);
+      if (coalescingKey) inFlight.delete(coalescingKey);
     }
     if (signal?.aborted) {
       return Promise.reject(asSyncFetchAbortError(signal.reason));
@@ -5020,7 +5020,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     }).finally(() => {
       nodeStopSignal?.removeEventListener('abort', onNodeStop);
-      if (inFlight.get(coalescingKey) === entry) {
+      if (coalescingKey && inFlight.get(coalescingKey) === entry) {
         inFlight.delete(coalescingKey);
       }
     });
@@ -5030,7 +5030,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // active waiters through the original promise.
     });
     entry = { promise: sharedFetch, controller, waiters: 0 };
-    inFlight.set(coalescingKey, entry);
+    if (coalescingKey) inFlight.set(coalescingKey, entry);
     return waitForSyncPageFetch(entry, signal);
   }
 

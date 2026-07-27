@@ -228,6 +228,85 @@ describe('durable sync lifecycle chain binding', () => {
     }
   });
 
+  it('does not admit a later Context Graph after the operation is aborted', async () => {
+    const controller = new AbortController();
+    const admittedContextGraphs: string[] = [];
+    const agentLike: any = {
+      config: {},
+      processDurableBatchInWorker: async () => ({}),
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        admittedContextGraphId: string,
+        _lane: string,
+        _operationId: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admittedContextGraphs.push(admittedContextGraphId);
+        return work();
+      },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    mockedRunDurableSync.mockImplementationOnce(async () => {
+      controller.abort(new Error('whole operation cancelled'));
+      return {} as Awaited<ReturnType<typeof runDurableSync>>;
+    });
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSync.call(
+      agentLike,
+      ctx,
+      'peer-operation-abort',
+      ['cg-a', 'cg-b'],
+      undefined,
+      undefined,
+      undefined,
+      { signal: controller.signal },
+    );
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(admittedContextGraphs).toEqual(['cg-a']);
+    expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards the operation signal through the lifecycle store bridge', async () => {
+    const controller = new AbortController();
+    const insertSyncedQuadsAndInvalidateListCache = vi.fn(async () => {});
+    const agentLike: any = {
+      config: {},
+      chain: { chainId: 'none' },
+      store: {},
+      subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      bindSubscriptionOnChainId: vi.fn(),
+      persistContextGraphSubscriptionState: vi.fn(),
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache,
+      syncCheckpoints: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike,
+      ctx,
+      'peer-store-signal',
+      contextGraphId,
+      1,
+      { signal: controller.signal },
+    );
+    const storeInsert = mockedRunDurableSync.mock.calls[0]![0].storeInsert;
+    expect(storeInsert).toBeTypeOf('function');
+
+    await storeInsert!({ quads: [], signal: controller.signal });
+
+    expect(insertSyncedQuadsAndInvalidateListCache).toHaveBeenCalledWith([], {
+      priority: 'background',
+      source: 'agent.durableSync.storeInsert',
+      signal: controller.signal,
+    });
+  });
+
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const runLegacyDurableSync = vi.fn(async () => ({}));
     const agentLike = { runLegacyDurableSync };

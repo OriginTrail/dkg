@@ -712,15 +712,19 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     vi.useFakeTimers();
     let resolveDurable!: (inserted: number) => void;
     let operationSignal: AbortSignal | undefined;
-    const syncFromPeer = vi.fn((
+    const syncFromPeerDetailed = vi.fn((
       _peerId: string,
       _contextGraphIds: string[],
       _onPhase: undefined,
       _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
       options: { signal: AbortSignal },
-    ) => new Promise<number>((resolve) => {
+    ) => new Promise<DurableSyncResult>((resolve) => {
       operationSignal = options.signal;
-      resolveDurable = resolve;
+      resolveDurable = (inserted) => resolve(detailedDurableResult({
+        insertedTriples: inserted,
+        insertedDataTriples: inserted,
+      }));
     }));
     const agent = {
       peerId: 'self-peer',
@@ -730,7 +734,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
         curatorIsLocal: false,
         peerIds: ['peer-curator'],
       })),
-      syncFromPeer,
+      syncFromPeerDetailed,
     };
     const { ctx, res } = buildCatchupCtx(
       {
@@ -754,9 +758,10 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       await vi.runAllTimersAsync();
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body).totalDurableInsertedTriples).toBe(23);
-      expect(syncFromPeer).toHaveBeenCalledWith(
+      expect(syncFromPeerDetailed).toHaveBeenCalledWith(
         'peer-curator',
         ['private-settlement-cg'],
+        undefined,
         undefined,
         undefined,
         {

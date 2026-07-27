@@ -177,6 +177,20 @@ export interface DurableCatchupRequestOutcome {
   } | undefined;
 }
 
+async function awaitLegacyDurableWithinBoundary<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
 /**
  * Adapt the agent's typed durable result for operator-facing catch-up APIs.
  * Whole-leg completion comes only from the explicit agent contract; phase
@@ -286,11 +300,13 @@ export async function runDurableCatchupLeg(
       };
     }
 
-    return {
-      insertedTriples: typeof agent.syncFromPeer === 'function'
-        // Legacy implementations may ignore AbortSignal. Await them rather
-        // than falsely reporting zero while unowned work can still commit.
-        ? await agent.syncFromPeer(
+    const insertedTriples = typeof agent.syncFromPeer === 'function'
+      // Legacy implementations do not expose the detailed lane's atomic
+      // settlement contract and may ignore AbortSignal entirely. Keep the
+      // route hard-bounded instead of allowing a stale adapter to pin the
+      // whole catch-up request forever.
+      ? await awaitLegacyDurableWithinBoundary(
+        agent.syncFromPeer(
           peerId,
           [contextGraphId],
           undefined,
@@ -299,8 +315,12 @@ export async function runDurableCatchupLeg(
             totalTimeoutMs: phaseTimeoutMs,
             signal: controller.signal,
           },
-        )
-        : 0,
+        ),
+        controller.signal,
+      )
+      : 0;
+    return {
+      insertedTriples,
       state: 'legacy',
     };
   } catch (error) {

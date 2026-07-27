@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   createOperationContext,
   PROTOCOL_SYNC,
-  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -12,6 +11,7 @@ import {
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PEER_B = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
@@ -30,22 +30,6 @@ type FetchArgs = {
   recovery?: boolean;
   assetUals?: string[];
 };
-
-interface LifecycleFetchCall {
-  ctx: OperationContext;
-  remotePeerId: string;
-  contextGraphId: string;
-  includeSharedMemory: boolean;
-  phase: SyncPhase;
-  graphUri: string;
-  deadline: number;
-  snapshotRef?: string;
-  sinceBatchId?: string;
-  signal?: AbortSignal;
-  recovery?: boolean;
-  forceFreshSession?: boolean;
-  assetUals?: string[];
-}
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
 const EXACT_UAL_8 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/8';
@@ -126,41 +110,6 @@ function emptySyncPage(phase: string): SyncPageResult {
     completed: true,
     timedOut: false,
   };
-}
-
-function stubLifecycleFetch(
-  agent: DKGAgent,
-  handler: (call: LifecycleFetchCall) => Promise<SyncPageResult>,
-): void {
-  (agent as any).fetchSyncPages = (
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphId: string,
-    includeSharedMemory: boolean,
-    phase: SyncPhase,
-    graphUri: string,
-    deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    signal?: AbortSignal,
-    recovery?: boolean,
-    forceFreshSession?: boolean,
-    assetUals?: string[],
-  ) => handler({
-    ctx,
-    remotePeerId,
-    contextGraphId,
-    includeSharedMemory,
-    phase,
-    graphUri,
-    deadline,
-    snapshotRef,
-    sinceBatchId,
-    signal,
-    recovery,
-    forceFreshSession,
-    assetUals,
-  });
 }
 
 async function createAgentWithSend(
@@ -291,36 +240,6 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it('does not coalesce signal-bounded fetches with different operation deadlines', async () => {
-    const response = deferred<Uint8Array>();
-    let sends = 0;
-    const agent = await createAgentWithSend(async () => {
-      sends++;
-      return response.promise;
-    });
-    const firstController = new AbortController();
-    const secondController = new AbortController();
-
-    try {
-      const first = fetchPages(agent, {
-        deadline: DEFAULT_DEADLINE,
-        signal: firstController.signal,
-      });
-      await flushMicrotasks();
-      const second = fetchPages(agent, {
-        deadline: DEFAULT_DEADLINE + 1,
-        signal: secondController.signal,
-      });
-      await flushMicrotasks();
-
-      expect(sends).toBe(2);
-      response.resolve(new Uint8Array(0));
-      await Promise.all([first, second]);
-    } finally {
-      await agent.stop().catch(() => {});
-    }
-  });
-
   it('clears the in-flight entry after success and after failure', async () => {
     let sends = 0;
     let failParser = true;
@@ -350,29 +269,28 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it('lets one waiter abort without aborting the shared fetch for another waiter', async () => {
+  it('isolates a signal-bounded fetch from a background shared fetch', async () => {
     const response = deferred<Uint8Array>();
     let sends = 0;
     const agent = await createAgentWithSend(async () => {
       sends++;
       return response.promise;
     });
-    const firstController = new AbortController();
     const abort = new AbortController();
 
     try {
-      const first = fetchPages(agent, { signal: firstController.signal });
+      const first = fetchPages(agent);
       await flushMicrotasks();
       const second = fetchPages(agent, { signal: abort.signal });
       await flushMicrotasks();
-      expect(sends).toBe(1);
+      expect(sends).toBe(2);
 
       abort.abort(new Error('waiter aborted'));
       await expect(second).rejects.toMatchObject({ name: 'AbortError', message: 'waiter aborted' });
 
       response.resolve(new Uint8Array(0));
       await expect(first).resolves.toMatchObject({ quads: [] });
-      expect(sends).toBe(1);
+      expect(sends).toBe(2);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -498,77 +416,6 @@ describe('DKGAgent sync fetch coalescing', () => {
       const [backgroundResult, foregroundResult] = await Promise.all([background, foreground]);
       expect(backgroundResult).not.toBe(foregroundResult);
       expect(fetchCalls).toBe(4);
-    } finally {
-      await agent.stop().catch(() => {});
-    }
-  });
-
-  it('does not single-flight signal-bounded direct durable syncs', async () => {
-    let fetchCalls = 0;
-    const agent = await createAgentWithSend(
-      async () => new Uint8Array(0),
-      { syncGlobalMaxInflight: 2, syncGlobalQueueLimit: 2 },
-    );
-    stubLifecycleFetch(agent, async ({ phase, signal }) => {
-      fetchCalls++;
-      if (fetchCalls !== 1) return emptySyncPage(phase);
-
-      if (!signal) throw new Error('signal-bounded durable fetch received no abort signal');
-      return new Promise<SyncPageResult>((_resolve, reject) => {
-        const rejectAbort = () => reject(signal.reason);
-        if (signal.aborted) {
-          rejectAbort();
-          return;
-        }
-        signal.addEventListener('abort', rejectAbort, { once: true });
-      });
-    });
-    (agent as any).processDurableBatchInWorker = async () => ({
-      verifiedData: [],
-      verifiedMeta: [],
-      totalFetchedDataQuads: 0,
-      totalFetchedMetaQuads: 0,
-      rejectedKcs: 0,
-      emptyResponses: 1,
-      metaOnlyResponses: 0,
-      dataRejectedMissingMeta: 0,
-    });
-    const firstController = new AbortController();
-    const secondController = new AbortController();
-
-    try {
-      const first = (agent as any).syncFromPeerDetailed(
-        PEER_A,
-        ['coalesced-cg'],
-        undefined,
-        undefined,
-        undefined,
-        { signal: firstController.signal },
-      );
-      const second = (agent as any).syncFromPeerDetailed(
-        PEER_A,
-        ['coalesced-cg'],
-        undefined,
-        undefined,
-        undefined,
-        { signal: secondController.signal },
-      );
-      let secondSettled = false;
-      void second.then(
-        () => { secondSettled = true; },
-        () => { secondSettled = true; },
-      );
-
-      await waitFor(() => fetchCalls === 1);
-      expect(secondSettled).toBe(false);
-
-      firstController.abort(new Error('first durable sync expired'));
-      const [firstResult, secondResult] = await Promise.all([first, second]);
-
-      expect(firstResult).not.toBe(secondResult);
-      expect(fetchCalls).toBe(3);
-      expect(secondController.signal.aborted).toBe(false);
-      expect(secondResult).toMatchObject({ failedPeers: 0 });
     } finally {
       await agent.stop().catch(() => {});
     }

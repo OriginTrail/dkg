@@ -19,6 +19,7 @@ export interface OrderedContextGraphSyncOptions<Result> {
   runWithAdmission: <T>(item: ContextGraphSyncWork<Result>, work: () => Promise<T>) => Promise<T>;
   merge: (summary: Result, part: Result) => Result;
   markDeferred: (summary: Result) => Result;
+  shouldContinue?: () => boolean;
   shouldStop?: (part: Result) => boolean;
   onDeferred?: (item: ContextGraphSyncWork<Result>, error: Error) => void;
 }
@@ -54,6 +55,7 @@ export async function runOrderedContextGraphSyncs<Result>(
   let summary = options.emptyResult();
   const orderedWork = orderWork(options.work, options.priorities);
   for (const [index, item] of orderedWork.entries()) {
+    if (options.shouldContinue && !options.shouldContinue()) break;
     const remaining = orderedWork.length - index;
     try {
       const part = await options.runWithAdmission(

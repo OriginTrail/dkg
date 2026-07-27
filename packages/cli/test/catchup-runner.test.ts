@@ -400,6 +400,33 @@ describe('route-level durable catchup orchestration', () => {
     }
   });
 
+  it('hard-bounds a legacy durable adapter that ignores cancellation', async () => {
+    vi.useFakeTimers();
+    const syncFromPeer = vi.fn(async () => new Promise<number>(() => {}));
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeer: syncFromPeer as any },
+        'peer-legacy-hung',
+        'cg-legacy-hung',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'failed',
+        complete: false,
+        failureReasons: [{
+          code: 'exception',
+          message: 'Durable catchup from peer-legacy-hung for cg-legacy-hung timed out after 1000ms',
+        }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ANDs completion across requested CGs and classifies partial progress', () => {
     const outcome = classifyDurableCatchupRequest([
       [{ durableComplete: true }],
