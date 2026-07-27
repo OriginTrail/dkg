@@ -27,10 +27,26 @@ import type {
   GraphScopedMaterializationOutcome,
   VerifiedGraphScopedAsset,
 } from './graph-scoped-materialization.js';
+import type { DurableSyncBudget } from './durable-sync-budget.js';
 import {
-  SYNC_MIN_GRAPH_BUDGET_MS,
-  SYNC_TOTAL_TIMEOUT_MS,
-} from '../../dkg-agent-constants.js';
+  normalizeDurableSyncContext,
+  type LegacyDurableSyncContext,
+} from './durable-sync-compat.js';
+
+export {
+  createContextGraphSyncDeadline,
+  createDurableSyncBudget,
+  createGraphScopedAuthenticationDeadline,
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
+  MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+  normalizeDurableSyncTimeoutMs,
+} from './durable-sync-budget.js';
+export type {
+  DurableSyncBudget,
+  DurableSyncContextGraphBudget,
+  DurableSyncContextGraphBudgetRequest,
+} from './durable-sync-budget.js';
+export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
@@ -64,12 +80,6 @@ const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
 ]);
 
-export const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
-// A maximum-size valid KA is 10,000 triples. Field measurements on the slowest
-// observed canary path project roughly 425 seconds for its byte-paged transfer,
-// so exact VM repair gets a separate hard 10-minute transfer ceiling.
-export const EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS = 600_000;
-
 /** Graph inventory from one clean, complete legacy full snapshot. */
 export interface VerifiedFullSnapshot {
   contextGraphId: string;
@@ -77,100 +87,6 @@ export interface VerifiedFullSnapshot {
   verifiedMetaGraphs: ReadonlySet<string>;
   /** False only when this CG's metadata phase was intentionally disabled. */
   metaFetched: boolean;
-}
-
-export interface DurableSyncContextGraphBudget {
-  /** Deadline for fetching this Context Graph's durable snapshot. */
-  readonly fetchDeadline: number;
-  /** Fresh deadline for authenticating graph-scoped assets from one verified page. */
-  readonly createGraphScopedAuthenticationDeadline: () => number;
-}
-
-export interface DurableSyncContextGraphBudgetRequest {
-  readonly contextGraphId: string;
-  readonly remainingContextGraphs: number;
-}
-
-export interface DurableSyncBudget {
-  /**
-   * Create one explicit Context Graph budget. Callers supply graph identity
-   * and remaining work, so budgeting never depends on hidden callback order.
-   */
-  createContextGraphBudget: (
-    request: DurableSyncContextGraphBudgetRequest,
-  ) => DurableSyncContextGraphBudget;
-}
-
-export function normalizeDurableSyncTimeoutMs(
-  value: number | undefined,
-  maximumMs: number = MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
-): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
-  return Math.min(
-    maximumMs,
-    Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(value)),
-  );
-}
-
-export function createContextGraphSyncDeadline(options: {
-  remainingContextGraphs: number;
-  totalTimeoutMs?: number;
-  maximumMs?: number;
-  now?: () => number;
-}): number {
-  const divisor = Math.max(1, options.remainingContextGraphs);
-  const normalizedTotalTimeoutMs = normalizeDurableSyncTimeoutMs(
-    options.totalTimeoutMs,
-    options.maximumMs,
-  );
-  const budgetMs = Math.max(
-    SYNC_MIN_GRAPH_BUDGET_MS,
-    Math.floor(normalizedTotalTimeoutMs / divisor),
-  );
-  return (options.now ?? Date.now)() + budgetMs;
-}
-
-export function createGraphScopedAuthenticationDeadline(options: {
-  totalTimeoutMs?: number;
-  now?: () => number;
-} = {}): number {
-  return (options.now ?? Date.now)()
-    + normalizeDurableSyncTimeoutMs(options.totalTimeoutMs);
-}
-
-/**
- * Construct the requester-owned fetch/authentication phase policy. Lifecycle
- * supplies only caller configuration and whether this is exact VM recovery.
- */
-export function createDurableSyncBudget(options: {
-  fetchTimeoutMs?: number;
-  authenticationTimeoutMs?: number;
-  exactRecovery?: boolean;
-  operationDeadline?: number;
-  now?: () => number;
-}): DurableSyncBudget {
-  return {
-    createContextGraphBudget: ({ remainingContextGraphs }) => ({
-      fetchDeadline: Math.min(
-        createContextGraphSyncDeadline({
-          remainingContextGraphs,
-          totalTimeoutMs: options.fetchTimeoutMs,
-          maximumMs: options.exactRecovery
-            ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
-            : MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
-          now: options.now,
-        }),
-        options.operationDeadline ?? Number.POSITIVE_INFINITY,
-      ),
-      createGraphScopedAuthenticationDeadline: () => Math.min(
-        createGraphScopedAuthenticationDeadline({
-          totalTimeoutMs: options.authenticationTimeoutMs,
-          now: options.now,
-        }),
-        options.operationDeadline ?? Number.POSITIVE_INFINITY,
-      ),
-    }),
-  };
 }
 
 /** Fetch-specific time and cancellation boundary. */
@@ -269,81 +185,6 @@ export interface DurableSyncContext {
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
-}
-
-export interface LegacyDurableSyncContext extends Omit<
-  DurableSyncContext,
-  'durableSyncBudget' | 'fetchSyncPages' | 'storeInsert' | 'storeGraphScopedAsset'
-> {
-  /**
-   * @deprecated Deep-import compatibility for callers from before durable sync
-   * split fetch and authentication into separate bounded phases.
-   */
-  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
-  fetchSyncPages: (
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphId: string,
-    includeSharedMemory: boolean,
-    phase: 'data' | 'meta',
-    graphUri: string,
-    deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    assetUals?: string[],
-  ) => Promise<SyncPageResult>;
-  storeInsert: (quads: Quad[]) => Promise<void>;
-  storeGraphScopedAsset?: (
-    asset: VerifiedGraphScopedAsset,
-    deadline: number,
-  ) => Promise<GraphScopedMaterializationOutcome>;
-}
-
-function legacyDurableSyncBudget(
-  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number,
-): DurableSyncBudget {
-  return {
-    createContextGraphBudget: ({ remainingContextGraphs }) => {
-      const deadline = createContextGraphSyncDeadline(remainingContextGraphs);
-      return {
-        fetchDeadline: deadline,
-        createGraphScopedAuthenticationDeadline: () => deadline,
-      };
-    },
-  };
-}
-
-function normalizeDurableSyncContext(
-  context: DurableSyncContext | LegacyDurableSyncContext,
-): DurableSyncContext {
-  if ('durableSyncBudget' in context) return context;
-  const {
-    createContextGraphSyncDeadline,
-    fetchSyncPages,
-    storeInsert,
-    storeGraphScopedAsset,
-    ...sharedContext
-  } = context;
-  return {
-    ...sharedContext,
-    durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),
-    fetchSyncPages: (request) => fetchSyncPages(
-      request.ctx,
-      request.remotePeerId,
-      request.contextGraphId,
-      false,
-      request.phase,
-      request.graphUri,
-      request.fetchContext.deadline,
-      request.snapshotRef,
-      request.sinceBatchId,
-      request.exactAssetUals,
-    ),
-    storeInsert: ({ quads }) => storeInsert(quads),
-    storeGraphScopedAsset: storeGraphScopedAsset
-      ? ({ asset, authenticationDeadline }) => storeGraphScopedAsset(asset, authenticationDeadline)
-      : undefined,
-  };
 }
 
 /**

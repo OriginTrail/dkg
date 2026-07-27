@@ -6,8 +6,10 @@ import {
   createContextGraphSyncDeadline,
   createDurableSyncBudget,
   createGraphScopedAuthenticationDeadline,
-  runDurableSync,
   type DurableSyncBudget,
+} from '../src/sync/requester/durable-sync-budget.js';
+import {
+  runDurableSync,
   type DurableSyncContext,
   type DurableSyncFetchContext,
   type DurableSyncGraphScopedStoreRequest,

@@ -1,4 +1,4 @@
-import type { DurableSyncBudget } from '../src/sync/requester/durable-sync.js';
+import type { DurableSyncBudget } from '../src/sync/requester/durable-sync-budget.js';
 
 export function uniformDurableSyncBudget(
   createDeadline: () => number,

@@ -257,6 +257,8 @@ import {
   createDurableSyncBudget,
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   normalizeDurableSyncTimeoutMs,
+} from './sync/requester/durable-sync-budget.js';
+import {
   runDurableSync,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
