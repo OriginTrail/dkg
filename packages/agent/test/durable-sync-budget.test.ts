@@ -80,6 +80,7 @@ function requesterBudgetContext(options: {
   onFetchContext?: (fetchContext: DurableSyncFetchContext) => void;
   onVerify?: () => void;
   onVerifiedFullSnapshot?: DurableSyncContext['onVerifiedFullSnapshot'];
+  emptyResponses?: number;
   storeInsert?: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   storeGraphScopedAsset: (
     request: DurableSyncGraphScopedStoreRequest,
@@ -120,7 +121,7 @@ function requesterBudgetContext(options: {
         totalFetchedDataQuads: dataQuads.length,
         totalFetchedMetaQuads: metadataQuads.length,
         rejectedKcs: 0,
-        emptyResponses: 0,
+        emptyResponses: options.emptyResponses ?? 0,
         metaOnlyResponses: 0,
         verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
@@ -547,6 +548,65 @@ describe('durable sync deadline budget', () => {
     expect(result.complete).toBe(false);
     expect(deleteCheckpoint).not.toHaveBeenCalled();
     expect(setCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it('does not advance empty-page checkpoints when cancellation occurs during snapshot reconciliation', async () => {
+    const controller = new AbortController();
+    let releaseSnapshot!: () => void;
+    let snapshotStarted!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    const snapshotObserved = new Promise<void>((resolve) => { snapshotStarted = resolve; });
+    const deleteCheckpoint = vi.fn();
+    const setCheckpoint = vi.fn();
+    const syncContext = requesterBudgetContext({
+      assetCount: 0,
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      graphScoped: false,
+      emptyResponses: 1,
+      storeGraphScopedAsset: async () => 'applied',
+      onVerifiedFullSnapshot: async () => {
+        snapshotStarted();
+        await snapshotGate;
+      },
+    });
+    syncContext.deleteCheckpoint = deleteCheckpoint;
+    syncContext.setCheckpoint = setCheckpoint;
+
+    const sync = runDurableSync(syncContext);
+    await snapshotObserved;
+    controller.abort(new Error('deadline expired during empty snapshot reconciliation'));
+    releaseSnapshot();
+    const result = await sync;
+
+    expect(result).toMatchObject({
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(setCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it('passes a live operation signal to plain durable inserts', async () => {
+    const controller = new AbortController();
+    const storeInsert = vi.fn(async (_request: DurableSyncStoreInsertRequest) => {});
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      graphScoped: false,
+      storeInsert,
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    expect(result.complete).toBe(true);
+    expect(storeInsert).toHaveBeenCalledTimes(2);
+    for (const [request] of storeInsert.mock.calls) {
+      expect(request).toMatchObject({
+        quads: expect.any(Array),
+        signal: controller.signal,
+      });
+    }
   });
 
   it('passes distinct fetch and graph-scoped authentication boundaries', async () => {
