@@ -657,22 +657,30 @@ function durableSyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
-  totalTimeoutMs: number;
+  fetchTimeoutMs: number;
+  authenticationTimeoutMs: number;
   syncAgentsMeta: boolean;
   hasPhaseCallback: boolean;
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
+  hasSignal: boolean;
   exactAssetUals?: readonly string[];
   priority?: number;
 }): string | null {
-  if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
+  if (
+    params.hasPhaseCallback
+    || params.hasAccessDeniedCallback
+    || params.hasSinceBatchIdResolver
+    || params.hasSignal
+  ) {
     return null;
   }
   return syncSingleFlightKey('durable-sync', {
     remotePeerId: params.remotePeerId,
     contextGraphIds: params.contextGraphIds,
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
-    totalTimeoutMs: params.totalTimeoutMs,
+    fetchTimeoutMs: params.fetchTimeoutMs,
+    authenticationTimeoutMs: params.authenticationTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
     priority: params.priority ?? null,
@@ -816,6 +824,12 @@ export type DurableSyncOptions = {
    * unbounded sync operation.
    */
   totalTimeoutMs?: number;
+  /**
+   * Cancels the whole durable operation. Paging and graph-scoped chain
+   * authentication observe the signal directly; verification and atomic
+   * materialization check it before any subsequent commit boundary.
+   */
+  signal?: AbortSignal;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
@@ -823,6 +837,11 @@ export type DurableSyncOptions = {
 };
 
 const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
+// A maximum-size valid KA is 10,000 triples. Field measurements on the slowest
+// observed canary path project roughly 425 seconds for its byte-paged transfer,
+// so exact VM repair gets a separate hard 10-minute transfer ceiling. Chain
+// authentication remains on the normal independently bounded phase below.
+const EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS = 600_000;
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
 const DURABLE_AUTHENTICATION_RETRY_BASE_MS = 1_000;
 const DURABLE_AUTHENTICATION_RETRY_MAX_MS = 8_000;
@@ -856,9 +875,10 @@ async function authenticateDurableGraphScopedAsset(params: {
   asset: VerifiedGraphScopedAsset;
   verifyContextGraphBinding: VerifyContextGraphBinding;
   deadline: number;
+  signal?: AbortSignal;
   onRetry: (error: unknown, attempt: number, maxAttempts: number) => void;
 }) {
-  const { chain, asset, verifyContextGraphBinding, deadline, onRetry } = params;
+  const { chain, asset, verifyContextGraphBinding, deadline, signal, onRetry } = params;
   const receivedAt = new Date();
   const deadlineError = createRpcTimeoutError(
     `Graph-scoped durable authentication for ${asset.ual} exceeded its context-graph deadline`,
@@ -867,6 +887,11 @@ async function authenticateDurableGraphScopedAsset(params: {
   if (remaining <= 0) throw deadlineError;
 
   const deadlineController = new AbortController();
+  const abortFromOperation = () => deadlineController.abort(
+    asSyncFetchAbortError(signal?.reason),
+  );
+  if (signal?.aborted) abortFromOperation();
+  else signal?.addEventListener('abort', abortFromOperation, { once: true });
   const deadlineTimer = setTimeout(
     () => deadlineController.abort(deadlineError),
     remaining,
@@ -916,17 +941,23 @@ async function authenticateDurableGraphScopedAsset(params: {
       },
     );
   } catch (error) {
-    if (deadlineController.signal.aborted) throw deadlineError;
+    if (deadlineController.signal.aborted) {
+      throw deadlineController.signal.reason ?? deadlineError;
+    }
     throw error;
   } finally {
     clearTimeout(deadlineTimer);
+    signal?.removeEventListener('abort', abortFromOperation);
   }
 }
 
-function normalizeDurableSyncTotalTimeoutMs(value: number | undefined): number {
+function normalizeDurableSyncTotalTimeoutMs(
+  value: number | undefined,
+  maximumMs: number = MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
   return Math.min(
-    MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+    maximumMs,
     Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(value)),
   );
 }
@@ -4194,7 +4225,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let changelogResult: DurableSyncResult | undefined;
     // Gate = this node's own changelog is enabled (its store is ChangelogStore-wrapped) —
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
-    if (asChangelogReader(this.store) !== null && contextGraphIds.length > 0) {
+    // The changelog lane does not yet expose cancellable verification/store
+    // boundaries. Explicitly bounded foreground callers therefore stay on the
+    // fully signal-aware legacy lane; otherwise the HTTP deadline could return
+    // while a detached changelog apply commits later.
+    if (
+      !options?.signal
+      && asChangelogReader(this.store) !== null
+      && contextGraphIds.length > 0
+    ) {
       try {
         const lane = await this.runChangelogLane(
           ctx,
@@ -4246,7 +4285,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const totalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
+    const authenticationTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
+    const fetchTimeoutMs = options?.exactAssetUals
+      ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
+      : authenticationTimeoutMs;
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
       this.config.syncContextGraphPriorities,
@@ -4268,8 +4310,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sinceBatchIdFor,
             stopOnBackoffWorthyFailure,
             undefined,
-            totalTimeoutMs,
+            fetchTimeoutMs,
             options?.exactAssetUals,
+            authenticationTimeoutMs,
+            options?.signal,
           ),
         ),
       })),
@@ -4307,11 +4351,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphIds: orderedContextGraphIds,
       stopOnBackoffWorthyFailure,
-      totalTimeoutMs,
+      fetchTimeoutMs,
+      authenticationTimeoutMs,
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
+      hasSignal: Boolean(options?.signal),
       exactAssetUals: options?.exactAssetUals,
       priority: options?.priority,
     });
@@ -4341,7 +4387,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetUals: assetUals,
         stopOnBackoffWorthyFailure: true,
-        totalTimeoutMs: SYNC_TOTAL_TIMEOUT_MS,
         priority: 1_000,
       },
     );
@@ -4358,8 +4403,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     stopOnBackoffWorthyFailure?: boolean,
     onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
-    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+    fetchTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
     exactAssetUals?: string[],
+    authenticationTimeoutMs: number = fetchTimeoutMs,
+    signal?: AbortSignal,
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     // The CG name commitment is immutable for an on-chain slot. Prove a
@@ -4409,12 +4456,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       durableSyncBudget: {
         fetchDeadline: () => this.createContextGraphSyncDeadline(
           remainingContextGraphs,
-          totalTimeoutMs,
+          fetchTimeoutMs,
+          exactAssetUals ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS : undefined,
         ),
         graphScopedAuthenticationDeadline: () => (
-          this.createGraphScopedAuthenticationDeadline(totalTimeoutMs)
+          this.createGraphScopedAuthenticationDeadline(authenticationTimeoutMs)
         ),
       },
+      signal,
       fetchSyncPages: (
         opCtx,
         peerId,
@@ -4435,7 +4484,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deadline,
         snapshotRef,
         sinceBatchId,
-        undefined,
+        signal,
         undefined,
         onVerifiedFullSnapshot !== undefined,
         exactAssetUals,
@@ -4454,6 +4503,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           asset,
           verifyContextGraphBinding,
           deadline,
+          signal,
           onRetry: (error, attempt, maxAttempts) => {
             this.log.warn(
               ctx,
@@ -4463,6 +4513,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           },
         });
+        if (signal?.aborted) throw asSyncFetchAbortError(signal.reason);
         const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
         if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
@@ -5293,9 +5344,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   createContextGraphSyncDeadline(this: DKGAgent,
     remainingContextGraphs: number,
     totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
+    maximumMs: number = MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
   ): number {
     const divisor = Math.max(1, remainingContextGraphs);
-    const normalizedTotalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(totalTimeoutMs);
+    const normalizedTotalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(
+      totalTimeoutMs,
+      maximumMs,
+    );
     const budgetMs = Math.max(
       SYNC_MIN_GRAPH_BUDGET_MS,
       Math.floor(normalizedTotalTimeoutMs / divisor),

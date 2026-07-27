@@ -1009,6 +1009,140 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(freshRequesterStore, 'materializedVersion')).toEqual(['"0:0"']);
   });
 
+  it('recovers a field-sized exact KA across delayed byte pages and keeps an incomplete attempt atomic', async () => {
+    vi.useFakeTimers();
+    const requesterStore = new OxigraphStore();
+    const fieldSizedData = Array.from({ length: 10_000 }, (_, index): Quad => ({
+      subject: `http://example.com/field-sized/${index}`,
+      predicate: 'http://example.com/value',
+      object: `"${index}"`,
+      graph: assertionGraph,
+    }));
+    const root = computeFlatKCRootV10(fieldSizedData, []);
+    const fieldSizedMeta = [
+      ...metadata(2, toHex(root)),
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"10000"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+    ];
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const deleteCheckpoint = vi.fn();
+    const setCheckpoint = vi.fn();
+    const materialize = vi.fn(async (asset: VerifiedGraphScopedAsset) => (
+      materializeVerifiedGraphScopedAsset({
+        store: requesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+          new Date('2026-07-16T09:00:00.000Z'),
+        )).asset,
+      })
+    ));
+    const process = async (
+      dataQuads: Quad[],
+      metaQuads: Quad[],
+      _ctx: OperationContext,
+      acceptUnverified: boolean,
+      mode: Parameters<typeof processDurableBatchForWire>[4],
+    ) => {
+      const verified = processDurableBatchForWire(
+        dataQuads,
+        metaQuads,
+        acceptUnverified,
+        mode,
+      );
+      return {
+        ...verified,
+        verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+        verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+      };
+    };
+    const delayedPage = async (
+      phase: 'data' | 'meta',
+      quads: Quad[],
+      completed: boolean,
+    ): Promise<SyncPageResult> => {
+      const received: Quad[] = [];
+      for (let offset = 0; offset < quads.length; offset += 500) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        received.push(...quads.slice(offset, offset + 500));
+      }
+      return {
+        ...page(phase, received),
+        completed,
+      };
+    };
+    const run = (data: Quad[], completed: boolean) => runDurableSync({
+      ctx,
+      remotePeerId: 'field-sized-exact-recovery-peer',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 600_000),
+      exactAssetUalsFor: () => [ual],
+      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+        phase === 'data'
+          ? delayedPage(phase, data, completed)
+          : delayedPage(phase, fieldSizedMeta, true)
+      ),
+      processDurableBatchInWorker: process,
+      storeInsert: (quads) => requesterStore.insert(quads),
+      storeGraphScopedAsset: materialize,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    try {
+      const incomplete = run(fieldSizedData.slice(0, -1), false);
+      await vi.runAllTimersAsync();
+      await expect(incomplete).resolves.toMatchObject({
+        insertedTriples: 0,
+        complete: false,
+      });
+      expect(materialize).not.toHaveBeenCalled();
+      expect(deleteCheckpoint).not.toHaveBeenCalled();
+      expect(setCheckpoint).not.toHaveBeenCalled();
+      expect(await graphQuads(requesterStore, assertionGraph)).toEqual([]);
+
+      const complete = run(fieldSizedData, true);
+      await vi.runAllTimersAsync();
+      await expect(complete).resolves.toMatchObject({
+        insertedDataTriples: 10_000,
+        complete: true,
+      });
+      expect(materialize).toHaveBeenCalledTimes(1);
+      expect(await graphQuads(requesterStore, assertionGraph)).toHaveLength(10_000);
+      expect(await values(requesterStore, 'status')).toEqual(['"confirmed"']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not downgrade same-version local receipt provenance during finalized durable replay', async () => {
     const sourceNodeStore = new OxigraphStore();
     const requesterStore = new OxigraphStore();

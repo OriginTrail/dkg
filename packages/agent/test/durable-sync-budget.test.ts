@@ -67,6 +67,7 @@ function requesterPage(phase: 'data' | 'meta', quads: Quad[]): SyncPageResult {
 function requesterBudgetContext(options: {
   assetCount?: number;
   durableSyncBudget: DurableSyncBudget;
+  signal?: AbortSignal;
   onFetchPhase?: (phase: 'data' | 'meta') => void;
   onVerify?: () => void;
   storeGraphScopedAsset: (
@@ -86,6 +87,7 @@ function requesterBudgetContext(options: {
     remotePeerId: 'peer-durable-sync-budget',
     contextGraphIds: [contextGraphId],
     durableSyncBudget: options.durableSyncBudget,
+    signal: options.signal,
     fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => {
       options.onFetchPhase?.(phase);
       return phase === 'data'
@@ -299,5 +301,32 @@ describe('durable sync deadline budget', () => {
     expect(createContextGraphSyncDeadline).toHaveBeenCalledWith(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
+  });
+
+  it('does not enter authentication or commit after whole-operation cancellation during verification', async () => {
+    const controller = new AbortController();
+    const graphScopedAuthenticationDeadline = vi.fn(() => Date.now() + 60_000);
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: {
+        fetchDeadline: () => Date.now() + 60_000,
+        graphScopedAuthenticationDeadline,
+      },
+      signal: controller.signal,
+      onVerify: () => controller.abort(new Error('whole operation expired')),
+      storeGraphScopedAsset,
+    });
+
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(graphScopedAuthenticationDeadline).not.toHaveBeenCalled();
+    expect(storeGraphScopedAsset).not.toHaveBeenCalled();
   });
 });

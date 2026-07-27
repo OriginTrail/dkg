@@ -13,6 +13,8 @@ import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
+const DURABLE_CATCHUP_PHASE_HEADROOM_MS = 1_000;
+const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
 
 export interface CatchupJobResult {
   connectedPeers: number;
@@ -245,18 +247,50 @@ export async function runDurableCatchupLeg(
   agent: DurableCatchupAgent,
   peerId: string,
   contextGraphId: string,
-  totalTimeoutMs: number,
+  overallTimeoutMs: number,
 ): Promise<DurableCatchupLegResult> {
+  const timeoutError = new Error(
+    `Durable catchup from ${peerId} for ${contextGraphId} timed out after ${overallTimeoutMs}ms`,
+  );
+  timeoutError.name = 'AbortError';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(timeoutError), overallTimeoutMs);
+  const phaseTimeoutMs = Math.max(
+    MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS,
+    overallTimeoutMs - DURABLE_CATCHUP_PHASE_HEADROOM_MS,
+  );
+  const raceWithOperationDeadline = <T>(work: Promise<T>): Promise<T> => {
+    if (controller.signal.aborted) return Promise.reject(controller.signal.reason);
+    return new Promise<T>((resolve, reject) => {
+      const cleanup = () => controller.signal.removeEventListener('abort', onAbort);
+      const onAbort = () => {
+        cleanup();
+        reject(controller.signal.reason);
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      work.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (error) => {
+          cleanup();
+          reject(error);
+        },
+      );
+      if (controller.signal.aborted) onAbort();
+    });
+  };
   try {
     if (typeof agent.syncFromPeerDetailed === 'function') {
-      const detailed = await agent.syncFromPeerDetailed(
+      const detailed = await raceWithOperationDeadline(agent.syncFromPeerDetailed(
         peerId,
         [contextGraphId],
         undefined,
         undefined,
         undefined,
-        { totalTimeoutMs },
-      );
+        { totalTimeoutMs: phaseTimeoutMs, signal: controller.signal },
+      ));
       const summary = summarizeDurableLeg(detailed);
       return {
         insertedTriples: summary.insertedTriples,
@@ -269,13 +303,13 @@ export async function runDurableCatchupLeg(
 
     return {
       insertedTriples: typeof agent.syncFromPeer === 'function'
-        ? await agent.syncFromPeer(
+        ? await raceWithOperationDeadline(agent.syncFromPeer(
           peerId,
           [contextGraphId],
           undefined,
           undefined,
-          { totalTimeoutMs },
-        )
+          { totalTimeoutMs: phaseTimeoutMs, signal: controller.signal },
+        ))
         : 0,
       state: 'legacy',
     };
@@ -289,6 +323,8 @@ export async function runDurableCatchupLeg(
         message: error instanceof Error ? error.message : String(error),
       }],
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

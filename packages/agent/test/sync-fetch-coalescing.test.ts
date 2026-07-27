@@ -420,9 +420,11 @@ describe('DKGAgent sync fetch coalescing', () => {
 
   it('does not single-flight exact VM syncs with different asset batches', async () => {
     let fetchCalls = 0;
+    const exactRecoveryDeadlineHeadroom: number[] = [];
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     (agent as any).fetchSyncPages = async (...args: unknown[]) => {
       fetchCalls++;
+      exactRecoveryDeadlineHeadroom.push(Number(args[6]) - Date.now());
       return emptySyncPage(String(args[4]));
     };
     (agent as any).processDurableBatchInWorker = async () => ({
@@ -451,6 +453,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       const [thirdResult, fourthResult] = await Promise.all([third, fourth]);
       expect(thirdResult).toBe(fourthResult);
       expect(fetchCalls).toBe(2);
+      expect(exactRecoveryDeadlineHeadroom).toHaveLength(6);
+      expect(exactRecoveryDeadlineHeadroom.every(
+        (remainingMs) => remainingMs > 599_000 && remainingMs <= 600_000,
+      )).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

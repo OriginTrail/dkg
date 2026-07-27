@@ -150,7 +150,7 @@ describe('durable sync lifecycle chain binding', () => {
       .toBe(1_800_000_299_000);
   });
 
-  it('gives exact VM recovery a full standard transfer phase', async () => {
+  it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const runLegacyDurableSync = vi.fn(async () => ({}));
     const agentLike = { runLegacyDurableSync };
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
@@ -166,9 +166,9 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       exactAssetUals: [exactUal],
       stopOnBackoffWorthyFailure: true,
-      totalTimeoutMs: 120_000,
       priority: 1_000,
     });
+    expect(runLegacyDurableSync.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {

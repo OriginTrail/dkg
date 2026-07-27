@@ -92,6 +92,8 @@ export interface DurableSyncContext {
   onAccessDenied?: (contextGraphId: string) => void;
   syncAgentsMeta?: boolean;
   durableSyncBudget: DurableSyncBudget;
+  /** Whole-operation cancellation propagated by bounded foreground callers. */
+  signal?: AbortSignal;
   fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -240,6 +242,7 @@ async function runDurableSyncWithBudget(
     onAccessDenied,
     syncAgentsMeta = true,
     durableSyncBudget,
+    signal,
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
@@ -254,6 +257,15 @@ async function runDurableSyncWithBudget(
     logWarn,
     logDebug,
   } = context;
+
+  const throwIfOperationAborted = () => {
+    if (!signal?.aborted) return;
+    const error = signal.reason instanceof Error
+      ? signal.reason
+      : new Error(typeof signal.reason === 'string' ? signal.reason : 'Durable sync aborted');
+    error.name = 'AbortError';
+    throw error;
+  };
 
   const accumulator = createDurableSyncAccumulator();
 
@@ -317,6 +329,7 @@ async function runDurableSyncWithBudget(
     };
 
     try {
+      throwIfOperationAborted();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
       const remainingContextGraphs = contextGraphIds.length - index;
@@ -387,6 +400,7 @@ async function runDurableSyncWithBudget(
             sinceBatchId,
             exactAssetUals,
           );
+      throwIfOperationAborted();
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -473,6 +487,7 @@ async function runDurableSyncWithBudget(
         isSystemContextGraph,
         verificationMode,
       );
+      throwIfOperationAborted();
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
@@ -608,6 +623,7 @@ async function runDurableSyncWithBudget(
         ? durableSyncBudget.graphScopedAuthenticationDeadline()
         : deadline;
       for (const asset of partitioned.assets) {
+        throwIfOperationAborted();
         const outcome = await storeGraphScopedAsset!(asset, graphScopedAuthenticationDeadline);
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
@@ -627,6 +643,7 @@ async function runDurableSyncWithBudget(
         }
       }
       if (partitioned.remainingData.length > 0) {
+        throwIfOperationAborted();
         await storeInsert(partitioned.remainingData);
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingData.length,
@@ -634,6 +651,7 @@ async function runDurableSyncWithBudget(
         });
       }
       if (partitioned.remainingMeta.length > 0) {
+        throwIfOperationAborted();
         await storeInsert(partitioned.remainingMeta);
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingMeta.length,
@@ -687,6 +705,7 @@ async function runDurableSyncWithBudget(
       if (backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')) {
         break;
       }
+      if (signal?.aborted) break;
     }
   }
   if (peerFailed) {

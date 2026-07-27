@@ -284,8 +284,67 @@ describe('route-level durable catchup orchestration', () => {
       undefined,
       undefined,
       undefined,
-      { totalTimeoutMs: 1234 },
+      {
+        totalTimeoutMs: 1_000,
+        signal: expect.any(AbortSignal),
+      },
     );
+  });
+
+  it('aborts authentication at the whole-operation deadline after a near-exhausted fetch', async () => {
+    vi.useFakeTimers();
+    let authenticationStarted = false;
+    let committed = false;
+    const wait = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: { signal: AbortSignal },
+    ) => {
+      await wait(900, options.signal);
+      authenticationStarted = true;
+      await wait(200, options.signal);
+      committed = true;
+      return {
+        insertedTriples: 1,
+        complete: true,
+      } as any;
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-near-deadline',
+        'cg-near-deadline',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(900);
+      expect(authenticationStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'failed',
+        complete: false,
+        failureReasons: [{
+          code: 'exception',
+          message: 'Durable catchup from peer-near-deadline for cg-near-deadline timed out after 1000ms',
+        }],
+      });
+      expect(committed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ANDs completion across requested CGs and classifies partial progress', () => {
