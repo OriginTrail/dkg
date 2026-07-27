@@ -346,20 +346,6 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,
     });
-
-    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
-      agentLike,
-      'peer-changelog-capable',
-      [contextGraphId],
-      undefined,
-      undefined,
-      undefined,
-      {
-        requireAbortableDurableLane: true,
-      },
-    );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync).toHaveBeenCalledTimes(2);
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {

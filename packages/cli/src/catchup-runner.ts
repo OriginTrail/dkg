@@ -274,7 +274,6 @@ export async function runDurableCatchupLeg(
         {
           totalTimeoutMs: phaseTimeoutMs,
           signal: controller.signal,
-          requireAbortableDurableLane: true,
         },
       );
       const summary = summarizeDurableLeg(detailed);
@@ -299,7 +298,6 @@ export async function runDurableCatchupLeg(
           {
             totalTimeoutMs: phaseTimeoutMs,
             signal: controller.signal,
-            requireAbortableDurableLane: true,
           },
         )
         : 0,

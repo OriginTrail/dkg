@@ -881,12 +881,6 @@ export type DurableSyncOptions = {
    * materialization check it before any subsequent commit boundary.
    */
   signal?: AbortSignal;
-  /**
-   * Require a lane whose fetch, authentication, and commit boundaries honor
-   * the operation signal. This is an explicit protocol-selection requirement;
-   * the mere presence of a signal does not select a durable lane.
-   */
-  requireAbortableDurableLane?: boolean;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
@@ -4280,11 +4274,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
     // The changelog lane does not yet expose cancellable verification/store
     // boundaries. Any caller-supplied signal therefore requires the fully
-    // signal-aware legacy lane; the explicit policy flag lets callers require
-    // that lane even when they do not supply a signal.
+    // signal-aware legacy lane.
     if (
-      !options?.requireAbortableDurableLane
-      && !options?.signal
+      !options?.signal
       && asChangelogReader(this.store) !== null
       && contextGraphIds.length > 0
     ) {

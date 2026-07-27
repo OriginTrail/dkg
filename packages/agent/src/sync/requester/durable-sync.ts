@@ -571,6 +571,7 @@ async function runDurableSyncWithBudget(
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
         await notifyVerifiedFullSnapshot();
+        throwIfOperationAborted();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
         // zero-offset phase is a real clean-empty response, while a sibling
@@ -660,6 +661,7 @@ async function runDurableSyncWithBudget(
       // next commit boundary.
       throwIfOperationAborted();
       await notifyVerifiedFullSnapshot();
+      throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);

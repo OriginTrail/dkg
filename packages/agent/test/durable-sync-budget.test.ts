@@ -79,6 +79,7 @@ function requesterBudgetContext(options: {
   onFetchPhase?: (phase: 'data' | 'meta') => void;
   onFetchContext?: (fetchContext: DurableSyncFetchContext) => void;
   onVerify?: () => void;
+  onVerifiedFullSnapshot?: DurableSyncContext['onVerifiedFullSnapshot'];
   storeInsert?: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   storeGraphScopedAsset: (
     request: DurableSyncGraphScopedStoreRequest,
@@ -127,6 +128,7 @@ function requesterBudgetContext(options: {
     },
     storeInsert: options.storeInsert ?? (async () => {}),
     storeGraphScopedAsset: options.storeGraphScopedAsset,
+    onVerifiedFullSnapshot: options.onVerifiedFullSnapshot,
     deleteCheckpoint: () => {},
     setCheckpoint: () => {},
     logInfo: () => {},
@@ -504,6 +506,38 @@ describe('durable sync deadline budget', () => {
       complete: false,
       failedPhases: 1,
     });
+    expect(setCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it('does not advance checkpoints when cancellation occurs during snapshot reconciliation', async () => {
+    const controller = new AbortController();
+    let releaseSnapshot!: () => void;
+    let snapshotStarted!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    const snapshotObserved = new Promise<void>((resolve) => { snapshotStarted = resolve; });
+    const deleteCheckpoint = vi.fn();
+    const setCheckpoint = vi.fn();
+    const syncContext = requesterBudgetContext({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      graphScoped: false,
+      storeGraphScopedAsset: async () => 'applied',
+      onVerifiedFullSnapshot: async () => {
+        snapshotStarted();
+        await snapshotGate;
+      },
+    });
+    syncContext.deleteCheckpoint = deleteCheckpoint;
+    syncContext.setCheckpoint = setCheckpoint;
+
+    const sync = runDurableSync(syncContext);
+    await snapshotObserved;
+    controller.abort(new Error('deadline expired during snapshot reconciliation'));
+    releaseSnapshot();
+    const result = await sync;
+
+    expect(result.complete).toBe(false);
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
     expect(setCheckpoint).not.toHaveBeenCalled();
   });
 
