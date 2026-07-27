@@ -281,10 +281,11 @@ describe('route-level durable catchup orchestration', () => {
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       'peer-a',
       ['cg-a'],
-      expect.any(Function),
+      undefined,
       undefined,
       undefined,
       {
+        onAtomicCommitStarted: expect.any(Function),
         totalTimeoutMs: 1_000,
         signal: expect.any(AbortSignal),
       },
@@ -306,10 +307,13 @@ describe('route-level durable catchup orchestration', () => {
     const syncFromPeerDetailed = vi.fn(async (
       _peerId: string,
       _contextGraphIds: string[],
-      _onPhase: (phase: string, status: 'start' | 'end') => void,
+      _onPhase: undefined,
       _onAccessDenied: undefined,
       _sinceBatchIdFor: undefined,
-      options: { signal: AbortSignal },
+      options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
     ) => {
       await wait(900, options.signal);
       authenticationStarted = true;
@@ -356,14 +360,17 @@ describe('route-level durable catchup orchestration', () => {
     const syncFromPeerDetailed = vi.fn(async (
       _peerId: string,
       _contextGraphIds: string[],
-      onPhase: (phase: string, status: 'start' | 'end') => void,
+      _onPhase: undefined,
       _onAccessDenied: undefined,
       _sinceBatchIdFor: undefined,
-      options: { signal: AbortSignal },
+      options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
     ) => {
       operationSignal = options.signal;
       await new Promise<void>((resolve) => setTimeout(resolve, 900));
-      onPhase('store', 'start');
+      options.onAtomicCommitStarted('cg-commit-boundary', 'did:dkg:test/commit');
       commitStarted = true;
       await new Promise<void>((resolve) => {
         resolveCommit = resolve;
@@ -401,9 +408,22 @@ describe('route-level durable catchup orchestration', () => {
     }
   });
 
-  it('hard-bounds a detailed adapter that stalls before the store phase', async () => {
+  it('hard-bounds a detailed adapter before atomic commit without a phase-string side channel', async () => {
     vi.useFakeTimers();
-    const syncFromPeerDetailed = vi.fn(async () => new Promise<never>(() => {}));
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      _options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
+    ) => {
+      expect(onPhase).toBeUndefined();
+      return new Promise<never>(() => {});
+    });
 
     try {
       const pending = runDurableCatchupLeg(
@@ -434,10 +454,15 @@ describe('route-level durable catchup orchestration', () => {
     const syncFromPeerDetailed = vi.fn(async (
       _peerId: string,
       _contextGraphIds: string[],
-      onPhase: (phase: string, status: 'start' | 'end') => void,
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: {
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
     ) => {
       await new Promise<void>((resolve) => setTimeout(resolve, 900));
-      onPhase('store', 'start');
+      options.onAtomicCommitStarted('cg-commit-indeterminate', 'did:dkg:test/commit');
       commitStarted = true;
       return new Promise<never>(() => {});
     });

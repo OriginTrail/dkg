@@ -71,6 +71,7 @@ export default defineConfig({
       "test/sync-memory-metrics.test.ts",
       "test/sync-responder-metrics.test.ts",
       "test/sync-fetch-coalescing.test.ts",
+      "test/sync-fetch-coalescing-durable.test.ts",
       "test/sync-backpressure.test.ts",
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",

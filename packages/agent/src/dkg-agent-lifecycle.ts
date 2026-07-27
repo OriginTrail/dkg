@@ -717,6 +717,7 @@ function durableSyncSingleFlightKey(params: {
   authenticationTimeoutMs: number;
   syncAgentsMeta: boolean;
   hasPhaseCallback: boolean;
+  hasAtomicCommitCallback: boolean;
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
   hasSignal: boolean;
@@ -725,6 +726,7 @@ function durableSyncSingleFlightKey(params: {
 }): string | null {
   if (
     params.hasPhaseCallback
+    || params.hasAtomicCommitCallback
     || params.hasAccessDeniedCallback
     || params.hasSinceBatchIdResolver
     || params.hasSignal
@@ -927,6 +929,12 @@ export type DurableSyncOptions = {
    * materialization check it before any subsequent commit boundary.
    */
   signal?: AbortSignal;
+  /**
+   * Called synchronously after graph-scoped authentication succeeds and
+   * immediately before atomic materialization is dispatched. This is a
+   * settlement boundary, not a generic progress callback.
+   */
+  onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
@@ -935,6 +943,7 @@ export type DurableSyncOptions = {
 
 type LegacyDurableContextGraphOptions = {
   onPhase?: PhaseCallback;
+  onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   onAccessDenied?: (contextGraphId: string) => void;
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   stopOnBackoffWorthyFailure?: boolean;
@@ -4413,6 +4422,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             remainingContextGraphs,
             {
               onPhase,
+              onAtomicCommitStarted: options?.onAtomicCommitStarted,
               onAccessDenied,
               sinceBatchIdFor,
               stopOnBackoffWorthyFailure,
@@ -4477,6 +4487,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       authenticationTimeoutMs,
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
+      hasAtomicCommitCallback: Boolean(options?.onAtomicCommitStarted),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
       hasSignal: Boolean(operationBoundary.signal),
@@ -4533,6 +4544,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const {
       onPhase,
+      onAtomicCommitStarted,
       onAccessDenied,
       sinceBatchIdFor,
       stopOnBackoffWorthyFailure,
@@ -4671,6 +4683,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           this.persistContextGraphSubscriptionState(asset.contextGraphId);
         }
+        if (operationSignal?.aborted) {
+          throw asSyncFetchAbortError(operationSignal.reason);
+        }
+        onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
         const outcome = await materializeVerifiedGraphScopedAsset({
           store: this.store,
           asset: authentication.asset,

@@ -132,10 +132,11 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       peerId,
       [cgId],
-      expect.any(Function),
+      undefined,
       undefined,
       undefined,
       {
+        onAtomicCommitStarted: expect.any(Function),
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
       },
@@ -311,10 +312,11 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       'peer-core',
       ['agent-blackbox-vm'],
-      expect.any(Function),
+      undefined,
       undefined,
       undefined,
       {
+        onAtomicCommitStarted: expect.any(Function),
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
       },
@@ -715,13 +717,19 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     const syncFromPeerDetailed = vi.fn((
       _peerId: string,
       _contextGraphIds: string[],
-      onPhase: (phase: string, status: 'start' | 'end') => void,
+      _onPhase: undefined,
       _onAccessDenied: undefined,
       _sinceBatchIdFor: undefined,
-      options: { signal: AbortSignal },
+      options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
     ) => new Promise<DurableSyncResult>((resolve) => {
       operationSignal = options.signal;
-      onPhase('store', 'start');
+      options.onAtomicCommitStarted(
+        'private-settlement-cg',
+        'did:dkg:test/private-settlement',
+      );
       resolveDurable = (inserted) => resolve(detailedDurableResult({
         insertedTriples: inserted,
         insertedDataTriples: inserted,
@@ -762,10 +770,11 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       expect(syncFromPeerDetailed).toHaveBeenCalledWith(
         'peer-curator',
         ['private-settlement-cg'],
-        expect.any(Function),
+        undefined,
         undefined,
         undefined,
         {
+          onAtomicCommitStarted: expect.any(Function),
           totalTimeoutMs: 1_000,
           signal: expect.any(AbortSignal),
         },

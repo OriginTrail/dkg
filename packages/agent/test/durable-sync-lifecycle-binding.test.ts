@@ -87,6 +87,7 @@ async function captureGraphScopedStore(
   options: {
     totalTimeoutMs?: number;
     signal?: AbortSignal;
+    onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   } = {},
 ) {
   const agentLike: any = {
@@ -124,6 +125,9 @@ async function captureGraphScopedStore(
         authenticationTimeoutMs: options.totalTimeoutMs,
       }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.onAtomicCommitStarted === undefined
+        ? {}
+        : { onAtomicCommitStarted: options.onAtomicCommitStarted }),
     },
   );
   return mockedRunDurableSync.mock.calls[0]![0].storeGraphScopedAsset!;
@@ -466,6 +470,7 @@ describe('durable sync lifecycle chain binding', () => {
       },
     );
     const persistContextGraphSubscriptionState = vi.fn();
+    const onAtomicCommitStarted = vi.fn();
     const agentLike: any = {
       config: {},
       chain,
@@ -495,6 +500,7 @@ describe('durable sync lifecycle chain binding', () => {
       'peer-remote',
       contextGraphId,
       1,
+      { onAtomicCommitStarted },
     );
     expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
     const storeGraphScopedAsset = mockedRunDurableSync.mock.calls[0]![0].storeGraphScopedAsset;
@@ -532,12 +538,15 @@ describe('durable sync lifecycle chain binding', () => {
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       expect(bindSubscriptionOnChainId).not.toHaveBeenCalled();
       expect(persistContextGraphSubscriptionState).not.toHaveBeenCalled();
+      expect(onAtomicCommitStarted).not.toHaveBeenCalled();
       expect(mockedMaterialize).not.toHaveBeenCalled();
       expect(agentLike.invalidateListContextGraphsCache).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1_099);
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1);
       await expect(firstMaterialization).resolves.toBe('applied');
+      expect(onAtomicCommitStarted).toHaveBeenCalledTimes(1);
+      expect(onAtomicCommitStarted).toHaveBeenCalledWith(contextGraphId, ual);
     } finally {
       random.mockRestore();
       vi.useRealTimers();
@@ -561,6 +570,10 @@ describe('durable sync lifecycle chain binding', () => {
     expect(persistContextGraphSubscriptionState.mock.invocationCallOrder[0]).toBeLessThan(
       mockedMaterialize.mock.invocationCallOrder[0]!,
     );
+    expect(onAtomicCommitStarted.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedMaterialize.mock.invocationCallOrder[0]!,
+    );
+    expect(onAtomicCommitStarted).toHaveBeenCalledTimes(2);
     const materializedAsset = mockedMaterialize.mock.calls[0]![0].asset as unknown as Record<
       string,
       unknown
@@ -702,10 +715,14 @@ describe('durable sync lifecycle chain binding', () => {
       getMerkleRootCount: async () => 2n,
       getKAContextGraphId: async () => 14n,
     } as ChainAdapter;
+    const onAtomicCommitStarted = vi.fn();
     const storeGraphScopedAsset = await captureGraphScopedStore(
       chain,
       vi.fn(),
-      { signal: controller.signal },
+      {
+        signal: controller.signal,
+        onAtomicCommitStarted,
+      },
     );
 
     const pending = storeGraphScopedAsset(graphScopedStoreRequest(
@@ -718,6 +735,7 @@ describe('durable sync lifecycle chain binding', () => {
 
     await expect(pending).rejects.toBe(timeoutError);
     expect(authenticationSignal?.aborted).toBe(true);
+    expect(onAtomicCommitStarted).not.toHaveBeenCalled();
     expect(mockedMaterialize).not.toHaveBeenCalled();
   });
 

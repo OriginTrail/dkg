@@ -214,7 +214,7 @@ async function awaitDetailedDurableSettlement<T>(
   signal: AbortSignal,
   peerId: string,
   contextGraphId: string,
-  storePhaseObserved: () => boolean,
+  atomicCommitStarted: () => boolean,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -237,7 +237,7 @@ async function awaitDetailedDurableSettlement<T>(
     };
     const onAbort = () => {
       if (graceTimer !== undefined || settled) return;
-      if (!storePhaseObserved()) {
+      if (!atomicCommitStarted()) {
         settleReject(signal.reason);
         return;
       }
@@ -339,7 +339,7 @@ export async function runDurableCatchupLeg(
   );
   try {
     if (typeof agent.syncFromPeerDetailed === 'function') {
-      let storePhaseObserved = false;
+      let atomicCommitStarted = false;
       // Cancellable work stops at the route deadline. A dispatched atomic
       // commit retains a bounded grace window to report its truthful outcome;
       // if the detailed adapter still does not settle, return an explicit
@@ -348,22 +348,21 @@ export async function runDurableCatchupLeg(
         agent.syncFromPeerDetailed(
           peerId,
           [contextGraphId],
-          (phase, status) => {
-            if (phase === 'store' && status === 'start') {
-              storePhaseObserved = true;
-            }
-          },
+          undefined,
           undefined,
           undefined,
           {
             totalTimeoutMs: phaseTimeoutMs,
             signal: controller.signal,
+            onAtomicCommitStarted: () => {
+              atomicCommitStarted = true;
+            },
           },
         ),
         controller.signal,
         peerId,
         contextGraphId,
-        () => storePhaseObserved,
+        () => atomicCommitStarted,
       );
       const summary = summarizeDurableLeg(detailed);
       return {
