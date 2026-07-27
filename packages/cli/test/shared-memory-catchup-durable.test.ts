@@ -708,10 +708,18 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
-  it('enforces the advertised whole-operation durable budget and ignores late settlement', async () => {
+  it('aborts at the durable deadline but awaits an in-flight atomic commit outcome', async () => {
     vi.useFakeTimers();
     let resolveDurable!: (inserted: number) => void;
-    const syncFromPeer = vi.fn(() => new Promise<number>((resolve) => {
+    let operationSignal: AbortSignal | undefined;
+    const syncFromPeer = vi.fn((
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      options: { signal: AbortSignal },
+    ) => new Promise<number>((resolve) => {
+      operationSignal = options.signal;
       resolveDurable = resolve;
     }));
     const agent = {
@@ -738,20 +746,14 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     try {
       const request = handleMemoryRoutes(ctx);
       await vi.advanceTimersByTimeAsync(1_500);
-      expect(res.writableEnded).toBe(true);
-      expect(res.statusCode).toBe(503);
-      expect(JSON.parse(res.body)).toMatchObject({
-        ok: false,
-        retryable: true,
-        errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED',
-        totalDurableInsertedTriples: 0,
-      });
+      expect(operationSignal?.aborted).toBe(true);
+      expect(res.writableEnded).toBe(false);
 
       resolveDurable(23);
       await request;
       await vi.runAllTimersAsync();
-      expect(res.statusCode).toBe(503);
-      expect(JSON.parse(res.body).totalDurableInsertedTriples).toBe(0);
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).totalDurableInsertedTriples).toBe(23);
       expect(syncFromPeer).toHaveBeenCalledWith(
         'peer-curator',
         ['private-settlement-cg'],

@@ -836,6 +836,18 @@ export type DurableSyncOptions = {
   priority?: number;
 };
 
+type LegacyDurableContextGraphOptions = {
+  onPhase?: PhaseCallback;
+  onAccessDenied?: (contextGraphId: string) => void;
+  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  stopOnBackoffWorthyFailure?: boolean;
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
+  fetchTimeoutMs?: number;
+  exactAssetUals?: string[];
+  authenticationTimeoutMs?: number;
+  signal?: AbortSignal;
+};
+
 const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
 // A maximum-size valid KA is 10,000 triples. Field measurements on the slowest
 // observed canary path project roughly 425 seconds for its byte-paged transfer,
@@ -4305,15 +4317,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             remotePeerId,
             contextGraphId,
             remainingContextGraphs,
-            onPhase,
-            onAccessDenied,
-            sinceBatchIdFor,
-            stopOnBackoffWorthyFailure,
-            undefined,
-            fetchTimeoutMs,
-            options?.exactAssetUals,
-            authenticationTimeoutMs,
-            options?.signal,
+            {
+              onPhase,
+              onAccessDenied,
+              sinceBatchIdFor,
+              stopOnBackoffWorthyFailure,
+              fetchTimeoutMs,
+              exactAssetUals: options?.exactAssetUals,
+              authenticationTimeoutMs,
+              signal: options?.signal,
+            },
           ),
         ),
       })),
@@ -4398,16 +4411,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     remainingContextGraphs: number,
-    onPhase?: PhaseCallback,
-    onAccessDenied?: (contextGraphId: string) => void,
-    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    stopOnBackoffWorthyFailure?: boolean,
-    onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
-    fetchTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
-    exactAssetUals?: string[],
-    authenticationTimeoutMs: number = fetchTimeoutMs,
-    signal?: AbortSignal,
+    options: LegacyDurableContextGraphOptions = {},
   ): Promise<DurableSyncResult> {
+    const {
+      onPhase,
+      onAccessDenied,
+      sinceBatchIdFor,
+      stopOnBackoffWorthyFailure,
+      onVerifiedFullSnapshot,
+      fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
+      exactAssetUals,
+      authenticationTimeoutMs = fetchTimeoutMs,
+      signal,
+    } = options;
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     // The CG name commitment is immutable for an on-chain slot. Prove a
     // local/on-chain binding once per durable-sync invocation, then reuse the
@@ -4692,25 +4708,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           remotePeerId,
           contextGraphId,
           1,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          curatorAuthoritative ? async (snapshot) => {
-            let reconciled = true;
-            for (const graph of pendingDrops) {
-              const metadataGraph = graph.endsWith('/_meta');
-              if (metadataGraph && !snapshot.metaFetched) {
-                reconciled = false;
-                continue;
+          {
+            onVerifiedFullSnapshot: curatorAuthoritative ? async (snapshot) => {
+              let reconciled = true;
+              for (const graph of pendingDrops) {
+                const metadataGraph = graph.endsWith('/_meta');
+                if (metadataGraph && !snapshot.metaFetched) {
+                  reconciled = false;
+                  continue;
+                }
+                const present = metadataGraph
+                  ? snapshot.verifiedMetaGraphs.has(graph)
+                  : snapshot.verifiedDataGraphs.has(graph);
+                if (!present) await this.store.dropGraph(graph);
               }
-              const present = metadataGraph
-                ? snapshot.verifiedMetaGraphs.has(graph)
-                : snapshot.verifiedDataGraphs.has(graph);
-              if (!present) await this.store.dropGraph(graph);
-            }
-            dropsReconciled = reconciled;
-          } : undefined,
+              dropsReconciled = reconciled;
+            } : undefined,
+          },
         );
         mergeDurableSyncResultIntoAccumulator(accumulator, r);
         const complete = r.complete && dropsReconciled;

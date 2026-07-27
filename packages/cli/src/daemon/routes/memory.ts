@@ -705,9 +705,11 @@ WHERE {
     const includeSharedMemory = parsed.includeSharedMemory !== false;
     const includeDurable = parsed.includeDurable === true;
 
-    // Per-peer hard cap on the catchup duration. Keeps the endpoint
-    // response within a single HTTP-level timeout even if the underlying
-    // sync internals retry their way to completion. SWM-only path:
+    // Per-peer operation deadline. Signal-aware work stops accepting new
+    // fetch/authentication/materialization work at this bound. If an atomic
+    // store commit already crossed its non-cancellable dispatch boundary, the
+    // route awaits settlement so its response reports the real commit outcome
+    // instead of returning a false zero-insert failure. SWM-only path:
     // ~45s/page * a couple of pages worst-case; under heavy gossip
     // load (the integration suite) backed-off retries can stretch this
     // out further. Underlying SYNC_TOTAL_TIMEOUT_MS in dkg-agent is
@@ -913,9 +915,10 @@ WHERE {
             }
           }
           if (durableSelected.has(candidate)) {
-            // The helper owns one outer deadline for fetch, verification,
-            // authentication, and materialization. Its AbortSignal propagates
-            // into the current agent so an expired route cannot commit later.
+            // The helper owns one outer deadline for fetch, verification, and
+            // authentication. Its AbortSignal prevents entry into later commit
+            // boundaries; an already-started atomic commit is awaited so the
+            // response remains consistent with the store.
             const durableLeg = await runDurableCatchupLeg(
               agent,
               candidate,

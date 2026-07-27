@@ -259,38 +259,20 @@ export async function runDurableCatchupLeg(
     MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS,
     overallTimeoutMs - DURABLE_CATCHUP_PHASE_HEADROOM_MS,
   );
-  const raceWithOperationDeadline = <T>(work: Promise<T>): Promise<T> => {
-    if (controller.signal.aborted) return Promise.reject(controller.signal.reason);
-    return new Promise<T>((resolve, reject) => {
-      const cleanup = () => controller.signal.removeEventListener('abort', onAbort);
-      const onAbort = () => {
-        cleanup();
-        reject(controller.signal.reason);
-      };
-      controller.signal.addEventListener('abort', onAbort, { once: true });
-      work.then(
-        (value) => {
-          cleanup();
-          resolve(value);
-        },
-        (error) => {
-          cleanup();
-          reject(error);
-        },
-      );
-      if (controller.signal.aborted) onAbort();
-    });
-  };
   try {
     if (typeof agent.syncFromPeerDetailed === 'function') {
-      const detailed = await raceWithOperationDeadline(agent.syncFromPeerDetailed(
+      // The deadline stops cancellable fetch/authentication work, but never
+      // detach from the durable promise. Atomic store adapters cannot all be
+      // interrupted after dispatch, so awaiting settlement is required for
+      // the HTTP response to report the actual commit outcome.
+      const detailed = await agent.syncFromPeerDetailed(
         peerId,
         [contextGraphId],
         undefined,
         undefined,
         undefined,
         { totalTimeoutMs: phaseTimeoutMs, signal: controller.signal },
-      ));
+      );
       const summary = summarizeDurableLeg(detailed);
       return {
         insertedTriples: summary.insertedTriples,
@@ -303,13 +285,15 @@ export async function runDurableCatchupLeg(
 
     return {
       insertedTriples: typeof agent.syncFromPeer === 'function'
-        ? await raceWithOperationDeadline(agent.syncFromPeer(
+        // Legacy implementations may ignore AbortSignal. Await them rather
+        // than falsely reporting zero while unowned work can still commit.
+        ? await agent.syncFromPeer(
           peerId,
           [contextGraphId],
           undefined,
           undefined,
           { totalTimeoutMs: phaseTimeoutMs, signal: controller.signal },
-        ))
+        )
         : 0,
       state: 'legacy',
     };

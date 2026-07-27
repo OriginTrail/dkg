@@ -347,6 +347,59 @@ describe('route-level durable catchup orchestration', () => {
     }
   });
 
+  it('awaits an in-flight non-cancellable commit and reports its actual outcome', async () => {
+    vi.useFakeTimers();
+    let commitStarted = false;
+    let operationSignal: AbortSignal | undefined;
+    let resolveCommit!: () => void;
+    let settled = false;
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: { signal: AbortSignal },
+    ) => {
+      operationSignal = options.signal;
+      await new Promise<void>((resolve) => setTimeout(resolve, 900));
+      commitStarted = true;
+      await new Promise<void>((resolve) => {
+        resolveCommit = resolve;
+      });
+      return {
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        complete: true,
+      } as any;
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-commit-boundary',
+        'cg-commit-boundary',
+        1_000,
+      ).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(900);
+      expect(commitStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(operationSignal?.aborted).toBe(true);
+      expect(settled).toBe(false);
+
+      resolveCommit();
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 1,
+        state: 'complete',
+        complete: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ANDs completion across requested CGs and classifies partial progress', () => {
     const outcome = classifyDurableCatchupRequest([
       [{ durableComplete: true }],

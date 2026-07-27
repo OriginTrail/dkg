@@ -68,7 +68,10 @@ function graphScopedAsset(
 async function captureGraphScopedStore(
   chain: ChainAdapter,
   warn: ReturnType<typeof vi.fn> = vi.fn(),
-  totalTimeoutMs?: number,
+  options: {
+    totalTimeoutMs?: number;
+    signal?: AbortSignal;
+  } = {},
 ) {
   const agentLike: any = {
     config: {},
@@ -105,12 +108,13 @@ async function captureGraphScopedStore(
     'peer-remote',
     contextGraphId,
     1,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    totalTimeoutMs,
+    {
+      ...(options.totalTimeoutMs === undefined ? {} : {
+        fetchTimeoutMs: options.totalTimeoutMs,
+        authenticationTimeoutMs: options.totalTimeoutMs,
+      }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    },
   );
   return mockedRunDurableSync.mock.calls[0]![0].storeGraphScopedAsset!;
 }
@@ -142,7 +146,7 @@ describe('durable sync lifecycle chain binding', () => {
     await captureGraphScopedStore(
       { chainId: 'none' } as ChainAdapter,
       vi.fn(),
-      299_000,
+      { totalTimeoutMs: 299_000 },
     );
 
     const syncContext = mockedRunDurableSync.mock.calls[0]![0];
@@ -399,6 +403,54 @@ describe('durable sync lifecycle chain binding', () => {
     expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
     expect(getContextGraphNameHash.mock.calls.map(([id]) => id)).toEqual([14n, 15n]);
     expect(mockedMaterialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts real graph-scoped authentication before materialization', async () => {
+    const controller = new AbortController();
+    const timeoutError = new Error('whole durable operation expired');
+    timeoutError.name = 'AbortError';
+    let authenticationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      authenticationStarted = resolve;
+    });
+    let authenticationSignal: AbortSignal | undefined;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: (
+        _kaId: bigint,
+        options?: { signal?: AbortSignal },
+      ) => new Promise<Uint8Array>((_resolve, reject) => {
+        authenticationSignal = options?.signal;
+        if (!authenticationSignal) {
+          reject(new Error('authentication root read received no abort signal'));
+          return;
+        }
+        authenticationStarted();
+        authenticationSignal.addEventListener(
+          'abort',
+          () => reject(authenticationSignal?.reason),
+          { once: true },
+        );
+      }),
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+    } as ChainAdapter;
+    const storeGraphScopedAsset = await captureGraphScopedStore(
+      chain,
+      vi.fn(),
+      { signal: controller.signal },
+    );
+
+    const pending = storeGraphScopedAsset(
+      graphScopedAsset(new Uint8Array(32)),
+      Date.now() + 120_000,
+    );
+    await started;
+    controller.abort(timeoutError);
+
+    await expect(pending).rejects.toBe(timeoutError);
+    expect(authenticationSignal?.aborted).toBe(true);
+    expect(mockedMaterialize).not.toHaveBeenCalled();
   });
 
   it('cancels and retries a hung root read within the graph deadline', async () => {
