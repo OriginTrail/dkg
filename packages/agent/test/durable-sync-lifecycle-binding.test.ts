@@ -22,6 +22,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   runDurableSync,
+  type DurableSyncContext,
   type DurableSyncGraphScopedStoreRequest,
 } from '../src/sync/requester/durable-sync.js';
 import {
@@ -143,10 +144,13 @@ describe('durable sync lifecycle chain binding', () => {
     await captureGraphScopedStore({ chainId: 'none' } as ChainAdapter);
 
     const syncContext = mockedRunDurableSync.mock.calls[0]![0];
-    expect(syncContext.durableSyncBudget.fetchDeadline())
-      .toBe(1_800_000_120_000);
+    const contextGraphBudget = syncContext.durableSyncBudget.createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs: 1,
+    });
+    expect(contextGraphBudget.fetchDeadline).toBe(1_800_000_120_000);
     vi.mocked(Date.now).mockReturnValue(1_800_000_300_000);
-    expect(syncContext.durableSyncBudget.graphScopedAuthenticationDeadline())
+    expect(contextGraphBudget.createGraphScopedAuthenticationDeadline())
       .toBe(1_800_000_420_000);
   });
 
@@ -159,8 +163,69 @@ describe('durable sync lifecycle chain binding', () => {
     );
 
     const syncContext = mockedRunDurableSync.mock.calls[0]![0];
-    expect(syncContext.durableSyncBudget.graphScopedAuthenticationDeadline())
+    const contextGraphBudget = syncContext.durableSyncBudget.createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs: 1,
+    });
+    expect(contextGraphBudget.createGraphScopedAuthenticationDeadline())
       .toBe(1_800_000_299_000);
+  });
+
+  it('keeps totalTimeoutMs as one outer operation boundary without a caller signal', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    const agentLike: any = {
+      config: {},
+      processDurableBatchInWorker: async () => ({}),
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _contextGraphId: string,
+        _lane: string,
+        _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    let capturedContext: DurableSyncContext | undefined;
+    mockedRunDurableSync.mockImplementationOnce(async (syncContext) => {
+      capturedContext = syncContext;
+      await new Promise<void>((resolve) => {
+        if (syncContext.signal?.aborted) resolve();
+        else syncContext.signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return {} as Awaited<ReturnType<typeof runDurableSync>>;
+    });
+
+    try {
+      const sync = LifecycleSyncMethods.prototype.runLegacyDurableSync.call(
+        agentLike,
+        ctx,
+        'peer-total-timeout',
+        [contextGraphId],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs: 30_000 },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(capturedContext?.signal).toBeDefined();
+      expect(capturedContext?.signal?.aborted).toBe(false);
+      const contextGraphBudget = capturedContext!.durableSyncBudget.createContextGraphBudget({
+        contextGraphId,
+        remainingContextGraphs: 1,
+      });
+      expect(contextGraphBudget.fetchDeadline).toBe(1_800_000_030_000);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await sync;
+
+      expect(capturedContext?.signal?.aborted).toBe(true);
+      expect(contextGraphBudget.createGraphScopedAuthenticationDeadline())
+        .toBe(1_800_000_030_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
@@ -214,8 +279,11 @@ describe('durable sync lifecycle chain binding', () => {
       },
     );
     expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
-    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline())
-      .toBe(1_800_000_030_000);
+    expect(
+      mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget
+        .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 })
+        .fetchDeadline,
+    ).toBe(1_800_000_030_000);
 
     mockedRunDurableSync.mockClear();
     agentLike.runLegacyDurableSync = LifecycleSyncMethods.prototype.runLegacyDurableSync;
@@ -226,8 +294,11 @@ describe('durable sync lifecycle chain binding', () => {
       [exactUal],
     );
     expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
-    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline())
-      .toBe(1_800_000_600_000);
+    expect(
+      mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget
+        .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 })
+        .fetchDeadline,
+    ).toBe(1_800_000_600_000);
   });
 
   it('selects the abortable durable lane only when the caller requires it', async () => {

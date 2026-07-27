@@ -726,6 +726,49 @@ function asSyncFetchAbortError(reason: unknown): Error {
   return err;
 }
 
+function createDurableSyncOperationBoundary(options: {
+  totalTimeoutMs?: number;
+  signal?: AbortSignal;
+}): {
+  deadline?: number;
+  signal?: AbortSignal;
+  dispose: () => void;
+} {
+  if (options.totalTimeoutMs === undefined) {
+    return {
+      signal: options.signal,
+      dispose: () => {},
+    };
+  }
+
+  const timeoutMs = normalizeDurableSyncTimeoutMs(options.totalTimeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(
+    asSyncFetchAbortError(options.signal?.reason),
+  );
+  if (options.signal?.aborted) abortFromCaller();
+  else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const timeout = setTimeout(
+    () => controller.abort(
+      asSyncFetchAbortError(new Error(
+        `Durable sync exceeded totalTimeoutMs=${timeoutMs}`,
+      )),
+    ),
+    timeoutMs,
+  );
+  timeout.unref?.();
+
+  return {
+    deadline,
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abortFromCaller);
+    },
+  };
+}
+
 function isMissingShardingTableContractError(error: unknown): boolean {
   // The EVM adapter normalizes a missing Hub binding onto these markers.
   // Keep every other membership failure retryable because it may be a
@@ -825,11 +868,9 @@ export interface ContextGraphCatchupOptions {
 export type DurableSyncOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
-   * Wall-clock budget for each bounded legacy durable phase. Network transfer
-   * and post-fetch chain authentication use separate deadlines so a completed
-   * transfer cannot consume the authentication phase before it starts. The
-   * agent clamps both independently so an API caller cannot create an
-   * unbounded sync operation.
+   * Outer wall-clock budget for the complete legacy durable operation.
+   * Network transfer and post-fetch chain authentication retain separate
+   * phase deadlines, but neither may extend work beyond this caller boundary.
    */
   totalTimeoutMs?: number;
   /**
@@ -859,6 +900,7 @@ type LegacyDurableContextGraphOptions = {
   fetchTimeoutMs?: number;
   exactAssetUals?: string[];
   authenticationTimeoutMs?: number;
+  operationDeadline?: number;
   signal?: AbortSignal;
 };
 
@@ -4294,6 +4336,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const operationBoundary = createDurableSyncOperationBoundary({
+      totalTimeoutMs: options?.totalTimeoutMs,
+      signal: options?.signal,
+    });
     const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
     const fetchTimeoutMs = options?.exactAssetUals && options.totalTimeoutMs === undefined
       ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
@@ -4322,7 +4368,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               fetchTimeoutMs,
               exactAssetUals: options?.exactAssetUals,
               authenticationTimeoutMs,
-              signal: options?.signal,
+              operationDeadline: operationBoundary.deadline,
+              signal: operationBoundary.signal,
             },
           ),
         ),
@@ -4367,11 +4414,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasPhaseCallback: Boolean(onPhase),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
-      hasSignal: Boolean(options?.signal),
+      hasSignal: Boolean(operationBoundary.signal),
       exactAssetUals: options?.exactAssetUals,
       priority: options?.priority,
     });
-    return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
+    const runWithinBoundary = async () => {
+      try {
+        return await runSync();
+      } finally {
+        operationBoundary.dispose();
+      }
+    };
+    return singleFlightKey
+      ? runSyncSingleFlight(this, singleFlightKey, runWithinBoundary)
+      : runWithinBoundary();
   }
 
   /**
@@ -4419,6 +4475,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetUals,
       authenticationTimeoutMs = fetchTimeoutMs,
+      operationDeadline,
       signal,
     } = options;
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
@@ -4459,6 +4516,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         throw error;
       }
     };
+    const contextGraphBudget = createDurableSyncBudget({
+      fetchTimeoutMs,
+      authenticationTimeoutMs,
+      exactRecovery: exactAssetUals !== undefined,
+      operationDeadline,
+    }).createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs,
+    });
     return runDurableSync({
       ctx,
       remotePeerId,
@@ -4466,12 +4532,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      durableSyncBudget: createDurableSyncBudget({
-        remainingContextGraphs,
-        fetchTimeoutMs,
-        authenticationTimeoutMs,
-        exactRecovery: exactAssetUals !== undefined,
-      }),
+      durableSyncBudget: {
+        createContextGraphBudget: () => contextGraphBudget,
+      },
       signal,
       fetchSyncPages: ({
         ctx: opCtx,

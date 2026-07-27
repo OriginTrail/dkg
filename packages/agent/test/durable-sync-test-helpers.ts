@@ -4,7 +4,9 @@ export function uniformDurableSyncBudget(
   createDeadline: () => number,
 ): DurableSyncBudget {
   return {
-    fetchDeadline: createDeadline,
-    graphScopedAuthenticationDeadline: createDeadline,
+    createContextGraphBudget: () => ({
+      fetchDeadline: createDeadline(),
+      createGraphScopedAuthenticationDeadline: createDeadline,
+    }),
   };
 }

@@ -4,6 +4,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 
 import {
   createContextGraphSyncDeadline,
+  createDurableSyncBudget,
   createGraphScopedAuthenticationDeadline,
   runDurableSync,
   type DurableSyncBudget,
@@ -138,6 +139,18 @@ function runRequesterBudgetHarness(
   return runDurableSync(requesterBudgetContext(options));
 }
 
+function requesterBudget(
+  createFetchDeadline: () => number,
+  createAuthenticationDeadline: () => number = createFetchDeadline,
+): DurableSyncBudget {
+  return {
+    createContextGraphBudget: () => ({
+      fetchDeadline: createFetchDeadline(),
+      createGraphScopedAuthenticationDeadline: createAuthenticationDeadline,
+    }),
+  };
+}
+
 describe('durable sync deadline budget', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -197,6 +210,45 @@ describe('durable sync deadline budget', () => {
     ).toBe(1_120_000);
   });
 
+  it('clamps fresh phase budgets to the caller outer deadline', () => {
+    const now = vi.fn(() => 1_800_000_000_000);
+    const budget = createDurableSyncBudget({
+      fetchTimeoutMs: 60_000,
+      authenticationTimeoutMs: 60_000,
+      operationDeadline: 1_800_000_030_000,
+      now,
+    }).createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs: 1,
+    });
+
+    expect(budget.fetchDeadline).toBe(1_800_000_030_000);
+    now.mockReturnValue(1_800_000_029_000);
+    expect(budget.createGraphScopedAuthenticationDeadline())
+      .toBe(1_800_000_030_000);
+  });
+
+  it('passes graph identity and remaining work into one explicit budget factory call', async () => {
+    const createContextGraphBudget = vi.fn(() => ({
+      fetchDeadline: Date.now() + 60_000,
+      createGraphScopedAuthenticationDeadline: () => Date.now() + 60_000,
+    }));
+    const syncContext = requesterBudgetContext({
+      durableSyncBudget: { createContextGraphBudget },
+      graphScoped: false,
+      storeGraphScopedAsset: async () => 'applied',
+    });
+    const secondContextGraphId = `${contextGraphId}-second`;
+    syncContext.contextGraphIds = [contextGraphId, secondContextGraphId];
+
+    await runDurableSync(syncContext);
+
+    expect(createContextGraphBudget.mock.calls).toEqual([
+      [{ contextGraphId, remainingContextGraphs: 2 }],
+      [{ contextGraphId: secondContextGraphId, remainingContextGraphs: 1 }],
+    ]);
+  });
+
   it('starts graph-scoped authentication after both fetch phases complete', async () => {
     let phaseTime = 1_800_000_000_000;
     const completedFetchPhases: Array<'data' | 'meta'> = [];
@@ -206,10 +258,10 @@ describe('durable sync deadline budget', () => {
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
     await runRequesterBudgetHarness({
-      durableSyncBudget: {
-        fetchDeadline: () => phaseTime + 60_000,
+      durableSyncBudget: requesterBudget(
+        () => phaseTime + 60_000,
         graphScopedAuthenticationDeadline,
-      },
+      ),
       onFetchPhase: (phase) => {
         completedFetchPhases.push(phase);
         phaseTime += phase === 'meta' ? 10_000 : 20_000;
@@ -234,10 +286,10 @@ describe('durable sync deadline budget', () => {
 
     await runRequesterBudgetHarness({
       assetCount: 2,
-      durableSyncBudget: {
-        fetchDeadline: () => Date.now() + 60_000,
+      durableSyncBudget: requesterBudget(
+        () => Date.now() + 60_000,
         graphScopedAuthenticationDeadline,
-      },
+      ),
       storeGraphScopedAsset,
     });
 
@@ -262,10 +314,10 @@ describe('durable sync deadline budget', () => {
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
     await runRequesterBudgetHarness({
-      durableSyncBudget: {
-        fetchDeadline: () => phaseTime + 60_000,
+      durableSyncBudget: requesterBudget(
+        () => phaseTime + 60_000,
         graphScopedAuthenticationDeadline,
-      },
+      ),
       onVerify: () => {
         phaseTime += 45_000;
         verificationComplete = true;
@@ -314,10 +366,7 @@ describe('durable sync deadline budget', () => {
         storeGraphScopedAsset: _storeGraphScopedAsset,
         ...sharedContext
       } = requesterBudgetContext({
-        durableSyncBudget: {
-          fetchDeadline: () => deadline,
-          graphScopedAuthenticationDeadline: () => deadline,
-        },
+        durableSyncBudget: requesterBudget(() => deadline),
         graphScoped,
         storeGraphScopedAsset: async () => 'applied',
       });
@@ -401,10 +450,10 @@ describe('durable sync deadline budget', () => {
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
     const result = await runRequesterBudgetHarness({
-      durableSyncBudget: {
-        fetchDeadline: () => Date.now() + 60_000,
+      durableSyncBudget: requesterBudget(
+        () => Date.now() + 60_000,
         graphScopedAuthenticationDeadline,
-      },
+      ),
       signal: controller.signal,
       onVerify: () => controller.abort(new Error('whole operation expired')),
       storeGraphScopedAsset,
@@ -435,10 +484,7 @@ describe('durable sync deadline budget', () => {
     });
     const syncContext = requesterBudgetContext({
       assetCount: 2,
-      durableSyncBudget: {
-        fetchDeadline: () => Date.now() + 60_000,
-        graphScopedAuthenticationDeadline: () => Date.now() + 60_000,
-      },
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
       signal: controller.signal,
       storeGraphScopedAsset,
     });
@@ -469,10 +515,10 @@ describe('durable sync deadline budget', () => {
     ));
 
     await runRequesterBudgetHarness({
-      durableSyncBudget: {
-        fetchDeadline: () => Date.now() + 60_000,
-        graphScopedAuthenticationDeadline: () => Date.now() + 90_000,
-      },
+      durableSyncBudget: requesterBudget(
+        () => Date.now() + 60_000,
+        () => Date.now() + 90_000,
+      ),
       signal: controller.signal,
       onFetchContext: (fetchContext) => fetchContexts.push(fetchContext),
       storeGraphScopedAsset,
@@ -495,10 +541,7 @@ describe('durable sync deadline budget', () => {
     const storeInsert = vi.fn(async (_request: DurableSyncStoreInsertRequest) => {});
 
     const result = await runRequesterBudgetHarness({
-      durableSyncBudget: {
-        fetchDeadline: () => Date.now() + 60_000,
-        graphScopedAuthenticationDeadline: () => Date.now() + 60_000,
-      },
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
       signal: controller.signal,
       graphScoped: false,
       onVerify: () => controller.abort(new Error('cancel before plain insert')),

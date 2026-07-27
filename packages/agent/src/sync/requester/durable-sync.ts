@@ -79,11 +79,26 @@ export interface VerifiedFullSnapshot {
   metaFetched: boolean;
 }
 
-export interface DurableSyncBudget {
-  /** Deadline for fetching one Context Graph's durable snapshot. */
-  fetchDeadline: () => number;
+export interface DurableSyncContextGraphBudget {
+  /** Deadline for fetching this Context Graph's durable snapshot. */
+  readonly fetchDeadline: number;
   /** Fresh deadline for authenticating graph-scoped assets from one verified page. */
-  graphScopedAuthenticationDeadline: () => number;
+  readonly createGraphScopedAuthenticationDeadline: () => number;
+}
+
+export interface DurableSyncContextGraphBudgetRequest {
+  readonly contextGraphId: string;
+  readonly remainingContextGraphs: number;
+}
+
+export interface DurableSyncBudget {
+  /**
+   * Create one explicit Context Graph budget. Callers supply graph identity
+   * and remaining work, so budgeting never depends on hidden callback order.
+   */
+  createContextGraphBudget: (
+    request: DurableSyncContextGraphBudgetRequest,
+  ) => DurableSyncContextGraphBudget;
 }
 
 export function normalizeDurableSyncTimeoutMs(
@@ -128,24 +143,32 @@ export function createGraphScopedAuthenticationDeadline(options: {
  * supplies only caller configuration and whether this is exact VM recovery.
  */
 export function createDurableSyncBudget(options: {
-  remainingContextGraphs: number;
   fetchTimeoutMs?: number;
   authenticationTimeoutMs?: number;
   exactRecovery?: boolean;
+  operationDeadline?: number;
   now?: () => number;
 }): DurableSyncBudget {
   return {
-    fetchDeadline: () => createContextGraphSyncDeadline({
-      remainingContextGraphs: options.remainingContextGraphs,
-      totalTimeoutMs: options.fetchTimeoutMs,
-      maximumMs: options.exactRecovery
-        ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
-        : MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
-      now: options.now,
-    }),
-    graphScopedAuthenticationDeadline: () => createGraphScopedAuthenticationDeadline({
-      totalTimeoutMs: options.authenticationTimeoutMs,
-      now: options.now,
+    createContextGraphBudget: ({ remainingContextGraphs }) => ({
+      fetchDeadline: Math.min(
+        createContextGraphSyncDeadline({
+          remainingContextGraphs,
+          totalTimeoutMs: options.fetchTimeoutMs,
+          maximumMs: options.exactRecovery
+            ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
+            : MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+          now: options.now,
+        }),
+        options.operationDeadline ?? Number.POSITIVE_INFINITY,
+      ),
+      createGraphScopedAuthenticationDeadline: () => Math.min(
+        createGraphScopedAuthenticationDeadline({
+          totalTimeoutMs: options.authenticationTimeoutMs,
+          now: options.now,
+        }),
+        options.operationDeadline ?? Number.POSITIVE_INFINITY,
+      ),
     }),
   };
 }
@@ -278,22 +301,14 @@ export interface LegacyDurableSyncContext extends Omit<
 
 function legacyDurableSyncBudget(
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number,
-  contextGraphCount: number,
 ): DurableSyncBudget {
-  let currentContextGraphDeadline: number | undefined;
-  let nextContextGraphIndex = 0;
   return {
-    fetchDeadline: () => {
-      const remainingContextGraphs = Math.max(1, contextGraphCount - nextContextGraphIndex);
-      nextContextGraphIndex += 1;
-      currentContextGraphDeadline = createContextGraphSyncDeadline(remainingContextGraphs);
-      return currentContextGraphDeadline;
-    },
-    graphScopedAuthenticationDeadline: () => {
-      if (currentContextGraphDeadline === undefined) {
-        throw new Error('legacy durable-sync deadline requested before Context Graph fetch');
-      }
-      return currentContextGraphDeadline;
+    createContextGraphBudget: ({ remainingContextGraphs }) => {
+      const deadline = createContextGraphSyncDeadline(remainingContextGraphs);
+      return {
+        fetchDeadline: deadline,
+        createGraphScopedAuthenticationDeadline: () => deadline,
+      };
     },
   };
 }
@@ -311,10 +326,7 @@ function normalizeDurableSyncContext(
   } = context;
   return {
     ...sharedContext,
-    durableSyncBudget: legacyDurableSyncBudget(
-      createContextGraphSyncDeadline,
-      sharedContext.contextGraphIds.length,
-    ),
+    durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),
     fetchSyncPages: (request) => fetchSyncPages(
       request.ctx,
       request.remotePeerId,
@@ -467,7 +479,7 @@ async function runDurableSyncWithBudget(
     logInfo(ctx, `Stopping durable sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
     return true;
   };
-  for (const pid of contextGraphIds) {
+  for (const [contextGraphIndex, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -484,7 +496,11 @@ async function runDurableSyncWithBudget(
       throwIfOperationAborted();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
-      const deadline = durableSyncBudget.fetchDeadline();
+      const contextGraphBudget = durableSyncBudget.createContextGraphBudget({
+        contextGraphId: pid,
+        remainingContextGraphs: contextGraphIds.length - contextGraphIndex,
+      });
+      const deadline = contextGraphBudget.fetchDeadline;
       const activeFetchContext = fetchContext(deadline);
       const exactAssetUals = exactAssetUalsFor?.(pid);
 
@@ -750,7 +766,7 @@ async function runDurableSyncWithBudget(
         );
       }
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
-        ? durableSyncBudget.graphScopedAuthenticationDeadline()
+        ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
         : deadline;
       for (const asset of partitioned.assets) {
         throwIfOperationAborted();
@@ -798,6 +814,10 @@ async function runDurableSyncWithBudget(
           insertedMetaTriples: partitioned.remainingMeta.length,
         });
       }
+      // An already-started atomic write is awaited and counted truthfully, but
+      // an expired operation may not advance a page checkpoint or enter the
+      // next commit boundary.
+      throwIfOperationAborted();
       await notifyVerifiedFullSnapshot();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
