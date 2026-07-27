@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
+  createContextGraphSyncDeadline,
+  createGraphScopedAuthenticationDeadline,
   runDurableSync,
   type DurableSyncBudget,
   type DurableSyncContext,
@@ -146,11 +147,10 @@ describe('durable sync deadline budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
     expect(
-      LifecycleSyncMethods.prototype.createContextGraphSyncDeadline.call(
-        {} as any,
-        1,
-        299_000,
-      ),
+      createContextGraphSyncDeadline({
+        remainingContextGraphs: 1,
+        totalTimeoutMs: 299_000,
+      }),
     ).toBe(1_299_000);
   });
 
@@ -158,11 +158,10 @@ describe('durable sync deadline budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
     expect(
-      LifecycleSyncMethods.prototype.createContextGraphSyncDeadline.call(
-        {} as any,
-        1,
-        900_000,
-      ),
+      createContextGraphSyncDeadline({
+        remainingContextGraphs: 1,
+        totalTimeoutMs: 900_000,
+      }),
     ).toBe(1_300_000);
   });
 
@@ -170,10 +169,7 @@ describe('durable sync deadline budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
     expect(
-      LifecycleSyncMethods.prototype.createContextGraphSyncDeadline.call(
-        {} as any,
-        1,
-      ),
+      createContextGraphSyncDeadline({ remainingContextGraphs: 1 }),
     ).toBe(1_120_000);
   });
 
@@ -181,10 +177,7 @@ describe('durable sync deadline budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
     expect(
-      LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline.call(
-        {} as any,
-        299_000,
-      ),
+      createGraphScopedAuthenticationDeadline({ totalTimeoutMs: 299_000 }),
     ).toBe(1_299_000);
   });
 
@@ -192,10 +185,7 @@ describe('durable sync deadline budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
     expect(
-      LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline.call(
-        {} as any,
-        900_000,
-      ),
+      createGraphScopedAuthenticationDeadline({ totalTimeoutMs: 900_000 }),
     ).toBe(1_300_000);
   });
 
@@ -203,9 +193,7 @@ describe('durable sync deadline budget', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
 
     expect(
-      LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline.call(
-        {} as any,
-      ),
+      createGraphScopedAuthenticationDeadline(),
     ).toBe(1_120_000);
   });
 
@@ -429,6 +417,46 @@ describe('durable sync deadline budget', () => {
     });
     expect(graphScopedAuthenticationDeadline).not.toHaveBeenCalled();
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+  });
+
+  it('awaits an in-flight graph-scoped commit but aborts before the next asset and checkpoint', async () => {
+    const controller = new AbortController();
+    let releaseFirstCommit!: () => void;
+    let firstCommitStarted!: () => void;
+    const firstCommitGate = new Promise<void>((resolve) => { releaseFirstCommit = resolve; });
+    const firstCommitObserved = new Promise<void>((resolve) => { firstCommitStarted = resolve; });
+    const setCheckpoint = vi.fn();
+    const storeGraphScopedAsset = vi.fn(async (
+      _request: DurableSyncGraphScopedStoreRequest,
+    ): Promise<GraphScopedMaterializationOutcome> => {
+      firstCommitStarted();
+      await firstCommitGate;
+      return 'applied';
+    });
+    const syncContext = requesterBudgetContext({
+      assetCount: 2,
+      durableSyncBudget: {
+        fetchDeadline: () => Date.now() + 60_000,
+        graphScopedAuthenticationDeadline: () => Date.now() + 60_000,
+      },
+      signal: controller.signal,
+      storeGraphScopedAsset,
+    });
+    syncContext.setCheckpoint = setCheckpoint;
+
+    const sync = runDurableSync(syncContext);
+    await firstCommitObserved;
+    controller.abort(new Error('deadline expired during atomic materialization'));
+    releaseFirstCommit();
+    const result = await sync;
+
+    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      insertedTriples: 9,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(setCheckpoint).not.toHaveBeenCalled();
   });
 
   it('passes distinct fetch and graph-scoped authentication boundaries', async () => {

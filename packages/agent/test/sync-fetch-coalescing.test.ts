@@ -291,6 +291,36 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not coalesce signal-bounded fetches with different operation deadlines', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends++;
+      return response.promise;
+    });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    try {
+      const first = fetchPages(agent, {
+        deadline: DEFAULT_DEADLINE,
+        signal: firstController.signal,
+      });
+      await flushMicrotasks();
+      const second = fetchPages(agent, {
+        deadline: DEFAULT_DEADLINE + 1,
+        signal: secondController.signal,
+      });
+      await flushMicrotasks();
+
+      expect(sends).toBe(2);
+      response.resolve(new Uint8Array(0));
+      await Promise.all([first, second]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('clears the in-flight entry after success and after failure', async () => {
     let sends = 0;
     let failParser = true;
@@ -327,10 +357,11 @@ describe('DKGAgent sync fetch coalescing', () => {
       sends++;
       return response.promise;
     });
+    const firstController = new AbortController();
     const abort = new AbortController();
 
     try {
-      const first = fetchPages(agent);
+      const first = fetchPages(agent, { signal: firstController.signal });
       await flushMicrotasks();
       const second = fetchPages(agent, { signal: abort.signal });
       await flushMicrotasks();

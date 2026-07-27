@@ -329,6 +329,7 @@ describe('reconcileContextGraph — sweep', () => {
             outcomes: new Map(),
             attemptedOrdinals: [],
             continuationOrdinal: targets[0]?.ordinal,
+            cooldownOnly: true,
           };
         }
         const attempted = targets[0]!;
@@ -364,6 +365,47 @@ describe('reconcileContextGraph — sweep', () => {
       [1],
       [1],
       [0],
+    ]);
+  });
+
+  it('keeps the fair scan moving when recovery finds no eligible peer', async () => {
+    const attempts: number[][] = [[], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 25,
+      maxOrdinalsPerPass: 10,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
+        return {
+          status: 'pending',
+          recovery: {
+            ordinal,
+            ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/0',
+            kaId: '0',
+            reason: 'no-swm',
+          },
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
+        outcomes: new Map(),
+        attemptedOrdinals: [],
+        continuationOrdinal: targets[0]?.ordinal,
+        cooldownOnly: false,
+      }),
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.hasMore).toBe(true);
+    expect(state.scanOrdinal).toBe(10);
+
+    pass += 1;
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
     ]);
   });
 

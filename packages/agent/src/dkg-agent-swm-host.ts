@@ -3672,10 +3672,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
     const noRecovery = (
       continuationOrdinal?: number,
+      cooldownOnly = false,
     ): PendingOrdinalRecoveryResult => ({
       outcomes: new Map(),
       attemptedOrdinals: [],
       continuationOrdinal,
+      cooldownOnly,
     });
     if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
@@ -3688,7 +3690,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the cooldown below so a draining backlog proceeds slice after slice.
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
-      return noRecovery(targets[0]?.ordinal);
+      return noRecovery(targets[0]?.ordinal, true);
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -3815,6 +3817,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       outcomes,
       attemptedOrdinals: [...attemptedOrdinals],
       continuationOrdinal: remaining[0]?.ordinal,
+      cooldownOnly: false,
     };
   }
 

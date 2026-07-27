@@ -69,6 +69,13 @@ export interface PendingOrdinalRecoveryResult {
    * instead of snapping back to the watermark.
    */
   continuationOrdinal: number | undefined;
+  /**
+   * True only when recovery intentionally skipped networking because its
+   * per-CG cooldown is active. This preserves the continuation without
+   * scheduling an immediate retry; ordinary no-eligible-peer outcomes keep
+   * the fair scan moving through unvisited ordinals.
+   */
+  cooldownOnly?: boolean;
 }
 
 export interface ChainReconcilerDeps {
@@ -189,6 +196,7 @@ export async function reconcileContextGraph(
   let staleTarget = false;
   let recoveryContinuationOrdinal: number | undefined;
   let recoveryAttempted = false;
+  let recoveryCooldownOnly = false;
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -276,6 +284,7 @@ export async function reconcileContextGraph(
         for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
         recoveryContinuationOrdinal = recovery.continuationOrdinal;
         recoveryAttempted = recovery.attemptedOrdinals.length > 0;
+        recoveryCooldownOnly = recovery.cooldownOnly === true;
       }
     }
 
@@ -303,7 +312,10 @@ export async function reconcileContextGraph(
 
   if (staleTarget || headUnavailable) {
     state.scanOrdinal = state.watermark;
-  } else if (recoveryContinuationOrdinal !== undefined) {
+  } else if (
+    recoveryContinuationOrdinal !== undefined
+    && (recoveryAttempted || recoveryCooldownOnly || !hasUnvisitedCandidates)
+  ) {
     state.scanOrdinal = Math.max(state.watermark, recoveryContinuationOrdinal);
   } else if (!hasUnvisitedCandidates) {
     state.scanOrdinal = state.watermark;
@@ -314,10 +326,11 @@ export async function reconcileContextGraph(
   const pending = ordinalsToReconcile(state, head).length;
   const hasMore = !headUnavailable
     && !staleTarget
+    && !recoveryCooldownOnly
     && (
       recoveryAttempted
         ? recoveryContinuationOrdinal !== undefined || hasUnvisitedCandidates
-        : recoveryContinuationOrdinal === undefined && hasUnvisitedCandidates
+        : hasUnvisitedCandidates
     );
 
   if (state.watermark !== before) {

@@ -2225,6 +2225,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(second.outcomes.size).toBe(0);
     expect(second.attemptedOrdinals).toEqual([]);
     expect(second.continuationOrdinal).toBe(0);
+    expect(second.cooldownOnly).toBe(true);
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {

@@ -127,7 +127,6 @@ describe('sync requester progress accounting', () => {
         ctx,
         remotePeerId: 'peer-a',
         contextGraphId: 'open-cg',
-        includeSharedMemory: false,
         phase: 'meta',
         graphUri: expect.any(String),
         fetchContext: expect.objectContaining({
@@ -170,7 +169,6 @@ describe('sync requester progress accounting', () => {
         ctx,
         remotePeerId: 'peer-a',
         contextGraphId: 'next-cg',
-        includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
         fetchContext: expect.objectContaining({
@@ -213,7 +211,6 @@ describe('sync requester progress accounting', () => {
         ctx,
         remotePeerId: 'peer-a',
         contextGraphId: 'next-cg',
-        includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
         fetchContext: expect.objectContaining({
@@ -264,7 +261,6 @@ describe('sync requester progress accounting', () => {
         ctx,
         remotePeerId: 'peer-a',
         contextGraphId: 'next-cg',
-        includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
         fetchContext: expect.objectContaining({
@@ -318,7 +314,6 @@ describe('sync requester progress accounting', () => {
         ctx,
         remotePeerId: 'peer-a',
         contextGraphId: 'next-cg',
-        includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
         fetchContext: expect.objectContaining({

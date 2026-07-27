@@ -112,7 +112,6 @@ describe('sync requester bailout', () => {
           ctx,
           remotePeerId: 'peer-a',
           contextGraphId: 'pressured-cg',
-          includeSharedMemory: false,
           phase: 'meta',
           graphUri: expect.any(String),
           fetchContext: expect.objectContaining({
@@ -156,7 +155,6 @@ describe('sync requester bailout', () => {
         ctx,
         remotePeerId: 'peer-a',
         contextGraphId: 'next-cg',
-        includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
         fetchContext: expect.objectContaining({

@@ -104,12 +104,6 @@ async function captureGraphScopedStore(
     contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
     log: { info: () => {}, warn, debug: () => {} },
   };
-  agentLike.createContextGraphSyncDeadline = (
-    LifecycleSyncMethods.prototype as any
-  ).createContextGraphSyncDeadline;
-  agentLike.createGraphScopedAuthenticationDeadline = (
-    LifecycleSyncMethods.prototype as any
-  ).createGraphScopedAuthenticationDeadline;
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.requireLocalCgMatchesOnChainSlot = (
     DKGAgent.prototype as any
@@ -195,10 +189,6 @@ describe('durable sync lifecycle chain binding', () => {
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const agentLike: any = {
       config: {},
-      createContextGraphSyncDeadline:
-        LifecycleSyncMethods.prototype.createContextGraphSyncDeadline,
-      createGraphScopedAuthenticationDeadline:
-        LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline,
       processDurableBatchInWorker: async () => ({}),
       runContextGraphSyncWithBackpressure: async (
         _ctx: unknown,

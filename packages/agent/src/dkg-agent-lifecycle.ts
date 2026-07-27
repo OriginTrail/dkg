@@ -253,6 +253,10 @@ import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversiz
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import {
+  createContextGraphSyncDeadline,
+  createDurableSyncBudget,
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
+  normalizeDurableSyncTimeoutMs,
   runDurableSync,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
@@ -391,7 +395,6 @@ import {
   EVM_PUBLISH_OPEN,
   MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
   META_REFRESH_COOLDOWN_MS,
-  SYNC_MIN_GRAPH_BUDGET_MS,
   DEBUG_SYNC_PROGRESS,
   DEFAULT_SWM_TTL_MS,
   SWM_CLEANUP_INTERVAL_MS,
@@ -583,6 +586,7 @@ function syncPageFetchCoalescingKey(params: {
   recovery?: boolean;
   forceFreshSession?: boolean;
   assetUals?: readonly string[];
+  callerDeadline?: number;
 }): string {
   return JSON.stringify([
     params.remotePeerId,
@@ -595,6 +599,7 @@ function syncPageFetchCoalescingKey(params: {
     params.recovery === true,
     params.forceFreshSession === true,
     params.assetUals ?? null,
+    params.callerDeadline ?? null,
   ]);
 }
 
@@ -857,12 +862,6 @@ type LegacyDurableContextGraphOptions = {
   signal?: AbortSignal;
 };
 
-const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
-// A maximum-size valid KA is 10,000 triples. Field measurements on the slowest
-// observed canary path project roughly 425 seconds for its byte-paged transfer,
-// so exact VM repair gets a separate hard 10-minute transfer ceiling. Chain
-// authentication remains on the normal independently bounded phase below.
-const EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS = 600_000;
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
 const DURABLE_AUTHENTICATION_RETRY_BASE_MS = 1_000;
 const DURABLE_AUTHENTICATION_RETRY_MAX_MS = 8_000;
@@ -970,17 +969,6 @@ async function authenticateDurableGraphScopedAsset(params: {
     clearTimeout(deadlineTimer);
     signal?.removeEventListener('abort', abortFromOperation);
   }
-}
-
-function normalizeDurableSyncTotalTimeoutMs(
-  value: number | undefined,
-  maximumMs: number = MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
-): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
-  return Math.min(
-    maximumMs,
-    Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(value)),
-  );
 }
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
@@ -4306,7 +4294,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const authenticationTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
+    const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
     const fetchTimeoutMs = options?.exactAssetUals && options.totalTimeoutMs === undefined
       ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
       : authenticationTimeoutMs;
@@ -4478,22 +4466,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      durableSyncBudget: {
-        fetchDeadline: () => this.createContextGraphSyncDeadline(
-          remainingContextGraphs,
-          fetchTimeoutMs,
-          exactAssetUals ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS : undefined,
-        ),
-        graphScopedAuthenticationDeadline: () => (
-          this.createGraphScopedAuthenticationDeadline(authenticationTimeoutMs)
-        ),
-      },
+      durableSyncBudget: createDurableSyncBudget({
+        remainingContextGraphs,
+        fetchTimeoutMs,
+        authenticationTimeoutMs,
+        exactRecovery: exactAssetUals !== undefined,
+      }),
       signal,
       fetchSyncPages: ({
         ctx: opCtx,
         remotePeerId: peerId,
         contextGraphId: cgId,
-        includeSharedMemory,
         phase,
         graphUri,
         snapshotRef,
@@ -4504,7 +4487,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           opCtx,
           peerId,
           cgId,
-          includeSharedMemory,
+          false,
           phase,
           graphUri,
           fetchContext.deadline,
@@ -4890,6 +4873,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       recovery,
       forceFreshSession,
       assetUals,
+      // Background fetches intentionally share across equivalent derived
+      // deadlines. Signal-bounded callers own an operation-specific deadline,
+      // so incompatible cancellation contracts must not share a page stream.
+      callerDeadline: signal ? deadline : undefined,
     });
     const inFlight = inFlightSyncPageFetchesFor(this);
     const existing = inFlight.get(coalescingKey);
@@ -5082,7 +5069,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         store: this.store,
         listSubGraphs: (id) => this.listSubGraphs(id),
-        createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
+        createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
+          remainingContextGraphs: remaining,
+        }),
         fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
           this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
@@ -5155,7 +5144,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               ctx,
               remotePeerId,
               contextGraphIds: [contextGraphId],
-              createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
+              createContextGraphSyncDeadline: () => createContextGraphSyncDeadline({
+                remainingContextGraphs,
+              }),
               fetchSyncPages: this.fetchSyncPages.bind(this),
               processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
                 this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
@@ -5337,7 +5328,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         {
           store: this.store,
           listSubGraphs: (id) => this.listSubGraphs(id),
-          createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
+          createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
+            remainingContextGraphs: remaining,
+          }),
           fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
             this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
@@ -5374,29 +5367,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId,
       ),
     );
-  }
-
-  createContextGraphSyncDeadline(this: DKGAgent,
-    remainingContextGraphs: number,
-    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
-    maximumMs: number = MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
-  ): number {
-    const divisor = Math.max(1, remainingContextGraphs);
-    const normalizedTotalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(
-      totalTimeoutMs,
-      maximumMs,
-    );
-    const budgetMs = Math.max(
-      SYNC_MIN_GRAPH_BUDGET_MS,
-      Math.floor(normalizedTotalTimeoutMs / divisor),
-    );
-    return Date.now() + budgetMs;
-  }
-
-  createGraphScopedAuthenticationDeadline(this: DKGAgent,
-    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
-  ): number {
-    return Date.now() + normalizeDurableSyncTotalTimeoutMs(totalTimeoutMs);
   }
 
   /**
