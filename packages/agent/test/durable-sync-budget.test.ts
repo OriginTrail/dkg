@@ -339,6 +339,7 @@ describe('durable sync deadline budget', () => {
     const deadline = 1_800_000_123_456;
     const createContextGraphSyncDeadline = vi.fn(() => deadline);
     const fixture = requesterFixture(1);
+    const exactAssetUals = [fixture.metadata[0]!.subject];
     const legacyFetchCalls: Array<Parameters<LegacyDurableSyncContext['fetchSyncPages']>> = [];
     const fetchSyncPages: LegacyDurableSyncContext['fetchSyncPages'] = async (...args) => {
       legacyFetchCalls.push(args);
@@ -383,6 +384,7 @@ describe('durable sync deadline budget', () => {
       fetchSyncPages,
       storeInsert,
       storeGraphScopedAsset,
+      exactAssetUalsFor: () => exactAssetUals,
     });
     await runDurableSync({
       ...legacyBase(true),
@@ -390,6 +392,7 @@ describe('durable sync deadline budget', () => {
       fetchSyncPages,
       storeInsert,
       storeGraphScopedAsset,
+      exactAssetUalsFor: () => exactAssetUals,
     });
 
     expect(createContextGraphSyncDeadline).toHaveBeenCalledTimes(2);
@@ -401,6 +404,7 @@ describe('durable sync deadline budget', () => {
       includeSharedMemory: args[3],
       phase: args[4],
       deadline: args[6],
+      assetUals: args[9],
     }))).toEqual([
       {
         argumentCount: 10,
@@ -408,6 +412,7 @@ describe('durable sync deadline budget', () => {
         includeSharedMemory: false,
         phase: 'meta',
         deadline,
+        assetUals: exactAssetUals,
       },
       {
         argumentCount: 10,
@@ -415,6 +420,7 @@ describe('durable sync deadline budget', () => {
         includeSharedMemory: false,
         phase: 'data',
         deadline,
+        assetUals: exactAssetUals,
       },
       {
         argumentCount: 10,
@@ -422,6 +428,7 @@ describe('durable sync deadline budget', () => {
         includeSharedMemory: false,
         phase: 'meta',
         deadline,
+        assetUals: exactAssetUals,
       },
       {
         argumentCount: 10,
@@ -429,6 +436,7 @@ describe('durable sync deadline budget', () => {
         includeSharedMemory: false,
         phase: 'data',
         deadline,
+        assetUals: exactAssetUals,
       },
     ]);
     expect(legacyStoreInsertCalls).toHaveLength(2);
