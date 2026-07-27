@@ -75,13 +75,9 @@ function graphScopedStoreRequest(
 ): DurableSyncGraphScopedStoreRequest {
   return {
     asset,
-    deadline,
-    boundary: {
+    phaseContext: {
       deadline,
       signal,
-      assertOpen: () => {
-        if (signal?.aborted) throw signal.reason;
-      },
     },
   };
 }

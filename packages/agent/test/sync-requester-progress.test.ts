@@ -130,10 +130,8 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'meta',
         graphUri: expect.any(String),
-        deadline: expect.any(Number),
-        boundary: expect.objectContaining({
+        phaseContext: expect.objectContaining({
           deadline: expect.any(Number),
-          assertOpen: expect.any(Function),
         }),
       }),
     ]);
@@ -175,10 +173,8 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        deadline: expect.any(Number),
-        boundary: expect.objectContaining({
+        phaseContext: expect.objectContaining({
           deadline: expect.any(Number),
-          assertOpen: expect.any(Function),
         }),
       }),
     ]);
@@ -220,10 +216,8 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        deadline: expect.any(Number),
-        boundary: expect.objectContaining({
+        phaseContext: expect.objectContaining({
           deadline: expect.any(Number),
-          assertOpen: expect.any(Function),
         }),
       }),
     ]);
@@ -273,10 +267,8 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        deadline: expect.any(Number),
-        boundary: expect.objectContaining({
+        phaseContext: expect.objectContaining({
           deadline: expect.any(Number),
-          assertOpen: expect.any(Function),
         }),
       }),
     ]);
@@ -329,10 +321,8 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        deadline: expect.any(Number),
-        boundary: expect.objectContaining({
+        phaseContext: expect.objectContaining({
           deadline: expect.any(Number),
-          assertOpen: expect.any(Function),
         }),
       }),
     ]);
@@ -535,9 +525,8 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls[0]![0].quads).toEqual([metaQuad]);
-    expect(storeInsert.calls[0]![0].boundary).toMatchObject({
+    expect(storeInsert.calls[0]![0].phaseContext).toMatchObject({
       deadline: expect.any(Number),
-      assertOpen: expect.any(Function),
     });
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toHaveLength(1);
@@ -743,9 +732,8 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls[0]![0].quads).toEqual([metaQuad]);
-    expect(storeInsert.calls[0]![0].boundary).toMatchObject({
+    expect(storeInsert.calls[0]![0].phaseContext).toMatchObject({
       deadline: expect.any(Number),
-      assertOpen: expect.any(Function),
     });
     expect(deleteCheckpoint.calls).toHaveLength(1);
     expect(deleteCheckpoint.calls).toContainEqual(['meta-only-complete:meta']);
@@ -801,9 +789,8 @@ describe('sync requester progress accounting', () => {
       [
         expect.objectContaining({
           quads: [metaQuad],
-          boundary: expect.objectContaining({
+          phaseContext: expect.objectContaining({
             deadline: expect.any(Number),
-            assertOpen: expect.any(Function),
           }),
         }),
       ],

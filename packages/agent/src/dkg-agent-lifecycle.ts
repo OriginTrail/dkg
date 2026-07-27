@@ -4490,12 +4490,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         includeSharedMemory,
         phase,
         graphUri,
-        deadline,
         snapshotRef,
         sinceBatchId,
-        boundary,
+        phaseContext,
       }) => {
-        const operationSignal = boundary?.signal ?? signal;
         return this.fetchSyncPages(
           opCtx,
           peerId,
@@ -4503,10 +4501,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           includeSharedMemory,
           phase,
           graphUri,
-          deadline,
+          phaseContext.deadline,
           snapshotRef,
           sinceBatchId,
-          operationSignal,
+          phaseContext.signal,
           undefined,
           onVerifiedFullSnapshot !== undefined,
           exactAssetUals,
@@ -4516,26 +4514,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: ({ quads, boundary }) => {
-        boundary.assertOpen();
+      storeInsert: ({ quads, phaseContext }) => {
         return this.insertSyncedQuadsAndInvalidateListCache(quads, {
           priority: 'background',
           source: 'agent.durableSync.storeInsert',
-          signal: boundary.signal ?? signal,
+          signal: phaseContext.signal,
         });
       },
       storeGraphScopedAsset: async ({
         asset,
-        deadline,
-        boundary,
+        phaseContext,
       }) => {
-        boundary.assertOpen();
-        const operationSignal = boundary.signal ?? signal;
+        const operationSignal = phaseContext.signal;
         const authentication = await authenticateDurableGraphScopedAsset({
           chain: this.chain,
           asset,
           verifyContextGraphBinding,
-          deadline,
+          deadline: phaseContext.deadline,
           signal: operationSignal,
           onRetry: (error, attempt, maxAttempts) => {
             this.log.warn(
@@ -4546,7 +4541,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           },
         });
-        boundary.assertOpen();
         if (operationSignal?.aborted) {
           throw asSyncFetchAbortError(operationSignal.reason);
         }

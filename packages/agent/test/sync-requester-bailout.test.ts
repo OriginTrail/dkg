@@ -115,10 +115,8 @@ describe('sync requester bailout', () => {
           includeSharedMemory: false,
           phase: 'meta',
           graphUri: expect.any(String),
-          deadline: expect.any(Number),
-          boundary: expect.objectContaining({
+          phaseContext: expect.objectContaining({
             deadline: expect.any(Number),
-            assertOpen: expect.any(Function),
           }),
         }),
       ],
@@ -161,10 +159,8 @@ describe('sync requester bailout', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        deadline: expect.any(Number),
-        boundary: expect.objectContaining({
+        phaseContext: expect.objectContaining({
           deadline: expect.any(Number),
-          assertOpen: expect.any(Function),
         }),
       }),
     ]);

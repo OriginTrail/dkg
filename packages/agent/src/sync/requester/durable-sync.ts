@@ -76,16 +76,10 @@ export interface DurableSyncBudget {
   graphScopedAuthenticationDeadline: () => number;
 }
 
-/**
- * Cancellation contract passed to phase callbacks for signal-bounded calls.
- * Callbacks should use `signal` for cancellable I/O and `assertOpen()` before
- * crossing a new non-cancellable commit boundary. It stays optional only so
- * pre-cancellation deep-import callbacks keep their original call shape.
- */
-export interface DurableSyncPhaseBoundary {
+/** One source of truth for a durable phase's time and cancellation budget. */
+export interface DurableSyncPhaseContext {
   readonly deadline: number;
   readonly signal?: AbortSignal;
-  assertOpen(): void;
 }
 
 export interface DurableSyncFetchRequest {
@@ -95,22 +89,20 @@ export interface DurableSyncFetchRequest {
   readonly includeSharedMemory: false;
   readonly phase: 'data' | 'meta';
   readonly graphUri: string;
-  readonly deadline: number;
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly exactAssetUals?: string[];
-  readonly boundary: DurableSyncPhaseBoundary;
+  readonly phaseContext: DurableSyncPhaseContext;
 }
 
 export interface DurableSyncStoreInsertRequest {
   readonly quads: Quad[];
-  readonly boundary: DurableSyncPhaseBoundary;
+  readonly phaseContext: DurableSyncPhaseContext;
 }
 
 export interface DurableSyncGraphScopedStoreRequest {
   readonly asset: VerifiedGraphScopedAsset;
-  readonly deadline: number;
-  readonly boundary: DurableSyncPhaseBoundary;
+  readonly phaseContext: DurableSyncPhaseContext;
 }
 
 export interface DurableSyncContext {
@@ -291,10 +283,9 @@ async function runDurableSyncWithBudget(
     error.name = 'AbortError';
     throw error;
   };
-  const phaseBoundary = (deadline: number): DurableSyncPhaseBoundary => ({
+  const phaseContext = (deadline: number): DurableSyncPhaseContext => ({
     deadline,
     signal,
-    assertOpen: throwIfOperationAborted,
   });
 
   const accumulator = createDurableSyncAccumulator();
@@ -364,7 +355,7 @@ async function runDurableSyncWithBudget(
       const metaGraph = contextGraphMetaGraphUri(pid);
       const remainingContextGraphs = contextGraphIds.length - index;
       const deadline = durableSyncBudget.fetchDeadline(remainingContextGraphs);
-      const fetchBoundary = phaseBoundary(deadline);
+      const fetchPhaseContext = phaseContext(deadline);
       const exactAssetUals = exactAssetUalsFor?.(pid);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -386,10 +377,9 @@ async function runDurableSyncWithBudget(
         includeSharedMemory: false,
         phase,
         graphUri,
-        deadline,
         sinceBatchId,
         exactAssetUals,
-        boundary: fetchBoundary,
+        phaseContext: fetchPhaseContext,
       });
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
@@ -633,13 +623,12 @@ async function runDurableSyncWithBudget(
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
         ? durableSyncBudget.graphScopedAuthenticationDeadline()
         : deadline;
-      const storeBoundary = phaseBoundary(graphScopedAuthenticationDeadline);
+      const storePhaseContext = phaseContext(graphScopedAuthenticationDeadline);
       for (const asset of partitioned.assets) {
-        storeBoundary.assertOpen();
+        throwIfOperationAborted();
         const outcome = await storeGraphScopedAsset!({
           asset,
-          deadline: graphScopedAuthenticationDeadline,
-          boundary: storeBoundary,
+          phaseContext: storePhaseContext,
         });
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
@@ -659,10 +648,10 @@ async function runDurableSyncWithBudget(
         }
       }
       if (partitioned.remainingData.length > 0) {
-        storeBoundary.assertOpen();
+        throwIfOperationAborted();
         await storeInsert({
           quads: partitioned.remainingData,
-          boundary: storeBoundary,
+          phaseContext: storePhaseContext,
         });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingData.length,
@@ -670,10 +659,10 @@ async function runDurableSyncWithBudget(
         });
       }
       if (partitioned.remainingMeta.length > 0) {
-        storeBoundary.assertOpen();
+        throwIfOperationAborted();
         await storeInsert({
           quads: partitioned.remainingMeta,
-          boundary: storeBoundary,
+          phaseContext: storePhaseContext,
         });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingMeta.length,

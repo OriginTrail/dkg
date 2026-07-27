@@ -8,7 +8,7 @@ import {
   type DurableSyncBudget,
   type DurableSyncContext,
   type DurableSyncGraphScopedStoreRequest,
-  type DurableSyncPhaseBoundary,
+  type DurableSyncPhaseContext,
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
 import type {
@@ -72,7 +72,7 @@ function requesterBudgetContext(options: {
   signal?: AbortSignal;
   graphScoped?: boolean;
   onFetchPhase?: (phase: 'data' | 'meta') => void;
-  onFetchBoundary?: (boundary: DurableSyncPhaseBoundary) => void;
+  onFetchPhaseContext?: (phaseContext: DurableSyncPhaseContext) => void;
   onVerify?: () => void;
   storeInsert?: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   storeGraphScopedAsset: (
@@ -94,10 +94,10 @@ function requesterBudgetContext(options: {
     signal: options.signal,
     fetchSyncPages: async ({
       phase,
-      boundary,
+      phaseContext,
     }) => {
       options.onFetchPhase?.(phase);
-      options.onFetchBoundary?.(boundary);
+      options.onFetchPhaseContext?.(phaseContext);
       return phase === 'data'
         ? requesterPage(phase, dataQuads)
         : requesterPage(phase, metadataQuads);
@@ -231,7 +231,9 @@ describe('durable sync deadline budget', () => {
     expect(completedFetchPhases).toEqual(['meta', 'data']);
     expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].deadline).toBe(1_800_000_090_000);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.deadline).toBe(
+      1_800_000_090_000,
+    );
   });
 
   it('shares one provider authentication deadline across the verified page', async () => {
@@ -251,7 +253,9 @@ describe('durable sync deadline budget', () => {
     });
 
     expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls.map(([request]) => request.deadline)).toEqual([
+    expect(
+      storeGraphScopedAsset.mock.calls.map(([request]) => request.phaseContext.deadline),
+    ).toEqual([
       authenticationDeadline,
       authenticationDeadline,
     ]);
@@ -281,7 +285,9 @@ describe('durable sync deadline budget', () => {
     });
 
     expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].deadline).toBe(1_800_000_105_000);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.deadline).toBe(
+      1_800_000_105_000,
+    );
   });
 
   it('preserves the legacy single-deadline callback contract', async () => {
@@ -306,7 +312,7 @@ describe('durable sync deadline budget', () => {
     expect(createContextGraphSyncDeadline).toHaveBeenCalledOnce();
     expect(createContextGraphSyncDeadline).toHaveBeenCalledWith(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].deadline).toBe(deadline);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.deadline).toBe(deadline);
   });
 
   it('does not enter authentication or commit after whole-operation cancellation during verification', async () => {
@@ -335,15 +341,14 @@ describe('durable sync deadline budget', () => {
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
   });
 
-  it('passes one explicit cancellation boundary through fetch and graph-scoped storage', async () => {
+  it('passes one explicit phase context through fetch and graph-scoped storage', async () => {
     const controller = new AbortController();
-    const fetchBoundaries: DurableSyncPhaseBoundary[] = [];
+    const fetchPhaseContexts: DurableSyncPhaseContext[] = [];
     const storeGraphScopedAsset = vi.fn(async ({
-      boundary,
-    }: DurableSyncGraphScopedStoreRequest): Promise<GraphScopedMaterializationOutcome> => {
-      boundary.assertOpen();
-      return 'applied';
-    });
+      phaseContext,
+    }: DurableSyncGraphScopedStoreRequest): Promise<GraphScopedMaterializationOutcome> => (
+      phaseContext.signal?.aborted ? 'stale' : 'applied'
+    ));
 
     await runRequesterBudgetHarness({
       durableSyncBudget: {
@@ -351,20 +356,22 @@ describe('durable sync deadline budget', () => {
         graphScopedAuthenticationDeadline: () => Date.now() + 90_000,
       },
       signal: controller.signal,
-      onFetchBoundary: (boundary) => fetchBoundaries.push(boundary),
+      onFetchPhaseContext: (phaseContext) => fetchPhaseContexts.push(phaseContext),
       storeGraphScopedAsset,
     });
 
-    expect(fetchBoundaries).toHaveLength(2);
-    expect(fetchBoundaries.every((boundary) => boundary.signal === controller.signal)).toBe(true);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].boundary.signal).toBe(controller.signal);
+    expect(fetchPhaseContexts).toHaveLength(2);
+    expect(
+      fetchPhaseContexts.every((phaseContext) => phaseContext.signal === controller.signal),
+    ).toBe(true);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.signal).toBe(
+      controller.signal,
+    );
   });
 
   it('does not enter plain storeInsert after cancellation during verification', async () => {
     const controller = new AbortController();
-    const storeInsert = vi.fn(async ({
-      boundary,
-    }: DurableSyncStoreInsertRequest) => boundary.assertOpen());
+    const storeInsert = vi.fn(async (_request: DurableSyncStoreInsertRequest) => {});
 
     const result = await runRequesterBudgetHarness({
       durableSyncBudget: {
