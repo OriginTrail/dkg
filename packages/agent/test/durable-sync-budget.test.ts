@@ -481,6 +481,34 @@ describe('durable sync deadline budget', () => {
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
   });
 
+  it('does not start data fetch after cancellation as metadata returns', async () => {
+    const controller = new AbortController();
+    const fetchedPhases: Array<'data' | 'meta'> = [];
+    const storeGraphScopedAsset = vi.fn(async (
+      _request: DurableSyncGraphScopedStoreRequest,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      onFetchPhase: (phase) => {
+        fetchedPhases.push(phase);
+        if (phase === 'meta') {
+          controller.abort(new Error('cancel between fetch phases'));
+        }
+      },
+      storeGraphScopedAsset,
+    });
+
+    expect(fetchedPhases).toEqual(['meta']);
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+  });
+
   it('awaits an in-flight graph-scoped commit but aborts before the next asset and checkpoint', async () => {
     const controller = new AbortController();
     let releaseFirstCommit!: () => void;

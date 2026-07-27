@@ -3731,10 +3731,35 @@ export class SwmHostModeMethods extends DKGAgentBase {
       approvedCuratorPeerId ?? curatorPeerIds[0],
       false,
     ).map((peer) => peer.toString());
-    const peerIds = [...new Set([
+    const orderedPeerIds = [...new Set([
       ...curatorPeerIds.filter((peerId) => connectedPeerIds.has(peerId)),
       ...orderedConnectedPeerIds,
     ])].slice(0, 3);
+    const rotationCandidates = orderedPeerIds
+      .map((peerId) => connectedByPeerId.get(peerId))
+      .filter((peer): peer is NonNullable<typeof peer> => peer !== undefined);
+    const peerPriorityRanks = new Map(
+      orderedPeerIds.map((peerId) => [
+        peerId,
+        curatorPeerIds.includes(peerId) ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0,
+      ]),
+    );
+    // Preserve curator preference for the first attempt, then rotate the full
+    // connected order one peer per network-eligible window. Exact recovery
+    // often has a single pending KA, so replaying the static preferred-first
+    // order would otherwise pin that KA to the same unproductive peer forever.
+    const rotationAnchor = this.selectCatchupPeerWindow(rotationCandidates, {
+      maxPeers: 1,
+      peerRotationKey: localCgId,
+      peerPriorityRanks,
+    })[0]?.toString();
+    const rotationStart = rotationAnchor === undefined
+      ? 0
+      : Math.max(0, orderedPeerIds.indexOf(rotationAnchor));
+    const peerIds = [
+      ...orderedPeerIds.slice(rotationStart),
+      ...orderedPeerIds.slice(0, rotationStart),
+    ];
     const outcomes = new Map<number, OrdinalOutcome>();
     const attemptedOrdinals = new Set<number>();
     let remaining = [...targets];

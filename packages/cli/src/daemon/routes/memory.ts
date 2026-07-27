@@ -917,8 +917,9 @@ WHERE {
           if (durableSelected.has(candidate)) {
             // The helper owns one outer deadline for fetch, verification, and
             // authentication. Its AbortSignal prevents entry into later commit
-            // boundaries; an already-started atomic commit is awaited so the
-            // response remains consistent with the store.
+            // boundaries; an already-started atomic commit gets a bounded
+            // settlement grace, after which the response is explicitly
+            // indeterminate instead of hanging or claiming a false outcome.
             const durableLeg = await runDurableCatchupLeg(
               agent,
               candidate,

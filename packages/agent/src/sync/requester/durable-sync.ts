@@ -385,6 +385,7 @@ async function runDurableSyncWithBudget(
         endPhase();
         break;
       }
+      throwIfOperationAborted();
       const sinceBatchId = sinceBatchIdFor?.(pid);
       const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
       throwIfOperationAborted();

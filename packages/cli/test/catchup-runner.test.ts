@@ -281,7 +281,7 @@ describe('route-level durable catchup orchestration', () => {
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       'peer-a',
       ['cg-a'],
-      undefined,
+      expect.any(Function),
       undefined,
       undefined,
       {
@@ -306,7 +306,7 @@ describe('route-level durable catchup orchestration', () => {
     const syncFromPeerDetailed = vi.fn(async (
       _peerId: string,
       _contextGraphIds: string[],
-      _onPhase: undefined,
+      _onPhase: (phase: string, status: 'start' | 'end') => void,
       _onAccessDenied: undefined,
       _sinceBatchIdFor: undefined,
       options: { signal: AbortSignal },
@@ -356,13 +356,14 @@ describe('route-level durable catchup orchestration', () => {
     const syncFromPeerDetailed = vi.fn(async (
       _peerId: string,
       _contextGraphIds: string[],
-      _onPhase: undefined,
+      onPhase: (phase: string, status: 'start' | 'end') => void,
       _onAccessDenied: undefined,
       _sinceBatchIdFor: undefined,
       options: { signal: AbortSignal },
     ) => {
       operationSignal = options.signal;
       await new Promise<void>((resolve) => setTimeout(resolve, 900));
+      onPhase('store', 'start');
       commitStarted = true;
       await new Promise<void>((resolve) => {
         resolveCommit = resolve;
@@ -394,6 +395,73 @@ describe('route-level durable catchup orchestration', () => {
         insertedTriples: 1,
         state: 'complete',
         complete: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hard-bounds a detailed adapter that stalls before the store phase', async () => {
+    vi.useFakeTimers();
+    const syncFromPeerDetailed = vi.fn(async () => new Promise<never>(() => {}));
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-detailed-precommit-hung',
+        'cg-detailed-precommit-hung',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'failed',
+        complete: false,
+        failureReasons: [{
+          code: 'exception',
+          message: 'Durable catchup from peer-detailed-precommit-hung for cg-detailed-precommit-hung timed out after 1000ms',
+        }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns indeterminate when an in-flight commit exceeds settlement grace', async () => {
+    vi.useFakeTimers();
+    let commitStarted = false;
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      onPhase: (phase: string, status: 'start' | 'end') => void,
+    ) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 900));
+      onPhase('store', 'start');
+      commitStarted = true;
+      return new Promise<never>(() => {});
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-commit-indeterminate',
+        'cg-commit-indeterminate',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(900);
+      expect(commitStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'indeterminate',
+        complete: false,
+        failureReasons: [{
+          code: 'indeterminateSettlement',
+          count: 1,
+        }],
       });
     } finally {
       vi.useRealTimers();
@@ -435,6 +503,24 @@ describe('route-level durable catchup orchestration', () => {
 
     expect(outcome).toMatchObject({
       perContextGraphCompletion: [true, false],
+      complete: false,
+      allPeersFailed: false,
+      incomplete: true,
+      responseStatus: 200,
+      errorBody: { errorCode: 'DURABLE_CATCHUP_INCOMPLETE', retryable: true },
+    });
+  });
+
+  it('classifies indeterminate settlement as retryable incomplete progress', () => {
+    const outcome = classifyDurableCatchupRequest([
+      [{
+        durableState: 'indeterminate',
+        durableComplete: false,
+        durableError: 'Durable sync did not complete (indeterminateSettlement=1)',
+      }],
+    ], true, false);
+
+    expect(outcome).toMatchObject({
       complete: false,
       allPeersFailed: false,
       incomplete: true,

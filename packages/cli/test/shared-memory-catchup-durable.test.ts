@@ -132,7 +132,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       peerId,
       [cgId],
-      undefined,
+      expect.any(Function),
       undefined,
       undefined,
       {
@@ -311,7 +311,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     expect(syncFromPeerDetailed).toHaveBeenCalledWith(
       'peer-core',
       ['agent-blackbox-vm'],
-      undefined,
+      expect.any(Function),
       undefined,
       undefined,
       {
@@ -715,12 +715,13 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     const syncFromPeerDetailed = vi.fn((
       _peerId: string,
       _contextGraphIds: string[],
-      _onPhase: undefined,
+      onPhase: (phase: string, status: 'start' | 'end') => void,
       _onAccessDenied: undefined,
       _sinceBatchIdFor: undefined,
       options: { signal: AbortSignal },
     ) => new Promise<DurableSyncResult>((resolve) => {
       operationSignal = options.signal;
+      onPhase('store', 'start');
       resolveDurable = (inserted) => resolve(detailedDurableResult({
         insertedTriples: inserted,
         insertedDataTriples: inserted,
@@ -761,7 +762,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       expect(syncFromPeerDetailed).toHaveBeenCalledWith(
         'peer-curator',
         ['private-settlement-cg'],
-        undefined,
+        expect.any(Function),
         undefined,
         undefined,
         {
