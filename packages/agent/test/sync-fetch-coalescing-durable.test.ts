@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent } from '../src/index.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
+import { getSyncBackpressureSnapshot } from '../src/sync/backpressure.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
@@ -53,12 +54,13 @@ function emptySyncPage(phase: string): SyncPageResult {
 
 async function createAgentWithSend(
   sendToPeer: (...args: unknown[]) => Promise<Uint8Array>,
+  syncGlobalMaxInflight = 2,
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'BoundedSyncFetchCoalescing',
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
-    syncGlobalMaxInflight: 2,
+    syncGlobalMaxInflight,
     syncGlobalQueueLimit: 2,
   });
   (agent as any).messenger = { sendToPeer };
@@ -240,6 +242,83 @@ describe('signal-bounded durable fetch coalescing', () => {
       expect(operationSignals[2]).toBe(operationSignals[3]);
       expect(secondResult).toMatchObject({ complete: true, failedPeers: 0 });
     } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('settles totalTimeoutMs while queued behind global admission', async () => {
+    const blocker = deferred<void>();
+    let blockingRun: Promise<void> | undefined;
+    let queuedRun: Promise<unknown> | undefined;
+    let fetchCalls = 0;
+    let queuedResult: any;
+    let queuedError: unknown;
+    let queuedSettled = false;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0), 1);
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetchCalls++;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      blockingRun = (agent as any).runContextGraphSyncWithBackpressure(
+        createOperationContext('sync'),
+        'admission-blocker',
+        'durable',
+        'admission-blocker',
+        () => blocker.promise,
+      );
+      await waitFor(() => getSyncBackpressureSnapshot().inflight === 1);
+      vi.useFakeTimers();
+
+      queuedRun = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['queued-timeout-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs: 10_000 },
+      );
+      void queuedRun.then(
+        (result) => {
+          queuedResult = result;
+          queuedSettled = true;
+        },
+        (error) => {
+          queuedError = error;
+          queuedSettled = true;
+        },
+      );
+      for (let attempt = 0; attempt < 20 && getSyncBackpressureSnapshot().queued === 0; attempt++) {
+        await flushMicrotasks();
+      }
+      expect(getSyncBackpressureSnapshot().queued).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      for (let attempt = 0; attempt < 20 && !queuedSettled; attempt++) {
+        await flushMicrotasks();
+      }
+
+      expect(queuedSettled).toBe(true);
+      expect(queuedError).toBeUndefined();
+      expect(queuedResult).toMatchObject({ complete: false });
+      expect(fetchCalls).toBe(0);
+      expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 1, queued: 0 });
+    } finally {
+      vi.useRealTimers();
+      blocker.resolve();
+      await blockingRun?.catch(() => {});
+      await queuedRun?.catch(() => {});
       await agent.stop().catch(() => {});
     }
   });

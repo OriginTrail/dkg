@@ -557,6 +557,7 @@ async function runSerializedDurableContextGraphSync<T>(
   remotePeerId: string,
   contextGraphId: string,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   let chains = durableContextGraphSyncChains.get(agent);
   if (!chains) {
@@ -565,16 +566,63 @@ async function runSerializedDurableContextGraphSync<T>(
   }
   const key = JSON.stringify([remotePeerId, contextGraphId]);
   const previous = chains.get(key) ?? Promise.resolve();
-  const run = previous.catch(() => undefined).then(operation);
+  let started = false;
+  const run = previous.catch(() => undefined).then(() => {
+    if (signal?.aborted) throw asSyncFetchAbortError(signal.reason);
+    started = true;
+    return operation();
+  });
   const settled = run.then(() => undefined, () => undefined);
   chains.set(key, settled);
-  try {
-    return await run;
-  } finally {
+  void settled.then(() => {
     if (chains.get(key) === settled) {
       chains.delete(key);
     }
+  });
+  if (!signal) return run;
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      // Once the operation owns the serialization turn, its admission and
+      // durable phase boundaries own cancellation and atomic settlement.
+      if (!started) reject(asSyncFetchAbortError(signal.reason));
+    };
+    signal.addEventListener('abort', onAbort);
+    if (signal.aborted) onAbort();
+    void run.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
+function combineSyncAdmissionSignals(
+  nodeStopSignal: AbortSignal | undefined,
+  operationSignal: AbortSignal | undefined,
+): { signal?: AbortSignal; dispose: () => void } {
+  const signals = [...new Set([nodeStopSignal, operationSignal].filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  ))];
+  if (signals.length <= 1) {
+    return { signal: signals[0], dispose: () => {} };
   }
+
+  const controller = new AbortController();
+  const listeners = signals.map((signal) => {
+    const onAbort = () => {
+      if (!controller.signal.aborted) controller.abort(signal.reason);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    return { signal, onAbort };
+  });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const { signal, onAbort } of listeners) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    },
+  };
 }
 
 function syncPageFetchCoalescingKey(params: {
@@ -1096,23 +1144,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     label: string,
     work: () => Promise<T>,
     priorityOverride?: number,
+    operationSignal?: AbortSignal,
   ): Promise<T> {
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
-    return withGlobalSyncBackpressure(
-      {
-        policy: resolveSyncGlobalBackpressure(this.config),
-        ctx,
-        label,
-        contextGraphId,
-        lane,
-        priority,
-        priorityClass: syncPriorityClass(priority),
-        signal: this.node.stopSignal ?? undefined,
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      },
-      work,
+    const admissionBoundary = combineSyncAdmissionSignals(
+      this.node.stopSignal ?? undefined,
+      operationSignal,
     );
+    try {
+      return await withGlobalSyncBackpressure(
+        {
+          policy: resolveSyncGlobalBackpressure(this.config),
+          ctx,
+          label,
+          contextGraphId,
+          lane,
+          priority,
+          priorityClass: syncPriorityClass(priority),
+          signal: admissionBoundary.signal,
+          logInfo: (opCtx, message) => this.log.info(opCtx, message),
+        },
+        work,
+      );
+    } finally {
+      admissionBoundary.dispose();
+    }
   }
 
   async start(this: DKGAgent): Promise<void> {
@@ -4275,6 +4332,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // signal-aware legacy lane.
     if (
       !options?.signal
+      && options?.totalTimeoutMs === undefined
       && asChangelogReader(this.store) !== null
       && contextGraphIds.length > 0
     ) {
@@ -4369,19 +4427,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       })),
       priorities: this.config.syncContextGraphPriorities,
       emptyResult: createDurableSyncAccumulator,
-      runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
-        this,
-        remotePeerId,
-        item.contextGraphId,
-        () => this.runContextGraphSyncWithBackpressure(
-          ctx,
-          item.contextGraphId,
-          item.lane,
-          item.operationId,
-          work,
-          options?.priority,
-        ),
-      ),
+      runWithAdmission: async (item, work) => {
+        try {
+          return await runSerializedDurableContextGraphSync(
+            this,
+            remotePeerId,
+            item.contextGraphId,
+            () => this.runContextGraphSyncWithBackpressure(
+              ctx,
+              item.contextGraphId,
+              item.lane,
+              item.operationId,
+              work,
+              options?.priority,
+              operationBoundary.signal,
+            ),
+            operationBoundary.signal,
+          );
+        } catch (error) {
+          if (!operationBoundary.signal?.aborted) throw error;
+          return markDurableTerminalBoundary(createDurableSyncAccumulator(), false);
+        }
+      },
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
         recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });

@@ -16,7 +16,10 @@ export interface OrderedContextGraphSyncOptions<Result> {
   work: readonly ContextGraphSyncWork<Result>[];
   priorities?: Readonly<SyncContextGraphPriorityConfig>;
   emptyResult: () => Result;
-  runWithAdmission: <T>(item: ContextGraphSyncWork<Result>, work: () => Promise<T>) => Promise<T>;
+  runWithAdmission: (
+    item: ContextGraphSyncWork<Result>,
+    work: () => Promise<Result>,
+  ) => Promise<Result>;
   merge: (summary: Result, part: Result) => Result;
   markDeferred: (summary: Result) => Result;
   markSkipped?: (
