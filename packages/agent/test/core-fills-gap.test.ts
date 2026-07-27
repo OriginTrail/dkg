@@ -2127,6 +2127,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       _lcg: string, _ocg: bigint, ordinal: number,
     ) => {
       revalidated.push(ordinal);
+      if (ordinal === 0) {
+        return {
+          status: 'pending',
+          recovery: targets[0],
+        };
+      }
       return { status: 'reconciled', blockNumber: 100 };
     };
     const targets = Array.from({ length: 4 }, (_, ordinal) => ({
@@ -2139,7 +2145,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const result = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
 
     // Every peer attempt gives one potentially frame-sized KA the full
-    // foreground budget. The untouched tail remains for the next sweep.
+    // foreground budget. A pending target rotates behind untouched work, so
+    // the second peer reaches ordinal 1 and the untouched tail leads the next
+    // eligible sweep.
     expect(fetches).toHaveLength(2);
     expect(fetches[0]!.uals).toEqual([targets[0]!.ual]);
     expect(fetches[1]!.uals).toEqual([targets[1]!.ual]);
@@ -2150,7 +2158,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.continuationOrdinal).toBe(2);
   });
 
-  it('keeps an attempted pending target ahead of deferred targets and damps retries', async () => {
+  it('tries each pending target once per eligible pass and damps immediate retries', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmBatchCooldown', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
@@ -2193,24 +2201,30 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       kaId: '8',
       reason: 'no-swm' as const,
     };
-    (internals as any).reconcileChainOrdinal = async () => ({
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string,
+      _ocg: bigint,
+      ordinal: number,
+    ) => ({
       status: 'pending',
-      recovery: target,
+      recovery: ordinal === target.ordinal ? target : deferredTarget,
     });
 
     const targets = [target, deferredTarget];
     const first = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
-    expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
+    expect(fetchedUals).toEqual([[target.ual], [deferredTarget.ual]]);
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
-    expect(first.attemptedOrdinals).toEqual([0]);
+    expect(first.outcomes.get(1)).toMatchObject({ status: 'pending' });
+    expect(first.attemptedOrdinals).toEqual([0, 1]);
     expect(first.continuationOrdinal).toBe(0);
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
-    expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
+    expect(fetchedUals).toEqual([[target.ual], [deferredTarget.ual]]);
     expect(second.outcomes.size).toBe(0);
     expect(second.attemptedOrdinals).toEqual([]);
+    expect(second.continuationOrdinal).toBe(0);
   });
 
   it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {

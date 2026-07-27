@@ -3670,10 +3670,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isTargetCurrent: () => boolean,
   ): Promise<PendingOrdinalRecoveryResult> {
     const ctx = createOperationContext('system');
-    const noRecovery = (): PendingOrdinalRecoveryResult => ({
+    const noRecovery = (
+      continuationOrdinal?: number,
+    ): PendingOrdinalRecoveryResult => ({
       outcomes: new Map(),
       attemptedOrdinals: [],
-      continuationOrdinal: undefined,
+      continuationOrdinal,
     });
     if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
@@ -3686,7 +3688,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the cooldown below so a draining backlog proceeds slice after slice.
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
-      return noRecovery();
+      return noRecovery(targets[0]?.ordinal);
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -3747,10 +3749,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'VM exact fetch'))) continue;
 
       // A recovery target can approach the frame budget by itself. Each peer
-      // attempt therefore consumes at most one queue item; untouched tail
-      // ordinals are surfaced to the outer fair-scan cursor for the next pass.
+      // attempt therefore consumes at most one queue item, and each queue item
+      // consumes at most one peer attempt per eligible pass. A still-pending
+      // item rotates behind untouched work so one unavailable KA cannot spend
+      // every peer budget and starve the rest of the queue.
       const [target, ...deferredTargets] = remaining;
       if (!target) break;
+      if (attemptedOrdinals.has(target.ordinal)) break;
       this.emitReplication({
         contextGraphId: localCgId,
         onChainCgId: onChainCgId.toString(),
@@ -3790,7 +3795,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       outcomes.set(target.ordinal, outcome);
       if (outcome.status === 'pending' && outcome.recovery) {
-        remaining = [outcome.recovery, ...deferredTargets];
+        remaining = [...deferredTargets, outcome.recovery];
       } else {
         remaining = deferredTargets;
       }
@@ -3809,7 +3814,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return {
       outcomes,
       attemptedOrdinals: [...attemptedOrdinals],
-      continuationOrdinal: attemptedFetch ? remaining[0]?.ordinal : undefined,
+      continuationOrdinal: remaining[0]?.ordinal,
     };
   }
 

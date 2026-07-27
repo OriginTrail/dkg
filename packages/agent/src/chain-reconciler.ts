@@ -64,9 +64,9 @@ export interface PendingOrdinalRecoveryResult {
   /** Ordinals whose exact-fetch attempts consumed this pass's recovery budget. */
   attemptedOrdinals: readonly number[];
   /**
-   * First recovery target that must lead the next pass. Unlike
-   * `attemptedOrdinals`, this preserves queue order when one still-pending
-   * ordinal consumed more than one peer attempt.
+   * First target remaining in the ordered recovery queue. This survives a
+   * cooldown-only pass so the next network-eligible pass resumes fairly
+   * instead of snapping back to the watermark.
    */
   continuationOrdinal: number | undefined;
 }
@@ -188,6 +188,7 @@ export async function reconcileContextGraph(
   let processed = 0;
   let staleTarget = false;
   let recoveryContinuationOrdinal: number | undefined;
+  let recoveryAttempted = false;
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -274,6 +275,7 @@ export async function reconcileContextGraph(
       } else {
         for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
         recoveryContinuationOrdinal = recovery.continuationOrdinal;
+        recoveryAttempted = recovery.attemptedOrdinals.length > 0;
       }
     }
 
@@ -312,7 +314,11 @@ export async function reconcileContextGraph(
   const pending = ordinalsToReconcile(state, head).length;
   const hasMore = !headUnavailable
     && !staleTarget
-    && (recoveryContinuationOrdinal !== undefined || hasUnvisitedCandidates);
+    && (
+      recoveryAttempted
+        ? recoveryContinuationOrdinal !== undefined || hasUnvisitedCandidates
+        : recoveryContinuationOrdinal === undefined && hasUnvisitedCandidates
+    );
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);

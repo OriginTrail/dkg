@@ -306,11 +306,12 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
   });
 
-  it('retries a still-pending ordinal before untouched recovery targets', async () => {
+  it('preserves the next recovery target across a cooldown-only pass', async () => {
     const recoveryCalls: number[][] = [];
+    const networkAttempts: number[] = [];
     const { deps } = makeDeps({
-      getKCCount: async () => 25,
-      maxOrdinalsPerPass: 10,
+      getKCCount: async () => 2,
+      maxOrdinalsPerPass: 2,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
         recovery: {
@@ -323,21 +324,23 @@ describe('reconcileContextGraph — sweep', () => {
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         const ordinals = targets.map((target) => target.ordinal);
         recoveryCalls.push(ordinals);
-        if (recoveryCalls.length > 1) {
+        if (recoveryCalls.length === 2) {
           return {
             outcomes: new Map(),
             attemptedOrdinals: [],
-            continuationOrdinal: undefined,
+            continuationOrdinal: targets[0]?.ordinal,
           };
         }
         const attempted = targets[0]!;
+        networkAttempts.push(attempted.ordinal);
+        const outcome: OrdinalOutcome = attempted.ordinal === 1
+          ? { status: 'reconciled', blockNumber: 100 }
+          : { status: 'pending', recovery: attempted };
         return {
-          outcomes: new Map([[
-            attempted.ordinal,
-            { status: 'pending', recovery: attempted } as OrdinalOutcome,
-          ]]),
+          outcomes: new Map([[attempted.ordinal, outcome]]),
           attemptedOrdinals: [attempted.ordinal],
-          continuationOrdinal: attempted.ordinal,
+          continuationOrdinal: targets[1]?.ordinal
+            ?? (outcome.status === 'pending' ? attempted.ordinal : undefined),
         };
       },
     });
@@ -346,13 +349,21 @@ describe('reconcileContextGraph — sweep', () => {
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(first.hasMore).toBe(true);
     expect(state.watermark).toBe(0);
-    expect(state.scanOrdinal).toBe(0);
+    expect(state.scanOrdinal).toBe(1);
+
+    const cooldown = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(cooldown.hasMore).toBe(false);
+    expect(state.scanOrdinal).toBe(1);
 
     await reconcileContextGraph(deps, state, 'cg', 1n);
+    await reconcileContextGraph(deps, state, 'cg', 1n);
 
+    expect(networkAttempts).toEqual([0, 1, 0]);
     expect(recoveryCalls).toEqual([
-      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+      [0, 1],
+      [1],
+      [1],
+      [0],
     ]);
   });
 

@@ -10,6 +10,7 @@ import {
   type DurableSyncGraphScopedStoreRequest,
   type DurableSyncPhaseContext,
   type DurableSyncStoreInsertRequest,
+  type LegacyDurableSyncContext,
 } from '../src/sync/requester/durable-sync.js';
 import type {
   GraphScopedMaterializationOutcome,
@@ -290,29 +291,118 @@ describe('durable sync deadline budget', () => {
     );
   });
 
-  it('preserves the legacy single-deadline callback contract', async () => {
+  it('adapts the complete legacy positional callback ABI at runtime', async () => {
     const deadline = 1_800_000_123_456;
     const createContextGraphSyncDeadline = vi.fn(() => deadline);
-    const storeGraphScopedAsset = vi.fn(async (
-      _request: DurableSyncGraphScopedStoreRequest,
-    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+    const fixture = requesterFixture(1);
+    const legacyFetchCalls: Array<Parameters<LegacyDurableSyncContext['fetchSyncPages']>> = [];
+    const fetchSyncPages: LegacyDurableSyncContext['fetchSyncPages'] = async (...args) => {
+      legacyFetchCalls.push(args);
+      const phase = args[4];
+      return requesterPage(
+        phase,
+        phase === 'data' ? [fixture.data] : fixture.metadata,
+      );
+    };
+    const legacyStoreInsertCalls: Quad[][] = [];
+    const storeInsert: LegacyDurableSyncContext['storeInsert'] = async (quads) => {
+      legacyStoreInsertCalls.push(quads);
+    };
+    const graphScopedStoreCalls: Array<{
+      asset: Parameters<NonNullable<LegacyDurableSyncContext['storeGraphScopedAsset']>>[0];
+      deadline: number;
+    }> = [];
+    const storeGraphScopedAsset: NonNullable<
+      LegacyDurableSyncContext['storeGraphScopedAsset']
+    > = async (asset, suppliedDeadline) => {
+      graphScopedStoreCalls.push({ asset, deadline: suppliedDeadline });
+      return 'applied';
+    };
+    const legacyBase = (graphScoped: boolean) => {
+      const {
+        durableSyncBudget: _budget,
+        fetchSyncPages: _fetchSyncPages,
+        storeInsert: _storeInsert,
+        storeGraphScopedAsset: _storeGraphScopedAsset,
+        ...sharedContext
+      } = requesterBudgetContext({
+        durableSyncBudget: {
+          fetchDeadline: () => deadline,
+          graphScopedAuthenticationDeadline: () => deadline,
+        },
+        graphScoped,
+        storeGraphScopedAsset: async () => 'applied',
+      });
+      return sharedContext;
+    };
 
-    const { durableSyncBudget: _budget, ...legacyContext } = requesterBudgetContext({
-      durableSyncBudget: {
-        fetchDeadline: () => deadline,
-        graphScopedAuthenticationDeadline: () => deadline,
-      },
+    await runDurableSync({
+      ...legacyBase(false),
+      createContextGraphSyncDeadline,
+      fetchSyncPages,
+      storeInsert,
       storeGraphScopedAsset,
     });
     await runDurableSync({
-      ...legacyContext,
+      ...legacyBase(true),
       createContextGraphSyncDeadline,
+      fetchSyncPages,
+      storeInsert,
+      storeGraphScopedAsset,
     });
 
-    expect(createContextGraphSyncDeadline).toHaveBeenCalledOnce();
-    expect(createContextGraphSyncDeadline).toHaveBeenCalledWith(1);
-    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.deadline).toBe(deadline);
+    expect(createContextGraphSyncDeadline).toHaveBeenCalledTimes(2);
+    expect(createContextGraphSyncDeadline).toHaveBeenNthCalledWith(1, 1);
+    expect(createContextGraphSyncDeadline).toHaveBeenNthCalledWith(2, 1);
+    expect(legacyFetchCalls.map((args) => ({
+      argumentCount: args.length,
+      contextGraphId: args[2],
+      includeSharedMemory: args[3],
+      phase: args[4],
+      deadline: args[6],
+    }))).toEqual([
+      {
+        argumentCount: 10,
+        contextGraphId,
+        includeSharedMemory: false,
+        phase: 'meta',
+        deadline,
+      },
+      {
+        argumentCount: 10,
+        contextGraphId,
+        includeSharedMemory: false,
+        phase: 'data',
+        deadline,
+      },
+      {
+        argumentCount: 10,
+        contextGraphId,
+        includeSharedMemory: false,
+        phase: 'meta',
+        deadline,
+      },
+      {
+        argumentCount: 10,
+        contextGraphId,
+        includeSharedMemory: false,
+        phase: 'data',
+        deadline,
+      },
+    ]);
+    expect(legacyStoreInsertCalls).toHaveLength(2);
+    expect(legacyStoreInsertCalls.every(Array.isArray)).toBe(true);
+    expect(legacyStoreInsertCalls.flat()).toContainEqual(fixture.data);
+    expect(
+      legacyStoreInsertCalls.flat().every((quad) => (
+        typeof quad.subject === 'string'
+        && typeof quad.predicate === 'string'
+        && typeof quad.graph === 'string'
+      )),
+    ).toBe(true);
+    expect(graphScopedStoreCalls).toHaveLength(1);
+    expect(graphScopedStoreCalls[0]?.asset.ual).toContain('/1');
+    expect(graphScopedStoreCalls[0]?.deadline).toBe(deadline);
   });
 
   it('does not enter authentication or commit after whole-operation cancellation during verification', async () => {

@@ -173,12 +173,32 @@ export interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-interface LegacyDurableSyncContext extends Omit<DurableSyncContext, 'durableSyncBudget'> {
+export interface LegacyDurableSyncContext extends Omit<
+  DurableSyncContext,
+  'durableSyncBudget' | 'fetchSyncPages' | 'storeInsert' | 'storeGraphScopedAsset'
+> {
   /**
    * @deprecated Deep-import compatibility for callers from before durable sync
    * split fetch and authentication into separate bounded phases.
    */
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
+  fetchSyncPages: (
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    includeSharedMemory: boolean,
+    phase: 'data' | 'meta',
+    graphUri: string,
+    deadline: number,
+    snapshotRef?: string,
+    sinceBatchId?: string,
+    assetUals?: string[],
+  ) => Promise<SyncPageResult>;
+  storeInsert: (quads: Quad[]) => Promise<void>;
+  storeGraphScopedAsset?: (
+    asset: VerifiedGraphScopedAsset,
+    deadline: number,
+  ) => Promise<GraphScopedMaterializationOutcome>;
 }
 
 function legacyDurableSyncBudget(
@@ -203,9 +223,32 @@ function normalizeDurableSyncContext(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): DurableSyncContext {
   if ('durableSyncBudget' in context) return context;
+  const {
+    createContextGraphSyncDeadline,
+    fetchSyncPages,
+    storeInsert,
+    storeGraphScopedAsset,
+    ...sharedContext
+  } = context;
   return {
-    ...context,
-    durableSyncBudget: legacyDurableSyncBudget(context.createContextGraphSyncDeadline),
+    ...sharedContext,
+    durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),
+    fetchSyncPages: (request) => fetchSyncPages(
+      request.ctx,
+      request.remotePeerId,
+      request.contextGraphId,
+      request.includeSharedMemory,
+      request.phase,
+      request.graphUri,
+      request.phaseContext.deadline,
+      request.snapshotRef,
+      request.sinceBatchId,
+      request.exactAssetUals,
+    ),
+    storeInsert: ({ quads }) => storeInsert(quads),
+    storeGraphScopedAsset: storeGraphScopedAsset
+      ? ({ asset, phaseContext }) => storeGraphScopedAsset(asset, phaseContext.deadline)
+      : undefined,
   };
 }
 
@@ -242,6 +285,12 @@ export function filterExactAssetDurablePayload(
   };
 }
 
+export function runDurableSync(
+  context: DurableSyncContext,
+): Promise<InitializedDurableSyncResult>;
+export function runDurableSync(
+  context: LegacyDurableSyncContext,
+): Promise<InitializedDurableSyncResult>;
 export async function runDurableSync(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
