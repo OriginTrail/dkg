@@ -2005,6 +2005,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           { status: 'reconciled', blockNumber: 0 } as const,
         ])),
         attemptedOrdinals: targets.map((target) => target.ordinal),
+        continuationOrdinal: undefined,
       };
     };
 
@@ -2146,6 +2147,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
     expect(result.outcomes.size).toBe(2);
     expect(result.attemptedOrdinals).toEqual([0, 1]);
+    expect(result.continuationOrdinal).toBe(2);
   });
 
   it('keeps an attempted pending target ahead of deferred targets and damps retries', async () => {
@@ -2201,6 +2203,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(fetchedUals).toEqual([[target.ual], [target.ual]]);
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
     expect(first.attemptedOrdinals).toEqual([0]);
+    expect(first.continuationOrdinal).toBe(0);
 
     // Nothing recovered: the cooldown stamped on entry stands, so an immediate
     // next pass performs no network fetch for this CG.

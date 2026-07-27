@@ -63,6 +63,12 @@ export interface PendingOrdinalRecoveryResult {
   outcomes: ReadonlyMap<number, OrdinalOutcome>;
   /** Ordinals whose exact-fetch attempts consumed this pass's recovery budget. */
   attemptedOrdinals: readonly number[];
+  /**
+   * First recovery target that must lead the next pass. Unlike
+   * `attemptedOrdinals`, this preserves queue order when one still-pending
+   * ordinal consumed more than one peer attempt.
+   */
+  continuationOrdinal: number | undefined;
 }
 
 export interface ChainReconcilerDeps {
@@ -267,10 +273,7 @@ export async function reconcileContextGraph(
         staleTarget = true;
       } else {
         for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
-        const attemptedOrdinals = new Set(recovery.attemptedOrdinals);
-        recoveryContinuationOrdinal = attemptedOrdinals.size > 0
-          ? recoveryTargets.find((target) => !attemptedOrdinals.has(target.ordinal))?.ordinal
-          : undefined;
+        recoveryContinuationOrdinal = recovery.continuationOrdinal;
       }
     }
 

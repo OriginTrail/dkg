@@ -251,6 +251,7 @@ describe('reconcileContextGraph — sweep', () => {
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
           attemptedOrdinals: targets.map((target) => target.ordinal),
+          continuationOrdinal: undefined,
         };
       },
     });
@@ -286,6 +287,7 @@ describe('reconcileContextGraph — sweep', () => {
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
           attemptedOrdinals: attempted,
+          continuationOrdinal: ordinals[attempted.length],
         };
       },
     });
@@ -304,7 +306,7 @@ describe('reconcileContextGraph — sweep', () => {
     ]);
   });
 
-  it('continues at the first untouched ordinal when attempted recovery remains pending', async () => {
+  it('retries a still-pending ordinal before untouched recovery targets', async () => {
     const recoveryCalls: number[][] = [];
     const { deps } = makeDeps({
       getKCCount: async () => 25,
@@ -322,7 +324,11 @@ describe('reconcileContextGraph — sweep', () => {
         const ordinals = targets.map((target) => target.ordinal);
         recoveryCalls.push(ordinals);
         if (recoveryCalls.length > 1) {
-          return { outcomes: new Map(), attemptedOrdinals: [] };
+          return {
+            outcomes: new Map(),
+            attemptedOrdinals: [],
+            continuationOrdinal: undefined,
+          };
         }
         const attempted = targets[0]!;
         return {
@@ -331,6 +337,7 @@ describe('reconcileContextGraph — sweep', () => {
             { status: 'pending', recovery: attempted } as OrdinalOutcome,
           ]]),
           attemptedOrdinals: [attempted.ordinal],
+          continuationOrdinal: attempted.ordinal,
         };
       },
     });
@@ -339,13 +346,13 @@ describe('reconcileContextGraph — sweep', () => {
     const first = await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(first.hasMore).toBe(true);
     expect(state.watermark).toBe(0);
-    expect(state.scanOrdinal).toBe(1);
+    expect(state.scanOrdinal).toBe(0);
 
     await reconcileContextGraph(deps, state, 'cg', 1n);
 
     expect(recoveryCalls).toEqual([
       [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
     ]);
   });
 
@@ -371,6 +378,7 @@ describe('reconcileContextGraph — sweep', () => {
       recoverPendingOrdinals: async () => ({
         outcomes: new Map(),
         attemptedOrdinals: [],
+        continuationOrdinal: undefined,
       }),
     });
     const state = createCursorState(0);
@@ -478,6 +486,7 @@ describe('reconcileContextGraph — sweep', () => {
             { status: 'reconciled', blockNumber: 100 } as OrdinalOutcome,
           ])),
           attemptedOrdinals: targets.map((target) => target.ordinal),
+          continuationOrdinal: undefined,
         };
       },
     });

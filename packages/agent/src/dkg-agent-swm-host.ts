@@ -3673,6 +3673,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const noRecovery = (): PendingOrdinalRecoveryResult => ({
       outcomes: new Map(),
       attemptedOrdinals: [],
+      continuationOrdinal: undefined,
     });
     if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
@@ -3808,6 +3809,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return {
       outcomes,
       attemptedOrdinals: [...attemptedOrdinals],
+      continuationOrdinal: attemptedFetch ? remaining[0]?.ordinal : undefined,
     };
   }
 

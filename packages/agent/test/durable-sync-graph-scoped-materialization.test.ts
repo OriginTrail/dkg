@@ -205,6 +205,7 @@ function runGraphScopedDurableSync(options: {
     asset: VerifiedGraphScopedAsset,
     deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
+  authenticationDeadline?: number;
   deleteCheckpoint?: (key: string) => void;
   setCheckpoint?: (key: string, offset: number) => void;
   logWarn?: (ctx: OperationContext, message: string) => void;
@@ -215,7 +216,9 @@ function runGraphScopedDurableSync(options: {
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
     contextGraphIds: [contextGraphId],
-    durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+    durableSyncBudget: uniformDurableSyncBudget(
+      () => options.authenticationDeadline ?? Date.now() + 60_000,
+    ),
     fetchSyncPages: async ({ phase }) => (
       phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
     ),
@@ -232,8 +235,8 @@ function runGraphScopedDurableSync(options: {
       dataRejectedMissingMeta: 0,
     }),
     storeInsert: async () => {},
-    storeGraphScopedAsset: ({ asset, deadline }) => (
-      options.storeGraphScopedAsset(asset, deadline)
+    storeGraphScopedAsset: ({ asset, phaseContext }) => (
+      options.storeGraphScopedAsset(asset, phaseContext.deadline)
     ),
     deleteCheckpoint: options.deleteCheckpoint ?? (() => {}),
     setCheckpoint: options.setCheckpoint ?? (() => {}),
@@ -244,6 +247,22 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
+  it('forwards the graph-scoped authentication deadline through the helper', async () => {
+    const authenticationDeadline = 1_800_000_123_456;
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+    ): Promise<GraphScopedMaterializationOutcome> => 'applied');
+
+    await runGraphScopedDurableSync({
+      authenticationDeadline,
+      storeGraphScopedAsset,
+    });
+
+    expect(storeGraphScopedAsset).toHaveBeenCalledOnce();
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
+  });
+
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {
