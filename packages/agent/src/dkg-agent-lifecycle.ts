@@ -4277,11 +4277,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Gate = this node's own changelog is enabled (its store is ChangelogStore-wrapped) —
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
     // The changelog lane does not yet expose cancellable verification/store
-    // boundaries. Callers that explicitly require those boundaries stay on the
-    // fully signal-aware legacy lane; a signal by itself remains an operation
-    // control and does not silently choose the sync protocol.
+    // boundaries. Any caller-supplied signal therefore requires the fully
+    // signal-aware legacy lane; the explicit policy flag lets callers require
+    // that lane even when they do not supply a signal.
     if (
       !options?.requireAbortableDurableLane
+      && !options?.signal
       && asChangelogReader(this.store) !== null
       && contextGraphIds.length > 0
     ) {

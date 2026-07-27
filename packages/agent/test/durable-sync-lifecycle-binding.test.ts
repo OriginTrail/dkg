@@ -301,7 +301,7 @@ describe('durable sync lifecycle chain binding', () => {
     ).toBe(1_800_000_600_000);
   });
 
-  it('selects the abortable durable lane only when the caller requires it', async () => {
+  it('keeps caller-signalled durable sync off the non-cancellable changelog lane', async () => {
     const runChangelogLane = vi.fn(async () => ({ remainingLegacyCgs: [] }));
     const runLegacyDurableSync = vi.fn(async () => ({
       insertedTriples: 0,
@@ -331,6 +331,7 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync).not.toHaveBeenCalled();
 
     const controller = new AbortController();
+    controller.abort(new Error('caller cancelled before lane selection'));
     await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
       agentLike,
       'peer-changelog-capable',
@@ -340,8 +341,11 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       { signal: controller.signal },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(2);
-    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
+      signal: controller.signal,
+    });
 
     await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
       agentLike,
@@ -351,15 +355,11 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       undefined,
       {
-        signal: controller.signal,
         requireAbortableDurableLane: true,
       },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(2);
-    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
-      signal: controller.signal,
-    });
+    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(2);
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {

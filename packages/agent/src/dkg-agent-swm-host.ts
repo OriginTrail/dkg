@@ -3816,7 +3816,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return {
       outcomes,
       attemptedOrdinals: [...attemptedOrdinals],
-      continuationOrdinal: remaining[0]?.ordinal,
+      // Continue only at work that this eligible pass did not attempt. Pending
+      // attempts are rotated inside `remaining` to give untouched targets the
+      // next peer, but once every submitted target has consumed one attempt
+      // the outer fair scan must wrap from its watermark on the next cycle.
+      continuationOrdinal: targets.find(
+        (target) => !attemptedOrdinals.has(target.ordinal),
+      )?.ordinal,
       cooldownOnly: false,
     };
   }
