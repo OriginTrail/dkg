@@ -7,6 +7,7 @@ import {
   runDurableSync,
   type DurableSyncBudget,
   type DurableSyncContext,
+  type DurableSyncPhaseBoundary,
 } from '../src/sync/requester/durable-sync.js';
 import type {
   GraphScopedMaterializationOutcome,
@@ -68,11 +69,18 @@ function requesterBudgetContext(options: {
   assetCount?: number;
   durableSyncBudget: DurableSyncBudget;
   signal?: AbortSignal;
+  graphScoped?: boolean;
   onFetchPhase?: (phase: 'data' | 'meta') => void;
+  onFetchBoundary?: (boundary: DurableSyncPhaseBoundary) => void;
   onVerify?: () => void;
+  storeInsert?: (
+    quads: Quad[],
+    boundary?: DurableSyncPhaseBoundary,
+  ) => Promise<void>;
   storeGraphScopedAsset: (
     asset: VerifiedGraphScopedAsset,
     deadline: number,
+    boundary?: DurableSyncPhaseBoundary,
   ) => Promise<GraphScopedMaterializationOutcome>;
 }): DurableSyncContext {
   const fixtures = Array.from(
@@ -88,8 +96,21 @@ function requesterBudgetContext(options: {
     contextGraphIds: [contextGraphId],
     durableSyncBudget: options.durableSyncBudget,
     signal: options.signal,
-    fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => {
+    fetchSyncPages: async (
+      _ctx,
+      _peer,
+      _cg,
+      _shared,
+      phase,
+      _graph,
+      _deadline,
+      _snapshot,
+      _since,
+      _assetUals,
+      boundary,
+    ) => {
       options.onFetchPhase?.(phase);
+      if (boundary) options.onFetchBoundary?.(boundary);
       return phase === 'data'
         ? requesterPage(phase, dataQuads)
         : requesterPage(phase, metadataQuads);
@@ -99,7 +120,9 @@ function requesterBudgetContext(options: {
       return {
         verifiedData: dataQuads,
         verifiedMeta: metadataQuads,
-        verifiedGraphScopedDataGraphs: fixtures.map((fixture) => fixture.assertionGraph),
+        verifiedGraphScopedDataGraphs: options.graphScoped === false
+          ? []
+          : fixtures.map((fixture) => fixture.assertionGraph),
         consumedUnpersistedMetaTriples: 0,
         totalFetchedDataQuads: dataQuads.length,
         totalFetchedMetaQuads: metadataQuads.length,
@@ -110,7 +133,7 @@ function requesterBudgetContext(options: {
         dataRejectedMissingMeta: 0,
       };
     },
-    storeInsert: async () => {},
+    storeInsert: options.storeInsert ?? (async () => {}),
     storeGraphScopedAsset: options.storeGraphScopedAsset,
     deleteCheckpoint: () => {},
     setCheckpoint: () => {},
@@ -328,5 +351,60 @@ describe('durable sync deadline budget', () => {
     });
     expect(graphScopedAuthenticationDeadline).not.toHaveBeenCalled();
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
+  });
+
+  it('passes one explicit cancellation boundary through fetch and graph-scoped storage', async () => {
+    const controller = new AbortController();
+    const fetchBoundaries: DurableSyncPhaseBoundary[] = [];
+    const storeGraphScopedAsset = vi.fn(async (
+      _asset: VerifiedGraphScopedAsset,
+      _deadline: number,
+      boundary?: DurableSyncPhaseBoundary,
+    ): Promise<GraphScopedMaterializationOutcome> => {
+      expect(boundary).toBeDefined();
+      boundary!.assertOpen();
+      return 'applied';
+    });
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: {
+        fetchDeadline: () => Date.now() + 60_000,
+        graphScopedAuthenticationDeadline: () => Date.now() + 90_000,
+      },
+      signal: controller.signal,
+      onFetchBoundary: (boundary) => fetchBoundaries.push(boundary),
+      storeGraphScopedAsset,
+    });
+
+    expect(fetchBoundaries).toHaveLength(2);
+    expect(fetchBoundaries.every((boundary) => boundary.signal === controller.signal)).toBe(true);
+    expect(storeGraphScopedAsset.mock.calls[0]?.[2]?.signal).toBe(controller.signal);
+  });
+
+  it('does not enter plain storeInsert after cancellation during verification', async () => {
+    const controller = new AbortController();
+    const storeInsert = vi.fn(async (
+      _quads: Quad[],
+      boundary?: DurableSyncPhaseBoundary,
+    ) => boundary?.assertOpen());
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: {
+        fetchDeadline: () => Date.now() + 60_000,
+        graphScopedAuthenticationDeadline: () => Date.now() + 60_000,
+      },
+      signal: controller.signal,
+      graphScoped: false,
+      onVerify: () => controller.abort(new Error('cancel before plain insert')),
+      storeInsert,
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(storeInsert).not.toHaveBeenCalled();
   });
 });

@@ -175,6 +175,102 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
   });
 
+  it('honors an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
+    const agentLike: any = {
+      config: {},
+      createContextGraphSyncDeadline:
+        LifecycleSyncMethods.prototype.createContextGraphSyncDeadline,
+      createGraphScopedAuthenticationDeadline:
+        LifecycleSyncMethods.prototype.createGraphScopedAuthenticationDeadline,
+      processDurableBatchInWorker: async () => ({}),
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _contextGraphId: string,
+        _lane: string,
+        _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSync.call(
+      agentLike,
+      ctx,
+      'peer-explicit-exact-budget',
+      [contextGraphId],
+      undefined,
+      undefined,
+      undefined,
+      {
+        exactAssetUals: [exactUal],
+        totalTimeoutMs: 30_000,
+      },
+    );
+    expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
+    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline(1))
+      .toBe(1_800_000_030_000);
+
+    mockedRunDurableSync.mockClear();
+    agentLike.runLegacyDurableSync = LifecycleSyncMethods.prototype.runLegacyDurableSync;
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+      agentLike,
+      'peer-internal-exact-recovery',
+      contextGraphId,
+      [exactUal],
+    );
+    expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
+    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline(1))
+      .toBe(1_800_000_600_000);
+  });
+
+  it('keeps signal-bounded callers off the non-cancellable changelog lane', async () => {
+    const runChangelogLane = vi.fn(async () => ({ remainingLegacyCgs: [] }));
+    const runLegacyDurableSync = vi.fn(async () => ({
+      insertedTriples: 0,
+      complete: false,
+    }));
+    const changelogCapableStore = {
+      changelogHead: async () => undefined,
+      readChanges: async () => [],
+      headSeq: async () => 0,
+      clearReconcileFlag: async () => {},
+      needsReconcile: false,
+    };
+    const agentLike: any = {
+      config: {},
+      store: changelogCapableStore,
+      runChangelogLane,
+      runLegacyDurableSync,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-changelog-capable',
+      [contextGraphId],
+    );
+    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-changelog-capable',
+      [contextGraphId],
+      undefined,
+      undefined,
+      undefined,
+      { signal: controller.signal },
+    );
+    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
+      signal: controller.signal,
+    });
+  });
+
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
     const root = new Uint8Array(32);
     root[31] = 2;

@@ -76,6 +76,18 @@ export interface DurableSyncBudget {
   graphScopedAuthenticationDeadline: () => number;
 }
 
+/**
+ * Cancellation contract passed to phase callbacks for signal-bounded calls.
+ * Callbacks should use `signal` for cancellable I/O and `assertOpen()` before
+ * crossing a new non-cancellable commit boundary. It stays optional only so
+ * pre-cancellation deep-import callbacks keep their original call shape.
+ */
+export interface DurableSyncPhaseBoundary {
+  readonly deadline: number;
+  readonly signal?: AbortSignal;
+  assertOpen(): void;
+}
+
 export interface DurableSyncContext {
   ctx: OperationContext;
   remotePeerId: string;
@@ -105,6 +117,7 @@ export interface DurableSyncContext {
     snapshotRef?: string,
     sinceBatchId?: string,
     assetUals?: string[],
+    boundary?: DurableSyncPhaseBoundary,
   ) => Promise<SyncPageResult>;
   /**
    * Phase C — optional, gap-safe per-CG delta high-water mark resolver. When it
@@ -141,11 +154,12 @@ export interface DurableSyncContext {
     verifiedPrivateOnlyResponses: number;
     dataRejectedMissingMeta: number;
   }>;
-  storeInsert: (quads: Quad[]) => Promise<void>;
+  storeInsert: (quads: Quad[], boundary?: DurableSyncPhaseBoundary) => Promise<void>;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
     asset: VerifiedGraphScopedAsset,
     deadline: number,
+    boundary?: DurableSyncPhaseBoundary,
   ) => Promise<GraphScopedMaterializationOutcome>;
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
@@ -266,6 +280,11 @@ async function runDurableSyncWithBudget(
     error.name = 'AbortError';
     throw error;
   };
+  const phaseBoundary = (deadline: number): DurableSyncPhaseBoundary => ({
+    deadline,
+    signal,
+    assertOpen: throwIfOperationAborted,
+  });
 
   const accumulator = createDurableSyncAccumulator();
 
@@ -334,6 +353,7 @@ async function runDurableSyncWithBudget(
       const metaGraph = contextGraphMetaGraphUri(pid);
       const remainingContextGraphs = contextGraphIds.length - index;
       const deadline = durableSyncBudget.fetchDeadline(remainingContextGraphs);
+      const fetchBoundary = phaseBoundary(deadline);
       const exactAssetUals = exactAssetUalsFor?.(pid);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -344,6 +364,55 @@ async function runDurableSyncWithBudget(
       if (skipAgentsMeta) {
         logInfo(ctx, `Skipping agents meta sync from ${remotePeerId} (syncAgentsMeta=false)`);
       }
+      const fetchPhase = (
+        phase: 'data' | 'meta',
+        graphUri: string,
+        sinceBatchId?: string,
+      ): Promise<SyncPageResult> => {
+        if (signal) {
+          return fetchSyncPages(
+            ctx,
+            remotePeerId,
+            pid,
+            false,
+            phase,
+            graphUri,
+            deadline,
+            undefined,
+            sinceBatchId,
+            exactAssetUals,
+            fetchBoundary,
+          );
+        }
+        if (exactAssetUals !== undefined) {
+          return fetchSyncPages(
+            ctx,
+            remotePeerId,
+            pid,
+            false,
+            phase,
+            graphUri,
+            deadline,
+            undefined,
+            sinceBatchId,
+            exactAssetUals,
+          );
+        }
+        if (phase === 'data') {
+          return fetchSyncPages(
+            ctx,
+            remotePeerId,
+            pid,
+            false,
+            phase,
+            graphUri,
+            deadline,
+            undefined,
+            sinceBatchId,
+          );
+        }
+        return fetchSyncPages(ctx, remotePeerId, pid, false, phase, graphUri, deadline);
+      };
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
             quads: [],
@@ -354,20 +423,7 @@ async function runDurableSyncWithBudget(
             completed: true,
             timedOut: false,
           }
-        : exactAssetUals === undefined
-          ? await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline)
-          : await fetchSyncPages(
-              ctx,
-              remotePeerId,
-              pid,
-              false,
-              'meta',
-              metaGraph,
-              deadline,
-              undefined,
-              undefined,
-              exactAssetUals,
-            );
+        : await fetchPhase('meta', metaGraph);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         markDurableTerminalBoundary(accumulator, false);
@@ -376,30 +432,7 @@ async function runDurableSyncWithBudget(
         break;
       }
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const rawDataResult = exactAssetUals === undefined
-        ? await fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            'data',
-            dataGraph,
-            deadline,
-            undefined,
-            sinceBatchId,
-          )
-        : await fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            'data',
-            dataGraph,
-            deadline,
-            undefined,
-            sinceBatchId,
-            exactAssetUals,
-          );
+      const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
       throwIfOperationAborted();
       peerRespondedForContextGraph = true;
       endPhase();
@@ -622,9 +655,16 @@ async function runDurableSyncWithBudget(
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
         ? durableSyncBudget.graphScopedAuthenticationDeadline()
         : deadline;
+      const storeBoundary = phaseBoundary(graphScopedAuthenticationDeadline);
       for (const asset of partitioned.assets) {
-        throwIfOperationAborted();
-        const outcome = await storeGraphScopedAsset!(asset, graphScopedAuthenticationDeadline);
+        storeBoundary.assertOpen();
+        const outcome = signal
+          ? await storeGraphScopedAsset!(
+              asset,
+              graphScopedAuthenticationDeadline,
+              storeBoundary,
+            )
+          : await storeGraphScopedAsset!(asset, graphScopedAuthenticationDeadline);
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does
@@ -643,16 +683,18 @@ async function runDurableSyncWithBudget(
         }
       }
       if (partitioned.remainingData.length > 0) {
-        throwIfOperationAborted();
-        await storeInsert(partitioned.remainingData);
+        storeBoundary.assertOpen();
+        if (signal) await storeInsert(partitioned.remainingData, storeBoundary);
+        else await storeInsert(partitioned.remainingData);
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingData.length,
           insertedDataTriples: partitioned.remainingData.length,
         });
       }
       if (partitioned.remainingMeta.length > 0) {
-        throwIfOperationAborted();
-        await storeInsert(partitioned.remainingMeta);
+        storeBoundary.assertOpen();
+        if (signal) await storeInsert(partitioned.remainingMeta, storeBoundary);
+        else await storeInsert(partitioned.remainingMeta);
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingMeta.length,
           insertedMetaTriples: partitioned.remainingMeta.length,

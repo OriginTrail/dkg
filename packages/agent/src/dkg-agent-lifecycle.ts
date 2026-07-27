@@ -252,7 +252,11 @@ import { requireExactAssetUals } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
-import { runDurableSync, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncPhaseBoundary,
+  type VerifiedFullSnapshot,
+} from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
@@ -4298,7 +4302,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const authenticationTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
-    const fetchTimeoutMs = options?.exactAssetUals
+    const fetchTimeoutMs = options?.exactAssetUals && options.totalTimeoutMs === undefined
       ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
       : authenticationTimeoutMs;
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
@@ -4490,36 +4494,54 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deadline,
         snapshotRef,
         sinceBatchId,
-      ) => this.fetchSyncPages(
-        opCtx,
-        peerId,
-        cgId,
-        includeSharedMemory,
-        phase,
-        graphUri,
-        deadline,
-        snapshotRef,
-        sinceBatchId,
-        signal,
-        undefined,
-        onVerifiedFullSnapshot !== undefined,
-        exactAssetUals,
-      ),
+        _assetUals,
+        boundary,
+      ) => {
+        const operationSignal = boundary?.signal ?? signal;
+        return this.fetchSyncPages(
+          opCtx,
+          peerId,
+          cgId,
+          includeSharedMemory,
+          phase,
+          graphUri,
+          deadline,
+          snapshotRef,
+          sinceBatchId,
+          operationSignal,
+          undefined,
+          onVerifiedFullSnapshot !== undefined,
+          exactAssetUals,
+        );
+      },
       sinceBatchIdFor,
       exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
-        priority: 'background',
-        source: 'agent.durableSync.storeInsert',
-      }),
-      storeGraphScopedAsset: async (asset, deadline) => {
+      storeInsert: (
+        quads,
+        boundary?: DurableSyncPhaseBoundary,
+      ) => {
+        boundary?.assertOpen();
+        return this.insertSyncedQuadsAndInvalidateListCache(quads, {
+          priority: 'background',
+          source: 'agent.durableSync.storeInsert',
+          signal: boundary?.signal ?? signal,
+        });
+      },
+      storeGraphScopedAsset: async (
+        asset,
+        deadline,
+        boundary?: DurableSyncPhaseBoundary,
+      ) => {
+        boundary?.assertOpen();
+        const operationSignal = boundary?.signal ?? signal;
         const authentication = await authenticateDurableGraphScopedAsset({
           chain: this.chain,
           asset,
           verifyContextGraphBinding,
           deadline,
-          signal,
+          signal: operationSignal,
           onRetry: (error, attempt, maxAttempts) => {
             this.log.warn(
               ctx,
@@ -4529,7 +4551,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           },
         });
-        if (signal?.aborted) throw asSyncFetchAbortError(signal.reason);
+        boundary?.assertOpen();
+        if (operationSignal?.aborted) {
+          throw asSyncFetchAbortError(operationSignal.reason);
+        }
         const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
         if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
@@ -4546,6 +4571,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           options: {
             priority: 'background',
             source: 'agent.durableSync.graphScopedMaterialization',
+            signal: operationSignal,
           },
           oversizeHooks: {
             recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
