@@ -418,6 +418,79 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not single-flight signal-bounded direct durable syncs', async () => {
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 2, syncGlobalQueueLimit: 2 },
+    );
+    (agent as any).fetchSyncPages = async (...args: unknown[]) => {
+      fetchCalls++;
+      const phase = String(args[4]);
+      if (fetchCalls !== 1) return emptySyncPage(phase);
+
+      const signal = args[9] as AbortSignal | undefined;
+      if (!signal) throw new Error('signal-bounded durable fetch received no abort signal');
+      return new Promise<SyncPageResult>((_resolve, reject) => {
+        const rejectAbort = () => reject(signal.reason);
+        if (signal.aborted) {
+          rejectAbort();
+          return;
+        }
+        signal.addEventListener('abort', rejectAbort, { once: true });
+      });
+    };
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    try {
+      const first = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { signal: firstController.signal },
+      );
+      const second = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { signal: secondController.signal },
+      );
+      let secondSettled = false;
+      void second.then(
+        () => { secondSettled = true; },
+        () => { secondSettled = true; },
+      );
+
+      await waitFor(() => fetchCalls === 1);
+      expect(secondSettled).toBe(false);
+
+      firstController.abort(new Error('first durable sync expired'));
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+
+      expect(firstResult).not.toBe(secondResult);
+      expect(fetchCalls).toBe(3);
+      expect(secondController.signal.aborted).toBe(false);
+      expect(secondResult).toMatchObject({ failedPeers: 0 });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not single-flight exact VM syncs with different asset batches', async () => {
     let fetchCalls = 0;
     const exactRecoveryDeadlineHeadroom: number[] = [];

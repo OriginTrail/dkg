@@ -368,51 +368,19 @@ async function runDurableSyncWithBudget(
         phase: 'data' | 'meta',
         graphUri: string,
         sinceBatchId?: string,
-      ): Promise<SyncPageResult> => {
-        if (signal) {
-          return fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            phase,
-            graphUri,
-            deadline,
-            undefined,
-            sinceBatchId,
-            exactAssetUals,
-            fetchBoundary,
-          );
-        }
-        if (exactAssetUals !== undefined) {
-          return fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            phase,
-            graphUri,
-            deadline,
-            undefined,
-            sinceBatchId,
-            exactAssetUals,
-          );
-        }
-        if (phase === 'data') {
-          return fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            phase,
-            graphUri,
-            deadline,
-            undefined,
-            sinceBatchId,
-          );
-        }
-        return fetchSyncPages(ctx, remotePeerId, pid, false, phase, graphUri, deadline);
-      };
+      ): Promise<SyncPageResult> => fetchSyncPages(
+        ctx,
+        remotePeerId,
+        pid,
+        false,
+        phase,
+        graphUri,
+        deadline,
+        undefined,
+        sinceBatchId,
+        exactAssetUals,
+        fetchBoundary,
+      );
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
             quads: [],

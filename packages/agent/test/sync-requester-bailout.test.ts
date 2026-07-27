@@ -107,7 +107,22 @@ describe('sync requester bailout', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(1);
     expect(fetchSyncPages.calls).toEqual([
-      [ctx, 'peer-a', 'pressured-cg', false, 'meta', expect.any(String), expect.any(Number)],
+      [
+        ctx,
+        'peer-a',
+        'pressured-cg',
+        false,
+        'meta',
+        expect.any(String),
+        expect.any(Number),
+        undefined,
+        undefined,
+        undefined,
+        expect.objectContaining({
+          deadline: expect.any(Number),
+          assertOpen: expect.any(Function),
+        }),
+      ],
     ]);
   });
 
@@ -152,6 +167,11 @@ describe('sync requester bailout', () => {
       expect.any(Number),
       undefined,
       undefined,
+      undefined,
+      expect.objectContaining({
+        deadline: expect.any(Number),
+        assertOpen: expect.any(Function),
+      }),
     ]);
   });
 

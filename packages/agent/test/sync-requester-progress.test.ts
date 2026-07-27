@@ -115,7 +115,22 @@ describe('sync requester progress accounting', () => {
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-cg', false, 'meta', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-cg',
+      false,
+      'meta',
+      expect.any(String),
+      expect.any(Number),
+      undefined,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        deadline: expect.any(Number),
+        assertOpen: expect.any(Function),
+      }),
+    ]);
   });
 
   it('does not count a transport-failed durable graph but counts the subsequent clean-empty graph', async () => {
@@ -149,7 +164,22 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'next-cg',
+      false,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      undefined,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        deadline: expect.any(Number),
+        assertOpen: expect.any(Function),
+      }),
+    ]);
   });
 
   it('counts multiple durable context-graph failures as one failed peer', async () => {
@@ -183,7 +213,22 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'next-cg',
+      false,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      undefined,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        deadline: expect.any(Number),
+        assertOpen: expect.any(Function),
+      }),
+    ]);
   });
 
   it('does not count a verification-failed durable graph but counts the subsequent clean-empty graph', async () => {
@@ -225,7 +270,22 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPhases).toBe(1);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'next-cg',
+      false,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      undefined,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        deadline: expect.any(Number),
+        assertOpen: expect.any(Function),
+      }),
+    ]);
     expect(phases.slice(0, 4)).toEqual(['fetch:start', 'fetch:end', 'verify:start', 'verify:end']);
   });
 
@@ -270,7 +330,22 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPhases).toBe(1);
     expect(summary.insertedDataTriples).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'next-cg',
+      false,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      undefined,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        deadline: expect.any(Number),
+        assertOpen: expect.any(Function),
+      }),
+    ]);
   });
 
   it('counts both clean zero-offset empty durable phases as complete', async () => {
