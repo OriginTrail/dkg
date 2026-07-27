@@ -238,9 +238,9 @@ import {
   VmReconcileDispatcher,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
+  type PendingOrdinalRecoveryResult,
   type OrdinalRecoveryTarget,
 } from './chain-reconciler.js';
-import { MAX_EXACT_SYNC_ASSETS } from './sync/exact-assets.js';
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
@@ -3668,9 +3668,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     targets: readonly OrdinalRecoveryTarget[],
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
-  ): Promise<ReadonlyMap<number, OrdinalOutcome>> {
+  ): Promise<PendingOrdinalRecoveryResult> {
     const ctx = createOperationContext('system');
-    if (!isTargetCurrent() || targets.length === 0) return new Map();
+    const noRecovery = (
+      continuationOrdinal?: number,
+      cooldownOnly = false,
+    ): PendingOrdinalRecoveryResult => ({
+      outcomes: new Map(),
+      attemptedOrdinals: [],
+      continuationOrdinal,
+      cooldownOnly,
+    });
+    if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
     // Damping: the batched path deliberately skips the per-UAL negative cache
     // (consulting it primes connections to every discovered agent — the walk
@@ -3681,7 +3690,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the cooldown below so a draining backlog proceeds slice after slice.
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
-      return new Map();
+      return noRecovery(targets[0]?.ordinal, true);
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -3722,11 +3731,37 @@ export class SwmHostModeMethods extends DKGAgentBase {
       approvedCuratorPeerId ?? curatorPeerIds[0],
       false,
     ).map((peer) => peer.toString());
-    const peerIds = [...new Set([
+    const orderedPeerIds = [...new Set([
       ...curatorPeerIds.filter((peerId) => connectedPeerIds.has(peerId)),
       ...orderedConnectedPeerIds,
     ])].slice(0, 3);
+    const rotationCandidates = orderedPeerIds
+      .map((peerId) => connectedByPeerId.get(peerId))
+      .filter((peer): peer is NonNullable<typeof peer> => peer !== undefined);
+    const peerPriorityRanks = new Map(
+      orderedPeerIds.map((peerId) => [
+        peerId,
+        curatorPeerIds.includes(peerId) ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0,
+      ]),
+    );
+    // Preserve curator preference for the first attempt, then rotate the full
+    // connected order one peer per network-eligible window. Exact recovery
+    // often has a single pending KA, so replaying the static preferred-first
+    // order would otherwise pin that KA to the same unproductive peer forever.
+    const rotationAnchor = this.selectCatchupPeerWindow(rotationCandidates, {
+      maxPeers: 1,
+      peerRotationKey: localCgId,
+      peerPriorityRanks,
+    })[0]?.toString();
+    const rotationStart = rotationAnchor === undefined
+      ? 0
+      : Math.max(0, orderedPeerIds.indexOf(rotationAnchor));
+    const peerIds = [
+      ...orderedPeerIds.slice(rotationStart),
+      ...orderedPeerIds.slice(0, rotationStart),
+    ];
     const outcomes = new Map<number, OrdinalOutcome>();
+    const attemptedOrdinals = new Set<number>();
     let remaining = [...targets];
     let attemptedFetch = false;
 
@@ -3740,37 +3775,35 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // unverified or rejected peer.
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'VM exact fetch'))) continue;
 
-      // The wire protocol rejects filters above MAX_EXACT_SYNC_ASSETS, so a
-      // scan batch configured larger than the protocol cap is requested in
-      // protocol-sized slices; targets past the cap stay in `remaining` for a
-      // later peer or pass. Revalidation is likewise restricted to the
-      // requested slice — each revalidated ordinal costs chain reads, and an
-      // unrequested target cannot have changed state.
-      const requestedTargets = remaining.slice(0, MAX_EXACT_SYNC_ASSETS);
-      const deferredTargets = remaining.slice(MAX_EXACT_SYNC_ASSETS);
-      const requestedUals = [...new Set(requestedTargets.map((target) => target.ual))];
-      for (const target of requestedTargets) {
-        this.emitReplication({
-          contextGraphId: localCgId,
-          onChainCgId: onChainCgId.toString(),
-          action: 'fetch',
-          ordinal: target.ordinal,
-          kaId: target.kaId,
-          ual: target.ual,
-          detail: `exact-batch:${requestedUals.length}`,
-        });
-      }
+      // A recovery target can approach the frame budget by itself. Each peer
+      // attempt therefore consumes at most one queue item, and each queue item
+      // consumes at most one peer attempt per eligible pass. A still-pending
+      // item rotates behind untouched work so one unavailable KA cannot spend
+      // every peer budget and starve the rest of the queue.
+      const [target, ...deferredTargets] = remaining;
+      if (!target) break;
+      if (attemptedOrdinals.has(target.ordinal)) break;
+      this.emitReplication({
+        contextGraphId: localCgId,
+        onChainCgId: onChainCgId.toString(),
+        action: 'fetch',
+        ordinal: target.ordinal,
+        kaId: target.kaId,
+        ual: target.ual,
+        detail: 'exact-asset',
+      });
 
       try {
         attemptedFetch = true;
+        attemptedOrdinals.add(target.ordinal);
         const result = await this.syncExactKnowledgeAssetsFromPeer(
           peerId,
           localCgId,
-          requestedUals,
+          [target.ual],
         );
         this.log.info(
           ctx,
-          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${requestedUals.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=1 fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
         );
       } catch (error) {
         this.log.info(
@@ -3779,22 +3812,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
 
-      const stillMissing: OrdinalRecoveryTarget[] = [];
-      for (const target of requestedTargets) {
-        if (!isTargetCurrent()) break;
-        const outcome = await this.reconcileChainOrdinal(
-          localCgId,
-          onChainCgId,
-          target.ordinal,
-          headBlock,
-          { isTargetCurrent, deferActiveFetch: true },
-        );
-        outcomes.set(target.ordinal, outcome);
-        if (outcome.status === 'pending' && outcome.recovery) {
-          stillMissing.push(outcome.recovery);
-        }
+      if (!isTargetCurrent()) break;
+      const outcome = await this.reconcileChainOrdinal(
+        localCgId,
+        onChainCgId,
+        target.ordinal,
+        headBlock,
+        { isTargetCurrent, deferActiveFetch: true },
+      );
+      outcomes.set(target.ordinal, outcome);
+      if (outcome.status === 'pending' && outcome.recovery) {
+        remaining = [...deferredTargets, outcome.recovery];
+      } else {
+        remaining = deferredTargets;
       }
-      remaining = [...stillMissing, ...deferredTargets];
     }
 
     // Mirror the inline path's cooldown policy: an unreachable network must
@@ -3807,7 +3838,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!attemptedFetch || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     }
-    return outcomes;
+    return {
+      outcomes,
+      attemptedOrdinals: [...attemptedOrdinals],
+      // Continue only at work that this eligible pass did not attempt. Pending
+      // attempts are rotated inside `remaining` to give untouched targets the
+      // next peer, but once every submitted target has consumed one attempt
+      // the outer fair scan must wrap from its watermark on the next cycle.
+      continuationOrdinal: targets.find(
+        (target) => !attemptedOrdinals.has(target.ordinal),
+      )?.ordinal,
+      cooldownOnly: false,
+    };
   }
 
   /**

@@ -135,7 +135,11 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       undefined,
       undefined,
       undefined,
-      { totalTimeoutMs: 109_000 },
+      {
+        onAtomicCommitStarted: expect.any(Function),
+        totalTimeoutMs: 109_000,
+        signal: expect.any(AbortSignal),
+      },
     );
     expect(JSON.parse(res.body)).toMatchObject({
       ok: true,
@@ -249,7 +253,10 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       [cgId],
       undefined,
       undefined,
-      { totalTimeoutMs: 299_000 },
+      {
+        totalTimeoutMs: 299_000,
+        signal: expect.any(AbortSignal),
+      },
     );
 
     const body = JSON.parse(res.body);
@@ -308,7 +315,11 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       undefined,
       undefined,
       undefined,
-      { totalTimeoutMs: 109_000 },
+      {
+        onAtomicCommitStarted: expect.any(Function),
+        totalTimeoutMs: 109_000,
+        signal: expect.any(AbortSignal),
+      },
     );
     expect(JSON.parse(res.body)).toMatchObject({
       ok: false,
@@ -699,11 +710,30 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
-  it('awaits durable verification and store settlement after the fetch budget', async () => {
+  it('aborts at the durable deadline but awaits an in-flight atomic commit outcome', async () => {
     vi.useFakeTimers();
     let resolveDurable!: (inserted: number) => void;
-    const syncFromPeer = vi.fn(() => new Promise<number>((resolve) => {
-      resolveDurable = resolve;
+    let operationSignal: AbortSignal | undefined;
+    const syncFromPeerDetailed = vi.fn((
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
+    ) => new Promise<DurableSyncResult>((resolve) => {
+      operationSignal = options.signal;
+      options.onAtomicCommitStarted(
+        'private-settlement-cg',
+        'did:dkg:test/private-settlement',
+      );
+      resolveDurable = (inserted) => resolve(detailedDurableResult({
+        insertedTriples: inserted,
+        insertedDataTriples: inserted,
+      }));
     }));
     const agent = {
       peerId: 'self-peer',
@@ -713,7 +743,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
         curatorIsLocal: false,
         peerIds: ['peer-curator'],
       })),
-      syncFromPeer,
+      syncFromPeerDetailed,
     };
     const { ctx, res } = buildCatchupCtx(
       {
@@ -729,20 +759,25 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     try {
       const request = handleMemoryRoutes(ctx);
       await vi.advanceTimersByTimeAsync(1_500);
-      // The fetch deadline may have elapsed, but returning now would be a false
-      // terminal: exact verification/atomic storage still owns the operation.
+      expect(operationSignal?.aborted).toBe(true);
       expect(res.writableEnded).toBe(false);
 
       resolveDurable(23);
       await request;
+      await vi.runAllTimersAsync();
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body).totalDurableInsertedTriples).toBe(23);
-      expect(syncFromPeer).toHaveBeenCalledWith(
+      expect(syncFromPeerDetailed).toHaveBeenCalledWith(
         'peer-curator',
         ['private-settlement-cg'],
         undefined,
         undefined,
-        { totalTimeoutMs: 1_000 },
+        undefined,
+        {
+          onAtomicCommitStarted: expect.any(Function),
+          totalTimeoutMs: 1_000,
+          signal: expect.any(AbortSignal),
+        },
       );
     } finally {
       vi.useRealTimers();
@@ -862,7 +897,10 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       ['review-cg'],
       undefined,
       undefined,
-      { totalTimeoutMs: 109_000 },
+      {
+        totalTimeoutMs: 109_000,
+        signal: expect.any(AbortSignal),
+      },
     );
 
     const body = JSON.parse(res.body);
@@ -1014,14 +1052,20 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       [cgId],
       undefined,
       undefined,
-      { totalTimeoutMs: 109_000 },
+      {
+        totalTimeoutMs: 109_000,
+        signal: expect.any(AbortSignal),
+      },
     );
     expect(syncFromPeer).toHaveBeenCalledWith(
       unknownPeer,
       [cgId],
       undefined,
       undefined,
-      { totalTimeoutMs: 109_000 },
+      {
+        totalTimeoutMs: 109_000,
+        signal: expect.any(AbortSignal),
+      },
     );
 
     const body = JSON.parse(second.res.body);

@@ -27,6 +27,26 @@ import type {
   GraphScopedMaterializationOutcome,
   VerifiedGraphScopedAsset,
 } from './graph-scoped-materialization.js';
+import type { DurableSyncBudget } from './durable-sync-budget.js';
+import {
+  normalizeDurableSyncContext,
+  type LegacyDurableSyncContext,
+} from './durable-sync-compat.js';
+
+export {
+  createContextGraphSyncDeadline,
+  createDurableSyncBudget,
+  createGraphScopedAuthenticationDeadline,
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
+  MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+  normalizeDurableSyncTimeoutMs,
+} from './durable-sync-budget.js';
+export type {
+  DurableSyncBudget,
+  DurableSyncContextGraphBudget,
+  DurableSyncContextGraphBudgetRequest,
+} from './durable-sync-budget.js';
+export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
@@ -69,7 +89,37 @@ export interface VerifiedFullSnapshot {
   metaFetched: boolean;
 }
 
-interface DurableSyncContext {
+/** Fetch-specific time and cancellation boundary. */
+export interface DurableSyncFetchContext {
+  readonly deadline: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface DurableSyncFetchRequest {
+  readonly ctx: OperationContext;
+  readonly remotePeerId: string;
+  readonly contextGraphId: string;
+  readonly phase: 'data' | 'meta';
+  readonly graphUri: string;
+  readonly snapshotRef?: string;
+  readonly sinceBatchId?: string;
+  readonly exactAssetUals?: string[];
+  readonly fetchContext: DurableSyncFetchContext;
+}
+
+export interface DurableSyncStoreInsertRequest {
+  readonly quads: Quad[];
+  /** Whole-operation cancellation only; plain inserts have no auth deadline. */
+  readonly signal?: AbortSignal;
+}
+
+export interface DurableSyncGraphScopedStoreRequest {
+  readonly asset: VerifiedGraphScopedAsset;
+  readonly authenticationDeadline: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface DurableSyncContext {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphIds: string[];
@@ -84,19 +134,10 @@ interface DurableSyncContext {
    */
   onAccessDenied?: (contextGraphId: string) => void;
   syncAgentsMeta?: boolean;
-  createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
-  fetchSyncPages: (
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphId: string,
-    includeSharedMemory: boolean,
-    phase: 'data' | 'meta',
-    graphUri: string,
-    deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    assetUals?: string[],
-  ) => Promise<SyncPageResult>;
+  durableSyncBudget: DurableSyncBudget;
+  /** Whole-operation cancellation propagated by bounded foreground callers. */
+  signal?: AbortSignal;
+  fetchSyncPages: (request: DurableSyncFetchRequest) => Promise<SyncPageResult>;
   /**
    * Phase C — optional, gap-safe per-CG delta high-water mark resolver. When it
    * returns a value for a CG, the durable DATA fetch carries `sinceBatchId` and
@@ -132,11 +173,10 @@ interface DurableSyncContext {
     verifiedPrivateOnlyResponses: number;
     dataRejectedMissingMeta: number;
   }>;
-  storeInsert: (quads: Quad[]) => Promise<void>;
+  storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
-    asset: VerifiedGraphScopedAsset,
-    deadline: number,
+    request: DurableSyncGraphScopedStoreRequest,
   ) => Promise<GraphScopedMaterializationOutcome>;
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
@@ -180,7 +220,19 @@ export function filterExactAssetDurablePayload(
   };
 }
 
+export function runDurableSync(
+  context: DurableSyncContext,
+): Promise<InitializedDurableSyncResult>;
+export function runDurableSync(
+  context: LegacyDurableSyncContext,
+): Promise<InitializedDurableSyncResult>;
 export async function runDurableSync(
+  context: DurableSyncContext | LegacyDurableSyncContext,
+): Promise<InitializedDurableSyncResult> {
+  return runDurableSyncWithBudget(normalizeDurableSyncContext(context));
+}
+
+async function runDurableSyncWithBudget(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
   const {
@@ -190,7 +242,8 @@ export async function runDurableSync(
     onPhase,
     onAccessDenied,
     syncAgentsMeta = true,
-    createContextGraphSyncDeadline,
+    durableSyncBudget,
+    signal,
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetUalsFor,
@@ -205,6 +258,19 @@ export async function runDurableSync(
     logWarn,
     logDebug,
   } = context;
+
+  const throwIfOperationAborted = () => {
+    if (!signal?.aborted) return;
+    const error = signal.reason instanceof Error
+      ? signal.reason
+      : new Error(typeof signal.reason === 'string' ? signal.reason : 'Durable sync aborted');
+    error.name = 'AbortError';
+    throw error;
+  };
+  const fetchContext = (deadline: number): DurableSyncFetchContext => ({
+    deadline,
+    signal,
+  });
 
   const accumulator = createDurableSyncAccumulator();
 
@@ -254,7 +320,7 @@ export async function runDurableSync(
     logInfo(ctx, `Stopping durable sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
     return true;
   };
-  for (const [index, pid] of contextGraphIds.entries()) {
+  for (const [contextGraphIndex, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -268,9 +334,15 @@ export async function runDurableSync(
     };
 
     try {
+      throwIfOperationAborted();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
-      const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
+      const contextGraphBudget = durableSyncBudget.createContextGraphBudget({
+        contextGraphId: pid,
+        remainingContextGraphs: contextGraphIds.length - contextGraphIndex,
+      });
+      const deadline = contextGraphBudget.fetchDeadline;
+      const activeFetchContext = fetchContext(deadline);
       const exactAssetUals = exactAssetUalsFor?.(pid);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -281,6 +353,20 @@ export async function runDurableSync(
       if (skipAgentsMeta) {
         logInfo(ctx, `Skipping agents meta sync from ${remotePeerId} (syncAgentsMeta=false)`);
       }
+      const fetchPhase = (
+        phase: 'data' | 'meta',
+        graphUri: string,
+        sinceBatchId?: string,
+      ): Promise<SyncPageResult> => fetchSyncPages({
+        ctx,
+        remotePeerId,
+        contextGraphId: pid,
+        phase,
+        graphUri,
+        sinceBatchId,
+        exactAssetUals,
+        fetchContext: activeFetchContext,
+      });
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
             quads: [],
@@ -291,20 +377,7 @@ export async function runDurableSync(
             completed: true,
             timedOut: false,
           }
-        : exactAssetUals === undefined
-          ? await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline)
-          : await fetchSyncPages(
-              ctx,
-              remotePeerId,
-              pid,
-              false,
-              'meta',
-              metaGraph,
-              deadline,
-              undefined,
-              undefined,
-              exactAssetUals,
-            );
+        : await fetchPhase('meta', metaGraph);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         markDurableTerminalBoundary(accumulator, false);
@@ -312,31 +385,10 @@ export async function runDurableSync(
         endPhase();
         break;
       }
+      throwIfOperationAborted();
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const rawDataResult = exactAssetUals === undefined
-        ? await fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            'data',
-            dataGraph,
-            deadline,
-            undefined,
-            sinceBatchId,
-          )
-        : await fetchSyncPages(
-            ctx,
-            remotePeerId,
-            pid,
-            false,
-            'data',
-            dataGraph,
-            deadline,
-            undefined,
-            sinceBatchId,
-            exactAssetUals,
-          );
+      const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
+      throwIfOperationAborted();
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -423,6 +475,7 @@ export async function runDurableSync(
         isSystemContextGraph,
         verificationMode,
       );
+      throwIfOperationAborted();
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
@@ -519,6 +572,7 @@ export async function runDurableSync(
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
         await notifyVerifiedFullSnapshot();
+        throwIfOperationAborted();
         // The verifier reports an empty batch only when both fetched phase
         // payloads are empty. Record each phase independently: a completed
         // zero-offset phase is a real clean-empty response, while a sibling
@@ -554,8 +608,16 @@ export async function runDurableSync(
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }
+      const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
+        ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
+        : deadline;
       for (const asset of partitioned.assets) {
-        const outcome = await storeGraphScopedAsset!(asset, deadline);
+        throwIfOperationAborted();
+        const outcome = await storeGraphScopedAsset!({
+          asset,
+          authenticationDeadline: graphScopedAuthenticationDeadline,
+          signal,
+        });
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does
@@ -574,20 +636,33 @@ export async function runDurableSync(
         }
       }
       if (partitioned.remainingData.length > 0) {
-        await storeInsert(partitioned.remainingData);
+        throwIfOperationAborted();
+        await storeInsert({
+          quads: partitioned.remainingData,
+          signal,
+        });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingData.length,
           insertedDataTriples: partitioned.remainingData.length,
         });
       }
       if (partitioned.remainingMeta.length > 0) {
-        await storeInsert(partitioned.remainingMeta);
+        throwIfOperationAborted();
+        await storeInsert({
+          quads: partitioned.remainingMeta,
+          signal,
+        });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingMeta.length,
           insertedMetaTriples: partitioned.remainingMeta.length,
         });
       }
+      // An already-started atomic write is awaited and counted truthfully, but
+      // an expired operation may not advance a page checkpoint or enter the
+      // next commit boundary.
+      throwIfOperationAborted();
       await notifyVerifiedFullSnapshot();
+      throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
@@ -634,6 +709,7 @@ export async function runDurableSync(
       if (backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')) {
         break;
       }
+      if (signal?.aborted) break;
     }
   }
   if (peerFailed) {

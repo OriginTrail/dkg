@@ -16,9 +16,17 @@ export interface OrderedContextGraphSyncOptions<Result> {
   work: readonly ContextGraphSyncWork<Result>[];
   priorities?: Readonly<SyncContextGraphPriorityConfig>;
   emptyResult: () => Result;
-  runWithAdmission: <T>(item: ContextGraphSyncWork<Result>, work: () => Promise<T>) => Promise<T>;
+  runWithAdmission: (
+    item: ContextGraphSyncWork<Result>,
+    work: () => Promise<Result>,
+  ) => Promise<Result>;
   merge: (summary: Result, part: Result) => Result;
   markDeferred: (summary: Result) => Result;
+  markSkipped?: (
+    summary: Result,
+    skipped: readonly ContextGraphSyncWork<Result>[],
+  ) => Result;
+  shouldContinue?: () => boolean;
   shouldStop?: (part: Result) => boolean;
   onDeferred?: (item: ContextGraphSyncWork<Result>, error: Error) => void;
 }
@@ -54,6 +62,10 @@ export async function runOrderedContextGraphSyncs<Result>(
   let summary = options.emptyResult();
   const orderedWork = orderWork(options.work, options.priorities);
   for (const [index, item] of orderedWork.entries()) {
+    if (options.shouldContinue && !options.shouldContinue()) {
+      summary = options.markSkipped?.(summary, orderedWork.slice(index)) ?? summary;
+      break;
+    }
     const remaining = orderedWork.length - index;
     try {
       const part = await options.runWithAdmission(

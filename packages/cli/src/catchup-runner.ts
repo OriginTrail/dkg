@@ -13,6 +13,9 @@ import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
+const DURABLE_CATCHUP_PHASE_HEADROOM_MS = 1_000;
+const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
+const DURABLE_CATCHUP_SETTLEMENT_GRACE_MS = 30_000;
 
 export interface CatchupJobResult {
   connectedPeers: number;
@@ -122,7 +125,12 @@ export interface DurableLegSummary {
   failureReasons: DurableCatchupFailureReason[];
 }
 
-export type DurableCatchupLegState = 'complete' | 'incomplete-progress' | 'failed' | 'legacy';
+export type DurableCatchupLegState =
+  | 'complete'
+  | 'incomplete-progress'
+  | 'failed'
+  | 'indeterminate'
+  | 'legacy';
 
 export type DurableCatchupFailureCode =
   | 'failedPeers'
@@ -130,7 +138,8 @@ export type DurableCatchupFailureCode =
   | 'deniedPhases'
   | 'rejectedKcs'
   | 'dataRejectedMissingMeta'
-  | 'incompleteWithoutProgress';
+  | 'incompleteWithoutProgress'
+  | 'indeterminateSettlement';
 
 export type DurableCatchupFailureReason =
   | { code: DurableCatchupFailureCode; count: number }
@@ -173,6 +182,77 @@ export interface DurableCatchupRequestOutcome {
     error: string;
     retryable: true;
   } | undefined;
+}
+
+async function awaitLegacyDurableWithinBoundary<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
+class DurableSettlementIndeterminateError extends Error {
+  constructor(peerId: string, contextGraphId: string) {
+    super(
+      `Durable catchup from ${peerId} for ${contextGraphId} did not settle within `
+      + `${DURABLE_CATCHUP_SETTLEMENT_GRACE_MS}ms after cancellation; `
+      + 'the atomic commit outcome is indeterminate',
+    );
+    this.name = 'DurableSettlementIndeterminateError';
+  }
+}
+
+async function awaitDetailedDurableSettlement<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  peerId: string,
+  contextGraphId: string,
+  atomicCommitStarted: () => boolean,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+    };
+    const settleResolve = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const settleReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      if (graceTimer !== undefined || settled) return;
+      if (!atomicCommitStarted()) {
+        settleReject(signal.reason);
+        return;
+      }
+      graceTimer = setTimeout(() => {
+        settleReject(new DurableSettlementIndeterminateError(peerId, contextGraphId));
+      }, DURABLE_CATCHUP_SETTLEMENT_GRACE_MS);
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    void operation.then(
+      settleResolve,
+      settleReject,
+    );
+  });
 }
 
 /**
@@ -245,17 +325,44 @@ export async function runDurableCatchupLeg(
   agent: DurableCatchupAgent,
   peerId: string,
   contextGraphId: string,
-  totalTimeoutMs: number,
+  overallTimeoutMs: number,
 ): Promise<DurableCatchupLegResult> {
+  const timeoutError = new Error(
+    `Durable catchup from ${peerId} for ${contextGraphId} timed out after ${overallTimeoutMs}ms`,
+  );
+  timeoutError.name = 'AbortError';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(timeoutError), overallTimeoutMs);
+  const phaseTimeoutMs = Math.max(
+    MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS,
+    overallTimeoutMs - DURABLE_CATCHUP_PHASE_HEADROOM_MS,
+  );
   try {
     if (typeof agent.syncFromPeerDetailed === 'function') {
-      const detailed = await agent.syncFromPeerDetailed(
+      let atomicCommitStarted = false;
+      // Cancellable work stops at the route deadline. A dispatched atomic
+      // commit retains a bounded grace window to report its truthful outcome;
+      // if the detailed adapter still does not settle, return an explicit
+      // indeterminate state instead of hanging forever or claiming zero work.
+      const detailed = await awaitDetailedDurableSettlement(
+        agent.syncFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          undefined,
+          undefined,
+          undefined,
+          {
+            totalTimeoutMs: phaseTimeoutMs,
+            signal: controller.signal,
+            onAtomicCommitStarted: () => {
+              atomicCommitStarted = true;
+            },
+          },
+        ),
+        controller.signal,
         peerId,
-        [contextGraphId],
-        undefined,
-        undefined,
-        undefined,
-        { totalTimeoutMs },
+        contextGraphId,
+        () => atomicCommitStarted,
       );
       const summary = summarizeDurableLeg(detailed);
       return {
@@ -267,19 +374,41 @@ export async function runDurableCatchupLeg(
       };
     }
 
-    return {
-      insertedTriples: typeof agent.syncFromPeer === 'function'
-        ? await agent.syncFromPeer(
+    const insertedTriples = typeof agent.syncFromPeer === 'function'
+      // Legacy implementations do not expose the detailed lane's atomic
+      // settlement contract and may ignore AbortSignal entirely. Keep the
+      // route hard-bounded instead of allowing a stale adapter to pin the
+      // whole catch-up request forever.
+      ? await awaitLegacyDurableWithinBoundary(
+        agent.syncFromPeer(
           peerId,
           [contextGraphId],
           undefined,
           undefined,
-          { totalTimeoutMs },
-        )
-        : 0,
+          {
+            totalTimeoutMs: phaseTimeoutMs,
+            signal: controller.signal,
+          },
+        ),
+        controller.signal,
+      )
+      : 0;
+    return {
+      insertedTriples,
       state: 'legacy',
     };
   } catch (error) {
+    if (error instanceof DurableSettlementIndeterminateError) {
+      return {
+        insertedTriples: 0,
+        state: 'indeterminate',
+        complete: false,
+        failureReasons: [{
+          code: 'indeterminateSettlement',
+          count: 1,
+        }],
+      };
+    }
     return {
       insertedTriples: 0,
       state: 'failed',
@@ -289,6 +418,8 @@ export async function runDurableCatchupLeg(
         message: error instanceof Error ? error.message : String(error),
       }],
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

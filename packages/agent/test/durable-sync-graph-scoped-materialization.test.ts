@@ -21,6 +21,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -204,7 +205,7 @@ function runGraphScopedDurableSync(options: {
     asset: VerifiedGraphScopedAsset,
     deadline: number,
   ) => Promise<GraphScopedMaterializationOutcome>;
-  createContextGraphSyncDeadline?: () => number;
+  authenticationDeadline?: number;
   deleteCheckpoint?: (key: string) => void;
   setCheckpoint?: (key: string, offset: number) => void;
   logWarn?: (ctx: OperationContext, message: string) => void;
@@ -215,9 +216,10 @@ function runGraphScopedDurableSync(options: {
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
     contextGraphIds: [contextGraphId],
-    createContextGraphSyncDeadline:
-      options.createContextGraphSyncDeadline ?? (() => Date.now() + 60_000),
-    fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+    durableSyncBudget: uniformDurableSyncBudget(
+      () => options.authenticationDeadline ?? Date.now() + 60_000,
+    ),
+    fetchSyncPages: async ({ phase }) => (
       phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
     ),
     processDurableBatchInWorker: async () => ({
@@ -233,7 +235,9 @@ function runGraphScopedDurableSync(options: {
       dataRejectedMissingMeta: 0,
     }),
     storeInsert: async () => {},
-    storeGraphScopedAsset: options.storeGraphScopedAsset,
+    storeGraphScopedAsset: ({ asset, authenticationDeadline }) => (
+      options.storeGraphScopedAsset(asset, authenticationDeadline)
+    ),
     deleteCheckpoint: options.deleteCheckpoint ?? (() => {}),
     setCheckpoint: options.setCheckpoint ?? (() => {}),
     logInfo: () => {},
@@ -243,20 +247,20 @@ function runGraphScopedDurableSync(options: {
 }
 
 describe('durable graph-scoped KA materialization', () => {
-  it('hands the exact context-graph deadline to graph-scoped storage', async () => {
-    const deadline = 1_800_000_123_456;
+  it('forwards the graph-scoped authentication deadline through the helper', async () => {
+    const authenticationDeadline = 1_800_000_123_456;
     const storeGraphScopedAsset = vi.fn(async (
       _asset: VerifiedGraphScopedAsset,
       _deadline: number,
     ): Promise<GraphScopedMaterializationOutcome> => 'applied');
 
     await runGraphScopedDurableSync({
-      createContextGraphSyncDeadline: () => deadline,
+      authenticationDeadline,
       storeGraphScopedAsset,
     });
 
-    expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(deadline);
+    expect(storeGraphScopedAsset).toHaveBeenCalledOnce();
+    expect(storeGraphScopedAsset.mock.calls[0]?.[1]).toBe(authenticationDeadline);
   });
 
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
@@ -640,8 +644,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-lifecycle-pointer',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? page(phase, [v2Data])
           : page(phase, [...v2Meta, ...lifecycleRows])
@@ -658,8 +662,8 @@ describe('durable graph-scoped KA materialization', () => {
         verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
       }),
-      storeInsert: async (quads) => { inserted.push(...quads); },
-      storeGraphScopedAsset: async (asset) => {
+      storeInsert: async ({ quads }) => { inserted.push(...quads); },
+      storeGraphScopedAsset: async ({ asset }) => {
         assets.push(asset);
         return 'applied';
       },
@@ -714,8 +718,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-invalid-confirmation-kind',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
       ),
       processDurableBatchInWorker: async () => ({
@@ -731,7 +735,7 @@ describe('durable graph-scoped KA materialization', () => {
         dataRejectedMissingMeta: 0,
       }),
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (asset) => {
+      storeGraphScopedAsset: async ({ asset }) => {
         materialized.push(asset);
         return 'applied';
       },
@@ -844,10 +848,12 @@ describe('durable graph-scoped KA materialization', () => {
       }),
     } as ChainAdapter;
     const storeHooks = {
-      storeInsert: (quads: Quad[]) => store.insert(quads),
-      storeGraphScopedAsset: async (
-        asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'],
-      ) => materializeVerifiedGraphScopedAsset({
+      storeInsert: ({ quads }: { quads: Quad[] }) => store.insert(quads),
+      storeGraphScopedAsset: async ({
+        asset,
+      }: {
+        asset: Parameters<typeof materializeVerifiedGraphScopedAsset>[0]['asset'];
+      }) => materializeVerifiedGraphScopedAsset({
         store,
         asset: (await authenticateVerifiedGraphScopedAsset(
           chain,
@@ -862,8 +868,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-v2',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? page(phase, [v2Data])
           : page(phase, [
@@ -981,8 +987,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'finalized-vm-source-node',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
       ),
       processDurableBatchInWorker: async (dataQuads, metaQuads, _ctx, acceptUnverified, mode) => {
@@ -998,8 +1004,8 @@ describe('durable graph-scoped KA materialization', () => {
           verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
         };
       },
-      storeInsert: (quads) => freshRequesterStore.insert(quads),
-      storeGraphScopedAsset: async (asset) => materializeVerifiedGraphScopedAsset({
+      storeInsert: ({ quads }) => freshRequesterStore.insert(quads),
+      storeGraphScopedAsset: async ({ asset }) => materializeVerifiedGraphScopedAsset({
         store: freshRequesterStore,
         asset: (await authenticateVerifiedGraphScopedAsset(
           chain,
@@ -1024,6 +1030,140 @@ describe('durable graph-scoped KA materialization', () => {
     // The requester never accepts the serving node's 123:0 local ordering
     // claim; it derives a neutral local stamp after chain authentication.
     expect(await values(freshRequesterStore, 'materializedVersion')).toEqual(['"0:0"']);
+  });
+
+  it('recovers a field-sized exact KA across delayed byte pages and keeps an incomplete attempt atomic', async () => {
+    vi.useFakeTimers();
+    const requesterStore = new OxigraphStore();
+    const fieldSizedData = Array.from({ length: 10_000 }, (_, index): Quad => ({
+      subject: `http://example.com/field-sized/${index}`,
+      predicate: 'http://example.com/value',
+      object: `"${index}"`,
+      graph: assertionGraph,
+    }));
+    const root = computeFlatKCRootV10(fieldSizedData, []);
+    const fieldSizedMeta = [
+      ...metadata(2, toHex(root)),
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"10000"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+    ];
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const deleteCheckpoint = vi.fn();
+    const setCheckpoint = vi.fn();
+    const materialize = vi.fn(async (asset: VerifiedGraphScopedAsset) => (
+      materializeVerifiedGraphScopedAsset({
+        store: requesterStore,
+        asset: (await authenticateVerifiedGraphScopedAsset(
+          chain,
+          asset,
+          strictContextGraphBindingVerifier(chain),
+          new Date('2026-07-16T09:00:00.000Z'),
+        )).asset,
+      })
+    ));
+    const process = async (
+      dataQuads: Quad[],
+      metaQuads: Quad[],
+      _ctx: OperationContext,
+      acceptUnverified: boolean,
+      mode: Parameters<typeof processDurableBatchForWire>[4],
+    ) => {
+      const verified = processDurableBatchForWire(
+        dataQuads,
+        metaQuads,
+        acceptUnverified,
+        mode,
+      );
+      return {
+        ...verified,
+        verifiedData: verified.verifiedDataIndexes.map((index) => dataQuads[index]!),
+        verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
+      };
+    };
+    const delayedPage = async (
+      phase: 'data' | 'meta',
+      quads: Quad[],
+      completed: boolean,
+    ): Promise<SyncPageResult> => {
+      const received: Quad[] = [];
+      for (let offset = 0; offset < quads.length; offset += 500) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+        received.push(...quads.slice(offset, offset + 500));
+      }
+      return {
+        ...page(phase, received),
+        completed,
+      };
+    };
+    const run = (data: Quad[], completed: boolean) => runDurableSync({
+      ctx,
+      remotePeerId: 'field-sized-exact-recovery-peer',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 600_000),
+      exactAssetUalsFor: () => [ual],
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data'
+          ? delayedPage(phase, data, completed)
+          : delayedPage(phase, fieldSizedMeta, true)
+      ),
+      processDurableBatchInWorker: process,
+      storeInsert: ({ quads }) => requesterStore.insert(quads),
+      storeGraphScopedAsset: ({ asset }) => materialize(asset),
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    try {
+      const incomplete = run(fieldSizedData.slice(0, -1), false);
+      await vi.runAllTimersAsync();
+      await expect(incomplete).resolves.toMatchObject({
+        insertedTriples: 0,
+        complete: false,
+      });
+      expect(materialize).not.toHaveBeenCalled();
+      expect(deleteCheckpoint).not.toHaveBeenCalled();
+      expect(setCheckpoint).not.toHaveBeenCalled();
+      expect(await graphQuads(requesterStore, assertionGraph)).toEqual([]);
+
+      const complete = run(fieldSizedData, true);
+      await vi.runAllTimersAsync();
+      await expect(complete).resolves.toMatchObject({
+        insertedDataTriples: 10_000,
+        complete: true,
+      });
+      expect(materialize).toHaveBeenCalledTimes(1);
+      expect(await graphQuads(requesterStore, assertionGraph)).toHaveLength(10_000);
+      expect(await values(requesterStore, 'status')).toEqual(['"confirmed"']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not downgrade same-version local receipt provenance during finalized durable replay', async () => {
@@ -1063,8 +1203,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'finalized-vm-replay-source',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data' ? page(phase, servedData) : page(phase, servedMeta)
       ),
       processDurableBatchInWorker: async (dataQuads, metaQuads, _ctx, acceptUnverified, mode) => {
@@ -1080,8 +1220,8 @@ describe('durable graph-scoped KA materialization', () => {
           verifiedMeta: verified.verifiedMetaIndexes.map((index) => metaQuads[index]!),
         };
       },
-      storeInsert: (quads) => requesterStore.insert(quads),
-      storeGraphScopedAsset: async (asset) => materializeVerifiedGraphScopedAsset({
+      storeInsert: ({ quads }) => requesterStore.insert(quads),
+      storeGraphScopedAsset: async ({ asset }) => materializeVerifiedGraphScopedAsset({
         store: requesterStore,
         asset: (await authenticateVerifiedGraphScopedAsset(
           chain,
@@ -1157,8 +1297,8 @@ describe('durable graph-scoped KA materialization', () => {
       ctx,
       remotePeerId: 'peer-mixed',
       contextGraphIds: [contextGraphId],
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (_ctx, _peer, _cg, _shared, phase) => (
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
         phase === 'data'
           ? page(phase, [v2Data])
           : page(phase, [...v2Meta, ...legacyMeta])
@@ -1175,8 +1315,8 @@ describe('durable graph-scoped KA materialization', () => {
         verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
       }),
-      storeInsert: async (quads) => { inserted.push(...quads); },
-      storeGraphScopedAsset: async (asset) => {
+      storeInsert: async ({ quads }) => { inserted.push(...quads); },
+      storeGraphScopedAsset: async ({ asset }) => {
         exactAssets.push(asset);
         return 'applied';
       },

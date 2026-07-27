@@ -252,7 +252,16 @@ import { requireExactAssetUals } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
-import { runDurableSync, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
+import {
+  createContextGraphSyncDeadline,
+  createDurableSyncBudget,
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
+  normalizeDurableSyncTimeoutMs,
+} from './sync/requester/durable-sync-budget.js';
+import {
+  runDurableSync,
+  type VerifiedFullSnapshot,
+} from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
@@ -388,7 +397,6 @@ import {
   EVM_PUBLISH_OPEN,
   MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
   META_REFRESH_COOLDOWN_MS,
-  SYNC_MIN_GRAPH_BUDGET_MS,
   DEBUG_SYNC_PROGRESS,
   DEFAULT_SWM_TTL_MS,
   SWM_CLEANUP_INTERVAL_MS,
@@ -549,6 +557,7 @@ async function runSerializedDurableContextGraphSync<T>(
   remotePeerId: string,
   contextGraphId: string,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   let chains = durableContextGraphSyncChains.get(agent);
   if (!chains) {
@@ -557,16 +566,63 @@ async function runSerializedDurableContextGraphSync<T>(
   }
   const key = JSON.stringify([remotePeerId, contextGraphId]);
   const previous = chains.get(key) ?? Promise.resolve();
-  const run = previous.catch(() => undefined).then(operation);
+  let started = false;
+  const run = previous.catch(() => undefined).then(() => {
+    if (signal?.aborted) throw asSyncFetchAbortError(signal.reason);
+    started = true;
+    return operation();
+  });
   const settled = run.then(() => undefined, () => undefined);
   chains.set(key, settled);
-  try {
-    return await run;
-  } finally {
+  void settled.then(() => {
     if (chains.get(key) === settled) {
       chains.delete(key);
     }
+  });
+  if (!signal) return run;
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      // Once the operation owns the serialization turn, its admission and
+      // durable phase boundaries own cancellation and atomic settlement.
+      if (!started) reject(asSyncFetchAbortError(signal.reason));
+    };
+    signal.addEventListener('abort', onAbort);
+    if (signal.aborted) onAbort();
+    void run.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
+function combineSyncAdmissionSignals(
+  nodeStopSignal: AbortSignal | undefined,
+  operationSignal: AbortSignal | undefined,
+): { signal?: AbortSignal; dispose: () => void } {
+  const signals = [...new Set([nodeStopSignal, operationSignal].filter(
+    (signal): signal is AbortSignal => signal !== undefined,
+  ))];
+  if (signals.length <= 1) {
+    return { signal: signals[0], dispose: () => {} };
   }
+
+  const controller = new AbortController();
+  const listeners = signals.map((signal) => {
+    const onAbort = () => {
+      if (!controller.signal.aborted) controller.abort(signal.reason);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    return { signal, onAbort };
+  });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const { signal, onAbort } of listeners) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    },
+  };
 }
 
 function syncPageFetchCoalescingKey(params: {
@@ -657,22 +713,32 @@ function durableSyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
-  totalTimeoutMs: number;
+  fetchTimeoutMs: number;
+  authenticationTimeoutMs: number;
   syncAgentsMeta: boolean;
   hasPhaseCallback: boolean;
+  hasAtomicCommitCallback: boolean;
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
+  hasSignal: boolean;
   exactAssetUals?: readonly string[];
   priority?: number;
 }): string | null {
-  if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
+  if (
+    params.hasPhaseCallback
+    || params.hasAtomicCommitCallback
+    || params.hasAccessDeniedCallback
+    || params.hasSinceBatchIdResolver
+    || params.hasSignal
+  ) {
     return null;
   }
   return syncSingleFlightKey('durable-sync', {
     remotePeerId: params.remotePeerId,
     contextGraphIds: params.contextGraphIds,
     stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
-    totalTimeoutMs: params.totalTimeoutMs,
+    fetchTimeoutMs: params.fetchTimeoutMs,
+    authenticationTimeoutMs: params.authenticationTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
     priority: params.priority ?? null,
@@ -708,6 +774,49 @@ function asSyncFetchAbortError(reason: unknown): Error {
   const err = new Error(typeof reason === 'string' ? reason : 'aborted');
   err.name = 'AbortError';
   return err;
+}
+
+function createDurableSyncOperationBoundary(options: {
+  totalTimeoutMs?: number;
+  signal?: AbortSignal;
+}): {
+  deadline?: number;
+  signal?: AbortSignal;
+  dispose: () => void;
+} {
+  if (options.totalTimeoutMs === undefined) {
+    return {
+      signal: options.signal,
+      dispose: () => {},
+    };
+  }
+
+  const timeoutMs = normalizeDurableSyncTimeoutMs(options.totalTimeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(
+    asSyncFetchAbortError(options.signal?.reason),
+  );
+  if (options.signal?.aborted) abortFromCaller();
+  else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const timeout = setTimeout(
+    () => controller.abort(
+      asSyncFetchAbortError(new Error(
+        `Durable sync exceeded totalTimeoutMs=${timeoutMs}`,
+      )),
+    ),
+    timeoutMs,
+  );
+  timeout.unref?.();
+
+  return {
+    deadline,
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abortFromCaller);
+    },
+  };
 }
 
 function isMissingShardingTableContractError(error: unknown): boolean {
@@ -809,17 +918,43 @@ export interface ContextGraphCatchupOptions {
 export type DurableSyncOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
-   * Total wall-clock budget for the legacy durable lane. The agent clamps this
-   * independently so an API caller cannot create an unbounded sync operation.
+   * Outer wall-clock budget for the complete legacy durable operation.
+   * Network transfer and post-fetch chain authentication retain separate
+   * phase deadlines, but neither may extend work beyond this caller boundary.
    */
   totalTimeoutMs?: number;
+  /**
+   * Cancels the whole durable operation. Paging and graph-scoped chain
+   * authentication observe the signal directly; verification and atomic
+   * materialization check it before any subsequent commit boundary.
+   */
+  signal?: AbortSignal;
+  /**
+   * Called synchronously after graph-scoped authentication succeeds and
+   * immediately before atomic materialization is dispatched. This is a
+   * settlement boundary, not a generic progress callback.
+   */
+  onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
   priority?: number;
 };
 
-const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
+type LegacyDurableContextGraphOptions = {
+  onPhase?: PhaseCallback;
+  onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
+  onAccessDenied?: (contextGraphId: string) => void;
+  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  stopOnBackoffWorthyFailure?: boolean;
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
+  fetchTimeoutMs?: number;
+  exactAssetUals?: string[];
+  authenticationTimeoutMs?: number;
+  operationDeadline?: number;
+  signal?: AbortSignal;
+};
+
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
 const DURABLE_AUTHENTICATION_RETRY_BASE_MS = 1_000;
 const DURABLE_AUTHENTICATION_RETRY_MAX_MS = 8_000;
@@ -853,9 +988,10 @@ async function authenticateDurableGraphScopedAsset(params: {
   asset: VerifiedGraphScopedAsset;
   verifyContextGraphBinding: VerifyContextGraphBinding;
   deadline: number;
+  signal?: AbortSignal;
   onRetry: (error: unknown, attempt: number, maxAttempts: number) => void;
 }) {
-  const { chain, asset, verifyContextGraphBinding, deadline, onRetry } = params;
+  const { chain, asset, verifyContextGraphBinding, deadline, signal, onRetry } = params;
   const receivedAt = new Date();
   const deadlineError = createRpcTimeoutError(
     `Graph-scoped durable authentication for ${asset.ual} exceeded its context-graph deadline`,
@@ -864,6 +1000,11 @@ async function authenticateDurableGraphScopedAsset(params: {
   if (remaining <= 0) throw deadlineError;
 
   const deadlineController = new AbortController();
+  const abortFromOperation = () => deadlineController.abort(
+    asSyncFetchAbortError(signal?.reason),
+  );
+  if (signal?.aborted) abortFromOperation();
+  else signal?.addEventListener('abort', abortFromOperation, { once: true });
   const deadlineTimer = setTimeout(
     () => deadlineController.abort(deadlineError),
     remaining,
@@ -913,19 +1054,14 @@ async function authenticateDurableGraphScopedAsset(params: {
       },
     );
   } catch (error) {
-    if (deadlineController.signal.aborted) throw deadlineError;
+    if (deadlineController.signal.aborted) {
+      throw deadlineController.signal.reason ?? deadlineError;
+    }
     throw error;
   } finally {
     clearTimeout(deadlineTimer);
+    signal?.removeEventListener('abort', abortFromOperation);
   }
-}
-
-function normalizeDurableSyncTotalTimeoutMs(value: number | undefined): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return SYNC_TOTAL_TIMEOUT_MS;
-  return Math.min(
-    MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
-    Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(value)),
-  );
 }
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
@@ -1017,23 +1153,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     label: string,
     work: () => Promise<T>,
     priorityOverride?: number,
+    operationSignal?: AbortSignal,
   ): Promise<T> {
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
-    return withGlobalSyncBackpressure(
-      {
-        policy: resolveSyncGlobalBackpressure(this.config),
-        ctx,
-        label,
-        contextGraphId,
-        lane,
-        priority,
-        priorityClass: syncPriorityClass(priority),
-        signal: this.node.stopSignal ?? undefined,
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      },
-      work,
+    const admissionBoundary = combineSyncAdmissionSignals(
+      this.node.stopSignal ?? undefined,
+      operationSignal,
     );
+    try {
+      return await withGlobalSyncBackpressure(
+        {
+          policy: resolveSyncGlobalBackpressure(this.config),
+          ctx,
+          label,
+          contextGraphId,
+          lane,
+          priority,
+          priorityClass: syncPriorityClass(priority),
+          signal: admissionBoundary.signal,
+          logInfo: (opCtx, message) => this.log.info(opCtx, message),
+        },
+        work,
+      );
+    } finally {
+      admissionBoundary.dispose();
+    }
   }
 
   async start(this: DKGAgent): Promise<void> {
@@ -4191,7 +4336,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let changelogResult: DurableSyncResult | undefined;
     // Gate = this node's own changelog is enabled (its store is ChangelogStore-wrapped) —
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
-    if (asChangelogReader(this.store) !== null && contextGraphIds.length > 0) {
+    // The changelog lane does not yet expose cancellable verification/store
+    // boundaries. Any caller-supplied signal therefore requires the fully
+    // signal-aware legacy lane.
+    if (
+      !options?.signal
+      && options?.totalTimeoutMs === undefined
+      && asChangelogReader(this.store) !== null
+      && contextGraphIds.length > 0
+    ) {
       try {
         const lane = await this.runChangelogLane(
           ctx,
@@ -4243,7 +4396,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const totalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(options?.totalTimeoutMs);
+    const operationBoundary = createDurableSyncOperationBoundary({
+      totalTimeoutMs: options?.totalTimeoutMs,
+      signal: options?.signal,
+    });
+    const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
+    const fetchTimeoutMs = options?.exactAssetUals && options.totalTimeoutMs === undefined
+      ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
+      : authenticationTimeoutMs;
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
       this.config.syncContextGraphPriorities,
@@ -4260,36 +4420,55 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             remotePeerId,
             contextGraphId,
             remainingContextGraphs,
-            onPhase,
-            onAccessDenied,
-            sinceBatchIdFor,
-            stopOnBackoffWorthyFailure,
-            undefined,
-            totalTimeoutMs,
-            options?.exactAssetUals,
+            {
+              onPhase,
+              onAtomicCommitStarted: options?.onAtomicCommitStarted,
+              onAccessDenied,
+              sinceBatchIdFor,
+              stopOnBackoffWorthyFailure,
+              fetchTimeoutMs,
+              exactAssetUals: options?.exactAssetUals,
+              authenticationTimeoutMs,
+              operationDeadline: operationBoundary.deadline,
+              signal: operationBoundary.signal,
+            },
           ),
         ),
       })),
       priorities: this.config.syncContextGraphPriorities,
       emptyResult: createDurableSyncAccumulator,
-      runWithAdmission: (item, work) => runSerializedDurableContextGraphSync(
-        this,
-        remotePeerId,
-        item.contextGraphId,
-        () => this.runContextGraphSyncWithBackpressure(
-          ctx,
-          item.contextGraphId,
-          item.lane,
-          item.operationId,
-          work,
-          options?.priority,
-        ),
-      ),
+      runWithAdmission: async (item, work) => {
+        try {
+          return await runSerializedDurableContextGraphSync(
+            this,
+            remotePeerId,
+            item.contextGraphId,
+            () => this.runContextGraphSyncWithBackpressure(
+              ctx,
+              item.contextGraphId,
+              item.lane,
+              item.operationId,
+              work,
+              options?.priority,
+              operationBoundary.signal,
+            ),
+            operationBoundary.signal,
+          );
+        } catch (error) {
+          if (!operationBoundary.signal?.aborted) throw error;
+          return markDurableTerminalBoundary(createDurableSyncAccumulator(), false);
+        }
+      },
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
         recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
         return markDurableTerminalBoundary(summary, false);
       },
+      // Preserve already-merged progress, but record that cancellation left
+      // requested Context Graphs unvisited so the aggregate cannot finalize
+      // as complete.
+      markSkipped: (summary) => markDurableTerminalBoundary(summary, false),
+      shouldContinue: () => !operationBoundary.signal?.aborted,
       shouldStop: (part) => Boolean(
         stopOnBackoffWorthyFailure
         && durableSyncAccumulatorHasBackoffWorthyFailure(part),
@@ -4304,15 +4483,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphIds: orderedContextGraphIds,
       stopOnBackoffWorthyFailure,
-      totalTimeoutMs,
+      fetchTimeoutMs,
+      authenticationTimeoutMs,
       syncAgentsMeta,
       hasPhaseCallback: Boolean(onPhase),
+      hasAtomicCommitCallback: Boolean(options?.onAtomicCommitStarted),
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
+      hasSignal: Boolean(operationBoundary.signal),
       exactAssetUals: options?.exactAssetUals,
       priority: options?.priority,
     });
-    return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
+    const runWithinBoundary = async () => {
+      try {
+        return await runSync();
+      } finally {
+        operationBoundary.dispose();
+      }
+    };
+    return singleFlightKey
+      ? runSyncSingleFlight(this, singleFlightKey, runWithinBoundary)
+      : runWithinBoundary();
   }
 
   /**
@@ -4338,7 +4529,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetUals: assetUals,
         stopOnBackoffWorthyFailure: true,
-        totalTimeoutMs: 60_000,
         priority: 1_000,
       },
     );
@@ -4350,14 +4540,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     remainingContextGraphs: number,
-    onPhase?: PhaseCallback,
-    onAccessDenied?: (contextGraphId: string) => void,
-    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    stopOnBackoffWorthyFailure?: boolean,
-    onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>,
-    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
-    exactAssetUals?: string[],
+    options: LegacyDurableContextGraphOptions = {},
   ): Promise<DurableSyncResult> {
+    const {
+      onPhase,
+      onAtomicCommitStarted,
+      onAccessDenied,
+      sinceBatchIdFor,
+      stopOnBackoffWorthyFailure,
+      onVerifiedFullSnapshot,
+      fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
+      exactAssetUals,
+      authenticationTimeoutMs = fetchTimeoutMs,
+      operationDeadline,
+      signal,
+    } = options;
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     // The CG name commitment is immutable for an on-chain slot. Prove a
     // local/on-chain binding once per durable-sync invocation, then reuse the
@@ -4396,6 +4593,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         throw error;
       }
     };
+    const contextGraphBudget = createDurableSyncBudget({
+      fetchTimeoutMs,
+      authenticationTimeoutMs,
+      exactRecovery: exactAssetUals !== undefined,
+      operationDeadline,
+    }).createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs,
+    });
     return runDurableSync({
       ctx,
       remotePeerId,
@@ -4403,49 +4609,58 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onPhase,
       onAccessDenied,
       syncAgentsMeta,
-      createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(
-        remainingContextGraphs,
-        totalTimeoutMs,
-      ),
-      fetchSyncPages: (
-        opCtx,
-        peerId,
-        cgId,
-        includeSharedMemory,
+      durableSyncBudget: {
+        createContextGraphBudget: () => contextGraphBudget,
+      },
+      signal,
+      fetchSyncPages: ({
+        ctx: opCtx,
+        remotePeerId: peerId,
+        contextGraphId: cgId,
         phase,
         graphUri,
-        deadline,
         snapshotRef,
         sinceBatchId,
-      ) => this.fetchSyncPages(
-        opCtx,
-        peerId,
-        cgId,
-        includeSharedMemory,
-        phase,
-        graphUri,
-        deadline,
-        snapshotRef,
-        sinceBatchId,
-        undefined,
-        undefined,
-        onVerifiedFullSnapshot !== undefined,
-        exactAssetUals,
-      ),
+        fetchContext,
+      }) => {
+        return this.fetchSyncPages(
+          opCtx,
+          peerId,
+          cgId,
+          false,
+          phase,
+          graphUri,
+          fetchContext.deadline,
+          snapshotRef,
+          sinceBatchId,
+          fetchContext.signal,
+          undefined,
+          onVerifiedFullSnapshot !== undefined,
+          exactAssetUals,
+        );
+      },
       sinceBatchIdFor,
       exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
-        priority: 'background',
-        source: 'agent.durableSync.storeInsert',
-      }),
-      storeGraphScopedAsset: async (asset, deadline) => {
+      storeInsert: ({ quads, signal: operationSignal }) => {
+        return this.insertSyncedQuadsAndInvalidateListCache(quads, {
+          priority: 'background',
+          source: 'agent.durableSync.storeInsert',
+          signal: operationSignal,
+        });
+      },
+      storeGraphScopedAsset: async ({
+        asset,
+        authenticationDeadline,
+        signal: operationSignal,
+      }) => {
         const authentication = await authenticateDurableGraphScopedAsset({
           chain: this.chain,
           asset,
           verifyContextGraphBinding,
-          deadline,
+          deadline: authenticationDeadline,
+          signal: operationSignal,
           onRetry: (error, attempt, maxAttempts) => {
             this.log.warn(
               ctx,
@@ -4455,6 +4670,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           },
         });
+        if (operationSignal?.aborted) {
+          throw asSyncFetchAbortError(operationSignal.reason);
+        }
         const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
         if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
@@ -4465,12 +4683,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           this.persistContextGraphSubscriptionState(asset.contextGraphId);
         }
+        if (operationSignal?.aborted) {
+          throw asSyncFetchAbortError(operationSignal.reason);
+        }
+        onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
         const outcome = await materializeVerifiedGraphScopedAsset({
           store: this.store,
           asset: authentication.asset,
           options: {
             priority: 'background',
             source: 'agent.durableSync.graphScopedMaterialization',
+            signal: operationSignal,
           },
           oversizeHooks: {
             recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
@@ -4633,25 +4856,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           remotePeerId,
           contextGraphId,
           1,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          curatorAuthoritative ? async (snapshot) => {
-            let reconciled = true;
-            for (const graph of pendingDrops) {
-              const metadataGraph = graph.endsWith('/_meta');
-              if (metadataGraph && !snapshot.metaFetched) {
-                reconciled = false;
-                continue;
+          {
+            onVerifiedFullSnapshot: curatorAuthoritative ? async (snapshot) => {
+              let reconciled = true;
+              for (const graph of pendingDrops) {
+                const metadataGraph = graph.endsWith('/_meta');
+                if (metadataGraph && !snapshot.metaFetched) {
+                  reconciled = false;
+                  continue;
+                }
+                const present = metadataGraph
+                  ? snapshot.verifiedMetaGraphs.has(graph)
+                  : snapshot.verifiedDataGraphs.has(graph);
+                if (!present) await this.store.dropGraph(graph);
               }
-              const present = metadataGraph
-                ? snapshot.verifiedMetaGraphs.has(graph)
-                : snapshot.verifiedDataGraphs.has(graph);
-              if (!present) await this.store.dropGraph(graph);
-            }
-            dropsReconciled = reconciled;
-          } : undefined,
+              dropsReconciled = reconciled;
+            } : undefined,
+          },
         );
         mergeDurableSyncResultIntoAccumulator(accumulator, r);
         const complete = r.complete && dropsReconciled;
@@ -4785,25 +5006,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // responder-session identities so offsets can never cross asset batches.
     assetUals?: string[],
   ): Promise<SyncPageResult> {
-    const coalescingKey = syncPageFetchCoalescingKey({
-      remotePeerId,
-      contextGraphId,
-      includeSharedMemory,
-      phase,
-      graphUri,
-      snapshotRef,
-      sinceBatchId,
-      recovery,
-      forceFreshSession,
-      assetUals,
-    });
+    // A caller signal defines an operation-owned cancellation contract. Do not
+    // place those fetches in the shared page map: even equal wall-clock
+    // deadlines do not make independently abortable operations compatible.
+    const coalescingKey = signal
+      ? null
+      : syncPageFetchCoalescingKey({
+        remotePeerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        graphUri,
+        snapshotRef,
+        sinceBatchId,
+        recovery,
+        forceFreshSession,
+        assetUals,
+      });
     const inFlight = inFlightSyncPageFetchesFor(this);
-    const existing = inFlight.get(coalescingKey);
+    const existing = coalescingKey ? inFlight.get(coalescingKey) : undefined;
     if (existing) {
       if (!existing.controller.signal.aborted) {
         return waitForSyncPageFetch(existing, signal);
       }
-      inFlight.delete(coalescingKey);
+      if (coalescingKey) inFlight.delete(coalescingKey);
     }
     if (signal?.aborted) {
       return Promise.reject(asSyncFetchAbortError(signal.reason));
@@ -4881,7 +5107,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     }).finally(() => {
       nodeStopSignal?.removeEventListener('abort', onNodeStop);
-      if (inFlight.get(coalescingKey) === entry) {
+      if (coalescingKey && inFlight.get(coalescingKey) === entry) {
         inFlight.delete(coalescingKey);
       }
     });
@@ -4891,7 +5117,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // active waiters through the original promise.
     });
     entry = { promise: sharedFetch, controller, waiters: 0 };
-    inFlight.set(coalescingKey, entry);
+    if (coalescingKey) inFlight.set(coalescingKey, entry);
     return waitForSyncPageFetch(entry, signal);
   }
 
@@ -4988,7 +5214,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         store: this.store,
         listSubGraphs: (id) => this.listSubGraphs(id),
-        createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
+        createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
+          remainingContextGraphs: remaining,
+        }),
         fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
           this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
@@ -5061,7 +5289,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               ctx,
               remotePeerId,
               contextGraphIds: [contextGraphId],
-              createContextGraphSyncDeadline: () => this.createContextGraphSyncDeadline(remainingContextGraphs),
+              createContextGraphSyncDeadline: () => createContextGraphSyncDeadline({
+                remainingContextGraphs,
+              }),
               fetchSyncPages: this.fetchSyncPages.bind(this),
               processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
                 this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
@@ -5243,7 +5473,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         {
           store: this.store,
           listSubGraphs: (id) => this.listSubGraphs(id),
-          createContextGraphSyncDeadline: (remaining) => this.createContextGraphSyncDeadline(remaining),
+          createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
+            remainingContextGraphs: remaining,
+          }),
           fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
             this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
@@ -5280,19 +5512,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId,
       ),
     );
-  }
-
-  createContextGraphSyncDeadline(this: DKGAgent,
-    remainingContextGraphs: number,
-    totalTimeoutMs: number = SYNC_TOTAL_TIMEOUT_MS,
-  ): number {
-    const divisor = Math.max(1, remainingContextGraphs);
-    const normalizedTotalTimeoutMs = normalizeDurableSyncTotalTimeoutMs(totalTimeoutMs);
-    const budgetMs = Math.max(
-      SYNC_MIN_GRAPH_BUDGET_MS,
-      Math.floor(normalizedTotalTimeoutMs / divisor),
-    );
-    return Date.now() + budgetMs;
   }
 
   /**

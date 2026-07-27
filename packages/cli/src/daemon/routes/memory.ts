@@ -705,9 +705,11 @@ WHERE {
     const includeSharedMemory = parsed.includeSharedMemory !== false;
     const includeDurable = parsed.includeDurable === true;
 
-    // Per-peer hard cap on the catchup duration. Keeps the endpoint
-    // response within a single HTTP-level timeout even if the underlying
-    // sync internals retry their way to completion. SWM-only path:
+    // Per-peer operation deadline. Signal-aware work stops accepting new
+    // fetch/authentication/materialization work at this bound. If an atomic
+    // store commit already crossed its non-cancellable dispatch boundary, the
+    // route awaits settlement so its response reports the real commit outcome
+    // instead of returning a false zero-insert failure. SWM-only path:
     // ~45s/page * a couple of pages worst-case; under heavy gossip
     // load (the integration suite) backed-off retries can stretch this
     // out further. Underlying SYNC_TOTAL_TIMEOUT_MS in dkg-agent is
@@ -729,15 +731,6 @@ WHERE {
     };
     const PER_PEER_SWM_BUDGET_MS = boundedBudget(parsed.perPeerBudgetMs, DEFAULT_PER_PEER_SWM_BUDGET_MS);
     const PER_PEER_DURABLE_BUDGET_MS = boundedBudget(parsed.perPeerDurableBudgetMs, DEFAULT_PER_PEER_DURABLE_BUDGET_MS);
-    // Finish the agent's internal durable deadline just before the HTTP wrapper
-    // expires. Previously this route could request a five-minute operation while
-    // the agent silently stopped useful work after its fixed two-minute default.
-    const DURABLE_BUDGET_HEADROOM_MS = 1_000;
-    const INTERNAL_DURABLE_BUDGET_MS = Math.max(
-      MIN_BUDGET_MS,
-      PER_PEER_DURABLE_BUDGET_MS - DURABLE_BUDGET_HEADROOM_MS,
-    );
-
     const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
       new Promise<T>((resolve, reject) => {
         const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -922,15 +915,16 @@ WHERE {
             }
           }
           if (durableSelected.has(candidate)) {
-            // The agent deadline bounds network fetching, but exact graph
-            // verification and atomic store materialization must settle
-            // afterward. The helper owns capability probing, typed invocation,
-            // completion classification, and legacy-agent adaptation.
+            // The helper owns one outer deadline for fetch, verification, and
+            // authentication. Its AbortSignal prevents entry into later commit
+            // boundaries; an already-started atomic commit gets a bounded
+            // settlement grace, after which the response is explicitly
+            // indeterminate instead of hanging or claiming a false outcome.
             const durableLeg = await runDurableCatchupLeg(
               agent,
               candidate,
               cgId,
-              INTERNAL_DURABLE_BUDGET_MS,
+              PER_PEER_DURABLE_BUDGET_MS,
             );
             durable = durableLeg.insertedTriples;
             durableState = durableLeg.state;
