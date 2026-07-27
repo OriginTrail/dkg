@@ -179,4 +179,68 @@ describe('signal-bounded durable fetch coalescing', () => {
       await agent.stop().catch(() => {});
     }
   });
+
+  it('does not single-flight totalTimeoutMs-only durable syncs', async () => {
+    let fetchCalls = 0;
+    const firstFetch = deferred<SyncPageResult>();
+    const operationSignals: AbortSignal[] = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, signal }) => {
+      fetchCalls++;
+      if (!signal) throw new Error('totalTimeoutMs durable fetch received no operation signal');
+      operationSignals.push(signal);
+      if (fetchCalls === 1) return firstFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const first = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs: 30_000 },
+      );
+      await waitFor(() => fetchCalls === 1);
+
+      const second = (agent as any).syncFromPeerDetailed(
+        PEER_A,
+        ['coalesced-cg'],
+        undefined,
+        undefined,
+        undefined,
+        { totalTimeoutMs: 30_000 },
+      );
+      let secondSettled = false;
+      void second.then(
+        () => { secondSettled = true; },
+        () => { secondSettled = true; },
+      );
+      await flushMicrotasks();
+      expect(secondSettled).toBe(false);
+
+      firstFetch.resolve(emptySyncPage('meta'));
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+
+      expect(firstResult).not.toBe(secondResult);
+      expect(fetchCalls).toBe(4);
+      expect(operationSignals[0]).toBe(operationSignals[1]);
+      expect(operationSignals[0]).not.toBe(operationSignals[2]);
+      expect(operationSignals[2]).toBe(operationSignals[3]);
+      expect(secondResult).toMatchObject({ complete: true, failedPeers: 0 });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });
