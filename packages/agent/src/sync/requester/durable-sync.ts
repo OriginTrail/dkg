@@ -88,6 +88,31 @@ export interface DurableSyncPhaseBoundary {
   assertOpen(): void;
 }
 
+export interface DurableSyncFetchRequest {
+  readonly ctx: OperationContext;
+  readonly remotePeerId: string;
+  readonly contextGraphId: string;
+  readonly includeSharedMemory: false;
+  readonly phase: 'data' | 'meta';
+  readonly graphUri: string;
+  readonly deadline: number;
+  readonly snapshotRef?: string;
+  readonly sinceBatchId?: string;
+  readonly exactAssetUals?: string[];
+  readonly boundary: DurableSyncPhaseBoundary;
+}
+
+export interface DurableSyncStoreInsertRequest {
+  readonly quads: Quad[];
+  readonly boundary: DurableSyncPhaseBoundary;
+}
+
+export interface DurableSyncGraphScopedStoreRequest {
+  readonly asset: VerifiedGraphScopedAsset;
+  readonly deadline: number;
+  readonly boundary: DurableSyncPhaseBoundary;
+}
+
 export interface DurableSyncContext {
   ctx: OperationContext;
   remotePeerId: string;
@@ -106,19 +131,7 @@ export interface DurableSyncContext {
   durableSyncBudget: DurableSyncBudget;
   /** Whole-operation cancellation propagated by bounded foreground callers. */
   signal?: AbortSignal;
-  fetchSyncPages: (
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphId: string,
-    includeSharedMemory: boolean,
-    phase: 'data' | 'meta',
-    graphUri: string,
-    deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    assetUals?: string[],
-    boundary?: DurableSyncPhaseBoundary,
-  ) => Promise<SyncPageResult>;
+  fetchSyncPages: (request: DurableSyncFetchRequest) => Promise<SyncPageResult>;
   /**
    * Phase C — optional, gap-safe per-CG delta high-water mark resolver. When it
    * returns a value for a CG, the durable DATA fetch carries `sinceBatchId` and
@@ -154,12 +167,10 @@ export interface DurableSyncContext {
     verifiedPrivateOnlyResponses: number;
     dataRejectedMissingMeta: number;
   }>;
-  storeInsert: (quads: Quad[], boundary?: DurableSyncPhaseBoundary) => Promise<void>;
+  storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
-    asset: VerifiedGraphScopedAsset,
-    deadline: number,
-    boundary?: DurableSyncPhaseBoundary,
+    request: DurableSyncGraphScopedStoreRequest,
   ) => Promise<GraphScopedMaterializationOutcome>;
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
@@ -368,19 +379,18 @@ async function runDurableSyncWithBudget(
         phase: 'data' | 'meta',
         graphUri: string,
         sinceBatchId?: string,
-      ): Promise<SyncPageResult> => fetchSyncPages(
+      ): Promise<SyncPageResult> => fetchSyncPages({
         ctx,
         remotePeerId,
-        pid,
-        false,
+        contextGraphId: pid,
+        includeSharedMemory: false,
         phase,
         graphUri,
         deadline,
-        undefined,
         sinceBatchId,
         exactAssetUals,
-        fetchBoundary,
-      );
+        boundary: fetchBoundary,
+      });
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
             quads: [],
@@ -626,13 +636,11 @@ async function runDurableSyncWithBudget(
       const storeBoundary = phaseBoundary(graphScopedAuthenticationDeadline);
       for (const asset of partitioned.assets) {
         storeBoundary.assertOpen();
-        const outcome = signal
-          ? await storeGraphScopedAsset!(
-              asset,
-              graphScopedAuthenticationDeadline,
-              storeBoundary,
-            )
-          : await storeGraphScopedAsset!(asset, graphScopedAuthenticationDeadline);
+        const outcome = await storeGraphScopedAsset!({
+          asset,
+          deadline: graphScopedAuthenticationDeadline,
+          boundary: storeBoundary,
+        });
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does
@@ -652,8 +660,10 @@ async function runDurableSyncWithBudget(
       }
       if (partitioned.remainingData.length > 0) {
         storeBoundary.assertOpen();
-        if (signal) await storeInsert(partitioned.remainingData, storeBoundary);
-        else await storeInsert(partitioned.remainingData);
+        await storeInsert({
+          quads: partitioned.remainingData,
+          boundary: storeBoundary,
+        });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingData.length,
           insertedDataTriples: partitioned.remainingData.length,
@@ -661,8 +671,10 @@ async function runDurableSyncWithBudget(
       }
       if (partitioned.remainingMeta.length > 0) {
         storeBoundary.assertOpen();
-        if (signal) await storeInsert(partitioned.remainingMeta, storeBoundary);
-        else await storeInsert(partitioned.remainingMeta);
+        await storeInsert({
+          quads: partitioned.remainingMeta,
+          boundary: storeBoundary,
+        });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingMeta.length,
           insertedMetaTriples: partitioned.remainingMeta.length,

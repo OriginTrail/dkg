@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+  type DurableSyncStoreInsertRequest,
+} from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -11,6 +15,12 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
   const fn = (...args: A): R => { calls.push(args); return impl(...args); };
   return Object.assign(fn, { calls });
+}
+
+function durableFetchRecorder(
+  impl: (request: DurableSyncFetchRequest) => Promise<SyncPageResult>,
+) {
+  return recorder(impl);
 }
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
@@ -84,13 +94,10 @@ function sharedMemoryProcessResult() {
 describe('sync requester progress accounting', () => {
   it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {
     const deniedCgs: string[] = [];
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => {
       if (contextGraphId === 'pending-join') throw deniedError();
       return pageResult(contextGraphId, phase);
     });
@@ -116,31 +123,27 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([
-      ctx,
-      'peer-a',
-      'open-cg',
-      false,
-      'meta',
-      expect.any(String),
-      expect.any(Number),
-      undefined,
-      undefined,
-      undefined,
       expect.objectContaining({
+        ctx,
+        remotePeerId: 'peer-a',
+        contextGraphId: 'open-cg',
+        includeSharedMemory: false,
+        phase: 'meta',
+        graphUri: expect.any(String),
         deadline: expect.any(Number),
-        assertOpen: expect.any(Function),
+        boundary: expect.objectContaining({
+          deadline: expect.any(Number),
+          assertOpen: expect.any(Function),
+        }),
       }),
     ]);
   });
 
   it('does not count a transport-failed durable graph but counts the subsequent clean-empty graph', async () => {
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => {
       if (contextGraphId === 'shed-cg') throw transportError('sync responder busy');
       return pageResult(contextGraphId, phase);
     });
@@ -165,31 +168,27 @@ describe('sync requester progress accounting', () => {
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([
-      ctx,
-      'peer-a',
-      'next-cg',
-      false,
-      'data',
-      expect.any(String),
-      expect.any(Number),
-      undefined,
-      undefined,
-      undefined,
       expect.objectContaining({
+        ctx,
+        remotePeerId: 'peer-a',
+        contextGraphId: 'next-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: expect.any(String),
         deadline: expect.any(Number),
-        assertOpen: expect.any(Function),
+        boundary: expect.objectContaining({
+          deadline: expect.any(Number),
+          assertOpen: expect.any(Function),
+        }),
       }),
     ]);
   });
 
   it('counts multiple durable context-graph failures as one failed peer', async () => {
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => {
       if (contextGraphId.startsWith('fail-')) throw transportError(`sync responder busy for ${contextGraphId}`);
       return pageResult(contextGraphId, phase);
     });
@@ -214,32 +213,28 @@ describe('sync requester progress accounting', () => {
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([
-      ctx,
-      'peer-a',
-      'next-cg',
-      false,
-      'data',
-      expect.any(String),
-      expect.any(Number),
-      undefined,
-      undefined,
-      undefined,
       expect.objectContaining({
+        ctx,
+        remotePeerId: 'peer-a',
+        contextGraphId: 'next-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: expect.any(String),
         deadline: expect.any(Number),
-        assertOpen: expect.any(Function),
+        boundary: expect.objectContaining({
+          deadline: expect.any(Number),
+          assertOpen: expect.any(Function),
+        }),
       }),
     ]);
   });
 
   it('does not count a verification-failed durable graph but counts the subsequent clean-empty graph', async () => {
     const phases: string[] = [];
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => pageResult(contextGraphId, phase, {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => pageResult(contextGraphId, phase, {
       quads: phase === 'data' && contextGraphId === 'verify-fails'
         ? [quad(contextGraphId)]
         : [],
@@ -271,32 +266,28 @@ describe('sync requester progress accounting', () => {
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([
-      ctx,
-      'peer-a',
-      'next-cg',
-      false,
-      'data',
-      expect.any(String),
-      expect.any(Number),
-      undefined,
-      undefined,
-      undefined,
       expect.objectContaining({
+        ctx,
+        remotePeerId: 'peer-a',
+        contextGraphId: 'next-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: expect.any(String),
         deadline: expect.any(Number),
-        assertOpen: expect.any(Function),
+        boundary: expect.objectContaining({
+          deadline: expect.any(Number),
+          assertOpen: expect.any(Function),
+        }),
       }),
     ]);
     expect(phases.slice(0, 4)).toEqual(['fetch:start', 'fetch:end', 'verify:start', 'verify:end']);
   });
 
   it('does not count a store-failed durable graph but counts the subsequent clean-empty graph', async () => {
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => pageResult(contextGraphId, phase, {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => pageResult(contextGraphId, phase, {
       quads: phase === 'data' && contextGraphId === 'store-fails'
         ? [quad(contextGraphId)]
         : [],
@@ -314,7 +305,7 @@ describe('sync requester progress accounting', () => {
         verifiedData: dataQuads,
         totalFetchedDataQuads: dataQuads.length,
       }),
-      storeInsert: async (quads) => {
+      storeInsert: async ({ quads }) => {
         if (quads.some((q) => q.subject === 'store-fails')) {
           throw new Error('store unavailable');
         }
@@ -331,19 +322,18 @@ describe('sync requester progress accounting', () => {
     expect(summary.insertedDataTriples).toBe(0);
     expect(summary.completedPhases).toBe(2);
     expect(fetchSyncPages.calls).toContainEqual([
-      ctx,
-      'peer-a',
-      'next-cg',
-      false,
-      'data',
-      expect.any(String),
-      expect.any(Number),
-      undefined,
-      undefined,
-      undefined,
       expect.objectContaining({
+        ctx,
+        remotePeerId: 'peer-a',
+        contextGraphId: 'next-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: expect.any(String),
         deadline: expect.any(Number),
-        assertOpen: expect.any(Function),
+        boundary: expect.objectContaining({
+          deadline: expect.any(Number),
+          assertOpen: expect.any(Function),
+        }),
       }),
     ]);
   });
@@ -354,13 +344,9 @@ describe('sync requester progress accounting', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['empty-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx: OperationContext,
-        _peer: string,
-        contextGraphId: string,
-        _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
-      ) => pageResult(contextGraphId, phase),
+      fetchSyncPages: async ({ contextGraphId, phase }) => (
+        pageResult(contextGraphId, phase)
+      ),
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
       deleteCheckpoint: () => {},
@@ -380,13 +366,9 @@ describe('sync requester progress accounting', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['resumed-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx: OperationContext,
-        _peer: string,
-        contextGraphId: string,
-        _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
-      ) => pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 }),
+      fetchSyncPages: async ({ contextGraphId, phase }) => (
+        pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 })
+      ),
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
       deleteCheckpoint: () => {},
@@ -404,13 +386,10 @@ describe('sync requester progress accounting', () => {
   it('counts only the clean-empty durable phase when its sibling times out', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'data'
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => phase === 'data'
       ? pageResult(contextGraphId, phase, { completed: false, timedOut: true, nextOffset: 500 })
       : pageResult(contextGraphId, phase));
 
@@ -439,13 +418,12 @@ describe('sync requester progress accounting', () => {
   it('does not report durable checkpoint progress when data is rejected for missing meta', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => pageResult(contextGraphId, phase, { nextOffset: phase === 'data' ? 500 : 5 }));
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => pageResult(contextGraphId, phase, {
+      nextOffset: phase === 'data' ? 500 : 5,
+    }));
 
     const summary = await runDurableSync({
       ctx,
@@ -474,17 +452,14 @@ describe('sync requester progress accounting', () => {
   });
 
   it('does not advance durable checkpoints when integrity verification rejects a KA', async () => {
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const logWarn = recorder((_ctx: OperationContext, _message: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => pageResult(contextGraphId, phase, {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => pageResult(contextGraphId, phase, {
       nextOffset: phase === 'data' ? 500 : 5,
     }));
 
@@ -523,16 +498,13 @@ describe('sync requester progress accounting', () => {
 
   it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-meta');
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'meta'
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => phase === 'meta'
       ? pageResult(contextGraphId, phase, { nextOffset: 5, completed: false, timedOut: true })
       : pageResult(contextGraphId, phase));
 
@@ -561,7 +533,12 @@ describe('sync requester progress accounting', () => {
     expect(summary.insertedMetaTriples).toBe(1);
     expect(summary.completedPhases).toBe(0);
     expect(summary.checkpointAdvances).toBe(0);
-    expect(storeInsert.calls).toContainEqual([[metaQuad]]);
+    expect(storeInsert.calls).toHaveLength(1);
+    expect(storeInsert.calls[0]![0].quads).toEqual([metaQuad]);
+    expect(storeInsert.calls[0]![0].boundary).toMatchObject({
+      deadline: expect.any(Number),
+      assertOpen: expect.any(Function),
+    });
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toHaveLength(1);
     expect(setCheckpoint.calls).toContainEqual(['meta-only-cg:meta', 5]);
@@ -570,14 +547,11 @@ describe('sync requester progress accounting', () => {
   it('advances the meta cursor when every fetched metadata row was deliberately discarded', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'meta'
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => phase === 'meta'
       ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
       : pageResult(contextGraphId, phase));
 
@@ -614,13 +588,10 @@ describe('sync requester progress accounting', () => {
   it('keeps the meta cursor pinned when discarded rows do not account for the whole page', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'meta'
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => phase === 'meta'
       ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
       : pageResult(contextGraphId, phase));
 
@@ -656,14 +627,11 @@ describe('sync requester progress accounting', () => {
     // were deliberately consumed) or durable sync pins on the same poisoned page.
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'meta'
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => phase === 'meta'
       ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
       : pageResult(contextGraphId, phase));
 
@@ -701,14 +669,11 @@ describe('sync requester progress accounting', () => {
     // fetched total, so the requester advances the cursor rather than pinning.
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'meta'
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => phase === 'meta'
       ? pageResult(contextGraphId, phase, { nextOffset: 3, completed: false })
       : pageResult(contextGraphId, phase));
 
@@ -741,16 +706,15 @@ describe('sync requester progress accounting', () => {
 
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-complete-meta');
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => pageResult(contextGraphId, phase, { nextOffset: phase === 'meta' ? 5 : 0 }));
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => pageResult(contextGraphId, phase, {
+      nextOffset: phase === 'meta' ? 5 : 0,
+    }));
 
     const summary = await runDurableSync({
       ctx,
@@ -777,7 +741,12 @@ describe('sync requester progress accounting', () => {
     expect(summary.insertedMetaTriples).toBe(1);
     expect(summary.completedPhases).toBe(0);
     expect(summary.checkpointAdvances).toBe(0);
-    expect(storeInsert.calls).toContainEqual([[metaQuad]]);
+    expect(storeInsert.calls).toHaveLength(1);
+    expect(storeInsert.calls[0]![0].quads).toEqual([metaQuad]);
+    expect(storeInsert.calls[0]![0].boundary).toMatchObject({
+      deadline: expect.any(Number),
+      assertOpen: expect.any(Function),
+    });
     expect(deleteCheckpoint.calls).toHaveLength(1);
     expect(deleteCheckpoint.calls).toContainEqual(['meta-only-complete:meta']);
     expect(setCheckpoint.calls).toEqual([]);
@@ -785,16 +754,13 @@ describe('sync requester progress accounting', () => {
 
   it('stores verified private-only metadata and advances both durable checkpoints cleanly', async () => {
     const metaQuad = quad('verified-private-only-meta');
-    const storeInsert = recorder(async (_quads: Quad[]) => {});
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => pageResult(contextGraphId, phase, {
+    const fetchSyncPages = durableFetchRecorder(async ({
+      contextGraphId,
+      phase,
+    }) => pageResult(contextGraphId, phase, {
       quads: phase === 'meta' ? [metaQuad] : [],
       nextOffset: phase === 'meta' ? 1 : 0,
     }));
@@ -831,7 +797,17 @@ describe('sync requester progress accounting', () => {
       rejectedKcs: 0,
       dataRejectedMissingMeta: 0,
     });
-    expect(storeInsert.calls).toEqual([[[metaQuad]]]);
+    expect(storeInsert.calls).toEqual([
+      [
+        expect.objectContaining({
+          quads: [metaQuad],
+          boundary: expect.objectContaining({
+            deadline: expect.any(Number),
+            assertOpen: expect.any(Function),
+          }),
+        }),
+      ],
+    ]);
     expect(deleteCheckpoint.calls).toEqual([
       ['verified-private-only-cg:meta'],
       ['verified-private-only-cg:data'],

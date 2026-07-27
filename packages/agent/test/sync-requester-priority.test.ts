@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createOperationContext, PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+} from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { runOrderedContextGraphSyncs } from '../src/sync/requester/ordered-sync.js';
@@ -33,13 +36,10 @@ function durableContext(contextGraphIds: string[]) {
     remotePeerId: 'peer',
     contextGraphIds,
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 1_000),
-    fetchSyncPages: async (
-      _ctx: unknown,
-      _peer: string,
-      contextGraphId: string,
-      _swm: boolean,
-      phase: 'data' | 'meta',
-    ) => page(contextGraphId, phase),
+    fetchSyncPages: async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => page(contextGraphId, phase),
     processDurableBatchInWorker: async () => ({
       verifiedData: [], verifiedMeta: [], totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0,
       rejectedKcs: 0, emptyResponses: 1, metaOnlyResponses: 0, dataRejectedMissingMeta: 0,
@@ -402,7 +402,10 @@ describe('requester per-CG priority admission', () => {
         run: async () => {
           await runDurableSync({
             ...durableContext([contextGraphId]),
-            fetchSyncPages: async (_ctx, _peer, id, _swm, phase) => {
+            fetchSyncPages: async ({
+              contextGraphId: id,
+              phase,
+            }: DurableSyncFetchRequest) => {
               if (id === 'low-1' && phase === 'meta' && lowOneBlocked) {
                 await new Promise<void>((resolve) => { releaseLowOne = resolve; });
                 lowOneBlocked = false;

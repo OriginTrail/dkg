@@ -20,7 +20,10 @@ vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOr
 
 import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncGraphScopedStoreRequest,
+} from '../src/sync/requester/durable-sync.js';
 import {
   materializeVerifiedGraphScopedAsset,
   type VerifiedGraphScopedAsset,
@@ -62,6 +65,24 @@ function graphScopedAsset(
         graph: metaGraph,
       },
     ],
+  };
+}
+
+function graphScopedStoreRequest(
+  asset: VerifiedGraphScopedAsset,
+  deadline: number,
+  signal?: AbortSignal,
+): DurableSyncGraphScopedStoreRequest {
+  return {
+    asset,
+    deadline,
+    boundary: {
+      deadline,
+      signal,
+      assertOpen: () => {
+        if (signal?.aborted) throw signal.reason;
+      },
+    },
   };
 }
 
@@ -362,7 +383,9 @@ describe('durable sync lifecycle chain binding', () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
     try {
-      const firstMaterialization = storeGraphScopedAsset!(asset, Date.now() + 120_000);
+      const firstMaterialization = storeGraphScopedAsset!(
+        graphScopedStoreRequest(asset, Date.now() + 120_000),
+      );
       await vi.advanceTimersByTimeAsync(0);
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       expect(bindSubscriptionOnChainId).not.toHaveBeenCalled();
@@ -377,7 +400,9 @@ describe('durable sync lifecycle chain binding', () => {
       random.mockRestore();
       vi.useRealTimers();
     }
-    await expect(storeGraphScopedAsset!(asset, Date.now() + 60_000)).resolves.toBe('applied');
+    await expect(storeGraphScopedAsset!(
+      graphScopedStoreRequest(asset, Date.now() + 60_000),
+    )).resolves.toBe('applied');
 
     expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
 
@@ -491,8 +516,12 @@ describe('durable sync lifecycle chain binding', () => {
       };
     };
 
-    await expect(storeGraphScopedAsset!(asset(1), Date.now() + 60_000)).resolves.toBe('applied');
-    await expect(storeGraphScopedAsset!(asset(2), Date.now() + 60_000)).rejects.toMatchObject({
+    await expect(storeGraphScopedAsset!(
+      graphScopedStoreRequest(asset(1), Date.now() + 60_000),
+    )).resolves.toBe('applied');
+    await expect(storeGraphScopedAsset!(
+      graphScopedStoreRequest(asset(2), Date.now() + 60_000),
+    )).rejects.toMatchObject({
       code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH',
     });
 
@@ -537,10 +566,11 @@ describe('durable sync lifecycle chain binding', () => {
       { signal: controller.signal },
     );
 
-    const pending = storeGraphScopedAsset(
+    const pending = storeGraphScopedAsset(graphScopedStoreRequest(
       graphScopedAsset(new Uint8Array(32)),
       Date.now() + 120_000,
-    );
+      controller.signal,
+    ));
     await started;
     controller.abort(timeoutError);
 
@@ -571,10 +601,10 @@ describe('durable sync lifecycle chain binding', () => {
       } as ChainAdapter;
       const warnings = vi.fn();
       const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
-      const pending = storeGraphScopedAsset(
+      const pending = storeGraphScopedAsset(graphScopedStoreRequest(
         graphScopedAsset(new Uint8Array(32)),
         Date.now() + 120_000,
-      );
+      ));
       const rejection = expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
 
       await vi.runAllTimersAsync();
@@ -618,10 +648,10 @@ describe('durable sync lifecycle chain binding', () => {
       } as ChainAdapter;
       const warnings = vi.fn();
       const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
-      const pending = storeGraphScopedAsset(
+      const pending = storeGraphScopedAsset(graphScopedStoreRequest(
         graphScopedAsset(root, 1n),
         Date.now() + 120_000,
-      );
+      ));
       const rejection = expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
 
       await vi.runAllTimersAsync();
@@ -651,10 +681,10 @@ describe('durable sync lifecycle chain binding', () => {
     } as ChainAdapter;
     const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings);
 
-    await expect(storeGraphScopedAsset(
+    await expect(storeGraphScopedAsset(graphScopedStoreRequest(
       graphScopedAsset(expectedRoot),
       Date.now() + 60_000,
-    )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+    ))).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
     expect(getLatestMerkleRoot).toHaveBeenCalledTimes(1);
     expect(warnings).not.toHaveBeenCalled();
     expect(mockedMaterialize).not.toHaveBeenCalled();
@@ -683,10 +713,10 @@ describe('durable sync lifecycle chain binding', () => {
     } as ChainAdapter;
     const storeGraphScopedAsset = await captureGraphScopedStore(chain);
 
-    await expect(storeGraphScopedAsset(
+    await expect(storeGraphScopedAsset(graphScopedStoreRequest(
       graphScopedAsset(new Uint8Array(32)),
       Date.now() + 60_000,
-    )).rejects.toBe(deterministicError);
+    ))).rejects.toBe(deterministicError);
     expect(siblingSignal?.aborted).toBe(true);
     expect(mockedMaterialize).not.toHaveBeenCalled();
   });

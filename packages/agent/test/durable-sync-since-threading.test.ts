@@ -144,19 +144,22 @@ function makeContext(options: {
       contextGraphIds: options.contextGraphIds ?? ['mfacts'],
       syncAgentsMeta: options.syncAgentsMeta,
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
-      fetchSyncPages: async (
-        _ctx: unknown,
-        _peer: string,
-        contextGraphId: string,
-        _swm: boolean,
-        phase: 'data' | 'meta',
-        graphUri: string,
-        _deadline: number,
-        snapshotRef?: string,
-        sinceBatchId?: string,
-        assetUals?: string[],
-      ) => {
-        calls.push({ contextGraphId, phase, graphUri, snapshotRef, sinceBatchId, assetUals });
+      fetchSyncPages: async ({
+        contextGraphId,
+        phase,
+        graphUri,
+        snapshotRef,
+        sinceBatchId,
+        exactAssetUals,
+      }) => {
+        calls.push({
+          contextGraphId,
+          phase,
+          graphUri,
+          snapshotRef,
+          sinceBatchId,
+          assetUals: exactAssetUals,
+        });
         return page(phase);
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
@@ -181,7 +184,7 @@ function makeContext(options: {
           dataRejectedMissingMeta: 0,
         };
       },
-      storeInsert: async (quads: Quad[]) => { insertedBatches.push(quads); },
+      storeInsert: async ({ quads }) => { insertedBatches.push(quads); },
       deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
       setCheckpoint: () => undefined,
       logInfo: () => undefined,

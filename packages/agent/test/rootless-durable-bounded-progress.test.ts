@@ -14,7 +14,12 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   planBoundedGraphScopedDurableBatch,
 } from '../src/sync/durable-integrity.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+  type DurableSyncGraphScopedStoreRequest,
+  type DurableSyncStoreInsertRequest,
+} from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type {
@@ -231,13 +236,9 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', {
           quads: meta,
           nextOffset: meta.length,
@@ -249,9 +250,13 @@ describe('bounded rootless durable progress', () => {
           timedOut: true,
         }),
       processDurableBatchInWorker: processBatch,
-      storeInsert: async (quads) => { inserted.push(quads); },
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry);
+      storeInsert: async ({ quads }: DurableSyncStoreInsertRequest) => {
+        inserted.push(quads);
+      },
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -288,20 +293,18 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
         : pageResult('data', { quads: data, nextOffset: data.length }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
         if (materialized.length === 1) throw new Error('transient chain lookup timeout');
-        materialized.push(entry);
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -335,19 +338,17 @@ describe('bounded rootless durable progress', () => {
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
         : pageResult('data', { quads: data, nextOffset: data.length }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry.ual);
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset.ual);
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -375,19 +376,17 @@ describe('bounded rootless durable progress', () => {
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
         : pageResult('data', { quads: data, nextOffset: data.length }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push({ ual: entry.ual, dataCount: entry.dataQuads.length });
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push({ ual: asset.ual, dataCount: asset.dataQuads.length });
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -417,13 +416,9 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', {
           quads: meta,
           nextOffset: meta.length,
@@ -436,8 +431,10 @@ describe('bounded rootless durable progress', () => {
         }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry);
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: (key) => { deleted.push(key); },
@@ -470,13 +467,9 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', {
           quads: meta,
           nextOffset: meta.length,
@@ -489,9 +482,13 @@ describe('bounded rootless durable progress', () => {
           timedOut: false,
         }),
       processDurableBatchInWorker: processBatch,
-      storeInsert: async (quads) => { inserted.push(quads); },
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry);
+      storeInsert: async ({ quads }: DurableSyncStoreInsertRequest) => {
+        inserted.push(quads);
+      },
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: (key) => { deleted.push(key); },

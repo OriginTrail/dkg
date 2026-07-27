@@ -254,7 +254,6 @@ import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import {
   runDurableSync,
-  type DurableSyncPhaseBoundary,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
@@ -4484,19 +4483,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ),
       },
       signal,
-      fetchSyncPages: (
-        opCtx,
-        peerId,
-        cgId,
+      fetchSyncPages: ({
+        ctx: opCtx,
+        remotePeerId: peerId,
+        contextGraphId: cgId,
         includeSharedMemory,
         phase,
         graphUri,
         deadline,
         snapshotRef,
         sinceBatchId,
-        _assetUals,
         boundary,
-      ) => {
+      }) => {
         const operationSignal = boundary?.signal ?? signal;
         return this.fetchSyncPages(
           opCtx,
@@ -4518,24 +4516,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (
-        quads,
-        boundary?: DurableSyncPhaseBoundary,
-      ) => {
-        boundary?.assertOpen();
+      storeInsert: ({ quads, boundary }) => {
+        boundary.assertOpen();
         return this.insertSyncedQuadsAndInvalidateListCache(quads, {
           priority: 'background',
           source: 'agent.durableSync.storeInsert',
-          signal: boundary?.signal ?? signal,
+          signal: boundary.signal ?? signal,
         });
       },
-      storeGraphScopedAsset: async (
+      storeGraphScopedAsset: async ({
         asset,
         deadline,
-        boundary?: DurableSyncPhaseBoundary,
-      ) => {
-        boundary?.assertOpen();
-        const operationSignal = boundary?.signal ?? signal;
+        boundary,
+      }) => {
+        boundary.assertOpen();
+        const operationSignal = boundary.signal ?? signal;
         const authentication = await authenticateDurableGraphScopedAsset({
           chain: this.chain,
           asset,
@@ -4551,7 +4546,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           },
         });
-        boundary?.assertOpen();
+        boundary.assertOpen();
         if (operationSignal?.aborted) {
           throw asSyncFetchAbortError(operationSignal.reason);
         }
