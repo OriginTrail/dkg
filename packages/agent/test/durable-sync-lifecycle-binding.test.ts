@@ -75,10 +75,8 @@ function graphScopedStoreRequest(
 ): DurableSyncGraphScopedStoreRequest {
   return {
     asset,
-    phaseContext: {
-      deadline,
-      signal,
-    },
+    authenticationDeadline: deadline,
+    signal,
   };
 }
 
@@ -151,7 +149,7 @@ describe('durable sync lifecycle chain binding', () => {
     await captureGraphScopedStore({ chainId: 'none' } as ChainAdapter);
 
     const syncContext = mockedRunDurableSync.mock.calls[0]![0];
-    expect(syncContext.durableSyncBudget.fetchDeadline(1))
+    expect(syncContext.durableSyncBudget.fetchDeadline())
       .toBe(1_800_000_120_000);
     vi.mocked(Date.now).mockReturnValue(1_800_000_300_000);
     expect(syncContext.durableSyncBudget.graphScopedAuthenticationDeadline())
@@ -226,7 +224,7 @@ describe('durable sync lifecycle chain binding', () => {
       },
     );
     expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
-    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline(1))
+    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline())
       .toBe(1_800_000_030_000);
 
     mockedRunDurableSync.mockClear();
@@ -238,11 +236,11 @@ describe('durable sync lifecycle chain binding', () => {
       [exactUal],
     );
     expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
-    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline(1))
+    expect(mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget.fetchDeadline())
       .toBe(1_800_000_600_000);
   });
 
-  it('keeps signal-bounded callers off the non-cancellable changelog lane', async () => {
+  it('selects the abortable durable lane only when the caller requires it', async () => {
     const runChangelogLane = vi.fn(async () => ({ remainingLegacyCgs: [] }));
     const runLegacyDurableSync = vi.fn(async () => ({
       insertedTriples: 0,
@@ -281,7 +279,22 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       { signal: controller.signal },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
+    expect(runChangelogLane).toHaveBeenCalledTimes(2);
+    expect(runLegacyDurableSync).not.toHaveBeenCalled();
+
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-changelog-capable',
+      [contextGraphId],
+      undefined,
+      undefined,
+      undefined,
+      {
+        signal: controller.signal,
+        requireAbortableDurableLane: true,
+      },
+    );
+    expect(runChangelogLane).toHaveBeenCalledTimes(2);
     expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
       signal: controller.signal,

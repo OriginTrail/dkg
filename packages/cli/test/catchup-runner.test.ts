@@ -287,6 +287,7 @@ describe('route-level durable catchup orchestration', () => {
       {
         totalTimeoutMs: 1_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
   });

@@ -71,13 +71,13 @@ export interface VerifiedFullSnapshot {
 
 export interface DurableSyncBudget {
   /** Deadline for fetching one Context Graph's durable snapshot. */
-  fetchDeadline: (remainingContextGraphs: number) => number;
+  fetchDeadline: () => number;
   /** Fresh deadline for authenticating graph-scoped assets from one verified page. */
   graphScopedAuthenticationDeadline: () => number;
 }
 
-/** One source of truth for a durable phase's time and cancellation budget. */
-export interface DurableSyncPhaseContext {
+/** Fetch-specific time and cancellation boundary. */
+export interface DurableSyncFetchContext {
   readonly deadline: number;
   readonly signal?: AbortSignal;
 }
@@ -92,17 +92,19 @@ export interface DurableSyncFetchRequest {
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly exactAssetUals?: string[];
-  readonly phaseContext: DurableSyncPhaseContext;
+  readonly fetchContext: DurableSyncFetchContext;
 }
 
 export interface DurableSyncStoreInsertRequest {
   readonly quads: Quad[];
-  readonly phaseContext: DurableSyncPhaseContext;
+  /** Whole-operation cancellation only; plain inserts have no auth deadline. */
+  readonly signal?: AbortSignal;
 }
 
 export interface DurableSyncGraphScopedStoreRequest {
   readonly asset: VerifiedGraphScopedAsset;
-  readonly phaseContext: DurableSyncPhaseContext;
+  readonly authenticationDeadline: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface DurableSyncContext {
@@ -203,10 +205,14 @@ export interface LegacyDurableSyncContext extends Omit<
 
 function legacyDurableSyncBudget(
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number,
+  contextGraphCount: number,
 ): DurableSyncBudget {
   let currentContextGraphDeadline: number | undefined;
+  let nextContextGraphIndex = 0;
   return {
-    fetchDeadline: (remainingContextGraphs) => {
+    fetchDeadline: () => {
+      const remainingContextGraphs = Math.max(1, contextGraphCount - nextContextGraphIndex);
+      nextContextGraphIndex += 1;
       currentContextGraphDeadline = createContextGraphSyncDeadline(remainingContextGraphs);
       return currentContextGraphDeadline;
     },
@@ -232,7 +238,10 @@ function normalizeDurableSyncContext(
   } = context;
   return {
     ...sharedContext,
-    durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),
+    durableSyncBudget: legacyDurableSyncBudget(
+      createContextGraphSyncDeadline,
+      sharedContext.contextGraphIds.length,
+    ),
     fetchSyncPages: (request) => fetchSyncPages(
       request.ctx,
       request.remotePeerId,
@@ -240,14 +249,14 @@ function normalizeDurableSyncContext(
       request.includeSharedMemory,
       request.phase,
       request.graphUri,
-      request.phaseContext.deadline,
+      request.fetchContext.deadline,
       request.snapshotRef,
       request.sinceBatchId,
       request.exactAssetUals,
     ),
     storeInsert: ({ quads }) => storeInsert(quads),
     storeGraphScopedAsset: storeGraphScopedAsset
-      ? ({ asset, phaseContext }) => storeGraphScopedAsset(asset, phaseContext.deadline)
+      ? ({ asset, authenticationDeadline }) => storeGraphScopedAsset(asset, authenticationDeadline)
       : undefined,
   };
 }
@@ -332,7 +341,7 @@ async function runDurableSyncWithBudget(
     error.name = 'AbortError';
     throw error;
   };
-  const phaseContext = (deadline: number): DurableSyncPhaseContext => ({
+  const fetchContext = (deadline: number): DurableSyncFetchContext => ({
     deadline,
     signal,
   });
@@ -385,7 +394,7 @@ async function runDurableSyncWithBudget(
     logInfo(ctx, `Stopping durable sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
     return true;
   };
-  for (const [index, pid] of contextGraphIds.entries()) {
+  for (const pid of contextGraphIds) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -402,9 +411,8 @@ async function runDurableSyncWithBudget(
       throwIfOperationAborted();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
-      const remainingContextGraphs = contextGraphIds.length - index;
-      const deadline = durableSyncBudget.fetchDeadline(remainingContextGraphs);
-      const fetchPhaseContext = phaseContext(deadline);
+      const deadline = durableSyncBudget.fetchDeadline();
+      const activeFetchContext = fetchContext(deadline);
       const exactAssetUals = exactAssetUalsFor?.(pid);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -428,7 +436,7 @@ async function runDurableSyncWithBudget(
         graphUri,
         sinceBatchId,
         exactAssetUals,
-        phaseContext: fetchPhaseContext,
+        fetchContext: activeFetchContext,
       });
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
@@ -672,12 +680,12 @@ async function runDurableSyncWithBudget(
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
         ? durableSyncBudget.graphScopedAuthenticationDeadline()
         : deadline;
-      const storePhaseContext = phaseContext(graphScopedAuthenticationDeadline);
       for (const asset of partitioned.assets) {
         throwIfOperationAborted();
         const outcome = await storeGraphScopedAsset!({
           asset,
-          phaseContext: storePhaseContext,
+          authenticationDeadline: graphScopedAuthenticationDeadline,
+          signal,
         });
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
@@ -700,7 +708,7 @@ async function runDurableSyncWithBudget(
         throwIfOperationAborted();
         await storeInsert({
           quads: partitioned.remainingData,
-          phaseContext: storePhaseContext,
+          signal,
         });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingData.length,
@@ -711,7 +719,7 @@ async function runDurableSyncWithBudget(
         throwIfOperationAborted();
         await storeInsert({
           quads: partitioned.remainingMeta,
-          phaseContext: storePhaseContext,
+          signal,
         });
         recordDurableSyncDiagnostics(accumulator, {
           insertedTriples: partitioned.remainingMeta.length,

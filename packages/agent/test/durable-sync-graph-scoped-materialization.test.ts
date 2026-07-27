@@ -235,8 +235,8 @@ function runGraphScopedDurableSync(options: {
       dataRejectedMissingMeta: 0,
     }),
     storeInsert: async () => {},
-    storeGraphScopedAsset: ({ asset, phaseContext }) => (
-      options.storeGraphScopedAsset(asset, phaseContext.deadline)
+    storeGraphScopedAsset: ({ asset, authenticationDeadline }) => (
+      options.storeGraphScopedAsset(asset, authenticationDeadline)
     ),
     deleteCheckpoint: options.deleteCheckpoint ?? (() => {}),
     setCheckpoint: options.setCheckpoint ?? (() => {}),

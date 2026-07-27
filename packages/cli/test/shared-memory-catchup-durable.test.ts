@@ -138,6 +138,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       {
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
     expect(JSON.parse(res.body)).toMatchObject({
@@ -255,6 +256,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       {
         totalTimeoutMs: 299_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
 
@@ -317,6 +319,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       {
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
     expect(JSON.parse(res.body)).toMatchObject({
@@ -762,6 +765,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
         {
           totalTimeoutMs: 1_000,
           signal: expect.any(AbortSignal),
+          requireAbortableDurableLane: true,
         },
       );
     } finally {
@@ -885,6 +889,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       {
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
 
@@ -1040,6 +1045,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       {
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
     expect(syncFromPeer).toHaveBeenCalledWith(
@@ -1050,6 +1056,7 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       {
         totalTimeoutMs: 109_000,
         signal: expect.any(AbortSignal),
+        requireAbortableDurableLane: true,
       },
     );
 

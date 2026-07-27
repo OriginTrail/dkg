@@ -130,7 +130,7 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'meta',
         graphUri: expect.any(String),
-        phaseContext: expect.objectContaining({
+        fetchContext: expect.objectContaining({
           deadline: expect.any(Number),
         }),
       }),
@@ -173,7 +173,7 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        phaseContext: expect.objectContaining({
+        fetchContext: expect.objectContaining({
           deadline: expect.any(Number),
         }),
       }),
@@ -216,7 +216,7 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        phaseContext: expect.objectContaining({
+        fetchContext: expect.objectContaining({
           deadline: expect.any(Number),
         }),
       }),
@@ -267,7 +267,7 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        phaseContext: expect.objectContaining({
+        fetchContext: expect.objectContaining({
           deadline: expect.any(Number),
         }),
       }),
@@ -321,7 +321,7 @@ describe('sync requester progress accounting', () => {
         includeSharedMemory: false,
         phase: 'data',
         graphUri: expect.any(String),
-        phaseContext: expect.objectContaining({
+        fetchContext: expect.objectContaining({
           deadline: expect.any(Number),
         }),
       }),
@@ -525,9 +525,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls[0]![0].quads).toEqual([metaQuad]);
-    expect(storeInsert.calls[0]![0].phaseContext).toMatchObject({
-      deadline: expect.any(Number),
-    });
+    expect(storeInsert.calls[0]![0]).toHaveProperty('signal', undefined);
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toHaveLength(1);
     expect(setCheckpoint.calls).toContainEqual(['meta-only-cg:meta', 5]);
@@ -732,9 +730,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toHaveLength(1);
     expect(storeInsert.calls[0]![0].quads).toEqual([metaQuad]);
-    expect(storeInsert.calls[0]![0].phaseContext).toMatchObject({
-      deadline: expect.any(Number),
-    });
+    expect(storeInsert.calls[0]![0]).toHaveProperty('signal', undefined);
     expect(deleteCheckpoint.calls).toHaveLength(1);
     expect(deleteCheckpoint.calls).toContainEqual(['meta-only-complete:meta']);
     expect(setCheckpoint.calls).toEqual([]);
@@ -789,9 +785,7 @@ describe('sync requester progress accounting', () => {
       [
         expect.objectContaining({
           quads: [metaQuad],
-          phaseContext: expect.objectContaining({
-            deadline: expect.any(Number),
-          }),
+          signal: undefined,
         }),
       ],
     ]);

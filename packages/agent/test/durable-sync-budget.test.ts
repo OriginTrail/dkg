@@ -7,8 +7,8 @@ import {
   runDurableSync,
   type DurableSyncBudget,
   type DurableSyncContext,
+  type DurableSyncFetchContext,
   type DurableSyncGraphScopedStoreRequest,
-  type DurableSyncPhaseContext,
   type DurableSyncStoreInsertRequest,
   type LegacyDurableSyncContext,
 } from '../src/sync/requester/durable-sync.js';
@@ -73,7 +73,7 @@ function requesterBudgetContext(options: {
   signal?: AbortSignal;
   graphScoped?: boolean;
   onFetchPhase?: (phase: 'data' | 'meta') => void;
-  onFetchPhaseContext?: (phaseContext: DurableSyncPhaseContext) => void;
+  onFetchContext?: (fetchContext: DurableSyncFetchContext) => void;
   onVerify?: () => void;
   storeInsert?: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   storeGraphScopedAsset: (
@@ -95,10 +95,10 @@ function requesterBudgetContext(options: {
     signal: options.signal,
     fetchSyncPages: async ({
       phase,
-      phaseContext,
+      fetchContext,
     }) => {
       options.onFetchPhase?.(phase);
-      options.onFetchPhaseContext?.(phaseContext);
+      options.onFetchContext?.(fetchContext);
       return phase === 'data'
         ? requesterPage(phase, dataQuads)
         : requesterPage(phase, metadataQuads);
@@ -232,7 +232,7 @@ describe('durable sync deadline budget', () => {
     expect(completedFetchPhases).toEqual(['meta', 'data']);
     expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.deadline).toBe(
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].authenticationDeadline).toBe(
       1_800_000_090_000,
     );
   });
@@ -255,7 +255,7 @@ describe('durable sync deadline budget', () => {
 
     expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
     expect(
-      storeGraphScopedAsset.mock.calls.map(([request]) => request.phaseContext.deadline),
+      storeGraphScopedAsset.mock.calls.map(([request]) => request.authenticationDeadline),
     ).toEqual([
       authenticationDeadline,
       authenticationDeadline,
@@ -286,7 +286,7 @@ describe('durable sync deadline budget', () => {
     });
 
     expect(graphScopedAuthenticationDeadline).toHaveBeenCalledTimes(1);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.deadline).toBe(
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].authenticationDeadline).toBe(
       1_800_000_105_000,
     );
   });
@@ -431,13 +431,13 @@ describe('durable sync deadline budget', () => {
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
   });
 
-  it('passes one explicit phase context through fetch and graph-scoped storage', async () => {
+  it('passes distinct fetch and graph-scoped authentication boundaries', async () => {
     const controller = new AbortController();
-    const fetchPhaseContexts: DurableSyncPhaseContext[] = [];
+    const fetchContexts: DurableSyncFetchContext[] = [];
     const storeGraphScopedAsset = vi.fn(async ({
-      phaseContext,
+      signal,
     }: DurableSyncGraphScopedStoreRequest): Promise<GraphScopedMaterializationOutcome> => (
-      phaseContext.signal?.aborted ? 'stale' : 'applied'
+      signal?.aborted ? 'stale' : 'applied'
     ));
 
     await runRequesterBudgetHarness({
@@ -446,16 +446,19 @@ describe('durable sync deadline budget', () => {
         graphScopedAuthenticationDeadline: () => Date.now() + 90_000,
       },
       signal: controller.signal,
-      onFetchPhaseContext: (phaseContext) => fetchPhaseContexts.push(phaseContext),
+      onFetchContext: (fetchContext) => fetchContexts.push(fetchContext),
       storeGraphScopedAsset,
     });
 
-    expect(fetchPhaseContexts).toHaveLength(2);
+    expect(fetchContexts).toHaveLength(2);
     expect(
-      fetchPhaseContexts.every((phaseContext) => phaseContext.signal === controller.signal),
+      fetchContexts.every((fetchContext) => fetchContext.signal === controller.signal),
     ).toBe(true);
-    expect(storeGraphScopedAsset.mock.calls[0]?.[0].phaseContext.signal).toBe(
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].signal).toBe(
       controller.signal,
+    );
+    expect(storeGraphScopedAsset.mock.calls[0]?.[0].authenticationDeadline).toBeGreaterThan(
+      Date.now(),
     );
   });
 

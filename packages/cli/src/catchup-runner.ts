@@ -271,7 +271,11 @@ export async function runDurableCatchupLeg(
         undefined,
         undefined,
         undefined,
-        { totalTimeoutMs: phaseTimeoutMs, signal: controller.signal },
+        {
+          totalTimeoutMs: phaseTimeoutMs,
+          signal: controller.signal,
+          requireAbortableDurableLane: true,
+        },
       );
       const summary = summarizeDurableLeg(detailed);
       return {
@@ -292,7 +296,11 @@ export async function runDurableCatchupLeg(
           [contextGraphId],
           undefined,
           undefined,
-          { totalTimeoutMs: phaseTimeoutMs, signal: controller.signal },
+          {
+            totalTimeoutMs: phaseTimeoutMs,
+            signal: controller.signal,
+            requireAbortableDurableLane: true,
+          },
         )
         : 0,
       state: 'legacy',

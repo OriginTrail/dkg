@@ -833,6 +833,12 @@ export type DurableSyncOptions = {
    * materialization check it before any subsequent commit boundary.
    */
   signal?: AbortSignal;
+  /**
+   * Require a lane whose fetch, authentication, and commit boundaries honor
+   * the operation signal. This is an explicit protocol-selection requirement;
+   * the mere presence of a signal does not select a durable lane.
+   */
+  requireAbortableDurableLane?: boolean;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
@@ -4241,11 +4247,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Gate = this node's own changelog is enabled (its store is ChangelogStore-wrapped) —
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
     // The changelog lane does not yet expose cancellable verification/store
-    // boundaries. Explicitly bounded foreground callers therefore stay on the
-    // fully signal-aware legacy lane; otherwise the HTTP deadline could return
-    // while a detached changelog apply commits later.
+    // boundaries. Callers that explicitly require those boundaries stay on the
+    // fully signal-aware legacy lane; a signal by itself remains an operation
+    // control and does not silently choose the sync protocol.
     if (
-      !options?.signal
+      !options?.requireAbortableDurableLane
       && asChangelogReader(this.store) !== null
       && contextGraphIds.length > 0
     ) {
@@ -4492,7 +4498,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         graphUri,
         snapshotRef,
         sinceBatchId,
-        phaseContext,
+        fetchContext,
       }) => {
         return this.fetchSyncPages(
           opCtx,
@@ -4501,10 +4507,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           includeSharedMemory,
           phase,
           graphUri,
-          phaseContext.deadline,
+          fetchContext.deadline,
           snapshotRef,
           sinceBatchId,
-          phaseContext.signal,
+          fetchContext.signal,
           undefined,
           onVerifiedFullSnapshot !== undefined,
           exactAssetUals,
@@ -4514,23 +4520,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactAssetUalsFor: exactAssetUals ? () => exactAssetUals : undefined,
       stopOnBackoffWorthyFailure,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: ({ quads, phaseContext }) => {
+      storeInsert: ({ quads, signal: operationSignal }) => {
         return this.insertSyncedQuadsAndInvalidateListCache(quads, {
           priority: 'background',
           source: 'agent.durableSync.storeInsert',
-          signal: phaseContext.signal,
+          signal: operationSignal,
         });
       },
       storeGraphScopedAsset: async ({
         asset,
-        phaseContext,
+        authenticationDeadline,
+        signal: operationSignal,
       }) => {
-        const operationSignal = phaseContext.signal;
         const authentication = await authenticateDurableGraphScopedAsset({
           chain: this.chain,
           asset,
           verifyContextGraphBinding,
-          deadline: phaseContext.deadline,
+          deadline: authenticationDeadline,
           signal: operationSignal,
           onRetry: (error, attempt, maxAttempts) => {
             this.log.warn(
