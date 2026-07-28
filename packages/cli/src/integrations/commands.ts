@@ -31,15 +31,32 @@ export function registerIntegrationCommands(program: Command): void {
     .command('integration')
     .description('Install and inspect community DKG integrations from the registry');
 
-  // `search` discovers what EXISTS in the registry; `list` reports what is
-  // installed HERE. That split is what the registry README documents and what
-  // npm/apt users expect. `list` previously did what `search` does now.
+  // Three verbs, deliberately: `list` and `search` are siblings over the same
+  // thing (the registry — all entries vs. filtered), and the one that reports
+  // something genuinely different gets a genuinely different word (`installed`).
+  //
+  // An earlier revision of this PR instead repurposed `list` to mean "installed
+  // here". That reads badly: `list` and `search` sound like near-synonyms, so a
+  // user typing `list` and getting local state has nothing in the name to warn
+  // them — and it silently changed the `--json` shape of a shipped command.
+  // `installed` needs no convention knowledge and breaks nothing.
   integrationCmd
     .command('search [keyword]')
-    .description('Search integrations available in the registry')
+    .description('Search registry integrations by keyword')
     .option('--tier <tier>', 'Minimum trust tier: community | verified | featured', 'verified')
     .option('--json', 'Print the raw registry entries as JSON')
     .action(async (keyword: string | undefined, opts: { tier: string; json?: boolean }) => {
+      await runRegistryListing(keyword, opts, 'search');
+    });
+
+  // Shared body for `list` and `search` — same view of the registry, the only
+  // difference being an optional keyword filter. Kept in one place so the two
+  // cannot drift in output or --json shape.
+  async function runRegistryListing(
+    keyword: string | undefined,
+    opts: { tier: string; json?: boolean },
+    verb: 'list' | 'search',
+  ): Promise<void> {
       try {
         const cfg = resolveRegistryConfig();
         const { entries, failures } = await fetchAllEntries(cfg);
@@ -80,14 +97,25 @@ export function registerIntegrationCommands(program: Command): void {
           }
         }
       } catch (err) {
-        console.error(`Failed to search integrations: ${toMessage(err)}`);
+        console.error(`Failed to ${verb} integrations: ${toMessage(err)}`);
         process.exit(1);
       }
+  }
+
+  // Unchanged from before this PR: browse the registry, `{ entries, failures }`
+  // under --json. `search` is the same view with a keyword filter.
+  integrationCmd
+    .command('list')
+    .description('List integrations available in the registry')
+    .option('--tier <tier>', 'Minimum trust tier: community | verified | featured', 'verified')
+    .option('--json', 'Print the raw registry entries as JSON')
+    .action(async (opts: { tier: string; json?: boolean }) => {
+      await runRegistryListing(undefined, opts, 'list');
     });
 
   integrationCmd
-    .command('list')
-    .description('List which registry integrations are installed on this machine')
+    .command('installed')
+    .description('Show which registry integrations are installed on this machine')
     .option('--tier <tier>', 'Minimum trust tier to consider: community | verified | featured', 'community')
     .option('--json', 'Print the raw detection result as JSON')
     .action(async (opts: { tier: string; json?: boolean }) => {
@@ -124,7 +152,7 @@ export function registerIntegrationCommands(program: Command): void {
         console.log('');
         console.log(
           `Checked ${known.length} detectable entr${known.length === 1 ? 'y' : 'ies'}. ` +
-            `Use \`dkg integration search\` to browse the registry.`,
+            `Use \`dkg integration list\` to browse the registry.`,
         );
       } catch (err) {
         console.error(`Failed to list installed integrations: ${toMessage(err)}`);

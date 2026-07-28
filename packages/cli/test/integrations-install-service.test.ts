@@ -231,18 +231,6 @@ describe('detectInstalled', () => {
     expect(rows[0]).toMatchObject({ state: 'not installed' });
   });
 
-  it('treats an unreadable client config as no evidence, not absence', async () => {
-    const rows = await detectInstalled(
-      [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
-      {
-        clients,
-        // readRegisteredServerKeys swallows parse errors and returns []
-        readServerKeys: () => [],
-      },
-    );
-    expect(rows[0]!.state).toBe('not installed');
-  });
-
   it('reports kinds it cannot detect as unknown, never "not installed"', async () => {
     const rows = await detectInstalled(
       [

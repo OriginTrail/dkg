@@ -36,17 +36,6 @@ function assertMcp(spec: IntegrationEntry['install']): asserts spec is InstallMc
   if (spec.kind !== 'mcp') {
     throw new Error(`install-mcp received non-mcp install spec (kind=${spec.kind})`);
   }
-  // `args` is optional in the registry schema, so an args-less entry is
-  // READABLE (it lists and inspects fine) but not INSTALLABLE. Refuse here
-  // rather than emitting a config block whose `args` key JSON.stringify would
-  // silently drop — that would leave the client launching a bare `command`
-  // with no package to run, and the failure would surface inside the user's
-  // MCP client rather than here.
-  if (!Array.isArray(spec.args) || spec.args.length === 0) {
-    throw new Error(
-      `Registry entry declares no install.args, so no launch command can be built for "${spec.command}". Report this to the integration maintainer.`,
-    );
-  }
 }
 
 // Best-effort token read from the standard daemon-written path. Matches the
@@ -110,7 +99,13 @@ export async function installMcp(options: InstallMcpOptions): Promise<InstallMcp
 
   const serverBlock: Record<string, unknown> = {
     command: entry.install.command,
-    args: entry.install.args,
+    // `args` is optional in the registry schema, and legitimately so: a server
+    // launched by a binary already on PATH needs none, whereas an `npx`-style
+    // launcher carries the package here. Normalise to [] rather than letting
+    // JSON.stringify drop an `undefined` key — the emitted block stays
+    // well-formed either way, and judging whether a given command needs args is
+    // the entry author's call, not the installer's.
+    args: entry.install.args ?? [],
     env,
   };
 

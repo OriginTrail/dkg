@@ -705,26 +705,48 @@ describe('registry ↔ CLI contract', () => {
   });
 });
 
-describe('installMcp args guard', () => {
+describe('installMcp with an args-less entry', () => {
+  // `args` is optional in the registry schema, and legitimately so: a server
+  // launched by a binary already on PATH needs none, while an npx-style
+  // launcher carries the package there. The installer must emit a well-formed
+  // block rather than dropping the key (JSON.stringify discards `undefined`)
+  // or refusing the entry — judging whether a given command needs args is the
+  // entry author's call, not the installer's.
   const mcpNoArgs: IntegrationEntry = {
     ...baseEntry,
     slug: 'no-args',
-    install: { kind: 'mcp', command: 'npx', supportedClients: ['cursor'] },
+    install: { kind: 'mcp', command: 'my-mcp-server', supportedClients: ['cursor'] },
   };
 
-  it('refuses an entry with no args instead of emitting a broken config', async () => {
-    // JSON.stringify drops undefined keys, so without this guard the emitted
-    // block would carry no `args` at all and the client would launch a bare
-    // `npx` with nothing to run.
-    await expect(installMcp({ entry: mcpNoArgs, apiUrl: 'http://127.0.0.1:9200' })).rejects.toThrow(
-      /no install\.args/i,
-    );
+  it('emits args: [] rather than omitting the key', async () => {
+    const res = await installMcp({
+      entry: mcpNoArgs,
+      apiUrl: 'http://127.0.0.1:9200',
+      logger: () => {},
+    });
+    const parsed = JSON.parse(res.mcpJson) as {
+      mcpServers: Record<string, { command: string; args: unknown }>;
+    };
+    const block = parsed.mcpServers['no-args']!;
+    expect(block.command).toBe('my-mcp-server');
+    expect(block.args).toEqual([]);
+    expect(res.mcpJson).toContain('"args"');
   });
 
-  it('refuses an entry with empty args', async () => {
-    const empty: IntegrationEntry = { ...mcpNoArgs, install: { kind: 'mcp', command: 'npx', args: [] } };
-    await expect(installMcp({ entry: empty, apiUrl: 'http://127.0.0.1:9200' })).rejects.toThrow(
-      /no install\.args/i,
-    );
+  it('preserves declared args when present', async () => {
+    const withArgs: IntegrationEntry = {
+      ...mcpNoArgs,
+      slug: 'with-args',
+      install: { kind: 'mcp', command: 'npx', args: ['-y', 'pkg@1.0.0'] },
+    };
+    const res = await installMcp({
+      entry: withArgs,
+      apiUrl: 'http://127.0.0.1:9200',
+      logger: () => {},
+    });
+    const parsed = JSON.parse(res.mcpJson) as {
+      mcpServers: Record<string, { args: string[] }>;
+    };
+    expect(parsed.mcpServers['with-args']!.args).toEqual(['-y', 'pkg@1.0.0']);
   });
 });
