@@ -2,25 +2,24 @@
 // `runtime: "npm-global"`.
 //
 // A service is a long-running process rather than a one-shot command, but the
-// npm-global mechanics are identical to `install.kind: "cli"` — same global
-// install, same pinned version, same provenance gate. The difference is the
-// post-install guidance: the operator needs to know how to keep it running and
-// which env vars it requires, not "run --help to get started".
+// npm-global mechanics are identical to `install.kind: "cli"`, so both share
+// installNpmGlobalPackage(). What differs is the post-install guidance: the
+// operator needs to know how to keep it running and which env vars it requires,
+// not "run --help to get started".
 //
 // `docker` and `binary` runtimes are NOT handled here; commands.ts keeps them
 // on the explicit not-implemented path.
 
-import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { dkgDir } from '../config.js';
+import {
+  installNpmGlobalPackage,
+  runCommand,
+  type InstallRunner,
+  type ProvenanceVerifier,
+} from './install-npm-global.js';
 import type { InstallService, IntegrationEntry } from './schema.js';
-import { verifyNpmProvenance, type ProvenanceCheckResult } from './verify-npm-provenance.js';
-
-export type ProvenanceVerifier = (
-  pkg: string,
-  version: string,
-  expectedRepo: string,
-) => Promise<ProvenanceCheckResult>;
-
-export type InstallRunner = (cmd: string, args: string[]) => Promise<number>;
+import type { ProvenanceCheckResult } from './verify-npm-provenance.js';
 
 export interface InstallServiceOptions {
   entry: IntegrationEntry;
@@ -57,6 +56,8 @@ function assertNpmGlobalService(
         `docker and binary runtimes are not yet automated.`,
     );
   }
+  // The schema requires package + version; `binary` is optional and defaults to
+  // the package name (see resolveBinary).
   if (!spec.npmGlobal?.package || !spec.npmGlobal?.version) {
     throw new Error(
       `Registry entry declares runtime "npm-global" but no npmGlobal.package/version. ` +
@@ -65,33 +66,52 @@ function assertNpmGlobalService(
   }
 }
 
-function runCommand(cmd: string, args: string[]): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32' });
-    child.on('error', reject);
-    child.on('close', (code) => resolve(code ?? 1));
-  });
+/**
+ * The command an operator runs to start the service. `npmGlobal.binary` is
+ * OPTIONAL in the registry schema — it is only present "if different from the
+ * package name" — so fall back to the package name rather than printing
+ * "Start it with: undefined".
+ */
+function resolveBinary(npmGlobal: NpmGlobalService['npmGlobal']): string {
+  return npmGlobal.binary?.trim() || npmGlobal.package;
 }
 
 function buildPostInstructions(entry: IntegrationEntry, binary: string): string[] {
-  const lines: string[] = [];
   const spec = entry.install as InstallService;
+  const lines: string[] = [];
   lines.push(`This integration is a long-running service. Start it with:`);
   lines.push(`  ${binary}`);
+
   const env = spec.envRequired ?? [];
   if (env.length > 0) {
     lines.push('');
-    lines.push('It requires these environment variables:');
-    for (const name of env) lines.push(`  ${name}`);
+    lines.push('Required environment:');
+    for (const name of env) {
+      if (name === 'DKG_AUTH_TOKEN') {
+        lines.push(`  ${name}  — pull from \`dkg auth show\` or ${join(dkgDir(), 'auth.token')}`);
+      } else if (name === 'DKG_API_URL') {
+        lines.push(`  ${name}    — default http://127.0.0.1:9200`);
+      } else {
+        lines.push(`  ${name}`);
+      }
+    }
   }
+
   if (spec.portsOpened?.length) {
     lines.push('');
     lines.push(`It listens on: ${spec.portsOpened.join(', ')}`);
   }
+
+  if (spec.usageHint) {
+    lines.push('');
+    lines.push('Usage:');
+    for (const line of spec.usageHint.split('\n')) lines.push(`  ${line}`);
+  }
+
   lines.push('');
   lines.push(
-    `Keep it running under your own process manager (systemd, pm2, docker, a terminal multiplexer) — ` +
-      `the DKG CLI does not supervise integrations.`,
+    `Keep it running under your own process manager (systemd, pm2, docker, a terminal ` +
+      `multiplexer) — the DKG CLI does not supervise integrations.`,
   );
   lines.push(`Setup details: ${entry.repo}`);
   return lines;
@@ -100,54 +120,26 @@ function buildPostInstructions(entry: IntegrationEntry, binary: string): string[
 export async function installService(
   options: InstallServiceOptions,
 ): Promise<InstallServiceResult> {
-  const {
-    entry,
-    dryRun = false,
-    skipProvenance = false,
-    verifier = verifyNpmProvenance,
-    runner = runCommand,
-    logger = console.log,
-  } = options;
+  const { entry, dryRun, skipProvenance, verifier, runner = runCommand, logger } = options;
   assertNpmGlobalService(entry.install);
-  const { package: pkg, version, binary } = entry.install.npmGlobal;
+  const { package: pkg, version } = entry.install.npmGlobal;
+  const binary = resolveBinary(entry.install.npmGlobal);
 
-  const command = 'npm';
-  const args = ['install', '--global', `${pkg}@${version}`];
+  const result = await installNpmGlobalPackage({
+    entry,
+    pkg,
+    version,
+    dryRun,
+    skipProvenance,
+    verifier,
+    runner,
+    logger,
+    label: 'service',
+  });
 
-  // Same provenance gate as installCli: verify BEFORE touching the user's
-  // global npm, skipped in dry-run and under --no-verify-provenance.
-  let provenance: ProvenanceCheckResult | undefined;
-  if (!dryRun && !skipProvenance) {
-    logger(`Verifying publish-time provenance for ${pkg}@${version}...`);
-    provenance = await verifier(pkg, version, entry.repo);
-    if (!provenance.ok) {
-      logger('');
-      logger('  Provenance check FAILED:');
-      for (const r of provenance.reasons) logger(`    - ${r}`);
-      logger('');
-      throw new Error(
-        `Refusing to install ${pkg}@${version}: the tarball on npm is not ` +
-          `cryptographically bound to ${entry.repo}. Re-run with --no-verify-provenance ` +
-          `to install anyway.`,
-      );
-    }
-    logger(`  ok — tarball is attested and points at ${entry.repo}.`);
-    logger('');
-  }
-
-  logger(`Installing service ${pkg}@${version} globally via npm...`);
-  logger(`  ${command} ${args.join(' ')}`);
-
-  const postInstructions = buildPostInstructions(entry, binary);
-
-  if (dryRun) {
-    return { command, args, exitCode: 0, binary, postInstructions, provenance };
-  }
-
-  const exitCode = await runner(command, args);
-  if (exitCode !== 0) {
-    throw new Error(`npm install failed with exit code ${exitCode}. See output above for details.`);
-  }
-
-  return { command, args, exitCode, binary, postInstructions, provenance };
+  return {
+    ...result,
+    binary,
+    postInstructions: buildPostInstructions(entry, binary),
+  };
 }

@@ -491,7 +491,7 @@ function detectContext(
     : { context: 'installed', monorepoRoot: null };
 }
 
-interface ClientTarget {
+export interface ClientTarget {
   name: string;
   configPath: string;
   /** Pretty path for display, with `~` substituted back in. */
@@ -1010,6 +1010,37 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
     default:
       throw new Error(`Unknown client config format: ${String(format)}`);
   }
+}
+
+/**
+ * Names of every MCP server registered in a client's config, whatever container
+ * that client uses (`mcpServers`, `servers`, `mcp_servers`) and whatever format
+ * it is written in (JSON, TOML).
+ *
+ * `dkg mcp setup` cares about one fixed leaf (`…dkg`); integration detection
+ * needs the sibling keys instead, because an installed integration registers
+ * itself under its own slug. Exposed here so `dkg integration list` reads the
+ * same client targets and container paths that `dkg mcp setup` writes, rather
+ * than maintaining a second, narrower list that silently misses clients.
+ *
+ * Returns [] for a missing, unreadable, or unparseable config — absence of
+ * evidence, not evidence of absence.
+ */
+export function readRegisteredServerKeys(target: ClientTarget): string[] {
+  let body: Record<string, unknown>;
+  try {
+    body = readConfigBody(target);
+  } catch {
+    return [];
+  }
+  const { head } = splitEntryPath(target.entryPath);
+  let cursor: unknown = body;
+  for (const segment of head) {
+    if (cursor === null || typeof cursor !== 'object') return [];
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  if (cursor === null || typeof cursor !== 'object') return [];
+  return Object.keys(cursor as Record<string, unknown>);
 }
 
 function serialiseTomlEntryOnly(

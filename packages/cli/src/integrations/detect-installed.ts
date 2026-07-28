@@ -8,15 +8,15 @@
 // that may never have happened.
 //
 // Coverage matches what the installers actually do:
-//   cli     -> `npm ls -g` for install.package
-//   mcp     -> the MCP client configs installMcp points users at, keyed on slug
-//   others  -> undetectable; reported as 'unknown', never as 'not installed'
+//   cli                     -> `npm ls -g` for install.package
+//   service (npm-global)    -> `npm ls -g` for install.npmGlobal.package
+//   mcp                     -> the client configs `dkg mcp setup` knows about,
+//                              via detectClients() + readRegisteredServerKeys()
+//   others                  -> undetectable; 'unknown', never 'not installed'
 
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { detectClients, readRegisteredServerKeys, type ClientTarget } from '../mcp-setup.js';
 import type { IntegrationEntry } from './schema.js';
 
 const execFileAsync = promisify(execFile);
@@ -31,27 +31,13 @@ export interface InstalledRow {
   detail: string;
 }
 
-/** Injectable for tests so nothing spawns npm or touches a real home dir. */
+/** Injectable so tests spawn no npm and touch no real config files. */
 export interface DetectDeps {
   listGlobalNpm?: () => Promise<Record<string, string>>;
-  readClientConfig?: (path: string) => Promise<string | null>;
-  mcpClientPaths?: Array<{ client: string; path: string }>;
-}
-
-// The same locations install-mcp.ts tells users to paste into. Kept in sync
-// with that list; if one moves, both should move.
-export function defaultMcpClientPaths(): Array<{ client: string; path: string }> {
-  return [
-    { client: 'Cursor', path: join(homedir(), '.cursor', 'mcp.json') },
-    {
-      client: 'Claude Desktop',
-      path: join(homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
-    },
-    {
-      client: 'Claude Desktop',
-      path: join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'Claude', 'claude_desktop_config.json'),
-    },
-  ];
+  /** Defaults to the same client targets `dkg mcp setup` registers into. */
+  clients?: ClientTarget[];
+  /** Defaults to reading each client's registered server keys. */
+  readServerKeys?: (target: ClientTarget) => string[];
 }
 
 /** `npm ls -g --json --depth=0` -> { packageName: version }. Empty on failure. */
@@ -75,12 +61,19 @@ async function listGlobalNpmPackages(): Promise<Record<string, string>> {
   }
 }
 
-async function readIfPresent(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, 'utf8');
-  } catch {
-    return null;
+/** The npm package an entry installs globally, if any. */
+function globalNpmPackageFor(
+  install: IntegrationEntry['install'],
+): { package: string; version: string } | null {
+  if (install.kind === 'cli') {
+    return { package: install.package, version: install.version };
   }
+  // A service installed via npm-global lands in exactly the same place as a
+  // cli install, so it is detectable the same way.
+  if (install.kind === 'service' && install.runtime === 'npm-global' && install.npmGlobal) {
+    return { package: install.npmGlobal.package, version: install.npmGlobal.version };
+  }
+  return null;
 }
 
 /**
@@ -91,71 +84,64 @@ export async function detectInstalled(
   entries: IntegrationEntry[],
   deps: DetectDeps = {},
 ): Promise<InstalledRow[]> {
-  const needsNpm = entries.some((e) => e.install.kind === 'cli');
+  const needsNpm = entries.some((e) => globalNpmPackageFor(e.install) !== null);
   const needsMcp = entries.some((e) => e.install.kind === 'mcp');
 
   const globals = needsNpm ? await (deps.listGlobalNpm ?? listGlobalNpmPackages)() : {};
 
-  // slug -> the client(s) whose config declares it as an MCP server
+  // slug -> the client(s) whose config registers a server under that name
   const wiredMcp = new Map<string, string[]>();
   if (needsMcp) {
-    const paths = deps.mcpClientPaths ?? defaultMcpClientPaths();
-    const read = deps.readClientConfig ?? readIfPresent;
-    for (const { client, path } of paths) {
-      const raw = await read(path);
-      if (!raw) continue;
-      let servers: Record<string, unknown> = {};
-      try {
-        servers = (JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
-      } catch {
-        continue; // a client config we can't parse is not evidence either way
-      }
-      for (const key of Object.keys(servers)) {
+    const clients = deps.clients ?? detectClients();
+    const readKeys = deps.readServerKeys ?? readRegisteredServerKeys;
+    for (const target of clients) {
+      for (const key of readKeys(target)) {
         const list = wiredMcp.get(key) ?? [];
-        if (!list.includes(client)) list.push(client);
+        if (!list.includes(target.name)) list.push(target.name);
         wiredMcp.set(key, list);
       }
     }
   }
 
   return entries.map((e): InstalledRow => {
-    switch (e.install.kind) {
-      case 'cli': {
-        const found = globals[e.install.package];
-        if (found === undefined) {
-          return { slug: e.slug, kind: 'cli', state: 'not installed', detail: '' };
-        }
-        const pinned = e.install.version;
-        const drift = found && pinned && found !== pinned ? ` (registry pins ${pinned})` : '';
-        return {
-          slug: e.slug,
-          kind: 'cli',
-          state: 'installed',
-          detail: `${e.install.package}@${found || '?'}${drift}`,
-        };
+    const npmPkg = globalNpmPackageFor(e.install);
+    if (npmPkg) {
+      const found = globals[npmPkg.package];
+      if (found === undefined) {
+        return { slug: e.slug, kind: e.install.kind, state: 'not installed', detail: '' };
       }
-      case 'mcp': {
-        // installMcp keys the server block on the entry slug, so that is what
-        // we look for. Note this detects a config the USER pasted — the CLI
-        // never writes it — so the wording is "wired into", not "installed by".
-        const clients = wiredMcp.get(e.slug);
-        if (!clients?.length) {
-          return { slug: e.slug, kind: 'mcp', state: 'not installed', detail: '' };
-        }
-        return {
-          slug: e.slug,
-          kind: 'mcp',
-          state: 'installed',
-          detail: `wired into ${clients.join(', ')}`,
-        };
-      }
-      default:
-        return {
-          slug: e.slug,
-          kind: e.install.kind,
-          state: 'unknown',
-          detail: 'the CLI does not perform this install kind',
-        };
+      const drift = found && npmPkg.version && found !== npmPkg.version
+        ? ` (registry pins ${npmPkg.version})`
+        : '';
+      return {
+        slug: e.slug,
+        kind: e.install.kind,
+        state: 'installed',
+        detail: `${npmPkg.package}@${found || '?'}${drift}`,
+      };
     }
+
+    if (e.install.kind === 'mcp') {
+      // installMcp keys the server block on the entry slug, so that is what we
+      // look for. Note this detects a config the USER pasted — the CLI never
+      // writes it — hence "wired into", not "installed by".
+      const clients = wiredMcp.get(e.slug);
+      if (!clients?.length) {
+        return { slug: e.slug, kind: 'mcp', state: 'not installed', detail: '' };
+      }
+      return {
+        slug: e.slug,
+        kind: 'mcp',
+        state: 'installed',
+        detail: `wired into ${clients.join(', ')}`,
+      };
+    }
+
+    return {
+      slug: e.slug,
+      kind: e.install.kind,
+      state: 'unknown',
+      detail: 'the CLI does not perform this install kind',
+    };
   });
 }
