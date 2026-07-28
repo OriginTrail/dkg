@@ -4,9 +4,54 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.10] - 2026-07-28
+
+This release lands OT-RFC-64, the public author catalog: a node-local subsystem that announces, discovers, fetches, and verifies another author's finalized Knowledge Assets over five new `/dkg/catalog/1/*` libp2p protocols. It is active by default on every node with a data directory, while authoring, auto-publish, and bootstrap targets stay opt-in. Because its persistence opens before networking, such a node now requires a Node runtime exposing `node:sqlite` (Node 22.5 or newer). The rest is durability hardening on paths that could strand, mis-report, or lose verified work. Two changes are operator-visible: one encoded SWM share or promotion is capped at 4 MiB instead of 10 MB, and the dashboard database migrates 30 → 31. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.9).
+
+### Upgrading from 10.0.9
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| RFC-64 persistence requires `node:sqlite` | on a node with a data directory the RFC-64 inventory and the finalization inbox open before networking, so a runtime without `node:sqlite` fails the start with `requires Node runtime support for node:sqlite` | run Node 22.5 or newer; the repo's `.nvmrc` baseline of 22 satisfies this, and `node:sqlite` resolves unflagged on current 22.x. Node releases before 22.5.0 do not ship the module at all. |
+| SWM payload ceiling 10 MB → 4 MiB | one encoded SWM share or promotion above 4 MiB is rejected, and a 10.0.9 peer emitting more is dropped inbound | reduce importer batch size (`dkg-importer` guidance moves 1000 → 400 records) |
+| `@origintrail-official/dkg-agent` declares `"exports"` | deep imports of internal paths fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` | import from the package root |
+| RFC-64 catalog is active by default | first boot creates `DKG_HOME/rfc64-sync/` and serves five new inbound catalog protocols (three without chain configuration) | no action; authoring/auto-publish stays opt-in |
+| Dashboard database migrates 30 → 31 | one additive index table; rolling back to 10.0.9 is safe | no action |
+
+### Added
+
+- **Public author catalog (OT-RFC-64) runs on every node with a data directory** (#1930, #1882, #1929): first boot opens `DKG_HOME/rfc64-sync/` and registers the five catalog protocols, but a graph is answered for only after an operator accepts its current policy snapshot.
+- **Catalog access follows the Context Graph policy cell** (#1835, #1881, #1905): every catalog operation is authorized in both directions against an accepted current `ContextGraphPolicyV1`, and an invite-only graph requires both ends in a roster bound to that policy digest.
+- **Catalog chain state is read at one pinned finalized block** (#1821, #1909, #1911, #1913, #1914, #1915): policy, name binding, and finalized inventory resolve inside one EIP-1898 session, and rows are materialized before the applied-head pointer moves, so no node advertises a head it has not stored.
+- **Opt-in catalog automation: cold start, bootstrap, and auto-advance** (#1819, #1926, #1928, #1927): a node can cold-start a public scope from a named provider, `rfc64PublicCatalogBootstrap` retries pinned provider targets across restarts, and `rfc64PublicCatalogAutoPublish` bridges a confirmed fully-public VM publish into it.
+- **Clear a single terminal publish or share job by exact job ID** (#1883, #1910, #1899): new idempotent `clear-job` routes on the publisher and SWM share APIs remove one terminal record atomically; previously only a status-scoped bulk clear existed.
+
+### Fixed
+
+- **A transient store timeout no longer strands a verified Knowledge Asset outside Verifiable Memory** (#1939): finalization envelopes are now recorded in a durable SQLite inbox before any store work, so a crash or store failure between verification and materialization leaves the graph untouched and the evidence replayable instead of returning `verified-vm-metadata-pending` forever. Recovery surfaces as `finalizationRecovery` on `GET /api/status`.
+- **Durable recovery drains its backlog and reports a truthful verdict** (#1967, #1898, #1908, #1895, #1937, #1906): exact VM repair now spends one peer attempt per asset under a far larger transfer ceiling and rotates the peer order, so large assets no longer time out together. A catch-up leg carries an explicit state, so a run that reached no eligible peer fails instead of reporting success, foreground catch-up retries backpressure, and a named `peerId` is probed.
+- **The store no longer answers routine work with full scans** (#1877, #1959, #1873, #1917): a write racing an in-flight index probe demoted a scoped update to an `O(store)` rebuild that stalled publishes and starved sync; public exact-asset reads are now byte-bounded, and snapshot paging seeks to a persisted checkpoint.
+- **Durable metadata pages no longer split an author seal** (#1916, #1936): pages end on a `(graph, subject)` boundary, so a seal straddling a boundary arrives whole instead of an unverifiable prefix that left curated Context Graphs unable to VM-publish, and a peer can no longer inject a non-IRI `_meta` subject.
+- **Curator no longer silently publishes its own same-named Knowledge Asset** (#1969): author resolution returned the caller's own assertion before the ambiguity check, spending real TRAC and gas on the wrong asset; both VM publish routes now accept `selectedAuthorAgentAddress`, so a caller answered `409 AMBIGUOUS_ASSERTION_AUTHOR` can name one.
+- **Publisher job records survive a crash mid-transition** (#1919, #1935, #1945, #1902): every async publish and share transition is now a single-subject atomic replace instead of a delete-then-insert that could strand it empty and lose the queue row; publisher admin routes also answer a malformed body without a 500.
+- **Transport failures are classified by what they actually mean** (#1942, #1918, #1904): an aborted fetch now fails over instead of failing a publish whose mint is already on chain, an unambiguous pre-mempool reject terminates at once rather than entering recovery, and a failed chain read is no longer a negative authentication verdict.
+
 ### Changed
 
-- **SWM gossip payload ceiling aligned with StorageACK:** one encoded SWM share or promotion is now capped at 4 MiB, matching the untrusted inline StorageACK staging ceiling. GossipSub retains 256 KiB of framing headroom, while the general direct-protocol frame/read limit remains 10 MiB.
+- **SWM gossip payload ceiling aligned with StorageACK** (#1932): one encoded SWM share or promotion is now capped at 4 MiB, matching the untrusted inline StorageACK staging ceiling. GossipSub retains 256 KiB of framing headroom, while the general direct-protocol frame/read limit remains 10 MiB.
+- **`@origintrail-official/dkg-agent` declares an explicit `"exports"` map** (#1835, #1930): it previously had none, so any subpath resolved; it now exposes only the root, `./package.json`, an allowlist of catalog subpaths, and `./dist/*`.
+- **Dashboard SQLite schema 30 → 31** (#1873): adds a `snapshot_page_indexes` table for public-snapshot page offsets; additive, so rolling back to 10.0.9 is safe.
+- **Node UI metric snapshots are collected once a day** (#1981): the collector's interval moves from 30 seconds to 24 hours, cutting dashboard database growth and periodic store-scan counters by roughly three orders of magnitude.
+- **Knowledge Asset metadata states how a confirmation was obtained** (#1920): `_meta` now carries `dkg:confirmationKind`, distinguishing an asset confirmed by its own publish transaction from one rebuilt by a finalized on-chain scan.
+- **Release version set:** all workspace packages move together to 10.0.10.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.9; nodes can upgrade through the normal npm release path.
+
+### Known issues
+
+- A node pinned to a Node release older than 22.5 will not start if it has a data directory: `node:sqlite` does not exist before 22.5.0, and neither the RFC-64 inventory nor the finalization inbox degrades gracefully. The project's Node 22 baseline satisfies this — `node:sqlite` resolves unflagged on current 22.x — but no `engines` field pins the minimum.
 
 ## [10.0.9] - 2026-07-21
 

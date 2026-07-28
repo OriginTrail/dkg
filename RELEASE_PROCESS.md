@@ -223,9 +223,11 @@ dkg start
 
 ## 10) Builder upgrade guides (per release)
 
-Every breaking or builder-impacting release ships a focused upgrade guide alongside the CHANGELOG entry. The guide lives at `docs/UPGRADE_<PRIOR>_TO_<NEW>.md` (e.g. `docs/UPGRADE_RC11_TO_RC12.md`).
+Every breaking or builder-impacting release ships upgrade guidance alongside the CHANGELOG entry. Scale the artifact to the migration:
 
-A good upgrade guide:
+**Small migrations (a handful of discrete changes) — default.** Put an `### Upgrading from <PRIOR>` section directly in the release's `CHANGELOG.md` entry, immediately after the theme paragraph, as a `Change | Impact | Action` matrix. This is what builders actually read: §6c copies the CHANGELOG section verbatim into the GitHub Release, so the guidance ships where it is seen without a separate file to discover. No standalone document is required.
+
+**Large migrations (mass renames, contract/ABI changes, economic changes).** Write a standalone guide at `docs/UPGRADE_<PRIOR>_TO_<NEW>.md` and link it from the `### Upgrading from <PRIOR>` section. `docs/` is synced to GitBook, so a standalone guide is published to builders — this is the correct home for builder-facing migration content. A good standalone guide:
 
 - Opens with an agent-prompt template builders can paste into Cursor / Claude Code / Codex CLI / any AGENTS.md-honouring tool to drive the migration end-to-end.
 - Includes a breaking-change matrix at the top so a reader can grep for what affects them in 30 seconds.
@@ -233,7 +235,7 @@ A good upgrade guide:
 - Documents every economic / contract / wire-format change a downstream caller could trip on, with concrete `tokenAmount`, ABI, and Hub-registration steps.
 - Cross-links the relevant `CHANGELOG.md` section for per-PR detail.
 
-Cross-link the new guide from [`docs/RELEASE.md`](docs/RELEASE.md) § "Upgrading from a prior release" before tagging.
+Historical guides from the rc line are archived at [`docs/archive/internal/`](docs/archive/internal/) (e.g. `UPGRADE_RC11_TO_RC12.md`); the release runbook they referenced now lives at [`docs/archive/internal/RELEASE.md`](docs/archive/internal/RELEASE.md). `docs/archive/internal/` is deliberately outside the GitBook navigation in `docs/SUMMARY.md`, so it holds internal process docs only — never builder-facing migration content.
 
 ## 11) Promotion policy
 
