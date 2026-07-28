@@ -141,7 +141,14 @@ One OTP covers the batch; a TOTP code can expire mid-loop, so if some fail, re-r
 
 ### 6c) Create the GitHub Release (manual)
 
-Because there is no tag-triggered release workflow, make the Release by hand from the signed tag, with notes taken from the matching `CHANGELOG.md` section (theme header, npm + channel line, PR-tagged bullets, a `compare/vPREV...vNEW` link):
+Because there is no tag-triggered release workflow, make the Release by hand from the signed tag. **This section owns GitHub Release note generation.** The notes are the matching `CHANGELOG.md` section copied *verbatim* — including its `### Upgrading from <PRIOR>` matrix, if §10 put one there — with only fixed metadata added around it. Do not reword, reorder, or drop bullets while assembling; if the notes need to say something the CHANGELOG does not, fix the CHANGELOG first so the two cannot drift.
+
+Assemble `notes.md` as:
+
+1. A `# DKG vX.Y.Z` title line.
+2. The CHANGELOG section body verbatim, minus its own `## [X.Y.Z] - DATE` heading.
+3. An npm + channel line directly under the theme paragraph: ``**npm:** `@origintrail-official/dkg@X.Y.Z` — dist-tags `latest`, `testnet`, `mainnet``, naming only the tags this release actually moved.
+4. A closing `**Full changelog:** https://github.com/OriginTrail/dkg/compare/vPREV...vX.Y.Z` link.
 
 ```bash
 gh release create vX.Y.Z --repo OriginTrail/dkg --verify-tag \
@@ -225,7 +232,9 @@ dkg start
 
 Every breaking or builder-impacting release ships upgrade guidance alongside the CHANGELOG entry. Scale the artifact to the migration:
 
-**Small migrations (a handful of discrete changes) — default.** Put an `### Upgrading from <PRIOR>` section directly in the release's `CHANGELOG.md` entry, immediately after the theme paragraph, as a `Change | Impact | Action` matrix. This is what builders actually read: §6c copies the CHANGELOG section verbatim into the GitHub Release, so the guidance ships where it is seen without a separate file to discover. No standalone document is required.
+This section defines **when** upgrade guidance is required and **where it is written**. §6c owns how it reaches the GitHub Release: it copies the matching CHANGELOG section verbatim, so anything placed in that section ships to builders automatically and the two cannot drift.
+
+**Small migrations (a handful of discrete changes) — default.** Put an `### Upgrading from <PRIOR>` section directly in the release's `CHANGELOG.md` entry, immediately after the theme paragraph, as a `Change | Impact | Action` matrix. No standalone document is required.
 
 **Large migrations (mass renames, contract/ABI changes, economic changes).** Write a standalone guide at `docs/release-notes/<version>.md` (e.g. `docs/release-notes/v10-1-0.md`) and link it from the `### Upgrading from <PRIOR>` section. One file per release, never a growing shared file: shipped notes are immutable, per-release files stay directly linkable from the CHANGELOG and the GitHub Release, and they do not conflict on every release. A good standalone guide:
 

@@ -6,13 +6,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [10.0.10] - 2026-07-28
 
-This release lands OT-RFC-64, the public author catalog: a node-local subsystem that announces, discovers, fetches, and verifies another author's finalized Knowledge Assets over five new `/dkg/catalog/1/*` libp2p protocols. It is active by default on every node with a data directory, while authoring, auto-publish, and bootstrap targets stay opt-in. Because its persistence opens before networking, such a node now requires a Node runtime exposing `node:sqlite` (Node 22.5 or newer). The rest is durability hardening on paths that could strand, mis-report, or lose verified work. Two changes are operator-visible: one encoded SWM share or promotion is capped at 4 MiB instead of 10 MB, and the dashboard database migrates 30 → 31. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.9).
+This release lands OT-RFC-64, the public author catalog: a node-local subsystem that announces, discovers, fetches, and verifies another author's finalized Knowledge Assets over five new `/dkg/catalog/1/*` libp2p protocols. It is active by default on every node with a data directory, while authoring, auto-publish, and bootstrap targets stay opt-in. Because its persistence opens before networking, such a node now requires a Node runtime where `node:sqlite` is available unflagged — Node 22.13 or newer, or 23.4 or newer on the 23.x line. The rest is durability hardening on paths that could strand, mis-report, or lose verified work. Two changes are operator-visible: one encoded SWM share or promotion is capped at 4 MiB instead of 10 MB, and the dashboard database migrates 30 → 31. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.9).
 
 ### Upgrading from 10.0.9
 
 | Change | Impact | Action |
 | --- | --- | --- |
-| RFC-64 persistence requires `node:sqlite` | on a node with a data directory the RFC-64 inventory and the finalization inbox open before networking, so a runtime without `node:sqlite` fails the start with `requires Node runtime support for node:sqlite` | run Node 22.5 or newer; the repo's `.nvmrc` baseline of 22 satisfies this, and `node:sqlite` resolves unflagged on current 22.x. Node releases before 22.5.0 do not ship the module at all. |
+| RFC-64 persistence requires unflagged `node:sqlite` | on a node with a data directory the RFC-64 inventory and the finalization inbox open before networking, so a runtime without `node:sqlite` fails the start with `requires Node runtime support for node:sqlite` | run **Node >= 22.13.0**, or **>= 23.4.0** on the 23.x line, or Node 24+. `node:sqlite` exists from 22.5.0 but stays behind `--experimental-sqlite` until 22.13.0/23.4.0, and the daemon never passes that flag — so 22.5–22.12 and 23.0–23.3 install cleanly and then fail to boot. `packages/cli` now declares this range in `engines.node`. |
 | SWM payload ceiling 10 MB → 4 MiB | one encoded SWM share or promotion above 4 MiB is rejected, and a 10.0.9 peer emitting more is dropped inbound | reduce importer batch size (`dkg-importer` guidance moves 1000 → 400 records) |
 | `@origintrail-official/dkg-agent` declares `"exports"` | deep imports of internal paths fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` | import from the package root |
 | RFC-64 catalog is active by default | first boot creates `DKG_HOME/rfc64-sync/` and serves five new inbound catalog protocols (three without chain configuration) | no action; authoring/auto-publish stays opt-in |
@@ -51,7 +51,7 @@ This release lands OT-RFC-64, the public author catalog: a node-local subsystem 
 
 ### Known issues
 
-- A node pinned to a Node release older than 22.5 will not start if it has a data directory: `node:sqlite` does not exist before 22.5.0, and neither the RFC-64 inventory nor the finalization inbox degrades gracefully. The project's Node 22 baseline satisfies this — `node:sqlite` resolves unflagged on current 22.x — but no `engines` field pins the minimum.
+- `engines.node` on `@origintrail-official/dkg` declares the supported runtime range, but npm and pnpm both treat `engines` as advisory unless `engine-strict` is set, so an unsupported runtime still installs with only an `EBADENGINE` warning. Neither the RFC-64 inventory nor the finalization inbox degrades gracefully, so such a node then fails at daemon start. Blue-green auto-update verifies build output exists before activating a slot but does not prove the new slot boots, so a node auto-updating on an unsupported runtime can activate and then restart-loop. Check `node --version` before upgrading.
 
 ## [10.0.9] - 2026-07-21
 
