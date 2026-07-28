@@ -36,6 +36,17 @@ function assertMcp(spec: IntegrationEntry['install']): asserts spec is InstallMc
   if (spec.kind !== 'mcp') {
     throw new Error(`install-mcp received non-mcp install spec (kind=${spec.kind})`);
   }
+  // `args` is optional in the registry schema, so an args-less entry is
+  // READABLE (it lists and inspects fine) but not INSTALLABLE. Refuse here
+  // rather than emitting a config block whose `args` key JSON.stringify would
+  // silently drop — that would leave the client launching a bare `command`
+  // with no package to run, and the failure would surface inside the user's
+  // MCP client rather than here.
+  if (!Array.isArray(spec.args) || spec.args.length === 0) {
+    throw new Error(
+      `Registry entry declares no install.args, so no launch command can be built for "${spec.command}". Report this to the integration maintainer.`,
+    );
+  }
 }
 
 // Best-effort token read from the standard daemon-written path. Matches the

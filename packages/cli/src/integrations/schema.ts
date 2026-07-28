@@ -28,7 +28,9 @@ export interface InstallCli {
 export interface InstallMcp {
   kind: 'mcp';
   command: string;
-  args: string[];
+  // Optional per the registry schema. An entry without args is readable
+  // (listed, inspectable) but not installable — installMcp refuses it.
+  args?: string[];
   // Env var NAMES the MCP server expects. Per the registry schema,
   // DKG_AUTH_TOKEN and DKG_API_URL are auto-filled by the installer when
   // listed here; other names are rendered as placeholders the user must
@@ -41,7 +43,7 @@ export interface InstallMcp {
 
 export interface InstallService {
   kind: 'service';
-  runtime: 'docker' | 'npm-global';
+  runtime: 'docker' | 'npm-global' | 'binary';
   docker?: {
     image: string;
     digest?: string;
@@ -54,6 +56,13 @@ export interface InstallService {
     binary: string;
     env?: Record<string, string>;
   };
+  binaryDownload?: {
+    url: string;
+    checksumSha256?: string;
+  };
+  // Present in the registry schema; surfaced in post-install guidance.
+  envRequired?: string[];
+  portsOpened?: number[];
   usageHint?: string;
 }
 
@@ -68,7 +77,11 @@ export interface InstallAgentPlugin {
 
 export interface InstallManual {
   kind: 'manual';
-  steps: string[];
+  // The registry schema requires docsUrl and allows only oneLiner beyond it
+  // (additionalProperties: false). `manual` means the installer links out to
+  // the integration's own docs rather than automating anything.
+  docsUrl: string;
+  oneLiner?: string;
   usageHint?: string;
 }
 
@@ -167,6 +180,16 @@ function isStringArray(v: unknown): boolean {
   return Array.isArray(v) && v.every((x) => typeof x === 'string');
 }
 
+// INVARIANT: this must never be STRICTER than the registry's published JSON
+// Schema (https://origintrail.io/schemas/integration/v0.1.0.json, $defs.install*).
+// It may be more lenient — unknown fields and unknown enum values must ride
+// through so an older CLI can still read a newer registry — but every entry the
+// registry can merge has to parse here, or `dkg integration` and the dashboard
+// sidebar silently drop it as "unreadable". Three divergences did exactly that:
+// `manual` required a `steps` field the schema forbids, `mcp` required the
+// schema-optional `args`, and `service` rejected the schema's `binary` runtime.
+// Requirements that make an entry *installable* (rather than readable) belong in
+// the installers, not here — see installMcp's args check.
 function isValidInstallSpec(v: unknown): boolean {
   if (!isPlainObject(v)) return false;
   const kind = v.kind;
@@ -180,14 +203,17 @@ function isValidInstallSpec(v: unknown): boolean {
         (v.usageHint === undefined || typeof v.usageHint === 'string')
       );
     case 'mcp':
+      // `args` is optional per the schema. An entry without it is readable but
+      // not installable; installMcp refuses it rather than emitting a config
+      // with no launch arguments.
       return (
         typeof v.command === 'string' &&
-        isStringArray(v.args) &&
+        (v.args === undefined || isStringArray(v.args)) &&
         (v.envRequired === undefined || isStringArray(v.envRequired)) &&
         (v.supportedClients === undefined || isStringArray(v.supportedClients))
       );
     case 'service':
-      return v.runtime === 'docker' || v.runtime === 'npm-global';
+      return v.runtime === 'docker' || v.runtime === 'npm-global' || v.runtime === 'binary';
     case 'agent-plugin':
       return (
         typeof v.framework === 'string' &&
@@ -195,7 +221,12 @@ function isValidInstallSpec(v: unknown): boolean {
         typeof v.version === 'string'
       );
     case 'manual':
-      return isStringArray(v.steps);
+      // The schema requires docsUrl and forbids anything else beyond oneLiner;
+      // `manual` means "the installer links out to your docs" (CONTRIBUTING §2).
+      return (
+        typeof v.docsUrl === 'string' &&
+        (v.oneLiner === undefined || typeof v.oneLiner === 'string')
+      );
     default:
       return false;
   }

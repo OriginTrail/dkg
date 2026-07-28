@@ -11,10 +11,18 @@
 // install instructions.
 
 import type { Command } from 'commander';
+import { detectInstalled } from './detect-installed.js';
 import { installCli } from './install-cli.js';
 import { installMcp } from './install-mcp.js';
+import { installService } from './install-service.js';
 import { fetchAllEntries, fetchEntry, resolveRegistryConfig } from './registry-client.js';
 import type { IntegrationEntry, TrustTier } from './schema.js';
+
+/** Case-insensitive substring match across the fields a user would search by. */
+function matchesKeyword(e: IntegrationEntry, needle: string): boolean {
+  const haystack = [e.slug, e.name, e.description, ...(e.category ?? [])].join(' ').toLowerCase();
+  return haystack.includes(needle);
+}
 
 const TIER_RANK: Record<TrustTier, number> = { community: 0, verified: 1, featured: 2 };
 
@@ -23,17 +31,23 @@ export function registerIntegrationCommands(program: Command): void {
     .command('integration')
     .description('Install and inspect community DKG integrations from the registry');
 
+  // `search` discovers what EXISTS in the registry; `list` reports what is
+  // installed HERE. That split is what the registry README documents and what
+  // npm/apt users expect. `list` previously did what `search` does now.
   integrationCmd
-    .command('list')
-    .description('List integrations available in the registry')
+    .command('search [keyword]')
+    .description('Search integrations available in the registry')
     .option('--tier <tier>', 'Minimum trust tier: community | verified | featured', 'verified')
     .option('--json', 'Print the raw registry entries as JSON')
-    .action(async (opts: { tier: string; json?: boolean }) => {
+    .action(async (keyword: string | undefined, opts: { tier: string; json?: boolean }) => {
       try {
         const cfg = resolveRegistryConfig();
         const { entries, failures } = await fetchAllEntries(cfg);
         const min = parseTier(opts.tier);
-        const filtered = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
+        const needle = keyword?.trim().toLowerCase();
+        const filtered = entries
+          .filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min])
+          .filter((e) => !needle || matchesKeyword(e, needle));
 
         if (opts.json) {
           console.log(JSON.stringify({ entries: filtered, failures }, null, 2));
@@ -41,9 +55,14 @@ export function registerIntegrationCommands(program: Command): void {
         }
 
         if (filtered.length === 0) {
-          console.log(`No integrations at tier "${min}" or above.`);
+          console.log(
+            needle
+              ? `No integrations matching "${keyword}" at tier "${min}" or above.`
+              : `No integrations at tier "${min}" or above.`,
+          );
         } else {
-          console.log(`Showing ${filtered.length} integration(s) at tier ${min}+:\n`);
+          const scope = needle ? ` matching "${keyword}"` : '';
+          console.log(`Showing ${filtered.length} integration(s)${scope} at tier ${min}+:\n`);
           for (const e of filtered) {
             console.log(`  ${e.slug.padEnd(24)}  [${e.trustTier}]  ${e.name}`);
             console.log(`    ${e.description.slice(0, 120)}${e.description.length > 120 ? '…' : ''}`);
@@ -61,7 +80,54 @@ export function registerIntegrationCommands(program: Command): void {
           }
         }
       } catch (err) {
-        console.error(`Failed to list integrations: ${toMessage(err)}`);
+        console.error(`Failed to search integrations: ${toMessage(err)}`);
+        process.exit(1);
+      }
+    });
+
+  integrationCmd
+    .command('list')
+    .description('List which registry integrations are installed on this machine')
+    .option('--tier <tier>', 'Minimum trust tier to consider: community | verified | featured', 'community')
+    .option('--json', 'Print the raw detection result as JSON')
+    .action(async (opts: { tier: string; json?: boolean }) => {
+      try {
+        const cfg = resolveRegistryConfig();
+        const { entries, failures } = await fetchAllEntries(cfg);
+        const min = parseTier(opts.tier);
+        const candidates = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[min]);
+        const rows = await detectInstalled(candidates);
+
+        if (opts.json) {
+          console.log(JSON.stringify({ installed: rows, failures }, null, 2));
+          return;
+        }
+
+        const known = rows.filter((r) => r.state !== 'unknown');
+        const installed = rows.filter((r) => r.state === 'installed');
+        if (installed.length === 0) {
+          console.log('No registry integrations detected as installed on this machine.');
+        } else {
+          console.log(`Detected ${installed.length} installed integration(s):\n`);
+          for (const r of installed) {
+            console.log(`  ${r.slug.padEnd(24)}  [${r.kind}]  ${r.detail}`);
+          }
+          console.log('');
+        }
+        const undetectable = rows.filter((r) => r.state === 'unknown');
+        if (undetectable.length > 0) {
+          console.log(
+            `${undetectable.length} entr${undetectable.length === 1 ? 'y' : 'ies'} cannot be detected ` +
+              `(install kinds the CLI does not perform): ${undetectable.map((r) => r.slug).join(', ')}`,
+          );
+        }
+        console.log('');
+        console.log(
+          `Checked ${known.length} detectable entr${known.length === 1 ? 'y' : 'ies'}. ` +
+            `Use \`dkg integration search\` to browse the registry.`,
+        );
+      } catch (err) {
+        console.error(`Failed to list installed integrations: ${toMessage(err)}`);
         process.exit(1);
       }
     });
@@ -155,12 +221,59 @@ export function registerIntegrationCommands(program: Command): void {
             await installMcp({ entry, apiUrl: opts.apiUrl });
             break;
           }
-          case 'service':
+          case 'manual': {
+            // `manual` is not an unimplemented kind — per CONTRIBUTING §2 it
+            // means "the installer links out to your docs". Handing off IS the
+            // success path, so exit 0; the entry's docsUrl is required by the
+            // registry schema precisely so we can print it here.
+            console.log(
+              'This integration installs manually — follow its setup guide:',
+            );
+            console.log('');
+            console.log(`  docs:  ${entry.install.docsUrl}`);
+            if (entry.install.oneLiner) {
+              console.log('');
+              console.log(`  ${entry.install.oneLiner}`);
+            }
+            console.log('');
+            console.log(formatSecurity(entry));
+            console.log('');
+            console.log(`Run \`dkg integration info ${entry.slug}\` for the full entry.`);
+            break;
+          }
+          case 'service': {
+            if (entry.install.runtime !== 'npm-global') {
+              console.error(
+                `Service runtime "${entry.install.runtime}" is declared by this entry but not yet ` +
+                  `automated by the CLI (only "npm-global" is).\n` +
+                  `Follow the integration's own instructions at ${entry.repo} for now.`,
+              );
+              process.exit(2);
+              break;
+            }
+            const result = await installService({
+              entry,
+              dryRun: opts.dryRun,
+              skipProvenance: opts.verifyProvenance === false,
+            });
+            if (opts.dryRun) {
+              console.log('');
+              console.log(`Dry-run: no changes made. Re-run without --dry-run to install.`);
+              console.log(`Note: provenance is only checked on a real install (skipped in dry-run).`);
+            } else {
+              console.log('');
+              console.log(`Installed ${entry.install.npmGlobal?.package}@${entry.install.npmGlobal?.version}.`);
+            }
+            if (result.postInstructions.length > 0) {
+              console.log('');
+              for (const line of result.postInstructions) console.log(line);
+            }
+            break;
+          }
           case 'agent-plugin':
-          case 'manual':
             console.error(
-              `Install kind "${entry.install.kind}" is declared by this entry but not yet supported by the CLI.\n` +
-                `Follow the manual instructions at ${entry.repo} for now. ` +
+              `Install kind "${entry.install.kind}" is declared by this entry but not yet automated by the CLI.\n` +
+                `Follow the integration's own instructions at ${entry.repo} for now. ` +
                 `Automated support is planned for a follow-up release.`,
             );
             process.exit(2);
@@ -206,7 +319,9 @@ function printEntryHuman(e: IntegrationEntry): void {
       console.log(`    binary:     ${e.install.binary}`);
       break;
     case 'mcp':
-      console.log(`    command:    ${e.install.command} ${e.install.args.join(' ')}`);
+      console.log(
+        `    command:    ${e.install.command}${e.install.args?.length ? ` ${e.install.args.join(' ')}` : ' (no args declared)'}`,
+      );
       if (e.install.supportedClients) {
         console.log(`    clients:    ${e.install.supportedClients.join(', ')}`);
       }
@@ -219,6 +334,8 @@ function printEntryHuman(e: IntegrationEntry): void {
         console.log(`    docker:     ${e.install.docker.image}${e.install.docker.digest ? `@${e.install.docker.digest}` : ''}`);
       } else if (e.install.runtime === 'npm-global' && e.install.npmGlobal) {
         console.log(`    npm global: ${e.install.npmGlobal.package}@${e.install.npmGlobal.version}`);
+      } else {
+        console.log(`    runtime:    ${e.install.runtime}`);
       }
       break;
     case 'agent-plugin':
@@ -226,7 +343,8 @@ function printEntryHuman(e: IntegrationEntry): void {
       console.log(`    package:    ${e.install.package}@${e.install.version}`);
       break;
     case 'manual':
-      console.log(`    steps:      ${e.install.steps.length} manual step(s); see registry entry.`);
+      console.log(`    docs:       ${e.install.docsUrl}`);
+      if (e.install.oneLiner) console.log(`    summary:    ${e.install.oneLiner}`);
       break;
   }
   console.log('');

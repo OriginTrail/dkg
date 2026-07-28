@@ -612,3 +612,119 @@ describe('installMcp', () => {
     expect(res.token).toBeUndefined();
   });
 });
+
+// ── Registry ↔ CLI contract ───────────────────────────────────────────────
+//
+// The CLI's validator is a hand-written re-implementation of the registry's
+// published JSON Schema. It drifted STRICTER than the schema in three places
+// and silently dropped every affected entry as "unreadable" — in `dkg
+// integration` and in the node dashboard sidebar, which share this parser.
+//
+// These tests own that seam. The per-kind cases are derived from the schema's
+// $defs (minimal shapes the registry can merge); the vendored cases are
+// verbatim copies of live entries. The first set is what catches drift.
+
+describe('registry ↔ CLI contract', () => {
+  const contractBase = {
+    schemaVersion: '0.1.0',
+    slug: 'contract-fixture',
+    name: 'Contract Fixture',
+    description: 'x'.repeat(25),
+    category: ['test'],
+    maintainer: { github: '@OriginTrail/core-developers' },
+    repo: 'https://github.com/OriginTrail/dkg',
+    commit: 'a'.repeat(40),
+    license: 'Apache-2.0',
+    memoryLayers: ['WM'],
+    v10PrimitivesUsed: ['UAL'],
+    publicInterfacesUsed: ['http-api'],
+    security: { networkEgress: [], writeAuthority: [] },
+    trustTier: 'community',
+  };
+
+  // One minimal, registry-VALID shape per $defs entry in the published schema.
+  // Every one of these must parse, or the registry can merge something the CLI
+  // cannot read.
+  const schemaValidInstalls: Array<[string, Record<string, unknown>]> = [
+    ['cli', { kind: 'cli', package: 'p', version: '1.0.0', binary: 'b' }],
+    ['mcp (args present)', { kind: 'mcp', command: 'npx', args: ['-y', 'p'], supportedClients: ['cursor'] }],
+    // args is OPTIONAL in the schema — readable here, refused by installMcp.
+    ['mcp (args absent)', { kind: 'mcp', command: 'npx', supportedClients: ['cursor'] }],
+    ['service (npm-global)', { kind: 'service', runtime: 'npm-global', npmGlobal: { package: 'p', version: '1.0.0', binary: 'b' } }],
+    ['service (docker)', { kind: 'service', runtime: 'docker', docker: { image: 'i', version: '1' } }],
+    // 'binary' is in the schema's runtime enum.
+    ['service (binary)', { kind: 'service', runtime: 'binary' }],
+    ['agent-plugin', { kind: 'agent-plugin', framework: 'openclaw', package: 'p', version: '1.0.0' }],
+    // manual requires docsUrl and FORBIDS anything but oneLiner beyond it.
+    ['manual (docsUrl only)', { kind: 'manual', docsUrl: 'https://example.com/README.md' }],
+    ['manual (+ oneLiner)', { kind: 'manual', docsUrl: 'https://example.com/README.md', oneLiner: 'run it' }],
+  ];
+
+  it.each(schemaValidInstalls)('accepts a schema-valid %s entry', (_label, install) => {
+    expect(isIntegrationEntry({ ...contractBase, install })).toBe(true);
+  });
+
+  it('still rejects shapes the schema would also reject', () => {
+    const invalid: Array<Record<string, unknown>> = [
+      { kind: 'manual' }, // docsUrl is required
+      { kind: 'mcp' }, // command is required
+      { kind: 'cli', package: 'p' }, // version + binary required
+      { kind: 'service' }, // runtime required
+      { kind: 'service', runtime: 'kubernetes' }, // not in the enum
+      { kind: 'not-a-kind' },
+    ];
+    for (const install of invalid) {
+      expect(isIntegrationEntry({ ...contractBase, install })).toBe(false);
+    }
+  });
+
+  it('parses every vendored live registry entry', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const dir = join(__dirname, 'fixtures', 'registry');
+    const files = (await readdir(dir)).filter(
+      (f) => f.endsWith('.json') && f !== 'integration.schema.json',
+    );
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const entry = JSON.parse(await readFile(join(dir, f), 'utf8'));
+      expect(isIntegrationEntry(entry), `${f} must be readable by the CLI`).toBe(true);
+    }
+  });
+
+  it('covers every install kind the published schema defines', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const schema = JSON.parse(
+      await readFile(join(__dirname, 'fixtures', 'registry', 'integration.schema.json'), 'utf8'),
+    );
+    const schemaKinds = Object.values(schema.$defs as Record<string, { properties: { kind: { const: string } } }>)
+      .map((d) => d.properties.kind.const)
+      .sort();
+    const covered = [...new Set(schemaValidInstalls.map(([, i]) => i.kind as string))].sort();
+    // If the registry adds an install kind, this fails until the CLI handles it.
+    expect(covered).toEqual(schemaKinds);
+  });
+});
+
+describe('installMcp args guard', () => {
+  const mcpNoArgs: IntegrationEntry = {
+    ...baseEntry,
+    slug: 'no-args',
+    install: { kind: 'mcp', command: 'npx', supportedClients: ['cursor'] },
+  };
+
+  it('refuses an entry with no args instead of emitting a broken config', async () => {
+    // JSON.stringify drops undefined keys, so without this guard the emitted
+    // block would carry no `args` at all and the client would launch a bare
+    // `npx` with nothing to run.
+    await expect(installMcp({ entry: mcpNoArgs, apiUrl: 'http://127.0.0.1:9200' })).rejects.toThrow(
+      /no install\.args/i,
+    );
+  });
+
+  it('refuses an entry with empty args', async () => {
+    const empty: IntegrationEntry = { ...mcpNoArgs, install: { kind: 'mcp', command: 'npx', args: [] } };
+    await expect(installMcp({ entry: empty, apiUrl: 'http://127.0.0.1:9200' })).rejects.toThrow(
+      /no install\.args/i,
+    );
+  });
+});
