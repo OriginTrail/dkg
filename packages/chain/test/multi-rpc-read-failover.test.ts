@@ -37,14 +37,34 @@
  * with a healthy backup = no failover). Do NOT weaken the assertions.
  */
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { JsonRpcProvider } from 'ethers';
+import { Contract, Interface, JsonRpcProvider } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
+import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 import { getRpcFailoverStats, _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
+const KAS = '0x0000000000000000000000000000000000000002';
+const AUTHOR = '0x1111111111111111111111111111111111111111';
+const TX_HASH = `0x${'aa'.repeat(32)}`;
+const BLOCK_HASH = `0x${'bb'.repeat(32)}`;
+const KAS_ABI = [
+  'function getLatestMerkleRoot(uint256) view returns (bytes32)',
+  'event KnowledgeAssetCreated(uint256 indexed id,address indexed author,string publishOperationId,bytes32 merkleRoot,uint88 byteSize,uint40 startEpoch,uint40 endEpoch,uint96 tokenAmount,bool isImmutable)',
+];
+
+async function waitForRpc(
+  rpc: LoopbackRpc,
+  method: string,
+  measure: 'hits' | 'aborted' = 'hits',
+): Promise<void> {
+  for (let turn = 0; turn < 100 && rpc[measure](method) === 0; turn += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+  }
+  expect(rpc[measure](method)).toBe(1);
+}
 
 function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
   return {
@@ -94,6 +114,93 @@ describe('multi-RPC read failover (real loopback providers)', () => {
     expect(only.hits('eth_chainId')).toBeGreaterThanOrEqual(1);
   });
 
+  describe('caller-owned cancellation reaches concrete adapter reads', () => {
+    it('aborts a hung getLatestMerkleRoot eth_call at the HTTP socket', async () => {
+      const rpc = trackServer(await startLoopbackRpc({ hang: ['eth_call'] }));
+      const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url })));
+      const internal = a as unknown as {
+        initialized: boolean;
+        providers: JsonRpcProvider[];
+        contracts: { knowledgeAssetStorage?: Contract };
+      };
+      internal.initialized = true;
+      internal.contracts.knowledgeAssetStorage = new Contract(KAS, KAS_ABI, internal.providers[0]);
+
+      const controller = new AbortController();
+      const timeoutError = createRpcTimeoutError('authentication attempt timed out');
+      const pending = a.getLatestMerkleRoot(1n, { signal: controller.signal });
+      try {
+        await waitForRpc(rpc, 'eth_call');
+        controller.abort(timeoutError);
+        await expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+        await waitForRpc(rpc, 'eth_call', 'aborted');
+      } finally {
+        if (!controller.signal.aborted) controller.abort(timeoutError);
+        await pending.catch(() => {});
+      }
+    });
+
+    it('aborts the receipt block read during V1 publish provenance parsing', async () => {
+      const kasInterface = new Interface(KAS_ABI);
+      const created = kasInterface.encodeEventLog(
+        kasInterface.getEvent('KnowledgeAssetCreated')!,
+        [1n, AUTHOR, 'publish-op', `0x${'11'.repeat(32)}`, 1n, 1n, 2n, 1n, false],
+      );
+      const receipt = {
+        blockHash: BLOCK_HASH,
+        blockNumber: '0x10',
+        contractAddress: null,
+        cumulativeGasUsed: '0x5208',
+        from: AUTHOR,
+        gasPrice: '0x1',
+        gasUsed: '0x5208',
+        logs: [{
+          address: KAS,
+          blockHash: BLOCK_HASH,
+          blockNumber: '0x10',
+          data: created.data,
+          logIndex: '0x0',
+          removed: false,
+          topics: created.topics,
+          transactionHash: TX_HASH,
+          transactionIndex: '0x0',
+        }],
+        logsBloom: `0x${'00'.repeat(256)}`,
+        status: '0x1',
+        to: KAS,
+        transactionHash: TX_HASH,
+        transactionIndex: '0x0',
+        type: '0x2',
+      };
+      const rpc = trackServer(await startLoopbackRpc({
+        results: { eth_getTransactionReceipt: receipt },
+        hang: ['eth_getBlockByNumber'],
+      }));
+      const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url })));
+      const internal = a as unknown as {
+        initialized: boolean;
+        providers: JsonRpcProvider[];
+        contracts: { knowledgeAssetStorage?: Contract };
+      };
+      internal.initialized = true;
+      internal.contracts.knowledgeAssetStorage = new Contract(KAS, KAS_ABI, internal.providers[0]);
+
+      const controller = new AbortController();
+      const timeoutError = createRpcTimeoutError('authentication attempt timed out');
+      const pending = a.resolvePublishByTxHash(TX_HASH, { signal: controller.signal });
+      try {
+        await waitForRpc(rpc, 'eth_getTransactionReceipt');
+        await waitForRpc(rpc, 'eth_getBlockByNumber');
+        controller.abort(timeoutError);
+        await expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+        await waitForRpc(rpc, 'eth_getBlockByNumber', 'aborted');
+      } finally {
+        if (!controller.signal.aborted) controller.abort(timeoutError);
+        await pending.catch(() => {});
+      }
+    });
+  });
+
   // ── TARGET (immediate failover) ──────────────────────────────────────────
   // UN-SKIP when R1 routes reads through the `RpcFailoverClient` read loop over
   // the bare providers AND multi-RPC sets per-endpoint retries = 0. On the CURRENT code
@@ -106,6 +213,19 @@ describe('multi-RPC read failover (real loopback providers)', () => {
   // backup is healthy — i.e. no failover — so the first test fails exactly as a
   // regression gate should. It must flip GREEN once R1 lands; do not weaken it.
   describe('TARGET — immediate read failover (R1)', () => {
+    it('raw fetch failure on a refused primary advances to the healthy backup', async () => {
+      const backup = trackServer(await startLoopbackRpc());
+      const a = track(new EVMChainAdapter(minimalConfig({
+        rpcUrl: 'http://127.0.0.1:1',
+        rpcUrls: [backup.url],
+      })));
+
+      const start = Date.now();
+      await expect(a.getEvmChainId()).resolves.toBe(31337n);
+      expect(backup.hits('eth_chainId')).toBeGreaterThanOrEqual(1);
+      expect(Date.now() - start).toBeLessThan(2_000);
+    });
+
     it('primary 429 on the read → served by the healthy backup, primary hit exactly once (no per-endpoint retry)', async () => {
       const primary = trackServer(await startLoopbackRpc({ throttle: ['eth_chainId'] }));
       const backup = trackServer(await startLoopbackRpc());

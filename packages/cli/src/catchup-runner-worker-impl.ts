@@ -3,6 +3,7 @@ import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
+  runCatchupPlanesWithPolicy,
 } from '@origintrail-official/dkg-agent';
 import {
   catchupPeerResponded,
@@ -175,16 +176,28 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     syncCapable,
     CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
     async (peerId) => {
-      const rawDurable = await invoke<any>('syncDurable', peerId, request.contextGraphId)
-        .catch(() => createFailedPeerDurableSyncResult());
-      const durable = {
-        ...rawDurable,
-        verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
-      };
-      const shared = request.includeSharedMemory
-        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
-        : null;
-      return { durable, shared };
+      return runCatchupPlanesWithPolicy({
+        mode: 'foreground',
+        includeSharedMemory: request.includeSharedMemory,
+        syncDurable: async ({ priority }) => {
+          const rawDurable = await invoke<any>(
+            'syncDurable',
+            peerId,
+            request.contextGraphId,
+            priority,
+          ).catch(() => createFailedPeerDurableSyncResult());
+          return {
+            ...rawDurable,
+            verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
+          };
+        },
+        syncSharedMemory: ({ priority }) => invoke<any>(
+          'syncSharedMemory',
+          peerId,
+          request.contextGraphId,
+          priority,
+        ).catch(() => emptyShared()),
+      });
     },
   );
   for (const { durable, shared } of perPeerResults) {

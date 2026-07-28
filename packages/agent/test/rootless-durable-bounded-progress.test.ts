@@ -14,7 +14,13 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   planBoundedGraphScopedDurableBatch,
 } from '../src/sync/durable-integrity.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+  type DurableSyncGraphScopedStoreRequest,
+  type DurableSyncStoreInsertRequest,
+} from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 import type {
   DurableBatchVerificationMode,
@@ -68,7 +74,7 @@ function asset(kaNumber: number, tripleCount = 4): AssetFixture {
     privateTripleCount: privateQuads.length,
     ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
     assertionGraph: graph,
-  }, 'tentative');
+  }, { status: 'tentative' });
   return { ual, graph, payload, meta };
 }
 
@@ -148,6 +154,50 @@ describe('bounded rootless durable progress', () => {
     ]);
   });
 
+  it('ignores a non-IRI dkg:partOf poison row and still projects the valid boundary (#1921)', () => {
+    // A peer can attach `_:bad dkg:partOf "<valid-ual>"` to a valid graph-scoped
+    // manifest. Without the bounded planner's #1921 verification-input sanitize,
+    // readIntegrityMetadata's PART_OF scan would invalidate that valid UAL →
+    // planBoundedGraphScopedDurableBatch returns null → timed-out graph-scoped
+    // progress is lost (sync pins). The sanitize keeps non-IRI subjects out of
+    // verification, so the planner still projects the same safe prefix as the
+    // clean case above. Mutation check: remove the iriMetaQuads filter from
+    // planBoundedGraphScopedDurableBatch and this returns null.
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const poison: Quad = {
+      subject: '_:bad',
+      predicate: 'http://dkg.io/ontology/partOf',
+      object: `"${fixtures[0]!.ual}"`,
+      graph: `${CONTEXT_GRAPH_URI}/_meta`,
+    };
+    const rawData = [
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload,
+      ...fixtures[2]!.payload.slice(0, 2),
+    ];
+
+    const plan = planBoundedGraphScopedDurableBatch(
+      rawData,
+      [...meta, poison],
+      0,
+      rawData.length,
+      false,
+    );
+
+    expect(plan).not.toBeNull();
+    expect(plan?.safeNextOffset).toBe(8);
+    expect(plan?.completedGraphCount).toBe(2);
+    expect(plan?.changedDataGraphs).toEqual([
+      fixtures[0]!.graph,
+      fixtures[1]!.graph,
+    ]);
+    expect(plan?.dataQuads).toEqual([
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload,
+    ]);
+  });
+
   it('replays one complete graph when timeout lands exactly on a boundary', () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);
@@ -185,14 +235,10 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', {
           quads: meta,
           nextOffset: meta.length,
@@ -204,9 +250,13 @@ describe('bounded rootless durable progress', () => {
           timedOut: true,
         }),
       processDurableBatchInWorker: processBatch,
-      storeInsert: async (quads) => { inserted.push(quads); },
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry);
+      storeInsert: async ({ quads }: DurableSyncStoreInsertRequest) => {
+        inserted.push(quads);
+      },
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -242,21 +292,19 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
         : pageResult('data', { quads: data, nextOffset: data.length }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
         if (materialized.length === 1) throw new Error('transient chain lookup timeout');
-        materialized.push(entry);
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -289,20 +337,18 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-partial-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
         : pageResult('data', { quads: data, nextOffset: data.length }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry.ual);
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset.ual);
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -329,20 +375,18 @@ describe('bounded rootless durable progress', () => {
       remotePeerId: 'peer-complete-host',
       contextGraphIds: [CONTEXT_GRAPH_ID],
       exactAssetUalsFor: () => requested.map((entry) => entry.ual),
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
         : pageResult('data', { quads: data, nextOffset: data.length }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push({ ual: entry.ual, dataCount: entry.dataQuads.length });
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push({ ual: asset.ual, dataCount: asset.dataQuads.length });
         return 'applied';
       },
       deleteCheckpoint: () => {},
@@ -371,14 +415,10 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', {
           quads: meta,
           nextOffset: meta.length,
@@ -391,8 +431,10 @@ describe('bounded rootless durable progress', () => {
         }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry);
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: (key) => { deleted.push(key); },
@@ -424,14 +466,10 @@ describe('bounded rootless durable progress', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx,
-        _peer,
-        _contextGraphId,
-        _includeSharedMemory,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
         phase,
-      ) => phase === 'meta'
+      }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', {
           quads: meta,
           nextOffset: meta.length,
@@ -444,9 +482,13 @@ describe('bounded rootless durable progress', () => {
           timedOut: false,
         }),
       processDurableBatchInWorker: processBatch,
-      storeInsert: async (quads) => { inserted.push(quads); },
-      storeGraphScopedAsset: async (entry) => {
-        materialized.push(entry);
+      storeInsert: async ({ quads }: DurableSyncStoreInsertRequest) => {
+        inserted.push(quads);
+      },
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset);
         return 'applied';
       },
       deleteCheckpoint: (key) => { deleted.push(key); },

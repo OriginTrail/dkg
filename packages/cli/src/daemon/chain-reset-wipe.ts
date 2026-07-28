@@ -52,7 +52,8 @@
  *
  * Files wiped: `store.nq` (always backed up, see above), `store.nq.tmp`,
  *              `random-sampling.wal`, `publish-journal.*` (all variants from
- *              publisher-runner).
+ *              publisher-runner), and `finalization-inbox-v1.sqlite3`
+ *              including its WAL/SHM sidecars.
  *
  * Files preserved: `wallets.json` (operator identity), `auth.token`,
  *              `config.json`, `node-ui.db` (dashboard state),
@@ -550,6 +551,10 @@ function performWipe(
     ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
+  for (const suffix of ['', '-journal', '-wal', '-shm']) {
+    const filename = `finalization-inbox-v1.sqlite3${suffix}`;
+    wipeAbs(join(dataDir, filename), filename);
+  }
 
   try {
     for (const f of readdirSync(dataDir)) {

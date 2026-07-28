@@ -1,5 +1,6 @@
 import {
   createOperationContext,
+  DEFAULT_MAX_READ_BYTES,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
@@ -7,7 +8,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
 } from '../../dkg-agent-constants.js';
@@ -25,6 +25,7 @@ import {
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
+  DurableMetaPageFrameError,
   readCatalogPage,
   readDurableDataPage,
   readDurableMetaPage,
@@ -53,6 +54,7 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
+import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -553,15 +555,22 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const hintedPageRows = typeof request.pageRowsHint === 'number' &&
-      Number.isSafeInteger(request.pageRowsHint)
-      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
-      : 0;
-    const usesByteBudgetPage = !isWorkspace &&
-      phase === 'data' &&
-      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-      hintedPageRows > limit;
-    const durableDataLimit = usesByteBudgetPage ? hintedPageRows : limit;
+    const durableDataPolicy = resolveDurableDataRequestPolicy({
+      legacyLimit: limit,
+      includeSharedMemory: isWorkspace,
+      phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: assetUals !== undefined,
+    });
+    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
+    // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
+    // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
+    // the page ≤ budget for BOTH modes, so this only selects the belt-and-
+    // suspenders response serializer and records the explicit contract.
+    const usesMetaByteBudget = !isWorkspace &&
+      phase === 'meta' &&
+      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -778,10 +787,35 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             assetUals,
+            maxResponseBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+            // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
+            // loud on an oversized `_meta` subject rather than receive a byte-fit
+            // SHORT page they would read as EOF — silent metadata loss + a #1788
+            // seal split. Negotiated (testnet-canary+) requesters keep the
+            // verified byte-fit behavior (empty=EOF pagination, so short≠EOF).
+            oversizedSubjectPolicy: usesMetaByteBudget ? 'byte-fit' : 'fail-loud',
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          // Byte-cap the durable-meta response (#1916) exactly like durable data:
+          // the subject-atomic extend can return a whole (or oversized) subject,
+          // so serialize within the frame budget rather than emitting unbounded
+          // N-Quads. The extend keeps every valid seal well under the budget, so
+          // this only ever truncates a pathological oversized subject.
+          //
+          // Pagination contract: durable meta uses byte-budget pagination where a
+          // SHORT page is NOT EOF — only an empty page is. The requester's
+          // short≠EOF handling is a requester-side default (page-fetch:
+          // syncPageSize=8192 > SYNC_PAGE_SIZE), and since #1923 it is ALSO
+          // negotiated on the wire via `pageMode` (usesMetaByteBudget). The
+          // subject-atomic byte-fit in readDurableMetaPage already bounds every
+          // page ≤ budget AND to whole subjects, so both the negotiated
+          // (byte-budget serializer) and the non-negotiated (plain serializer)
+          // branches are frame-safe and never split a subject; the gate here just
+          // honours the explicit contract.
+          const serialized = usesMetaByteBudget
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -806,10 +840,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit: durableDataLimit,
+          limit: durableDataPolicy.limit,
           signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
+          rowListMemo: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? durableDataRowsMemo
+            : undefined,
+          rowListCacheScope: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? peerId
+            : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
           exactGraphPlanMemo: durableDataExactGraphPlanMemo,
@@ -818,6 +856,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
+          exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
@@ -877,9 +916,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           },
         );
 
+    const guardSyncResponseBytes = (bytes: Uint8Array): Uint8Array => {
+      if (bytes.byteLength <= DEFAULT_MAX_READ_BYTES) return bytes;
+      const message = `Sync responder refused ${bytes.byteLength}-byte response for `
+        + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
+        + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; response must be paginated below the transport ceiling`;
+      logWarn(createOperationContext('sync'), message);
+      throw new Error(message);
+    };
+
     return response.then((res) => {
+      const guarded = guardSyncResponseBytes(res);
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
-      return res;
+      return guarded;
     }).catch((err) => {
       if (err instanceof SyncResponderBusyError) {
         getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
@@ -908,6 +957,21 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           `bytesEstimate=${err.bytesEstimate}, key=${err.key})`,
         );
         throw new QuietRetryableHandlerError(err.message);
+      }
+      if (err instanceof DurableMetaPageFrameError) {
+        // Loud, non-retryable failure (#1788/#1916): an oversized `_meta` subject
+        // cannot be served frame-safe to a non-negotiated legacy requester, and
+        // byte-fitting it would be a silent short=EOF metadata loss. Retrying
+        // cannot help — surface it as a hard error so the round fails visibly
+        // rather than completing with partial metadata. Root fix: #1921.
+        getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
+        span.setAttribute('dkg.sync_response_outcome', 'error');
+        logWarn(
+          createOperationContext('sync'),
+          `Sync responder cannot serve durable meta frame-safe to a non-negotiated (legacy) `
+          + `requester for "${contextGraphId}" from peer ${peerId}: ${err.message}`,
+        );
+        throw err;
       }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;

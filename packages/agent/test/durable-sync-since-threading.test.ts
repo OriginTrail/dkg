@@ -4,6 +4,7 @@ import {
   filterExactAssetDurablePayload,
   runDurableSync,
 } from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -142,20 +143,23 @@ function makeContext(options: {
       remotePeerId: 'peerR',
       contextGraphIds: options.contextGraphIds ?? ['mfacts'],
       syncAgentsMeta: options.syncAgentsMeta,
-      createContextGraphSyncDeadline: () => Date.now() + 10_000,
-      fetchSyncPages: async (
-        _ctx: unknown,
-        _peer: string,
-        contextGraphId: string,
-        _swm: boolean,
-        phase: 'data' | 'meta',
-        graphUri: string,
-        _deadline: number,
-        snapshotRef?: string,
-        sinceBatchId?: string,
-        assetUals?: string[],
-      ) => {
-        calls.push({ contextGraphId, phase, graphUri, snapshotRef, sinceBatchId, assetUals });
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({
+        contextGraphId,
+        phase,
+        graphUri,
+        snapshotRef,
+        sinceBatchId,
+        exactAssetUals,
+      }) => {
+        calls.push({
+          contextGraphId,
+          phase,
+          graphUri,
+          snapshotRef,
+          sinceBatchId,
+          assetUals: exactAssetUals,
+        });
         return page(phase);
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
@@ -171,6 +175,7 @@ function makeContext(options: {
         return {
           verifiedData,
           verifiedMeta,
+          consumedUnpersistedMetaTriples: 0,
           totalFetchedDataQuads: options.processResult?.totalFetchedDataQuads ?? dataQuads.length,
           totalFetchedMetaQuads: options.processResult?.totalFetchedMetaQuads ?? metaQuads.length,
           rejectedKcs: 0,
@@ -179,7 +184,7 @@ function makeContext(options: {
           dataRejectedMissingMeta: 0,
         };
       },
-      storeInsert: async (quads: Quad[]) => { insertedBatches.push(quads); },
+      storeInsert: async ({ quads }) => { insertedBatches.push(quads); },
       deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
       setCheckpoint: () => undefined,
       logInfo: () => undefined,

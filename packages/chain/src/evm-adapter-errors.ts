@@ -3,7 +3,7 @@
 /**
  * EVM error decoding / classification helpers extracted from
  * evm-adapter.ts. Covers low-level error-shape extraction
- * (`errorMessage` / `errorCode` / `errorStatus`), custom-error ABI
+ * (`errorMessage` / `errorName` / `errorCode` / `errorStatus`), custom-error ABI
  * decoding (`decodeEvmError` / `enrichEvmError` and the lazily-cached
  * error/PCA interfaces), the Hub-stale revert markers, and the
  * `TooLowAllowance` classifier. Bodies are a 1:1 move from the original
@@ -20,6 +20,18 @@ import { loadAbi } from './evm-adapter-abi.js';
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return JSON.stringify(err); } catch { return String(err); }
+}
+
+/**
+ * Read the top-level error class name exposed by Error / DOMException shapes.
+ * Unlike status and code extraction, this deliberately does not traverse
+ * wrappers: a name describes the caught surface error, while nested transport
+ * metadata is decoded separately by {@link errorCode} / {@link errorStatus}.
+ */
+export function errorName(err: unknown): string {
+  if (!err || typeof err !== 'object') return '';
+  const { name } = err as { name?: unknown };
+  return typeof name === 'string' ? name : '';
 }
 
 export function errorCode(err: unknown): string {

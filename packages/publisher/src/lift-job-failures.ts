@@ -66,6 +66,14 @@ export interface LiftJobTimeoutMetadata {
 
 export interface LiftJobFailurePolicy {
   readonly code: LiftJobFailureCode;
+  /**
+   * The CONCERN this failure belongs to, NOT a mirror of `failedFromState`. Several codes are
+   * legitimately raised from a state in a different phase — `wallet_claim_timeout` is allowed
+   * from 'accepted'/'claimed' yet labelled 'broadcast', because claiming a wallet is a
+   * broadcast concern; `wallet_unavailable` likewise from 'claimed'. Clients read `phase` to
+   * learn WHICH CONCERN failed and `failedFromState` to learn where the job stopped; deriving
+   * one from the other would collapse two different questions into one.
+   */
   readonly phase: LiftJobFailurePhase;
   readonly mode: LiftJobFailureMode;
   readonly retryable: boolean;
@@ -121,7 +129,12 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   publish_intent_stale: ['claimed', 'validated'],
   canonicalization_failed: ['claimed', 'validated'],
   authority_unavailable: ['claimed', 'validated'],
-  authority_forbidden: ['claimed', 'validated'],
+  // GH#1786 — also reachable from 'broadcast': the executor discovers mid-publish, before
+  // any transaction is sent, that it cannot re-sign the UpdateAuthorAttestation for this
+  // author. That is an authority failure rather than a transport one, and it is PERMANENT,
+  // so it must be able to fail the job terminally from the broadcast state instead of
+  // falling through to the retryable `rpc_unavailable` default.
+  authority_forbidden: ['claimed', 'validated', 'broadcast'],
   validation_timeout: ['claimed', 'validated'],
   wallet_claim_timeout: ['accepted', 'claimed'],
   wallet_unavailable: ['claimed', 'broadcast'],

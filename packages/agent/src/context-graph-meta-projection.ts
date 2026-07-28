@@ -176,6 +176,22 @@ export class ContextGraphMetaProjection {
     this.entries.set(contextGraphId, { dirty: true, invalidationVersion: 1 });
   }
 
+  /**
+   * #1863 — dirty the projection for the context graph a single-graph destructive
+   * mutation (e.g. `replaceSubject`) targets, derived from the GRAPH itself, not
+   * from the mutation's inserted quads. A subject replace can DELETE
+   * projection-relevant metadata or replace it with non-relevant/empty rows, so
+   * keying off the inserted quads alone (`markDirtyFromQuads`) misses the delete.
+   * Keying off the target graph covers both insert and delete, with no whole-cache
+   * churn. No-op when the graph is not a CG meta/catalog graph (e.g. the publisher
+   * control-plane graph), so hot-path job writes never dirty the projection.
+   */
+  markDirtyForGraph(graphUri: string): void {
+    const contextGraphId =
+      contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
+    if (contextGraphId) this.markDirty(contextGraphId);
+  }
+
   markAllDirty(): void {
     for (const entry of this.entries.values()) {
       entry.dirty = true;

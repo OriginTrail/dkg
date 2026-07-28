@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { describe, expect, it } from 'vitest';
+import {
+  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  computeContextGraphPolicyObjectDigestV1,
+  type ContextGraphPolicyV1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type MemberRosterV1,
+  type UnsignedControlEnvelopeV1,
+} from '@origintrail-official/dkg-core';
+
+import {
+  Rfc64CatalogAccessPolicyRegistryV1,
+  type Rfc64CatalogAccessOperationV1,
+} from '../src/rfc64/catalog-access-policy-v1.js';
+
+const OWNER = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
+const LOCAL = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
+const REMOTE = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const OUTSIDER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
+const CURATOR = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
+const NETWORK = 'otp:20430' as const;
+const CG = '0x1111111111111111111111111111111111111111/v2-policy' as const;
+
+const OPERATIONS: readonly Rfc64CatalogAccessOperationV1[] = Object.freeze([
+  'announce-outbound',
+  'announce-inbound',
+  'fetch-outbound',
+  'fetch-inbound',
+  'catalog-object-fetch-outbound',
+  'catalog-object-fetch-inbound',
+  'ka-bundle-fetch-outbound',
+  'ka-bundle-fetch-inbound',
+]);
+
+function policy(accessPolicy: 0 | 1, publishPolicy: 0 | 1): ContextGraphPolicyV1 {
+  return {
+    networkId: NETWORK,
+    contextGraphId: CG,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    era: '0',
+    version: '0',
+    previousPolicyDigest: null,
+    accessPolicy,
+    publishPolicy,
+    publishAuthority: publishPolicy === 0 ? CURATOR : null,
+    publishAuthorityAccountId: '0',
+    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+    administrativeDelegationDigest: null,
+    source: {
+      kind: 'owner-signed-unregistered',
+      ownerAddress: OWNER,
+      ownerAuthorityEra: '0',
+    },
+    effectiveAt: '0',
+    issuedAt: '0',
+  };
+}
+
+function digestFor(input: ContextGraphPolicyV1): Digest32V1 {
+  return computeContextGraphPolicyObjectDigestV1({
+    issuer: OWNER,
+    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+    payload: input,
+    signatureEvidence: { kind: 'none' },
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  } as unknown as UnsignedControlEnvelopeV1);
+}
+
+function roster(
+  policyDigest: Digest32V1,
+  options: { localProvider?: boolean; remoteProvider?: boolean } = {},
+): MemberRosterV1 {
+  return {
+    networkId: NETWORK,
+    contextGraphId: CG,
+    ownershipTransitionDigest: null,
+    era: '0',
+    version: '0',
+    previousRosterDigest: null,
+    policyDigest,
+    administrativeDelegationDigest: null,
+    members: [
+      {
+        agentAddress: LOCAL,
+        roles: options.localProvider === false ? ['holder'] : ['holder', 'provider'],
+      },
+      {
+        agentAddress: REMOTE,
+        roles: options.remoteProvider === false ? ['holder'] : ['holder', 'provider'],
+      },
+    ],
+    issuedAt: '0',
+  };
+}
+
+function registry(
+  remoteAddress: EvmAddressV1 | null = REMOTE,
+): Rfc64CatalogAccessPolicyRegistryV1 {
+  return new Rfc64CatalogAccessPolicyRegistryV1({
+    localAgentAddress: LOCAL,
+    resolveRemoteAgentAddress: async () => remoteAddress,
+  });
+}
+
+function authInput(operation: Rfc64CatalogAccessOperationV1, policyDigest: Digest32V1) {
+  return {
+    operation,
+    remotePeerId: '12D3KooRemote',
+    networkId: NETWORK,
+    contextGraphId: CG,
+    policyDigest,
+  } as const;
+}
+
+describe('RFC-64 D26 catalog access authorization', () => {
+  it('supports an explicit open-only registry without a dummy identity authority', async () => {
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1();
+    const openPolicy = policy(0, 1);
+    const openDigest = digestFor(openPolicy);
+    subject.accept({ policy: openPolicy, policyDigest: openDigest });
+    await expect(subject.authorize(authInput('fetch-inbound', openDigest)))
+      .resolves.toEqual({ accessPolicy: 0, policyDigest: openDigest });
+
+    const privatePolicy = policy(1, 1);
+    const privateDigest = digestFor(privatePolicy);
+    expect(() => subject.accept({
+      policy: privatePolicy,
+      policyDigest: privateDigest,
+      roster: roster(privateDigest),
+    })).toThrow(/requires explicit access-policy authority/u);
+  });
+
+  it('keeps both open-sharing cells SWM-equivalent without resolving a roster identity', async () => {
+    for (const publishPolicy of [0, 1] as const) {
+      let resolverCalls = 0;
+      const acceptedPolicy = policy(0, publishPolicy);
+      const policyDigest = digestFor(acceptedPolicy);
+      const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+        localAgentAddress: LOCAL,
+        resolveRemoteAgentAddress: async () => {
+          resolverCalls += 1;
+          return null;
+        },
+      });
+      subject.accept({ policy: acceptedPolicy, policyDigest });
+      for (const operation of OPERATIONS) {
+        await expect(subject.authorize(authInput(operation, policyDigest))).resolves.toEqual({
+          accessPolicy: 0,
+          policyDigest,
+        });
+      }
+      expect(subject.isSwmAuthorAuthorized({
+        networkId: NETWORK,
+        contextGraphId: CG,
+        policyDigest,
+        authorAddress: OUTSIDER,
+      })).toBe(true);
+      expect(resolverCalls).toBe(0);
+    }
+  });
+
+  it('keeps both invite-only cells SWM-equivalent and requires current members', async () => {
+    for (const publishPolicy of [0, 1] as const) {
+      const acceptedPolicy = policy(1, publishPolicy);
+      const policyDigest = digestFor(acceptedPolicy);
+      const subject = registry();
+      subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+      for (const operation of OPERATIONS) {
+        await expect(subject.authorize(authInput(operation, policyDigest))).resolves.toEqual({
+          accessPolicy: 1,
+          policyDigest,
+        });
+      }
+      expect(subject.isSwmAuthorAuthorized({
+        networkId: NETWORK,
+        contextGraphId: CG,
+        policyDigest,
+        authorAddress: REMOTE,
+      })).toBe(true);
+      expect(subject.isSwmAuthorAuthorized({
+        networkId: NETWORK,
+        contextGraphId: CG,
+        policyDigest,
+        authorAddress: OUTSIDER,
+      })).toBe(false);
+    }
+  });
+
+  it('requires the serving side to hold the provider role', async () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+
+    const localNotProvider = registry();
+    localNotProvider.accept({
+      policy: acceptedPolicy,
+      policyDigest,
+      roster: roster(policyDigest, { localProvider: false }),
+    });
+    for (const operation of [
+      'announce-outbound',
+      'fetch-inbound',
+      'catalog-object-fetch-inbound',
+      'ka-bundle-fetch-inbound',
+    ] as const) {
+      await expect(localNotProvider.authorize(authInput(operation, policyDigest)))
+        .resolves.toBeNull();
+    }
+
+    const remoteNotProvider = registry();
+    remoteNotProvider.accept({
+      policy: acceptedPolicy,
+      policyDigest,
+      roster: roster(policyDigest, { remoteProvider: false }),
+    });
+    for (const operation of [
+      'announce-inbound',
+      'fetch-outbound',
+      'catalog-object-fetch-outbound',
+      'ka-bundle-fetch-outbound',
+    ] as const) {
+      await expect(remoteNotProvider.authorize(authInput(operation, policyDigest)))
+        .resolves.toBeNull();
+    }
+  });
+
+  it('denies unknown peers, stale digests, and missing private membership', async () => {
+    const acceptedPolicy = policy(1, 0);
+    const policyDigest = digestFor(acceptedPolicy);
+    const outsider = registry(OUTSIDER);
+    outsider.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+    await expect(outsider.authorize(authInput('fetch-inbound', policyDigest)))
+      .resolves.toBeNull();
+    await expect(outsider.authorize(authInput(
+      'fetch-inbound',
+      `0x${'ab'.repeat(32)}` as Digest32V1,
+    ))).resolves.toBeNull();
+    const unresolved = registry(null);
+    unresolved.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+    await expect(unresolved.authorize(authInput('fetch-inbound', policyDigest)))
+      .resolves.toBeNull();
+  });
+
+  it('fails closed for malformed runtime operations and peer identifiers', async () => {
+    for (const accessPolicy of [0, 1] as const) {
+      const acceptedPolicy = policy(accessPolicy, 1);
+      const policyDigest = digestFor(acceptedPolicy);
+      const subject = registry();
+      subject.accept({
+        policy: acceptedPolicy,
+        policyDigest,
+        roster: accessPolicy === 1 ? roster(policyDigest) : null,
+      });
+
+      await expect(subject.authorize({
+        ...authInput('fetch-inbound', policyDigest),
+        operation: 'not-a-catalog-operation',
+      } as never)).resolves.toBeNull();
+      await expect(subject.authorize({
+        ...authInput('fetch-inbound', policyDigest),
+        remotePeerId: '',
+      })).resolves.toBeNull();
+      await expect(subject.authorize(null as never)).resolves.toBeNull();
+      expect(subject.isSwmAuthorAuthorized(null as never)).toBe(false);
+    }
+  });
+
+  it('snapshots the operation before awaiting peer-to-agent resolution', async () => {
+    let finishResolution: ((address: EvmAddressV1) => void) | undefined;
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      localAgentAddress: LOCAL,
+      resolveRemoteAgentAddress: async () => new Promise<EvmAddressV1>((resolve) => {
+        finishResolution = resolve;
+      }),
+    });
+    subject.accept({
+      policy: acceptedPolicy,
+      policyDigest,
+      roster: roster(policyDigest, { remoteProvider: false }),
+    });
+
+    const input = { ...authInput('fetch-outbound', policyDigest) };
+    const authorization = subject.authorize(input);
+    input.operation = 'fetch-inbound';
+    expect(finishResolution).toBeTypeOf('function');
+    finishResolution!(REMOTE);
+    await expect(authorization).resolves.toBeNull();
+  });
+
+  it('binds the conditional roster exactly and snapshots mutable caller input', async () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const acceptedRoster = roster(policyDigest);
+    const subject = registry();
+    const accepted = subject.accept({
+      policy: acceptedPolicy,
+      policyDigest,
+      roster: acceptedRoster,
+    });
+    acceptedPolicy.accessPolicy = 0;
+    acceptedRoster.members.splice(0, acceptedRoster.members.length);
+    expect(accepted.policy.accessPolicy).toBe(1);
+    expect(accepted.roster?.members).toHaveLength(2);
+    await expect(subject.authorize(authInput('fetch-outbound', policyDigest)))
+      .resolves.toEqual({ accessPolicy: 1, policyDigest });
+
+    expect(() => registry().accept({
+      policy: policy(1, 1),
+      policyDigest,
+    })).toThrow(/requires a current member roster/u);
+    expect(() => registry().accept({
+      policy: policy(0, 1),
+      policyDigest: digestFor(policy(0, 1)),
+      roster: roster(policyDigest),
+    })).toThrow(/forbids an exhaustive member roster/u);
+    expect(() => registry().accept({
+      policy: policy(1, 1),
+      policyDigest,
+      roster: { ...roster(policyDigest), policyDigest: `0x${'cd'.repeat(32)}` as Digest32V1 },
+    })).toThrow(/not bound to the exact accepted policy/u);
+  });
+
+  it('allows exact replay but refuses unverified current-policy replacement', () => {
+    const initial = policy(0, 1);
+    const initialDigest = digestFor(initial);
+    const subject = registry();
+    subject.accept({ policy: initial, policyDigest: initialDigest });
+    expect(subject.accept({ policy: initial, policyDigest: initialDigest }).policyDigest)
+      .toBe(initialDigest);
+    const replacement = { ...policy(0, 0), version: '1', previousPolicyDigest: initialDigest };
+    expect(() => subject.accept({
+      policy: replacement,
+      policyDigest: digestFor(replacement),
+    })).toThrow(/verified transition\/high-water path/u);
+  });
+
+  it('advances only across a linked monotonic accepted-current policy transition', async () => {
+    const initial = policy(0, 1);
+    const initialDigest = digestFor(initial);
+    const subject = registry();
+    subject.acceptCurrent({ policy: initial, policyDigest: initialDigest });
+    const successor = {
+      ...policy(0, 0),
+      version: '1',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    const successorDigest = digestFor(successor);
+    subject.acceptCurrent({ policy: successor, policyDigest: successorDigest });
+
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
+    await expect(subject.authorize(authInput('fetch-inbound', initialDigest)))
+      .resolves.toBeNull();
+    await expect(subject.authorize(authInput('fetch-inbound', successorDigest)))
+      .resolves.toEqual({ accessPolicy: 0, policyDigest: successorDigest });
+
+    const unlinked = {
+      ...policy(0, 1),
+      version: '2',
+      previousPolicyDigest: initialDigest,
+    } satisfies ContextGraphPolicyV1;
+    expect(() => subject.acceptCurrent({
+      policy: unlinked,
+      policyDigest: digestFor(unlinked),
+    })).toThrow(/exact predecessor digest/u);
+    expect(subject.lookup(NETWORK, CG)?.policyDigest).toBe(successorDigest);
+  });
+});

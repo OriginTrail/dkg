@@ -244,6 +244,38 @@ export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
   return quads;
 }
 
+/** The two subject groups a job record serializes into. */
+export interface SerializedJobRecord {
+  readonly jobRef: string;
+  readonly requestRef: string;
+  readonly jobQuads: Quad[];
+  readonly requestQuads: Quad[];
+}
+
+/**
+ * #1863 — the grouping the atomic write path needs, owned by the serializer
+ * rather than re-derived at the write site with ad-hoc subject filters.
+ * `serializeJob` emits rows for EXACTLY two subjects: the mutable job subject
+ * and the immutable request subject. This splits them and GUARDS that invariant
+ * at the serialization boundary: if a future field ever emits a third subject,
+ * this throws here (fail-loud) instead of the write path silently dropping it.
+ */
+export function serializeJobRecord(job: LiftJob, graphUri: string): SerializedJobRecord {
+  const jobRef = jobSubject(job.jobId);
+  const requestRef = requestSubject(job.jobId);
+  const all = serializeJob(job, graphUri);
+  const jobQuads = all.filter((quad) => quad.subject === jobRef);
+  const requestQuads = all.filter((quad) => quad.subject === requestRef);
+  if (jobQuads.length + requestQuads.length !== all.length) {
+    throw new Error(
+      `serializeJobRecord(${job.jobId}): serializeJob emitted a quad outside the ` +
+        `job (${jobRef}) and request (${requestRef}) subjects — it would be silently ` +
+        `dropped by the atomic write path`,
+    );
+  }
+  return { jobRef, requestRef, jobQuads, requestQuads };
+}
+
 /** Canonical agent lane for a VM-publish lifecycle subject (case-insensitive, trimmed). */
 function agentAddressScopeKey(agentAddress?: string): string {
   return agentAddress?.trim().toLowerCase() ?? '';

@@ -94,7 +94,7 @@ describe('FinalizationHandler STEP 0 — chain-truth cgId resolution', () => {
   it('routes to the scoped graph on a positive chain-truth resolve (no targetContextGraphId)', async () => {
     await seedConfirmedAt(store, SCOPED_META);
     const { chain, calls } = chainStub([5n]);
-    const handler = new FinalizationHandler(store, chain, undefined, undefined);
+    const handler = new FinalizationHandler(store, chain);
 
     await handler.handleFinalizationMessage(encodeFinalizationMessage(makeMsg()), CONTEXT_GRAPH);
 
@@ -108,7 +108,7 @@ describe('FinalizationHandler STEP 0 — chain-truth cgId resolution', () => {
     await seedConfirmedAt(store, LEGACY_META);
     await seedConfirmedAt(store, SCOPED_META);
     const { chain, calls } = chainStub([0n, 5n]); // miss, then positive (then stays positive)
-    const handler = new FinalizationHandler(store, chain, undefined, undefined);
+    const handler = new FinalizationHandler(store, chain);
 
     // Call 1 — chain returns 0 → unresolved → legacy probe; the miss is NOT cached.
     await handler.handleFinalizationMessage(

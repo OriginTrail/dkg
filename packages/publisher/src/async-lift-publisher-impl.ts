@@ -40,9 +40,15 @@ import type {
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
   VmPublishAdmissionJournalReader,
+  VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
+import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
+import { isSafeJobId } from './job-id.js';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
+  isDefinitivePreAcceptanceSendFailure,
+  isPermanentAuthorCapabilityFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
@@ -80,6 +86,7 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  isClearableTerminalLiftJob,
   isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
@@ -88,11 +95,25 @@ import {
   parseIntegerLiteral,
   parseLiteral,
   requestSubject,
-  serializeJob,
+  serializeJobRecord,
   serializeWalletLock,
   walletLockSubject,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
+
+/**
+ * #1864 — outcome of the KA VM-publish pre-send write-ahead boundary
+ * (`recordDurableBroadcastBeforeSend`), tracked by the broadcast recorder's closure and
+ * read by the `processKnowledgeAssetVmPublish` catch to decide recovery vs terminal —
+ * replacing the prior inference from a mutable `executorReturned` flag + a post-hoc
+ * `getStatus` re-read. A transient control-flow value, deliberately kept out of the
+ * persisted `LiftJobState` model.
+ * - `'not-reached'`          the write-ahead hook never fired (no tx was signed or sent).
+ * - `'recorded-durable'`     `'broadcast'` was fsync-durably recorded; the tx is being/was sent.
+ * - `'rolled-back-pre-send'` the write-ahead was attempted but the fsync/transition failed
+ *                            and was rolled back to `'validated'`; the tx was never sent.
+ */
+type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
@@ -192,7 +213,7 @@ function resolveKnowledgeAssetVmPublishHandler(
 }
 
 export class TripleStoreAsyncLiftPublisher
-  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader {
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
   // read-modify-write seq allocation is atomic without touching the claim lock (lock
@@ -373,14 +394,15 @@ export class TripleStoreAsyncLiftPublisher
     // Object-bound triple pattern (not a FILTER) so the store resolves it via the
     // index instead of scanning every job. Read-only: no lock, no write, no reaccept.
     //
-    // Best-effort during a concurrent in-flight rewrite: writeJob replaces the job
-    // subject as delete-then-insert, so a lookup that races a state transition can
-    // transiently miss the index and return `none`. This window is pre-existing
-    // (getStatus/list/findActive all share it) and NOT introduced here; admission's
-    // claim-locked findActive remains the authoritative dedup guard, so a transient
-    // false `none` cannot by itself create a duplicate active job. Making writeJob
-    // atomic (single transactional store.update) is a dedicated follow-up (#1863)
-    // so this PR does not put raw-SPARQL payload-literal escaping on the hot path.
+    // #1863 — writeJob now persists the job subject via the atomic
+    // tryReplaceSubjectAtomically capability (one commit boundary), so a lookup
+    // racing a state transition sees the subject fully prior-or-fully-next and
+    // this index row never transiently disappears: no false `none`. On a store
+    // that cannot guarantee one commit boundary (no replaceSubject, or a
+    // non-transactional endpoint that refuses it) writeJob falls back to
+    // delete-then-insert, which retains the bounded pre-#1863 window; there
+    // admission's claim-locked findActive remains the authoritative dedup guard,
+    // so a transient false `none` cannot by itself create a duplicate active job.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
     );
@@ -581,7 +603,6 @@ export class TripleStoreAsyncLiftPublisher
     const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
     const preflightInput = { walletId, request, snapshot, snapshotMetadata };
 
-    let executorReturned = false;
     try {
       const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
@@ -621,19 +642,20 @@ export class TripleStoreAsyncLiftPublisher
       return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
     }
 
+    const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
+    const broadcastRecorder = this.createKnowledgeAssetVmPublishBroadcastRecorder({
+      jobId: claimed.jobId,
+      walletId,
+      merkleRoot: request.sealMerkleRoot,
+      publicByteSize,
+      delegate: prepared.publishOptions.onPhase,
+    });
+    let publishResult!: PublishResult;
     try {
       const preflight = await this.knowledgeAssetVmPublishHandler.preflight?.(preflightInput);
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
-      const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
-      const onPhase = this.createKnowledgeAssetVmPublishBroadcastProgressCallback({
-        jobId: claimed.jobId,
-        walletId,
-        merkleRoot: request.sealMerkleRoot,
-        publicByteSize,
-        delegate: prepared.publishOptions.onPhase,
-      });
       const executionInput = {
         walletId,
         request,
@@ -643,34 +665,45 @@ export class TripleStoreAsyncLiftPublisher
         resolved: validated.resolved,
         publishOptions: {
           ...prepared.publishOptions,
-          onPhase,
+          onPhase: broadcastRecorder.onPhase,
         },
       };
-      const publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
-      executorReturned = true;
+      publishResult = await this.knowledgeAssetVmPublishHandler.execute(executionInput);
+    } catch (error) {
+      // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
+      // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
+      // records 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose failure
+      // rolls the transition back), so a 'recorded-durable' outcome means the tx may be on
+      // the wire.
+      if (broadcastRecorder.outcome === 'recorded-durable' && !isDefinitivePreAcceptanceSendFailure(error)) {
+        // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
+        // interrupted-broadcast path reconciles it on chain, never resend.
+        return await this.getRequiredJob(claimed.jobId);
+      }
+      // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
+      // DEFINITIVE pre-acceptance reject (e.g. insufficient funds at eth_sendRawTransaction)
+      // on a durably-recorded broadcast: record an immediate terminal failure rather than a
+      // ~15-min recovery chase. A failed KA VM job is never chain-recovery-chased
+      // (canRetryFailedRecovery === false); its code comes from the publish mapper
+      // (insufficient_funds for the whitelisted rejects).
+      return await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
+    }
+    try {
+      // execute() returned — the tx landed and returned a result. A local recording failure
+      // here is a broadcast-phase failure (unchanged from the prior single-catch behavior).
       return await this.recordPublishResult(claimed.jobId, publishResult, {
         publicByteSize,
       });
     } catch (error) {
-      const current = await this.getStatus(claimed.jobId);
-      if (!executorReturned && current?.status === 'broadcast') {
-        // The tx send happens strictly AFTER the write-ahead durably records
-        // 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose
-        // failure rolls the transition back). So a durable 'broadcast' here means
-        // the tx may be on the wire — leave the job in 'broadcast' so recovery's
-        // interrupted-broadcast path reconciles it on chain, never resend. A
-        // pre-send failure (fsync failed → rolled back to 'validated', or an error
-        // before the write-ahead) does NOT reach here and is recorded as 'failed'
-        // below; a failed KA VM job is never chain-recovery-chased
-        // (canRetryFailedRecovery === false), and its code comes from the publish
-        // mapper (e.g. NO_FUNDED_PUBLISHER_WALLET → insufficient_funds).
-        return current;
-      }
-      const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
-        ? 'validated'
-        : 'broadcast';
-      return await this.recordExecutionFailure(claimed.jobId, failedFromState, error);
+      return await this.failKnowledgeAssetVmPublishExecution(claimed.jobId, error);
     }
+  }
+
+  private async failKnowledgeAssetVmPublishExecution(jobId: string, error: unknown): Promise<LiftJob> {
+    const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
+      ? 'validated'
+      : 'broadcast';
+    return await this.recordExecutionFailure(jobId, failedFromState, error);
   }
 
   private async recoverRawLiftInterrupted(job: LiftJob): Promise<boolean> {
@@ -808,6 +841,13 @@ export class TripleStoreAsyncLiftPublisher
     ) {
       return true;
     }
+    // GH#1786 — the node cannot re-sign the selected author's UpdateAuthorAttestation.
+    // Raised while BUILDING the attestation, strictly before onPhase reaches
+    // recordDurableBroadcastBeforeSend, so no transaction was ever sent: the job is still
+    // 'validated' and recording 'broadcast' would publish a false claim that a broadcast
+    // occurred (and mislabel the phase with it). Shared predicate — the same one decides the
+    // failure CODE on both the validated and broadcast paths.
+    if (isPermanentAuthorCapabilityFailure(error)) return true;
     const message = String(anyError?.message ?? error);
     return /is not finalized/i.test(message)
       || /No quads in shared memory/i.test(message)
@@ -992,17 +1032,24 @@ export class TripleStoreAsyncLiftPublisher
     await this.ensureGraph();
     if (filter.status && filter.status !== 'failed') return 0;
 
-    let retried = 0;
-    for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
-      if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-      // Jobs that failed with a recovery-phase resolution must go through recover(),
-      // not retry(), to avoid double-publishing if the original tx eventually lands.
-      if (job.failure.resolution === 'retry_recovery') continue;
+    // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
+    // serialized with claimNext/enqueue AND with clearTerminalJob (which also runs under
+    // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
+    // after retry() flips it active. Without this lock the "a transitioning job cannot be
+    // swept" guarantee does not hold.
+    return this.withClaimLock(async () => {
+      let retried = 0;
+      for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
+        // Jobs that failed with a recovery-phase resolution must go through recover(),
+        // not retry(), to avoid double-publishing if the original tx eventually lands.
+        if (job.failure.resolution === 'retry_recovery') continue;
 
-      await this.reacceptFailedJob(job);
-      retried += 1;
-    }
-    return retried;
+        await this.reacceptFailedJob(job);
+        retried += 1;
+      }
+      return retried;
+    });
   }
 
   async clear(status: 'finalized' | 'failed'): Promise<number> {
@@ -1010,14 +1057,54 @@ export class TripleStoreAsyncLiftPublisher
     const jobs = await this.list({ status });
     let cleared = 0;
     for (const job of jobs) {
-      // Protect retry_recovery jobs — they may still have a pending on-chain tx
-      // that periodic recovery will finalize. Only explicit cancel can remove them.
-      if (status === 'failed' && isFailedJob(job) && job.failure.resolution === 'retry_recovery') continue;
+      // #1837 — single terminal-clear authority shared with clearTerminalJob: skips
+      // retry_recovery-failed jobs (a pending on-chain tx may still land). Behavior is
+      // identical to the prior inline `resolution === 'retry_recovery'` guard.
+      if (!isClearableTerminalLiftJob(job)) continue;
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(job.jobId);
       cleared += 1;
     }
     return cleared;
+  }
+
+  /**
+   * #1837 — atomic by-exact-jobId terminal clear. Runs INSIDE withClaimLock so it is
+   * serialized against claimNext/enqueue/reaccept and retry() (the only terminal→active
+   * transitions) — a job transitioning cannot be swept, and concurrent clears are
+   * deterministic (exactly one 'cleared', the rest 'already_absent'). deleteJob is
+   * subject-scoped to the control-plane graph, so it never touches another job or the
+   * #1829 journal. Never throws / never mutates on a reject.
+   */
+  async clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome> {
+    // Reject an empty OR SPARQL-unsafe jobId as malformed BEFORE building the jobSubject
+    // IRI — otherwise an attacker-controlled jobId (from the clear-job HTTP body) with a
+    // space/'>'/'{' could break the query out of `<…>` and surface as a 500/injection
+    // instead of the bounded outcome.
+    if (!isSafeJobId(jobId)) return { outcome: 'rejected', reason: 'malformed' };
+    return this.withClaimLock(async () => {
+      await this.ensureGraph();
+      const rows = expectBindings(
+        await this.store.query(
+          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
+        ),
+      );
+      if (rows.length === 0) return { outcome: 'already_absent' };
+      // Parse defensively — a corrupt persisted payload must surface as rejected(malformed),
+      // never throw (parseJobPayload does an unguarded JSON.parse).
+      let job: LiftJob | null;
+      try {
+        job = this.parseJobPayload(rows[0]?.['payload']);
+      } catch {
+        return { outcome: 'rejected', reason: 'malformed' };
+      }
+      if (job === null) return { outcome: 'rejected', reason: 'malformed' };
+      if (!LIFT_JOB_STATES.includes(job.status)) return { outcome: 'rejected', reason: 'unknown' };
+      if (!isClearableTerminalLiftJob(job)) return { outcome: 'rejected', reason: 'nonterminal' };
+      await this.releaseWalletLockForJob(job);
+      await this.deleteJob(jobId);
+      return { outcome: 'cleared' };
+    });
   }
 
   private async ensureGraph(): Promise<void> {
@@ -1029,9 +1116,62 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
-    await this.store.deleteByPattern({ subject: jobSubject(job.jobId), graph: this.graphUri });
-    await this.store.insert(serializeJob(job, this.graphUri));
+    await this.persistJobRecord(job);
     await this.appendJournal(job, kind);
+  }
+
+  /**
+   * #1863 — persist the job record as a single-subject atomic replace so a
+   * lock-free reader racing a transition never observes the job subject
+   * transiently empty. Every row for `jobSubject` — the payload, the status, and
+   * the `CONTROL_LIFECYCLE_KEY` intent-index row (emitted inside `serializeJob`
+   * via `serializeVmPublishIntentIndex`) — is replaced in ONE commit, so the
+   * false `kind:'none'` intent-lookup miss / dedup gap that hinges on that index
+   * row disappearing mid-write cannot occur.
+   *
+   * Routed through the shared writer `replaceSubjectAtomicallyOrFallback` (#1938),
+   * which uses the storage capability `tryReplaceSubjectAtomically` (a
+   * sibling of `replaceGraph` / `replaceGraphAndSubject`) rather than a raw
+   * `update()` string: the storage layer owns the transaction boundary, literal
+   * externalization, graph-set-index and changelog bookkeeping, and — crucially —
+   * the reserved-plane guard applies to the TARGET GRAPH structurally instead of
+   * scanning a serialized SPARQL string (a raw update would false-reject a job
+   * whose quads merely reference a reserved IRI). `replaceSubject` is a STRICT
+   * single-subject primitive (it rejects co-located subjects), so the two
+   * subjects `serializeJob` emits — the mutable job subject and the immutable
+   * request subject — are persisted separately:
+   *
+   *   1. INSERT the request rows FIRST (idempotent — the request is immutable,
+   *      so this is a no-op re-assert on every transition after creation, and the
+   *      defensive re-assert legacy/partial re-persist relies on).
+   *   2. THEN atomically replace the job subject.
+   *
+   * The ordering is load-bearing: the request must be present before the job
+   * subject becomes observable, or a lock-free reader at CREATION could see a job
+   * referencing an absent request (dangling requestRef). The job-replace must
+   * never land first. A store that cannot guarantee one commit boundary (no
+   * `replaceSubject`, or a non-transactional SPARQL endpoint that refuses it)
+   * takes the BOUNDED pre-#1863 delete-then-insert fallback (job subject only —
+   * the request stays present): it still has the transient job window, but
+   * admission's claim-locked `findActiveKnowledgeAssetVmPublishJob` remains the
+   * authoritative dedup guard there. Durability (#1851 fsync) stays scoped to
+   * `recordDurableBroadcastBeforeSend`, not here.
+   */
+  private async persistJobRecord(job: LiftJob): Promise<void> {
+    // The serializer owns the split (and guards that a job record is exactly the
+    // job + request subjects) — no ad-hoc subject filters on the write path.
+    const { jobRef, jobQuads, requestQuads } = serializeJobRecord(job, this.graphUri);
+    // (1) Request present BEFORE the job subject is observable — ordering matters.
+    await this.store.insert(requestQuads);
+    // (2) Atomically replace the mutable job subject via the shared writer (#1938),
+    //     which owns the atomic-capable-vs-bounded-fallback policy for both queues.
+    await replaceSubjectAtomicallyOrFallback(
+      this.store,
+      this.graphUri,
+      jobRef,
+      jobQuads,
+      'publisher.asyncLift.writeJob',
+    );
   }
 
   /**
@@ -1343,7 +1483,15 @@ export class TripleStoreAsyncLiftPublisher
       const lower = message.toLowerCase();
       const errorCode = (error as { code?: unknown })?.code;
       const code =
-        errorCode === 'PUBLISH_INTENT_STALE'
+        // GH#1786 — a no-send author-capability refusal, recognized by CODE (with the shared
+        // marker fallback for a re-wrap that lost it) BEFORE the message chain below. That
+        // chain would otherwise reach `canonicalization_failed`: this message contains none
+        // of its keywords, and not even 'authority' — "UpdateAuthorAttestation" carries
+        // "author", not "authority". Terminal either way, but the code is what clients
+        // branch on and what tells an operator the publish is unfixable by retrying.
+        isPermanentAuthorCapabilityFailure(error)
+          ? 'authority_forbidden'
+        : errorCode === 'PUBLISH_INTENT_STALE'
           ? 'publish_intent_stale'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
@@ -1384,27 +1532,47 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
-  private createKnowledgeAssetVmPublishBroadcastProgressCallback(params: {
+  private createKnowledgeAssetVmPublishBroadcastRecorder(params: {
     jobId: string;
     walletId: string;
     merkleRoot: LiftJobHex;
     publicByteSize?: number;
     delegate?: PhaseCallback;
-  }): PhaseCallback {
+  }): { onPhase: PhaseCallback; readonly outcome: PreSendOutcome } {
+    // #1864 — the pre-send write-ahead outcome is tracked in this closure (like
+    // `recordedTxHash`) rather than threaded as a mutable out-parameter through the publish
+    // path. The processKnowledgeAssetVmPublish catch reads `.outcome` to decide recovery vs
+    // terminal. It stays 'not-reached' unless the write-ahead hook actually fires.
+    let outcome: PreSendOutcome = 'not-reached';
     let recordedTxHash: LiftJobHex | undefined;
-    return async (phase, status) => {
+    const onPhase: PhaseCallback = async (phase, status) => {
       await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
       if (status !== 'start') return;
       const txHash = txHashFromSignedPhase(phase);
       if (!txHash || recordedTxHash) return;
       recordedTxHash = txHash;
-      await this.recordKnowledgeAssetVmPublishBroadcastProgress({
-        jobId: params.jobId,
-        walletId: params.walletId,
-        txHash,
-        merkleRoot: params.merkleRoot,
-        publicByteSize: params.publicByteSize,
-      });
+      try {
+        await this.recordKnowledgeAssetVmPublishBroadcastProgress({
+          jobId: params.jobId,
+          walletId: params.walletId,
+          txHash,
+          merkleRoot: params.merkleRoot,
+          publicByteSize: params.publicByteSize,
+        });
+        // The transition is fsync-durable (or was already durable): the tx is about to send.
+        outcome = 'recorded-durable';
+      } catch (error) {
+        // recordDurableBroadcastBeforeSend rolled the transition back before re-throwing (or
+        // the write-ahead never durably mutated state): the tx was never sent.
+        outcome = 'rolled-back-pre-send';
+        throw error;
+      }
+    };
+    return {
+      onPhase,
+      get outcome() {
+        return outcome;
+      },
     };
   }
 
@@ -1446,6 +1614,10 @@ export class TripleStoreAsyncLiftPublisher
    * never landed. The prior job is 'validated' (asserted by the sole caller), so
    * restoring it takes no fsync and cannot re-fail here. The caller then fails
    * the job from its pre-broadcast state, off the chain-recovery track.
+   *
+   * #1864 — success vs the rollback re-throw is what the broadcast recorder maps to its
+   * `PreSendOutcome` ('recorded-durable' vs 'rolled-back-pre-send'); this method itself
+   * stays a pure durability boundary and does not carry that state.
    */
   private async recordDurableBroadcastBeforeSend(
     current: LiftJob,

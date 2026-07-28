@@ -47,7 +47,7 @@ describe('classifyPromoteError', () => {
 
   it('classifies gossip-cap errors as cap_exceeded (non-retryable)', () => {
     const verdict = classifyPromoteError(
-      new Error('Promoted assertion too large for gossip (10240 KB, limit 10 MB). Promote fewer entities per call.'),
+      new Error('Promoted assertion too large for gossip (5120 KB, limit 4 MB). Promote fewer entities per call.'),
     );
     expect(verdict).toEqual({ classification: 'cap_exceeded', retryable: false });
   });
@@ -101,7 +101,7 @@ describe('classifyPromoteError', () => {
       .toEqual({ classification: 'transient', retryable: true });
     // A GENUINE gossip-cap error (token in the ORIGINAL message) still classifies cap_exceeded even
     // when tagged — stripping removes only the injected prefix, never real tokens.
-    expect(classifyPromoteError(new Error('[promote:assertionScopedQuads] Promoted assertion too large for gossip (limit 10 MB)')))
+    expect(classifyPromoteError(new Error('[promote:assertionScopedQuads] Promoted assertion too large for gossip (limit 4 MB)')))
       .toEqual({ classification: 'cap_exceeded', retryable: false });
   });
 
@@ -328,7 +328,7 @@ describe('runPromoteJob', () => {
       queue,
       workerId: 'worker-test',
       runPromote: async () => {
-        throw new Error('Promoted assertion too large for gossip (12000 KB, limit 10 MB)');
+        throw new Error('Promoted assertion too large for gossip (6000 KB, limit 4 MB)');
       },
       now: () => now,
       heartbeatIntervalMs: 0,

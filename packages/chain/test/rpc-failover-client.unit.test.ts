@@ -53,6 +53,15 @@ const badDataError = () => {
   return e;
 };
 const knownTxError = () => new Error('already known');
+const abortedRpcError = () => {
+  const error = new Error('This operation was aborted');
+  error.name = 'AbortError';
+  return error;
+};
+const abortedRpcCodeError = () => Object.assign(
+  new Error('request aborted'),
+  { code: 'ABORT_ERR' },
+);
 
 const URLS = ['https://primary.example', 'https://backup.example'];
 
@@ -210,6 +219,16 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     ).resolves.toBe('BACKUP');
     expect(backupView.calls).toHaveLength(1);
   });
+
+  it('read: an AbortError is a retryable transport interruption and fails over', async () => {
+    const primary = { read: recorder(async () => { throw abortedRpcError(); }) };
+    const backup = { read: recorder(async () => 'BACKUP') };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.read('aborted point read', (p: any) => p.read())).resolves.toBe('BACKUP');
+    expect(primary.read.calls).toHaveLength(1);
+    expect(backup.read.calls).toHaveLength(1);
+  });
 });
 
 // ── broadcast (write transport) ──────────────────────────────────────────────
@@ -245,6 +264,7 @@ describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhau
     try { await client.broadcast('0xsigned', '0xDEADBEEF', 'unit write'); } catch (e) { thrown = e; }
     expect(thrown.code).toBe('RPC_ENDPOINTS_EXHAUSTED'); // #1329: maps to a retryable 503, not a code-less 500
     expect(thrown.rpcUrls).toEqual(URLS);
+    expect(thrown.txHash).toBe('0xDEADBEEF');
     expect(thrown.message).toContain('0xDEADBEEF'); // names the tx
     expect(thrown.message).not.toContain('https://'); // never a full URL
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
@@ -259,6 +279,30 @@ describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhau
 
     await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).rejects.toBe(err);
     expect(backup.broadcastTransaction.calls).toEqual([]);
+  });
+
+  it('an AbortError after submit is ambiguous, so the byte-identical signed tx fails over', async () => {
+    const primary = { broadcastTransaction: recorder(async () => { throw abortedRpcError(); }) };
+    const backup = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).resolves.toBeUndefined();
+    expect(primary.broadcastTransaction.calls).toHaveLength(1);
+    expect(backup.broadcastTransaction.calls).toHaveLength(1);
+    expect(primary.broadcastTransaction.calls[0][0]).toBe('0xsigned');
+    expect(backup.broadcastTransaction.calls[0][0]).toBe('0xsigned');
+  });
+
+  it('a code-only ABORT_ERR after submit also fails over with the byte-identical signed tx', async () => {
+    const primary = { broadcastTransaction: recorder(async () => { throw abortedRpcCodeError(); }) };
+    const backup = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).resolves.toBeUndefined();
+    expect(primary.broadcastTransaction.calls).toHaveLength(1);
+    expect(backup.broadcastTransaction.calls).toHaveLength(1);
+    expect(primary.broadcastTransaction.calls[0][0]).toBe('0xsigned');
+    expect(backup.broadcastTransaction.calls[0][0]).toBe('0xsigned');
   });
 });
 

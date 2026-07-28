@@ -20,6 +20,7 @@ export interface CapturedSyncHandler {
     handler: (data: Uint8Array, peerId: string) => Promise<Uint8Array>,
   ) => void;
   invoke: (envelope: SyncRequestEnvelope, remotePeerId?: string) => Promise<string>;
+  invokeBytes: (request: Uint8Array, remotePeerId?: string) => Promise<string>;
 }
 
 export function captureSyncHandler(): CapturedSyncHandler {
@@ -34,6 +35,11 @@ export function captureSyncHandler(): CapturedSyncHandler {
       const out = await captured(bytes, remotePeerId);
       return new TextDecoder().decode(out);
     },
+    invokeBytes: async (request, remotePeerId = TEST_REMOTE_PEER) => {
+      if (!captured) throw new Error('handler not registered');
+      const out = await captured(request, remotePeerId);
+      return new TextDecoder().decode(out);
+    },
   };
 }
 
@@ -44,6 +50,7 @@ export function registerTestSyncHandler(
     syncPageSize?: number;
     snapshotBudget?: SyncResponderSnapshotBudgetOptions;
     authorize?: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
+    parseSyncRequest?: (data: Uint8Array) => SyncRequestEnvelope;
     logDebug?: (ctx: OperationContext, message: string) => void;
     publicSnapshotStore?: WorkspacePublicSnapshotStore;
   } = {},
@@ -58,7 +65,8 @@ export function registerTestSyncHandler(
     store,
     publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',
-    parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+    parseSyncRequest: options.parseSyncRequest ??
+      ((data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope),
     authorizeSyncRequest: options.authorize ?? (async () => true),
     logWarn: noopLog,
     logDebug: options.logDebug ?? noopLog,

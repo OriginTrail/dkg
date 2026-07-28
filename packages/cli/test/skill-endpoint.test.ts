@@ -201,11 +201,16 @@ describe('SKILL.md file', () => {
     // register/publishPolicy caveat, create-failure recovery semantics) — content we
     // deliberately added, where trimming would regress the accuracy we just fixed.
     //
-    // 950 lines stays a realistic ceiling: well below the documented Agent Skills
+    // Resident-author selection (GH#1786) raised the cap 950 → 1000. The added
+    // contract distinguishes selection from authorship and documents the
+    // synchronous/async non-custodial failure modes; omitting it would make the
+    // canonical skill inaccurate for the newly exposed API.
+    //
+    // 1000 lines stays a realistic ceiling: well below the documented Agent Skills
     // "should be concise" guidance for very large skills, while still catching
     // unbounded growth (e.g. an accidental dump of full OpenAPI schema in-line).
     const lines = skillContent.split('\n').length;
-    expect(lines).toBeLessThan(950);
+    expect(lines).toBeLessThan(1000);
   });
 });
 

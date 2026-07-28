@@ -284,8 +284,240 @@ describe('route-level durable catchup orchestration', () => {
       undefined,
       undefined,
       undefined,
-      { totalTimeoutMs: 1234 },
+      {
+        onAtomicCommitStarted: expect.any(Function),
+        totalTimeoutMs: 1_000,
+        signal: expect.any(AbortSignal),
+      },
     );
+  });
+
+  it('aborts authentication at the whole-operation deadline after a near-exhausted fetch', async () => {
+    vi.useFakeTimers();
+    let authenticationStarted = false;
+    let committed = false;
+    const wait = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
+    ) => {
+      await wait(900, options.signal);
+      authenticationStarted = true;
+      await wait(200, options.signal);
+      committed = true;
+      return {
+        insertedTriples: 1,
+        complete: true,
+      } as any;
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-near-deadline',
+        'cg-near-deadline',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(900);
+      expect(authenticationStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'failed',
+        complete: false,
+        failureReasons: [{
+          code: 'exception',
+          message: 'Durable catchup from peer-near-deadline for cg-near-deadline timed out after 1000ms',
+        }],
+      });
+      expect(committed).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('awaits an in-flight non-cancellable commit and reports its actual outcome', async () => {
+    vi.useFakeTimers();
+    let commitStarted = false;
+    let operationSignal: AbortSignal | undefined;
+    let resolveCommit!: () => void;
+    let settled = false;
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
+    ) => {
+      operationSignal = options.signal;
+      await new Promise<void>((resolve) => setTimeout(resolve, 900));
+      options.onAtomicCommitStarted('cg-commit-boundary', 'did:dkg:test/commit');
+      commitStarted = true;
+      await new Promise<void>((resolve) => {
+        resolveCommit = resolve;
+      });
+      return {
+        insertedTriples: 1,
+        insertedDataTriples: 1,
+        complete: true,
+      } as any;
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-commit-boundary',
+        'cg-commit-boundary',
+        1_000,
+      ).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(900);
+      expect(commitStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(operationSignal?.aborted).toBe(true);
+      expect(settled).toBe(false);
+
+      resolveCommit();
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 1,
+        state: 'complete',
+        complete: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hard-bounds a detailed adapter before atomic commit without a phase-string side channel', async () => {
+    vi.useFakeTimers();
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      _options: {
+        signal: AbortSignal;
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
+    ) => {
+      expect(onPhase).toBeUndefined();
+      return new Promise<never>(() => {});
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-detailed-precommit-hung',
+        'cg-detailed-precommit-hung',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'failed',
+        complete: false,
+        failureReasons: [{
+          code: 'exception',
+          message: 'Durable catchup from peer-detailed-precommit-hung for cg-detailed-precommit-hung timed out after 1000ms',
+        }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns indeterminate when an in-flight commit exceeds settlement grace', async () => {
+    vi.useFakeTimers();
+    let commitStarted = false;
+    const syncFromPeerDetailed = vi.fn(async (
+      _peerId: string,
+      _contextGraphIds: string[],
+      _onPhase: undefined,
+      _onAccessDenied: undefined,
+      _sinceBatchIdFor: undefined,
+      options: {
+        onAtomicCommitStarted: (contextGraphId: string, ual: string) => void;
+      },
+    ) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 900));
+      options.onAtomicCommitStarted('cg-commit-indeterminate', 'did:dkg:test/commit');
+      commitStarted = true;
+      return new Promise<never>(() => {});
+    });
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeerDetailed: syncFromPeerDetailed as any },
+        'peer-commit-indeterminate',
+        'cg-commit-indeterminate',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(900);
+      expect(commitStarted).toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'indeterminate',
+        complete: false,
+        failureReasons: [{
+          code: 'indeterminateSettlement',
+          count: 1,
+        }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hard-bounds a legacy durable adapter that ignores cancellation', async () => {
+    vi.useFakeTimers();
+    const syncFromPeer = vi.fn(async () => new Promise<number>(() => {}));
+
+    try {
+      const pending = runDurableCatchupLeg(
+        { syncFromPeer: syncFromPeer as any },
+        'peer-legacy-hung',
+        'cg-legacy-hung',
+        1_000,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(pending).resolves.toMatchObject({
+        insertedTriples: 0,
+        state: 'failed',
+        complete: false,
+        failureReasons: [{
+          code: 'exception',
+          message: 'Durable catchup from peer-legacy-hung for cg-legacy-hung timed out after 1000ms',
+        }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('ANDs completion across requested CGs and classifies partial progress', () => {
@@ -296,6 +528,24 @@ describe('route-level durable catchup orchestration', () => {
 
     expect(outcome).toMatchObject({
       perContextGraphCompletion: [true, false],
+      complete: false,
+      allPeersFailed: false,
+      incomplete: true,
+      responseStatus: 200,
+      errorBody: { errorCode: 'DURABLE_CATCHUP_INCOMPLETE', retryable: true },
+    });
+  });
+
+  it('classifies indeterminate settlement as retryable incomplete progress', () => {
+    const outcome = classifyDurableCatchupRequest([
+      [{
+        durableState: 'indeterminate',
+        durableComplete: false,
+        durableError: 'Durable sync did not complete (indeterminateSettlement=1)',
+      }],
+    ], true, false);
+
+    expect(outcome).toMatchObject({
       complete: false,
       allPeersFailed: false,
       incomplete: true,

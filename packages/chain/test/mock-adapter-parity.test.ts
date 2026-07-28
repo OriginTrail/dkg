@@ -135,16 +135,19 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getBlockTimestamp',
   'broadcastSignedTransactionWithFailover',
   'getTransactionReceiptWithFailover',
+  'getTransactionWithFailover',
   'waitForReceiptWithFailover',
   'signPopulatedTransaction',
   // #1336 read-facade + populate plumbing: the chain-concept read facades over
   // the `RpcFailoverClient` transport — `readContract` (string-method point read),
+  // `readContractWithOptions` (the cancellable string-method variant),
   // `readContractWith` (policy/classifier-bearing contract read), and the raw
   // `readProvider` — plus the event-log scan wrapper, the contract rebind helper,
   // and the populate+sign-across-providers delegator. Protected EVM-only helpers
   // over `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
   // contract methods — same category as the write-failover helpers above.
   'readContract',
+  'readContractWithOptions',
   'readContractWith',
   'readProvider',
   'readTipProvider',

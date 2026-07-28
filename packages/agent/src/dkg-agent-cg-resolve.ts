@@ -210,10 +210,13 @@ import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import {
-  decodeExactAssetUals,
   normalizeExactAssetUals,
   requireExactAssetUals,
 } from './sync/exact-assets.js';
+import {
+  decodePipeSyncRequestTail,
+  normalizeByteBudgetPageHint,
+} from './sync/auth/pipe-request-tail.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
@@ -286,8 +289,6 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
-  SYNC_BYTE_BUDGET_MAX_ROWS,
-  SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
@@ -948,14 +949,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
-        pageMode: parsed.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE
-          ? SYNC_BYTE_BUDGET_PAGE_MODE
-          : undefined,
-        pageRowsHint: parsed.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-          Number.isSafeInteger(parsed.pageRowsHint) &&
-          Number(parsed.pageRowsHint) > SYNC_PAGE_SIZE
-          ? Math.min(Number(parsed.pageRowsHint), SYNC_BYTE_BUDGET_MAX_ROWS)
-          : undefined,
+        ...normalizeByteBudgetPageHint(parsed.pageMode, parsed.pageRowsHint),
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -990,33 +984,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
     const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const phase = normalizeSyncPhase(parts[3]);
-    // Phase C: parse only the trailing keyed tokens emitted by
-    // `buildSyncRequestEnvelope` (after the optional phase/snapshot suffix).
-    // Scanning every segment would misparse ordinary values literally equal to
-    // "since" or "session" as control tokens. Old encoders never emit them.
-    let sinceBatchId: string | undefined;
-    let syncSessionId: string | undefined;
-    let assetUals: string[] | undefined;
-    let tail = parts.length;
-    if (tail >= 2 && parts[tail - 2] === 'assets') {
-      assetUals = decodeExactAssetUals(parts[tail - 1]);
-      tail -= 2;
-    }
-    if (
-      tail >= 2 &&
-      parts[tail - 2] === 'since' &&
-      /^\d+$/.test(parts[tail - 1])
-    ) {
-      sinceBatchId = parts[tail - 1];
-      tail -= 2;
-    }
-    if (
-      tail >= 2 &&
-      parts[tail - 2] === 'session' &&
-      parts[tail - 1].length > 0
-    ) {
-      syncSessionId = parts[tail - 1];
-    }
+    const tail = decodePipeSyncRequestTail(parts);
     return {
       contextGraphId,
       offset: parseInt(parts[1], 10) || 0,
@@ -1024,9 +992,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       includeSharedMemory,
       phase,
       snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
-      syncSessionId,
-      sinceBatchId,
-      assetUals,
+      ...tail,
     };
   }
 
@@ -1490,8 +1456,26 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    */
   gossipWireIdFor(this: DKGAgent, localId: string): string {
     const sub = this.subscribedContextGraphs.get(localId);
-    if (sub?.onChainHash) return sub.onChainHash;
-    if (/^0x[0-9a-fA-F]{64}$/.test(localId)) return localId.toLowerCase();
+    if (sub?.onChainHash) return this.contextGraphWireId(sub.onChainHash);
+    return this.contextGraphWireId(localId);
+  }
+
+  /** Canonical cleartext-or-hash Context Graph identity used by every index path. */
+  contextGraphWireId(this: DKGAgent, contextGraphId: string): string {
+    if (/^0x[0-9a-f]{64}$/i.test(contextGraphId)) return contextGraphId.toLowerCase();
+    return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+  }
+
+  /**
+   * Derive the curator commitment for a LOCAL cleartext identifier.
+   *
+   * This deliberately hashes every string, including values that happen to
+   * look like a 32-byte wire id. A hash-shaped user-chosen CG name is still
+   * cleartext and its on-chain commitment is keccak256(utf8(name)). Host-only
+   * subscriptions carry an explicit `onChainHash`, so callers never need to
+   * guess which interpretation applies from the string shape alone.
+   */
+  contextGraphNameCommitment(this: DKGAgent, localId: string): string {
     return ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
   }
 
@@ -1600,32 +1584,45 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     return lower;
   }
 
+  /** Bind a name-hash event to its indexed cleartext or hash-only subscription. */
+  bindOnChainContextGraphIdFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    // Chain events may only enrich a subscription that explicitly indexed this
+    // commitment. Falling back to `localId === wireId` is ambiguous: a user may
+    // legitimately choose a cleartext id that itself looks like a 32-byte hash.
+    // Host-only records are indexed under their explicit `onChainHash`, so the
+    // reverse map covers both safe cases without a shape-based fallback.
+    const localId = this.wireIdToLocalCgId.get(wireId);
+    if (localId === undefined) return null;
+    const current = this.subscribedContextGraphs.get(localId);
+    if (current === undefined) return null;
+    const next = { ...current };
+    this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
+    next.onChainHash = wireId;
+    this.setContextGraphSubscription(localId, next, options);
+    return localId;
+  }
+
   /**
-   * Record the curator-committed wire id for a local CG. Keeps the
-   * forward (subscribedContextGraphs) and reverse (wireIdToLocalCgId)
-   * mappings in lockstep. Idempotent.
+   * Compatibility adapter for callers that only enrich an existing
+   * subscription's wire id. The canonical subscription mutator owns both the
+   * forward record and reverse index update.
    *
-   * Pass `null` to clear the mapping (rare — used when a CG is
-   * deactivated and we want to free the reverse-index slot).
+   * Pass `null` to clear the curator commitment and restore the canonical
+   * local-id-derived reverse mapping.
    */
   recordCgWireId(this: DKGAgent, localId: string, wireId: string | null): void {
     const sub = this.subscribedContextGraphs.get(localId);
-    const lower = wireId ? wireId.toLowerCase() : null;
-    if (sub) {
-      sub.onChainHash = lower ?? undefined;
-    }
-    // Drop any stale reverse entry that pointed at this localId under
-    // a different hash (curator rotated the wire id — currently
-    // unsupported but cheap to defend against).
-    if (sub?.onChainHash && (!lower || sub.onChainHash !== lower)) {
-      const prev = sub.onChainHash;
-      if (this.wireIdToLocalCgId.get(prev) === localId) {
-        this.wireIdToLocalCgId.delete(prev);
-      }
-    }
-    if (lower) {
-      this.wireIdToLocalCgId.set(lower, localId);
-    }
+    if (sub === undefined) return;
+    this.setContextGraphSubscription(localId, {
+      ...sub,
+      onChainHash: wireId ? this.contextGraphWireId(wireId) : undefined,
+    }, { persist: false });
   }
 
   /**

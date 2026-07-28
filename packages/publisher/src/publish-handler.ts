@@ -586,7 +586,7 @@ export class PublishHandler {
           : {}),
         assertionGraph: vmGraph,
       },
-      'tentative',
+      { status: 'tentative' },
     );
     const metaGraph = this.graphManager.metaGraphUri(request.contextGraphId);
     const applyOutcome = await withMaterializationLock(

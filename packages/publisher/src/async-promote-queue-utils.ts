@@ -58,6 +58,20 @@ export const ACTIVE_PROMOTE_STATES: readonly PromoteJobState[] = [
   'failed_retrying',
 ];
 
+/**
+ * #1837 — native terminal states for a by-jobId terminal clear. Unlike the lift queue
+ * there is NO carve-out: nothing background re-drives a terminal promote row (no on-chain
+ * tx; recover() failed→queued is manual-only + locked; reconcileExpiredRunning touches
+ * only 'running'; conflict detection gates on ACTIVE states), so both terminal states are
+ * uniformly clearable — a `requiresManualInspection` (partial-ambiguity) failed row
+ * included (data-safe: nothing reads a removed row).
+ */
+export const TERMINAL_PROMOTE_JOB_STATES: readonly PromoteJobState[] = ['succeeded', 'failed'];
+
+export function isTerminalPromoteJobState(state: PromoteJobState): boolean {
+  return TERMINAL_PROMOTE_JOB_STATES.includes(state);
+}
+
 export function jobSubject(jobId: string): string {
   return `urn:dkg:promote-queue:job:${jobId}`;
 }
@@ -192,6 +206,49 @@ export function serializeJob(job: PromoteJob, graphUri: string): Quad[] {
   return quads;
 }
 
+/**
+ * #1933 — fail-loud guard that a promote-job record is EXACTLY one subject. Run by
+ * {@link serializeJobRecord} on `serializeJob`'s output before the atomic replace. Unlike the
+ * lift publisher, a promote job has NO immutable request subject to partition, so
+ * `serializeJobRecord` is a thin single-subject wrapper around this focused assertion (rather
+ * than a two-subject split). `serializeJob` emits rows for only the job subject today, so this
+ * never fires in prod; it is a future-proofing tripwire (and a unit-testable seam): if a new
+ * field ever emits a second subject it throws HERE rather than being rejected by the STRICT
+ * single-subject `replaceSubject` in prod, or silently leaked by the delete-then-insert
+ * fallback (which deletes only `jobRef`).
+ */
+export function assertPromoteJobRecordSingleSubject(jobId: string, jobRef: string, jobQuads: Quad[]): void {
+  const stray = jobQuads.find((q) => q.subject !== jobRef);
+  if (stray) {
+    throw new Error(
+      `serializeJob(${jobId}) emitted subject ${stray.subject} outside the job subject ${jobRef} ` +
+        `— it would be rejected by the atomic replace / leaked by the fallback`,
+    );
+  }
+}
+
+/** The single subject group a promote-job record serializes into. */
+export interface SerializedPromoteJobRecord {
+  readonly jobRef: string;
+  readonly jobQuads: Quad[];
+}
+
+/**
+ * #1938 — the grouping the atomic write path needs, owned by the serializer rather than
+ * re-derived at the write site. Mirrors the async-lift sibling's `serializeJobRecord`, adapted
+ * to the promote job's SINGLE subject: there is no immutable request subject to partition, so
+ * the record is just the job subject and its quads. Runs
+ * {@link assertPromoteJobRecordSingleSubject} internally, so the fail-loud single-subject guard
+ * still fires on the write path (before the STRICT single-subject atomic replace / the
+ * jobRef-only fallback delete) without the writer re-asserting it.
+ */
+export function serializeJobRecord(job: PromoteJob, graphUri: string): SerializedPromoteJobRecord {
+  const jobRef = jobSubject(job.jobId);
+  const jobQuads = serializeJob(job, graphUri);
+  assertPromoteJobRecordSingleSubject(job.jobId, jobRef, jobQuads);
+  return { jobRef, jobQuads };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -230,37 +287,74 @@ function isCommitMarker(value: unknown): value is PromoteCommitMarker {
 }
 
 /**
- * Parse a `payload` binding back into a full `PromoteJob`. Returns null
- * if the literal is malformed (corrupted payload) — the queue logs and
- * skips such rows rather than crashing.
+ * Bounded classification of a `payload` binding. Distinguishes an absent row, a corrupt
+ * payload, and a structurally-valid job whose `state` is not a recognized enum value — a
+ * distinction {@link parseJobPayload} deliberately collapses into `null`. The by-jobId
+ * terminal clear reads through this so it can classify `already_absent` / `malformed` /
+ * `unknown` from a SINGLE canonical payload read (matching the lift sibling), rather than
+ * reading a secondary state-index triple. Never throws.
  */
-export function parseJobPayload(binding: string | undefined): PromoteJob | null {
-  if (!binding) return null;
+/**
+ * A payload that parsed as a structurally complete job whose `state` has been validated only
+ * as a non-empty string — the PROMOTE_JOB_STATES enum-membership check is deliberately deferred
+ * to the caller (so the by-jobId clear can report a well-formed-but-unrecognized state as
+ * `unknown`, distinct from a corrupt payload). Exposing `state: string` keeps the classifier
+ * boundary honest: it never types a value as `PromoteJobState` before that has been checked.
+ */
+export type StructurallyValidPromoteJobPayload = Omit<PromoteJob, 'state'> & { readonly state: string };
+
+export type PromoteJobParseResult =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'malformed' }
+  | { readonly kind: 'job'; readonly job: StructurallyValidPromoteJobPayload };
+
+export function classifyJobPayload(binding: string | undefined): PromoteJobParseResult {
+  if (!binding) return { kind: 'absent' };
   try {
     const payload = parseLiteral(binding);
-    if (typeof payload !== 'string') return null;
+    if (typeof payload !== 'string') return { kind: 'malformed' };
     const parsed = JSON.parse(payload);
-    if (!isRecord(parsed)) return null;
-    if (typeof parsed['jobId'] !== 'string' || parsed['jobId'].length === 0) return null;
-    if (!(PROMOTE_JOB_STATES as readonly string[]).includes(String(parsed['state']))) return null;
-    if (!isPromoteRequest(parsed['request'])) return null;
-    if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return null;
-    if (!isRecord(parsed['attempt'])) return null;
+    if (!isRecord(parsed)) return { kind: 'malformed' };
+    if (typeof parsed['jobId'] !== 'string' || parsed['jobId'].length === 0) return { kind: 'malformed' };
+    // `state` is structurally validated as a non-empty string here, but the PROMOTE_JOB_STATES
+    // enum-membership check is intentionally NOT applied: a well-formed job carrying an
+    // unrecognized state *string* is `kind: 'job'` so the terminal clear can report it as
+    // `unknown`. A missing or non-string `state` is structural corruption (not an unrecognized
+    // state), so — like every other malformed field — it is `malformed`, never `unknown`.
+    if (typeof parsed['state'] !== 'string' || parsed['state'].length === 0) return { kind: 'malformed' };
+    if (!isPromoteRequest(parsed['request'])) return { kind: 'malformed' };
+    if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return { kind: 'malformed' };
+    if (!isRecord(parsed['attempt'])) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['attempt']['count']) || !isFiniteNumber(parsed['attempt']['maxRetries'])) {
-      return null;
+      return { kind: 'malformed' };
     }
     if (
       parsed['attempt']['nextRetryAt'] !== undefined &&
       !isFiniteNumber(parsed['attempt']['nextRetryAt'])
     ) {
-      return null;
+      return { kind: 'malformed' };
     }
-    if (parsed['lease'] !== undefined && !isLease(parsed['lease'])) return null;
-    if (parsed['commitMarker'] !== undefined && !isCommitMarker(parsed['commitMarker'])) return null;
-    return parsed as unknown as PromoteJob;
+    if (parsed['lease'] !== undefined && !isLease(parsed['lease'])) return { kind: 'malformed' };
+    if (parsed['commitMarker'] !== undefined && !isCommitMarker(parsed['commitMarker'])) return { kind: 'malformed' };
+    return { kind: 'job', job: parsed as unknown as StructurallyValidPromoteJobPayload };
   } catch {
-    return null;
+    return { kind: 'malformed' };
   }
+}
+
+/**
+ * Parse a `payload` binding back into a full `PromoteJob`, or null when the payload is
+ * absent, malformed, or carries an unrecognized `state`. A strict view over
+ * {@link classifyJobPayload} (it re-applies the enum drop), so the read/list/conflict paths
+ * skip such rows rather than crashing.
+ */
+export function parseJobPayload(binding: string | undefined): PromoteJob | null {
+  const result = classifyJobPayload(binding);
+  if (result.kind !== 'job') return null;
+  // Re-apply the enum drop classifyJobPayload defers: a well-formed job whose state string is
+  // not a recognized value is skipped by the list/read/conflict paths. The cast is honest only
+  // once the membership check has passed (state is provably a PromoteJobState here).
+  return (PROMOTE_JOB_STATES as readonly string[]).includes(result.job.state) ? (result.job as PromoteJob) : null;
 }
 
 /**

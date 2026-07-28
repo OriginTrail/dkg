@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 30;
+const SCHEMA_VERSION = 31;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -1192,6 +1192,24 @@ export class DashboardDB {
       // the opaque responder token beside the verified offset so a requester
       // restart can resume that same list instead of discarding durable work.
       ensureSyncCheckpointResponderSessionColumns();
+    }
+    if (version < 31) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS snapshot_page_indexes (
+          snapshot_digest TEXT PRIMARY KEY,
+          format_version INTEGER NOT NULL CHECK (format_version > 0),
+          stride INTEGER NOT NULL CHECK (stride > 0),
+          snapshot_file_size INTEGER NOT NULL CHECK (snapshot_file_size >= 0),
+          modification_fingerprint TEXT NOT NULL,
+          offset_count INTEGER NOT NULL CHECK (offset_count > 0),
+          offsets BLOB NOT NULL,
+          checksum TEXT NOT NULL,
+          CHECK (length(snapshot_digest) > 0),
+          CHECK (length(modification_fingerprint) > 0),
+          CHECK (length(offsets) = offset_count * 8),
+          CHECK (length(checksum) > 0)
+        );
+      `);
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {

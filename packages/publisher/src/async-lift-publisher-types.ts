@@ -17,6 +17,7 @@ import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -125,6 +126,18 @@ export interface VmPublishAdmissionJournalReader {
 }
 
 /**
+ * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the
+ * #1828/#1829 capabilities); a MUTATION/admin capability, not a query. Clears the exact
+ * job ONLY when it is in a native terminal state, rejects otherwise without mutation,
+ * and is idempotent for an absent job. Never broadens to other jobs. On the lift side
+ * this preserves the #1829 append-only journal by construction (subject-scoped delete
+ * in the control-plane graph only).
+ */
+export interface VmPublishTerminalJobClearer {
+  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
+}
+
+/**
  * #1828 — one-shot storage maintenance: (re)build the ephemeral intent index for
  * VM-publish jobs admitted before it existed. This is a boot-time repair, not a
  * runtime publisher behaviour, so it lives on its OWN narrow interface — the
@@ -135,6 +148,20 @@ export interface VmPublishIntentIndexBackfiller {
   ensureVmPublishIntentIndex(): Promise<number>;
 }
 
+/**
+ * #1889 — the composite VM-publisher control surface returned by the daemon factory
+ * (`createPublisherControlFromStore`) and held by `RequestContext.publisherControl`. Names
+ * the capability set the daemon depends on, so the factory return type and the context field
+ * are a single named contract instead of an ad-hoc intersection. The four base interfaces
+ * remain the narrow contracts for callers that need a smaller surface (e.g. the boot
+ * backfill depends only on `VmPublishIntentIndexBackfiller`).
+ */
+export interface VmPublisherControl
+  extends VmPublishIntentRecoveryPublisher,
+    VmPublishIntentIndexBackfiller,
+    VmPublishAdmissionJournalReader,
+    VmPublishTerminalJobClearer {}
+
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
@@ -143,9 +170,13 @@ export interface AsyncLiftPublisherRecoveryResult {
 /** Required immutable transaction evidence for named-KA lifecycle recovery. */
 export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
   extends AsyncLiftPublisherRecoveryResult {
+  readonly inclusion: LiftJobInclusionMetadata & {
+    readonly blockHash: LiftJobHex;
+  };
   readonly publishProof: {
     readonly merkleRoot: LiftJobHex;
     readonly authorAddress: LiftJobHex;
+    readonly txIndex: number;
   };
 }
 

@@ -11,6 +11,7 @@ import {
   encryptWorkspacePayload,
   generateWorkspaceRecipientEncryptionKey,
   computeGossipSigningPayload,
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   STORAGE_ACK_MAX_STAGING_BYTES,
@@ -503,7 +504,7 @@ describe('Workspace: publishFromSharedMemory', () => {
     expect(decoded).toContain(`<${ENTITY}> <http://schema.org/name> "Inline From SWM"`);
   });
 
-  it('omits staging quads for over-limit internal public SWM first ACK attempts', async () => {
+  it('omits staging quads for over-limit aggregate public SWM first ACK attempts', async () => {
     const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
     // The publisher prices/ACKs the canonical data-graph N-Quads, not the
     // caller's graphless SWM input. Build the boundary fixture with that exact
@@ -511,11 +512,24 @@ describe('Workspace: publishFromSharedMemory', () => {
     const selectedQuads = buildPublicQuadsWithByteSize(targetBytes, DATA_GRAPH);
     expect(encodedPublicByteLength(selectedQuads)).toBe(targetBytes);
 
-    await publisher.share(
+    // An aggregate SWM selection can exceed the 4 MiB ACK-inline ceiling even
+    // though every individual gossip operation respects the same 4 MiB limit.
+    // Seed that reachable state through two valid shares instead of one
+    // oversized share that must now fail at the producing boundary.
+    const graphlessQuads = selectedQuads.map((quad) => ({ ...quad, graph: '' }));
+    const splitAt = Math.ceil(graphlessQuads.length / 2);
+    const firstShare = await publisher.share(
       CONTEXT_GRAPH,
-      selectedQuads.map((quad) => ({ ...quad, graph: '' })),
-      { publisherPeerId: 'peer-oversized-inline' },
+      graphlessQuads.slice(0, splitAt),
+      { publisherPeerId: 'peer-aggregate-first' },
     );
+    const secondShare = await publisher.share(
+      CONTEXT_GRAPH,
+      graphlessQuads.slice(splitAt),
+      { publisherPeerId: 'peer-aggregate-second' },
+    );
+    expect(firstShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+    expect(secondShare.message.length).toBeLessThanOrEqual(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     let receivedParams: V10ACKProviderParams | undefined;
     const stopAfterCapture = new Error('stop after over-limit ACK capture');

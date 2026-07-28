@@ -22,6 +22,7 @@ import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
@@ -385,6 +386,25 @@ export class OxigraphStore implements TripleStore {
     }
     this.scheduleFlush();
     this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+  }
+
+  async replaceSubject(graphUri: string, subject: string, quads: DKGQuad[]): Promise<void> {
+    const guarded = quads.filter(
+      (q) => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)),
+    );
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.replaceSubject',
+      });
+    }
+    // One transactional `store.update()` — the embedded oxigraph applies the
+    // DELETE WHERE + INSERT DATA as a single commit, so a reader never sees the
+    // subject transiently empty. No staging graph / cleanup: a failed request
+    // rolls the whole thing back.
+    this.store.update(buildAtomicSubjectReplaceUpdate(graphUri, subject, quads));
+    this.scheduleFlush();
+    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

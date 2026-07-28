@@ -1,4 +1,6 @@
 import {
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   ASSERTION_SEAL_PREDICATES,
   assertSafeIri,
   contextGraphAssertionQueryBounds,
@@ -10,6 +12,19 @@ import {
 } from '@origintrail-official/dkg-core';
 
 type SealQuad = { subject: string; predicate: string; object: string };
+
+/**
+ * Distinct authors, case-insensitive (guards the known mixed-case `_meta` hazard),
+ * preserving first-seen STORED case. Shared by the ambiguity and the
+ * not-resident throws so both report the candidate list identically.
+ */
+function distinctAuthors(candidates: readonly string[]): string[] {
+  const distinct: string[] = [];
+  for (const author of candidates) {
+    if (!distinct.some((a) => knowledgeAssetAgentAddressesEqual(a, author))) distinct.push(author);
+  }
+  return distinct;
+}
 
 /** Minimal structural view of the store this resolver needs. */
 export interface AssertionAuthorQueryStore {
@@ -30,6 +45,14 @@ export interface ResolveFinalizedAssertionAuthorParams {
    * `resolveFinalizedAssertionPublishAuthor` for the selector-vs-hint split.
    */
   callerAgentAddress?: string;
+  /**
+   * GH#1786 — an explicit choice among the authors who ALREADY have a finalized
+   * assertion at this coordinate, so a curator can act on an
+   * `AMBIGUOUS_ASSERTION_AUTHOR` response. It selects; it never confers
+   * authorship (an address that is not resident fails closed) and it never
+   * changes the caller identity used for CG registration / curator stamping.
+   */
+  selectedAuthorAgentAddress?: string;
 }
 
 /**
@@ -40,6 +63,9 @@ export interface ResolveFinalizedAssertionAuthorParams {
  * coordinate helpers it depends on.
  *
  * Resolution order:
+ *   0. if `selectedAuthorAgentAddress` names a resident candidate → that candidate
+ *      (GH#1786); if it names none → throw `ASSERTION_AUTHOR_NOT_RESIDENT`. An
+ *      explicit selection is never silently ignored, and it outranks rule 1;
  *   1. if the caller authored a KA of this name → the caller's own (stored-case)
  *      address, so self-publish is byte-identical to before;
  *   2. else if exactly one other author has it → that author;
@@ -54,7 +80,13 @@ export interface ResolveFinalizedAssertionAuthorParams {
  */
 export async function resolveFinalizedAssertionAuthor(
   store: AssertionAuthorQueryStore,
-  { contextGraphId, name, subGraphName, callerAgentAddress }: ResolveFinalizedAssertionAuthorParams,
+  {
+    contextGraphId,
+    name,
+    subGraphName,
+    callerAgentAddress,
+    selectedAuthorAgentAddress,
+  }: ResolveFinalizedAssertionAuthorParams,
 ): Promise<string | undefined> {
   if (!validateAssertionName(name).valid) return undefined;
   const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
@@ -106,17 +138,41 @@ export async function resolveFinalizedAssertionAuthor(
       || candidate.coordinate.name !== name) continue;
     candidates.push(candidate.coordinate.agentAddress);
   }
+  // 0. GH#1786 — an explicit resident-candidate selection is authoritative. It is
+  // evaluated BEFORE both the zero-candidate return and the caller-preference rule
+  // below, for two reasons: it is what lets a curator who ALSO owns a same-named KA
+  // publish the member's instead of silently self-publishing, and it guarantees a
+  // supplied selector can never be silently ignored — a dropped selector spends real
+  // TRAC/gas on the wrong author. Matching is case-insensitive but the STORED case is
+  // returned, because `contextGraphAssertionUri` does not canonicalise address case.
+  // Presence, NOT truthiness: a caller supplying `''` — or `null` from untyped JS — has
+  // still SUPPLIED a selector, and silently falling back to normal resolution is the exact
+  // silent-drop this option exists to prevent. Only `undefined` is absent, matching the
+  // HTTP boundary, which 400s every other malformed value. Anything present that names no
+  // resident candidate fails closed below.
+  if (selectedAuthorAgentAddress !== undefined) {
+    const selected = candidates.find(
+      (a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthorAgentAddress),
+    );
+    if (selected) return selected;
+    throw Object.assign(
+      new Error(
+        `Cannot publish "${name}" in context graph "${contextGraphId}": selected author ` +
+          `${selectedAuthorAgentAddress} has no finalized knowledge asset with this name.`,
+      ),
+      {
+        code: ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+        candidates: distinctAuthors(candidates),
+      },
+    );
+  }
   if (candidates.length === 0) return undefined;
   // 1. Prefer the caller's own KA (preserves today's self-publish exactly).
   if (callerAgentAddress) {
     const own = candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, callerAgentAddress));
     if (own) return own;
   }
-  // Distinct authors, case-insensitive (guards the known mixed-case _meta hazard).
-  const distinct: string[] = [];
-  for (const author of candidates) {
-    if (!distinct.some((a) => knowledgeAssetAgentAddressesEqual(a, author))) distinct.push(author);
-  }
+  const distinct = distinctAuthors(candidates);
   if (distinct.length === 1) return distinct[0];
   throw Object.assign(
     new Error(
@@ -124,6 +180,6 @@ export async function resolveFinalizedAssertionAuthor(
         `${distinct.length} authors have a knowledge asset with this name. ` +
         `Publish is unambiguous only for a single author.`,
     ),
-    { code: 'AMBIGUOUS_ASSERTION_AUTHOR', candidates: distinct },
+    { code: AMBIGUOUS_ASSERTION_AUTHOR_CODE, candidates: distinct },
   );
 }

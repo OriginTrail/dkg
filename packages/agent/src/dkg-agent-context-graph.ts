@@ -1477,13 +1477,10 @@ export class ContextGraphMethods extends DKGAgentBase {
     // Update in-memory subscription record and ensure we're subscribed
     const sub = this.subscribedContextGraphs.get(id);
     if (sub) {
-      this.bindSubscriptionOnChainId(id, sub, onChainId);
-      // Keep the forward + reverse maps in lockstep so the receive
-      // path can translate the wire id back to `id` (see
-      // {@link recordCgWireId}).
-      this.recordCgWireId(id, nameHash);
-      if (!sub.subscribed) {
-        sub.subscribed = true;
+      const next = { ...sub, onChainHash: nameHash };
+      this.bindSubscriptionOnChainId(id, next, onChainId);
+      this.setContextGraphSubscription(id, next, { persist: false });
+      if (!next.subscribed) {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
         this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
       }

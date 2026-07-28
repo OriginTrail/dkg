@@ -300,6 +300,16 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // A transient failure merely makes the remainder of this phase conservative;
   // it never changes offsets or responder-session identity.
   const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+  // Byte-budget pagination: a SHORT page is NOT EOF — only an empty response is
+  // (see the loop's EOF checks). This is a REQUESTER-SIDE default derived from
+  // `syncPageSize > SYNC_PAGE_SIZE` (the fetch wrapper passes
+  // SYNC_REQUEST_PAGE_SIZE=8192 for every phase), NOT a wire-negotiated
+  // capability. Durable meta relies on it: since #1916 the responder byte-caps
+  // durable-meta pages, so a page can be short for byte reasons; a requester
+  // that treated "short = EOF" for meta could end the phase early. Every
+  // testnet-canary+ requester uses 8192 here, so short≠EOF holds for meta and
+  // data alike; a pre-canary requester using the 500-row cap is the only one
+  // that would regress, and only on an oversized (>4 MiB) meta subject.
   const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
   let activePageSize = syncPageSize;
   let successfulPageSize = syncPageSize;

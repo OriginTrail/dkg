@@ -275,6 +275,37 @@ describe('SharedMemoryLiteralBlobStore', () => {
     }
     await reopened.close();
   });
+
+  // #1863 — the atomic single-subject replace (replaceSubject) must externalize
+  // oversized SWM literals like insert()/replaceGraph(), or the atomic path would
+  // silently store a large literal inline and bypass blob storage.
+  it('externalizes a large literal in a replaceSubject payload and hydrates the original on read', async () => {
+    const blobDir = await tempBlobDir();
+    const inner = new OxigraphStore();
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const subject = 'http://ex.org/subject';
+    const largeLiteral = `"${'z'.repeat(80)}"`;
+
+    // Seed a prior (small) value, then atomically replace the subject with a large one.
+    await store.insert([quad(subject, '"small"', SWM_GRAPH)]);
+    await store.replaceSubject(SWM_GRAPH, subject, [quad(subject, largeLiteral, SWM_GRAPH)]);
+
+    // The large literal was externalized to a content-addressed blob; the inner
+    // store holds only the ref (never the inline literal).
+    const hash = sha256Term(largeLiteral);
+    expect(await readFile(blobPath(blobDir, hash), 'utf8')).toBe(largeLiteral);
+    const raw = await inner.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(raw.type === 'bindings' ? raw.bindings : []).toEqual([{ o: externalRef(hash) }]);
+
+    // The public query hydrates the ORIGINAL literal intact, and the stale small
+    // value is gone (the replace was atomic, not additive).
+    const select = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(select.type === 'bindings' ? select.bindings : []).toEqual([{ o: largeLiteral }]);
+  });
 });
 
 function quad(subject: string, object: string, graph: string): Quad {

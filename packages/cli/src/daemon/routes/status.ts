@@ -688,6 +688,27 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
+    const unavailableFinalizationRecovery = (reason: string) => ({
+      available: false,
+      closed: false,
+      ready: false,
+      canonicalReceiptCapability: 'unknown' as const,
+      degradedReason: reason,
+      stateCounts: {},
+      livePayloadBytes: 0,
+    });
+    let finalizationRecovery: Awaited<
+      ReturnType<DKGAgent['getFinalizationRecoveryHealth']>
+    > = unavailableFinalizationRecovery('not-configured');
+    if (typeof agent.getFinalizationRecoveryHealth === 'function') {
+      try {
+        finalizationRecovery = await agent.getFinalizationRecoveryHealth();
+      } catch (error) {
+        finalizationRecovery = unavailableFinalizationRecovery(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -755,6 +776,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
       asyncPublisher: publisherState.availability,
+      finalizationRecovery,
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),

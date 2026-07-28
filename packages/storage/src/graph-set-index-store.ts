@@ -14,6 +14,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
+  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 
@@ -34,6 +35,7 @@ export type GraphSetMutationSource =
   | 'dropGraph'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
+  | 'replaceSubject'
   | 'query'
   | 'update';
 
@@ -43,6 +45,7 @@ type TouchedGraphMutationSource =
   | 'deleteBySubjectPrefix'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
+  | 'replaceSubject'
   | 'update';
 type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
@@ -425,6 +428,34 @@ export class GraphSetIndexStore implements TripleStore {
       'replaceGraphAndSubject',
       options,
     );
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
+    }
+    if (!this.enabled) {
+      await this.inner.replaceSubject(graphUri, subject, quads, options);
+      return;
+    }
+    try {
+      await this.inner.replaceSubject(graphUri, subject, quads, options);
+    } catch (error) {
+      // A committed subject replace could add/remove the graph's first/last row;
+      // dirty the index so a lazy rebuild re-derives membership — unless this was
+      // a clean preflight capability refusal, where nothing was mutated.
+      if (!isReplaceSubjectCapabilityRefusal(error)) {
+        this.scheduleFullRefresh('replaceSubject');
+      }
+      throw error;
+    }
+    this.bumpMutation();
+    await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

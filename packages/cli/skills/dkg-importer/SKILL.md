@@ -29,7 +29,7 @@ many times, with each call staying under fixed budgets.
 | Constant | Value | Where it lands |
 |---|---|---|
 | `CHUNK` | **5,000 quads** | Per `POST /api/knowledge-assets/<name>/wm/write` call |
-| `ROOT_CHUNK` | **1,000 URIs** | Per `POST /api/knowledge-assets/<name>/swm/share` `entities` array |
+| `ROOT_CHUNK` | **400 URIs** | Initial per-call batch for `POST /api/knowledge-assets/<name>/swm/share`; halve on the 4 MiB encoded-payload cap |
 | Max concurrent writes within one assertion | **1** (sequential) | The daemon does not parallelise intra-assertion writes; the manifest in §3 tracks per-assertion state anyway |
 | Max concurrent assertions | **4** | Safe across assertions; keeps memory bounded for laptop-class nodes |
 
@@ -41,27 +41,29 @@ heavy end.
 ### 1.1 Known daemon caps and the exact error strings they produce
 
 These are the three hard caps you will hit if you push past the constants
-above, with the verbatim error text the daemon emits. The cap source lives in
-[`packages/cli/src/daemon/http-utils.ts`](../../../../packages/cli/src/daemon/http-utils.ts).
+above, with the verbatim error text the daemon emits. The HTTP body caps live
+in [`packages/cli/src/daemon/http-utils.ts`](../../../../packages/cli/src/daemon/http-utils.ts);
+the gossip cap lives in
+[`packages/core/src/constants.ts`](../../../../packages/core/src/constants.ts).
 
 | Endpoint | Cap | Constant | Trigger | Error response |
 |---|---|---|---|---|
 | `POST /api/knowledge-assets/<name>/wm/write` | **10 MB** request body | `MAX_BODY_BYTES` | N-Quads payload too large | `HTTP 413` "Request body too large (>10485760 bytes)" |
 | `POST /api/knowledge-assets/<name>/swm/share` | **256 KB** request body | `SMALL_BODY_BYTES` | `entities` array too long (~4,000+ URIs at 60-char average) | `HTTP 413` "Request body too large (>262144 bytes)" |
-| `POST /api/knowledge-assets/<name>/swm/share` | **10 MB** gossip message | hard-coded in gossipsub publish | Promoted assertion's N-Quads serialisation exceeds 10 MB | `HTTP 500` "Promoted assertion too large for gossip (XXXX KB, limit 10 MB). Promote fewer entities per call." |
+| `POST /api/knowledge-assets/<name>/swm/share` | **4 MiB** gossip message | `DKG_GOSSIP_MAX_MESSAGE_BYTES` | Promoted assertion's encoded payload exceeds 4 MiB | `HTTP 500` "Promoted assertion too large for gossip (XXXX KB, limit 4 MB). Promote fewer entities per call." |
 
 The two `/swm/share` caps are independent: the 256 KB body cap is on the
-**request** you send (URI count × URI length); the 10 MB gossip cap is on the
+**request** you send (URI count × URI length); the 4 MiB gossip cap is on the
 **assertion** that ends up in SWM (triples × N-Quads length). It is possible
 to hit the gossip cap with a single-URI `entities` array, if the assertion
 under that root is large enough. `entities: "all"` triggers it most often
 because it asks the daemon to gossip every root in one message; for any
-assertion above ~30k triples, expect to split.
+assertion above ~12k typical-sized triples, expect to split.
 
 In practice this means a robust importer needs **two independent halve-and-
 retry paths on `/swm/share`**: one for 413 (shrink the `entities` array) and
 one for 500 (shrink the per-root scope or switch from `"all"` to explicit
-batches of N ≤ 1000 root URIs). See [§5 Error handling](#5-error-handling)
+batches of N ≤ 400 root URIs). See [§5 Error handling](#5-error-handling)
 for the recipes.
 
 **Self-tune from `/api/status`.** Future versions of the daemon advertise their
@@ -120,12 +122,12 @@ for (const partition of partitions) {                       // one source artefa
     triples,
   }, { batchSize: 5000 });                                  // bump if your triples are small
   const entities = rootUrisFor(partition);
-  for (let i = 0; i < entities.length; i += 1000) {         // chunk promote ourselves
+  for (let i = 0; i < entities.length; i += 400) {          // chunk promote ourselves
     await client.promote({
       contextGraphId: client.cgId,
       assertionName,
       subGraphName: 'code',
-      entities: entities.slice(i, i + 1000),
+      entities: entities.slice(i, i + 400),
     });
   }
 }
@@ -144,7 +146,7 @@ with open(TOKEN_PATH) as f:
 H = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
 BASE = f'http://localhost:{PORT}/api'
 CHUNK = 5000
-ROOT_CHUNK = 1000
+ROOT_CHUNK = 400
 
 def ensure_assertion(cg, name, sg):
     res = requests.post(f'{BASE}/knowledge-assets',
@@ -188,7 +190,7 @@ await createImportManifest({
 `createImportManifest` writes a single `urn:dkg:import:<id>` assertion to the
 `meta` sub-graph listing every partition with `initialStatus = "pending"`.
 Manifests follow the chunking contract automatically: the import root **and**
-every partition URI are promoted to SWM in chunks of `ROOT_CHUNK ≤ 1000` so a
+every partition URI are promoted to SWM in chunks of `ROOT_CHUNK ≤ 400` so a
 peer node (or this node after a restart) can read the manifest back from SWM
 to resume — promoting only the root would leave partition triples in WM only.
 
@@ -294,7 +296,7 @@ typical lengths. Recovery is to shrink the `entities` array, not the
 underlying assertion:
 
 ```ts
-async function promoteRoots(assertion, roots, batchSize = 1000) {
+async function promoteRoots(assertion, roots, batchSize = 400) {
   for (let i = 0; i < roots.length; i += batchSize) {
     const batch = roots.slice(i, i + batchSize);
     try {
@@ -313,25 +315,25 @@ async function promoteRoots(assertion, roots, batchSize = 1000) {
 
 ### HTTP 500 on `/swm/share` with "too large for gossip"
 
-The assertion you're promoting serialises to more than 10 MB of N-Quads.
+The assertion you're promoting serialises to an encoded payload above 4 MiB.
 This is independent of how many root URIs you pass — even
 `entities: ["<one-uri>"]` can trip this if that one root's transitive
-triple set is bigger than 10 MB. The error message is verbatim:
+triple set is bigger than 4 MiB. The error message is verbatim:
 
 ```
 HTTP 500 "Promoted assertion too large for gossip
-(XXXX KB, limit 10 MB). Promote fewer entities per call."
+(XXXX KB, limit 4 MB). Promote fewer entities per call."
 ```
 
 Recovery is to **shrink the per-promote scope**, which means: if you were
 promoting with `entities: "all"`, switch to an explicit URI batch sized so
-its transitive triples land under 10 MB. There is no formula because triple
-fan-out varies; in practice 500-1000 roots per call works for code graphs
-and 100-200 for prose corpora with long string literals.
+its transitive triples land under 4 MiB. There is no formula because triple
+fan-out varies; start around 200-400 roots per call for code graphs and
+50-100 for prose corpora with long string literals, then halve on the cap.
 
 ```ts
 async function promoteAllInBatches(assertion, allRoots) {
-  let batch = 1000;
+  let batch = 400;
   for (let i = 0; i < allRoots.length; i += batch) {
     try {
       await promoteRoots(assertion, allRoots.slice(i, i + batch));
@@ -552,7 +554,7 @@ The worker classifies every failure into one of three buckets. Read it from
 | Classification | Retry? | Typical cause | Importer action |
 |---|---|---|---|
 | `transient` | yes (until `maxRetries=5` reached) | `fetch failed` / `ECONNRESET` / `timeout` | Wait — the worker auto-retries with backoff. No-op for the importer until the job leaves `failed_retrying`. |
-| `cap_exceeded` | no | `Promoted assertion too large for gossip` (10 MB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice (the queue can't subdivide on its own — that's a future enhancement). Same halve-and-retry shape as the synchronous recipe, just applied at the queue layer. |
+| `cap_exceeded` | no | `Promoted assertion too large for gossip` (4 MiB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice (the queue can't subdivide on its own — that's a future enhancement). Same halve-and-retry shape as the synchronous recipe, just applied at the queue layer. |
 | `fatal` | no | Bad request, missing assertion, etc. | Inspect the error message, fix the cause, then `POST /api/knowledge-assets/swm/share-jobs/<jobId>/recover` to re-queue. |
 
 Note that `cap_exceeded` jobs reach `state: "failed"`, not `failed_retrying`,
@@ -634,7 +636,7 @@ promote job is queued / running.
    a. markPartitionStatus(..., 'in_progress')
    b. POST /api/knowledge-assets   { name, subGraphName, contextGraphId }
    c. POST /api/knowledge-assets/<name>/wm/write   { quads }      // chunks of ≤ 5000
-   d. POST /api/knowledge-assets/<name>/swm/share { entities }   // chunks of ≤ 1000 URIs
+   d. POST /api/knowledge-assets/<name>/swm/share { entities }   // chunks of ≤ 400 URIs
    e. markPartitionStatus(..., 'done')
 4. On 413: halve chunk + retry.
 5. On crash: loadImportManifest → pendingPartitions → resume from step 3.

@@ -13,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { appendInPlace } from './append-in-place.js';
+import { isIriMetaSubject } from './iri-term.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const MERKLE_ROOT = `${DKG_NS}merkleRoot`;
@@ -102,8 +103,19 @@ export interface DurableIntegritySelection {
   dataIndexes: number[];
   metaIndexes: number[];
   rejected: number;
-  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted. */
+  /** Unauthenticated cursor/routing rows deliberately consumed but not persisted (diagnostic). */
   droppedSyncControlTriples: number;
+  /** Non-IRI (blank-node/literal) `_meta` subject rows dropped at peer ingest (#1921) (diagnostic). */
+  droppedNonIriSubjectTriples: number;
+  /**
+   * Reason-agnostic aggregate of `_meta` rows deliberately consumed but NOT
+   * persisted (= droppedSyncControlTriples + droppedNonIriSubjectTriples). Owned
+   * here by the verifier that classifies the drops (#1921): the worker transports
+   * it and the requester uses it as the single meta-checkpoint-advance signal, so
+   * checkpoint policy never has to enumerate verifier discard reasons. The two
+   * per-reason fields above stay as diagnostics.
+   */
+  consumedUnpersistedMetaTriples: number;
   /** Verified V2 assets whose exact public assertion graph is intentionally empty. */
   verifiedZeroPublicAssets: number;
   /** Exact assertion graphs whose V2 descriptors and fetched payload verified. */
@@ -171,7 +183,13 @@ export function planBoundedGraphScopedDurableBatch(
     || metaQuads.length === 0
   ) return null;
 
-  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  // #1921 — verification must never see non-IRI `_meta` subjects: a peer's
+  // `_:bad dkg:partOf "<valid-ual>"` row would otherwise be scanned by
+  // readIntegrityMetadata and falsely invalidate the valid graph-scoped UAL.
+  // Sanitize before indexing. The bounded planner returns only data offsets,
+  // so dropping non-IRI meta rows here is loss-free.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
   const parsed = readIntegrityMetadata(metadata, false);
   if (
     parsed.fatalUnscopedFailure
@@ -365,6 +383,8 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         droppedSyncControlTriples: 0,
+        droppedNonIriSubjectTriples: 0,
+        consumedUnpersistedMetaTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -375,13 +395,25 @@ export function selectVerifiedDurableSyncQuads(
       metaIndexes: [],
       rejected: 0,
       droppedSyncControlTriples: 0,
+      droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
     };
   }
 
-  const metadata = indexIntegrityMetadata(dataQuads, metaQuads);
+  // #1921 — sanitize the verification inputs ONCE at this boundary so a non-IRI
+  // `_meta` subject can neither authenticate data (it never becomes a candidate)
+  // NOR poison verification (the readIntegrityMetadata PART_OF scan and
+  // verifyLegacyCandidates' raw scan never see it, so a `_:bad dkg:partOf
+  // "<valid-ual>"` row cannot falsely invalidate a valid batch). Admission below
+  // deliberately runs on the ORIGINAL metaQuads: the selectors still drop+count
+  // non-IRI rows (persist-drop + meta-cursor advance) and index into the
+  // original array. The verification outcome is subject-keyed, so no positional
+  // remap is needed across the sanitized/original split.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
   if (metadata.merkleSubjects.size === 0 && metadata.markerSubjects.size === 0) {
     if (!acceptUnverified && dataQuads.length > 0) {
       logs.push({
@@ -393,6 +425,8 @@ export function selectVerifiedDurableSyncQuads(
         metaIndexes: [],
         rejected: 1,
         droppedSyncControlTriples: 0,
+        droppedNonIriSubjectTriples: 0,
+        consumedUnpersistedMetaTriples: 0,
         verifiedZeroPublicAssets: 0,
         verifiedGraphScopedDataGraphs: [],
         logs,
@@ -406,11 +440,14 @@ export function selectVerifiedDurableSyncQuads(
       new Set(),
     );
     logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
     return {
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
+      droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+      consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: 0,
       verifiedGraphScopedDataGraphs: [],
       logs,
@@ -427,7 +464,7 @@ export function selectVerifiedDurableSyncQuads(
   );
   const legacy = verifyLegacyCandidates(
     dataQuads,
-    metaQuads,
+    iriMetaQuads,
     metadata,
     parsed.candidates,
     acceptUnverified,
@@ -483,6 +520,16 @@ function indexIntegrityMetadata(
 
   const merkleSubjects = new Set<string>();
   const markerSubjects = new Set<string>();
+  // #1921 PRECONDITION: callers MUST pass IRI-sanitized `_meta` quads. Both
+  // current callers do — selectVerifiedDurableSyncQuads and
+  // planBoundedGraphScopedDurableBatch filter non-IRI subjects at their boundary
+  // before indexing — and any NEW caller MUST too. This function no longer
+  // filters internally, so a non-IRI subject reaching here would re-enter
+  // candidacy AND the metaBySubject-based verification scans
+  // (readIntegrityMetadata's PART_OF scan, parseGraphScopedDescriptor), letting a
+  // peer's blank-node/literal subject authenticate data OR poison a valid batch.
+  // Admission (the selectors) deliberately runs on the ORIGINAL metaQuads and is
+  // where non-IRI rows are dropped + counted.
   for (const quad of metaQuads) {
     if (quad.predicate === MERKLE_ROOT) {
       merkleSubjects.add(quad.subject);
@@ -1019,11 +1066,14 @@ function selectVerifiedQuads(
       outcome.kaToKc,
     );
     logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+    logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
     return {
       dataIndexes: allIndexes(dataQuads),
       metaIndexes: selectedMetadata.indexes,
       rejected: 0,
       droppedSyncControlTriples: selectedMetadata.droppedControls,
+      droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+      consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       verifiedGraphScopedDataGraphs,
       logs,
@@ -1035,6 +1085,8 @@ function selectVerifiedQuads(
       metaIndexes: [],
       rejected,
       droppedSyncControlTriples: 0,
+      droppedNonIriSubjectTriples: 0,
+      consumedUnpersistedMetaTriples: 0,
       verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
       // Keep this list aligned with the selected data + metadata indexes.
       // A fatal batch deliberately selects neither. Returning the names of
@@ -1054,12 +1106,15 @@ function selectVerifiedQuads(
     outcome.authenticatedMetadataUals,
   );
   logDroppedSyncControls(logs, selectedMetadata.droppedControls);
+  logDroppedNonIriMetaSubjects(logs, selectedMetadata.droppedNonIriSubjectTriples);
 
   return {
     dataIndexes,
     metaIndexes: selectedMetadata.indexes,
     rejected,
     droppedSyncControlTriples: selectedMetadata.droppedControls,
+    droppedNonIriSubjectTriples: selectedMetadata.droppedNonIriSubjectTriples,
+    consumedUnpersistedMetaTriples: selectedMetadata.droppedControls + selectedMetadata.droppedNonIriSubjectTriples,
     verifiedZeroPublicAssets: outcome.verifiedZeroPublicAssets,
     verifiedGraphScopedDataGraphs,
     logs,
@@ -1072,11 +1127,23 @@ function selectAdmittedMetadataIndexes(
   admittedMetadataUals: ReadonlySet<string>,
   kaToKc: ReadonlyMap<string, string>,
   authenticatedMetadataUals: ReadonlySet<string>,
-): { indexes: number[]; droppedControls: number } {
+): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
   let droppedControls = 0;
+  let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
+    // #1921 — admission runs on the ORIGINAL metaQuads (verification already ran
+    // on the IRI-sanitized set at the boundary). A non-IRI descriptive row would
+    // otherwise reach the descriptive fall-through below and be persisted, so
+    // drop + count it here — that keeps it out of the store AND feeds the
+    // meta-cursor consumed-row count (checkpoint advance). It could not reach the
+    // merkle/marker branch regardless: the boundary sanitize keeps non-IRI
+    // subjects out of `merkleSubjects`/`markerSubjects`.
+    if (!isIriMetaSubject(quad.subject)) {
+      droppedNonIriSubjectTriples += 1;
+      continue;
+    }
     if (
       metadata.merkleSubjects.has(quad.subject)
       || metadata.markerSubjects.has(quad.subject)
@@ -1130,7 +1197,7 @@ function selectAdmittedMetadataIndexes(
     }
     indexes.push(index);
   }
-  return { indexes, droppedControls };
+  return { indexes, droppedControls, droppedNonIriSubjectTriples };
 }
 
 function selectSystemOverrideMetadataIndexes(
@@ -1138,11 +1205,20 @@ function selectSystemOverrideMetadataIndexes(
   metadata: IntegrityMetadataIndex,
   authenticatedMetadataUals: ReadonlySet<string>,
   kaToKc: ReadonlyMap<string, string>,
-): { indexes: number[]; droppedControls: number } {
+): { indexes: number[]; droppedControls: number; droppedNonIriSubjectTriples: number } {
   const indexes: number[] = [];
   let droppedControls = 0;
+  let droppedNonIriSubjectTriples = 0;
   for (let index = 0; index < metaQuads.length; index++) {
     const quad = metaQuads[index]!;
+    // #1921 — reject a non-IRI durable `_meta` subject at ingest. This terminal
+    // system-CG selector admits every non-control row, so without this guard a
+    // blank-node subject bearing ANY descriptive or integrity predicate
+    // (e.g. `dkg:merkleRoot`) would be persisted and later served back.
+    if (!isIriMetaSubject(quad.subject)) {
+      droppedNonIriSubjectTriples += 1;
+      continue;
+    }
     if (
       DURABLE_SYNC_CONTROL_PREDICATE_SET.has(quad.predicate)
       && !isGraphSealDescriptiveVersion(quad, metadata)
@@ -1158,7 +1234,7 @@ function selectSystemOverrideMetadataIndexes(
     }
     indexes.push(index);
   }
-  return { indexes, droppedControls };
+  return { indexes, droppedControls, droppedNonIriSubjectTriples };
 }
 
 /**
@@ -1244,6 +1320,17 @@ function logDroppedSyncControls(
   logs.push({
     level: 'warn',
     message: `Dropped ${droppedControls} unverified durable sync control metadata triple(s)`,
+  });
+}
+
+function logDroppedNonIriMetaSubjects(
+  logs: DurableIntegrityLogEntry[],
+  dropped: number,
+): void {
+  if (dropped === 0) return;
+  logs.push({
+    level: 'warn',
+    message: `Dropped ${dropped} non-IRI durable _meta subject triple(s) from peer ingest (#1921)`,
   });
 }
 

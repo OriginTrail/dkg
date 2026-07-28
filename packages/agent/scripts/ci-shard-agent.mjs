@@ -64,7 +64,7 @@ const WEIGHTS = {
   'test/v10-ack-provider.test.ts': 1131,
   'test/finalization-promote-extra.test.ts': 1058,
   'test/wm-multi-agent-isolation-extra.test.ts': 1022,
-  'test/swm-10mb-boundary-extra.test.ts': 1000,
+  'test/swm-4mib-boundary-extra.test.ts': 1000,
 };
 const DEFAULT_WEIGHT = 500;
 
