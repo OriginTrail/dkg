@@ -115,6 +115,10 @@ export function sleep(ms) {
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'http://schema.org/';
+// Keep generated load-test literals well below DKG's 60,000-byte
+// Blazegraph-compatible MUTF-8 ceiling. The indexed predicate makes every
+// filler quad unique and ordered while keeping all filler on the same root KA.
+export const FILLER_LITERAL_BODY_BYTES = 16 * 1024;
 
 export function buildQuads(nodeName, kaNumber) {
   const nodeKey = nodeName.replace(/\s+/g, '').toLowerCase();
@@ -141,12 +145,35 @@ export function buildQuads(nodeName, kaNumber) {
     addQuad(entityId, `${SCHEMA}isPartOf`, rootId);
   }
 
-  // Pad to target size
-  const currentBytes = Buffer.byteLength(JSON.stringify(quads), 'utf8');
+  // Pad the serialized quad array to the requested aggregate size. A single
+  // multi-MiB literal is not a valid DKG payload even when the aggregate
+  // payload is below the 4 MiB publish ceiling, so distribute the padding over
+  // unique, ordered, individually safe literals.
+  let currentBytes = Buffer.byteLength(JSON.stringify(quads), 'utf8');
   const targetBytes = Math.max(0, Math.floor(TEST_CONTENT_SIZE_KB * 1024));
-  const fillerBytes = Math.max(0, targetBytes - currentBytes);
-  if (fillerBytes > 0) {
-    addQuad(rootId, `urn:dkg:filler`, literal(createLargeText(fillerBytes)));
+  let chunkIndex = 0;
+  while (currentBytes < targetBytes) {
+    const predicate = `urn:dkg:filler:${String(chunkIndex).padStart(6, '0')}`;
+    const emptyQuad = {
+      subject: rootId,
+      predicate,
+      object: literal(''),
+      graph: '',
+    };
+    // The array is already non-empty. Appending adds one comma plus the
+    // serialized quad; the surrounding [] bytes are already in currentBytes.
+    const structuralBytes = 1 + Buffer.byteLength(JSON.stringify(emptyQuad), 'utf8');
+    const availableBodyBytes = targetBytes - currentBytes - structuralBytes;
+    if (availableBodyBytes <= 0) break;
+
+    const bodyBytes = Math.min(FILLER_LITERAL_BODY_BYTES, availableBodyBytes);
+    const fillerQuad = {
+      ...emptyQuad,
+      object: literal(createLargeText(bodyBytes)),
+    };
+    quads.push(fillerQuad);
+    currentBytes += 1 + Buffer.byteLength(JSON.stringify(fillerQuad), 'utf8');
+    chunkIndex++;
   }
 
   return { quads, rootEntity: rootId };
