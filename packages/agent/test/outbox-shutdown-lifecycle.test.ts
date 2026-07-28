@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
@@ -34,6 +35,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
       node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
     });
@@ -85,6 +87,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         inFlightSubstrateFanOutCount: () => 0,
         router: { closePooling: vi.fn(async () => {}) },
         node: { stop: stopNode },
+        finalizationRuntime: new FinalizationRuntime(),
         store: { close: closeStore },
         log: { warn },
       });
@@ -124,6 +127,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
       node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
       store: { close: vi.fn(async () => {}) },
       log: { warn: vi.fn() },
     });
@@ -157,6 +161,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
       node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn },
     });
