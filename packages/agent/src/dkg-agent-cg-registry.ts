@@ -123,7 +123,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -420,6 +419,16 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<string | null> {
     const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (subscribed) return subscribed;
+
+    // Registered CG events carry only the curator-committed name hash. Resolve
+    // the cleartext subscription through the in-memory reverse index before
+    // consulting RDF state; this mapping is populated and persisted by the
+    // chain-event lifecycle path.
+    const mappedLocalId = this.localCgIdForWireId(
+      this.contextGraphWireId(contextGraphId),
+    );
+    const mapped = this.subscribedContextGraphs.get(mappedLocalId)?.onChainId;
+    if (mapped) return mapped;
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;

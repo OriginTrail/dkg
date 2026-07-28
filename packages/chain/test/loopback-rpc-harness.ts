@@ -15,7 +15,12 @@
  * in afterEach, or the hook hangs past vitest's timeout — the known flaky-CI
  * failure mode (see evm-adapter.unit.test.ts:1549).
  */
-import { createServer, type Server } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 /** chainId 31337 (matches the tests' `chainId: 'evm:31337'`). */
@@ -26,6 +31,8 @@ export interface LoopbackRpc {
   server: Server;
   /** Per-JSON-RPC-method request counts, e.g. `hits('eth_chainId')`. */
   hits: (method: string) => number;
+  /** Requests whose client connection closed before a response was sent. */
+  aborted: (method: string) => number;
   totalHits: () => number;
   /** Force-close sockets then close the server (afterEach teardown). */
   close: () => Promise<void>;
@@ -34,11 +41,37 @@ export interface LoopbackRpc {
 export interface LoopbackOptions {
   /** JSON-RPC methods that respond HTTP 429 (rate-limited). */
   throttle?: Iterable<string>;
-  /** Override canned results per method (return a hex string). */
-  results?: Record<string, string>;
+  /** Override canned JSON-RPC results per method. */
+  results?: Record<string, unknown>;
+  /** JSON-RPC methods that accept the request but never send a response. */
+  hang?: Iterable<string>;
 }
 
-const DEFAULT_RESULTS: Record<string, string> = {
+export interface LoopbackJsonRpcRequest {
+  readonly jsonrpc: '2.0';
+  readonly id: number;
+  readonly method: string;
+  readonly params: readonly unknown[];
+}
+
+export interface LoopbackJsonRpcServer {
+  readonly url: string;
+  readonly calls: LoopbackJsonRpcRequest[];
+  readonly stop: () => Promise<void>;
+}
+
+export type LoopbackJsonRpcHandler = (
+  call: LoopbackJsonRpcRequest,
+  response: ServerResponse,
+  request: IncomingMessage,
+) => void | Promise<void>;
+
+export interface LoopbackJsonRpcTestHarness {
+  readonly start: (handler: LoopbackJsonRpcHandler) => Promise<LoopbackJsonRpcServer>;
+  readonly stopAll: () => Promise<void>;
+}
+
+const DEFAULT_RESULTS: Record<string, unknown> = {
   eth_chainId: CHAIN_ID_HEX,
   eth_blockNumber: '0x10',
   eth_getCode: '0x1234',
@@ -55,10 +88,12 @@ const DEFAULT_RESULTS: Record<string, string> = {
  */
 export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<LoopbackRpc> {
   const throttle = new Set(options.throttle ?? []);
+  const hang = new Set(options.hang ?? []);
   const results = { ...DEFAULT_RESULTS, ...(options.results ?? {}) };
   const counts = new Map<string, number>();
+  const abortedCounts = new Map<string, number>();
 
-  const server = createServer((req, res) => {
+  const loopback = await startLoopbackHttpServer((req, res) => {
     let raw = '';
     req.on('data', (c) => { raw += c; });
     req.on('end', () => {
@@ -72,6 +107,16 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
         if (throttle.has(r.method)) { throttled = true; continue; }
         const result = r.method in results ? results[r.method] : '0x';
         out.push({ jsonrpc: '2.0', id: r.id, result: result === '' ? null : result });
+      }
+      const hungMethods = reqs.filter(r => hang.has(r.method)).map(r => r.method);
+      if (hungMethods.length > 0) {
+        res.on('close', () => {
+          if (res.writableEnded) return;
+          for (const method of hungMethods) {
+            abortedCounts.set(method, (abortedCounts.get(method) ?? 0) + 1);
+          }
+        });
+        return;
       }
       if (throttled) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -87,16 +132,108 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
     });
   });
 
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const addr = server.address() as AddressInfo;
   return {
-    url: `http://127.0.0.1:${addr.port}`,
-    server,
+    url: loopback.url,
+    server: loopback.server,
     hits: (method) => counts.get(method) ?? 0,
+    aborted: (method) => abortedCounts.get(method) ?? 0,
     totalHits: () => [...counts.values()].reduce((a, b) => a + b, 0),
-    close: async () => {
-      server.closeAllConnections?.();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
+    close: loopback.close,
   };
+}
+
+/** Handler-driven variant sharing the canonical loopback server lifecycle. */
+export function createLoopbackJsonRpcTestHarness(): LoopbackJsonRpcTestHarness {
+  const activeServers: LoopbackJsonRpcServer[] = [];
+
+  const start = async (handler: LoopbackJsonRpcHandler): Promise<LoopbackJsonRpcServer> => {
+    const calls: LoopbackJsonRpcRequest[] = [];
+    const started = await startLoopbackHttpServer(async (request, response) => {
+      try {
+        const parsed = JSON.parse(await readRequestBody(request)) as LoopbackJsonRpcRequest;
+        calls.push(parsed);
+        await handler(parsed, response, request);
+      } catch (cause) {
+        if (!response.headersSent) response.writeHead(500, { 'content-type': 'text/plain' });
+        if (!response.writableEnded) {
+          response.end(cause instanceof Error ? cause.message : 'failure');
+        }
+      }
+    });
+    let stopped = false;
+    const loopback = Object.freeze({
+      url: started.url,
+      calls,
+      stop: async () => {
+        if (stopped) return;
+        stopped = true;
+        await started.close();
+      },
+    });
+    activeServers.push(loopback);
+    return loopback;
+  };
+
+  return Object.freeze({
+    start,
+    stopAll: async () => {
+      await Promise.all(activeServers.splice(0).map((server) => server.stop()));
+    },
+  });
+}
+
+export function sendJsonRpcResult(
+  response: ServerResponse,
+  request: LoopbackJsonRpcRequest,
+  result: unknown,
+): void {
+  response.writeHead(200, { 'content-type': 'application/json' });
+  response.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+}
+
+export function sendJsonRpcError(
+  response: ServerResponse,
+  request: LoopbackJsonRpcRequest,
+  code: number,
+  message: string,
+  data?: string,
+): void {
+  response.writeHead(200, { 'content-type': 'application/json' });
+  response.end(JSON.stringify({
+    jsonrpc: '2.0',
+    id: request.id,
+    error: { code, message, ...(data === undefined ? {} : { data }) },
+  }));
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function startLoopbackHttpServer(
+  handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
+): Promise<Readonly<{ url: string; server: Server; close: () => Promise<void> }>> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return Object.freeze({
+    url: `http://127.0.0.1:${address.port}`,
+    server,
+    close: () => closeServer(server),
+  });
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  });
 }

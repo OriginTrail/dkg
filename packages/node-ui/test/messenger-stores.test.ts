@@ -46,7 +46,7 @@ describe('V12 migration', () => {
     // DB layer in `db.test.ts`; this assertion just pins that
     // the substrate store fixtures are created against the
     // Current SCHEMA_VERSION includes the durable VM-reconcile negative cache.
-    expect(db.db.pragma('user_version', { simple: true })).toBe(30);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
   });
 });
 

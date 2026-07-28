@@ -54,6 +54,7 @@ import {
   contextGraphSessionTopic,
 } from '../src/constants.js';
 import { MemoryLayer } from '../src/memory-model.js';
+import { STORAGE_ACK_MAX_STAGING_BYTES } from '../src/protocol-limits.js';
 
 describe('V10 protocol stream IDs', () => {
   // rc.9 plan: protocols on /dkg/10.0.1/* are migrated onto the
@@ -127,9 +128,10 @@ describe('V10 GossipSub topics', () => {
     expect(networkPeersTopic()).toBe('dkg/network/peers');
   });
 
-  it('allows one 10 MB DKG gossip application payload', () => {
-    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(10 * 1024 * 1024);
-    expect(DKG_GOSSIP_MAX_RPC_BYTES).toBeGreaterThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+  it('limits one DKG gossip application payload to the 4 MiB StorageACK ceiling', () => {
+    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(4 * 1024 * 1024);
+    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(STORAGE_ACK_MAX_STAGING_BYTES);
+    expect(DKG_GOSSIP_MAX_RPC_BYTES).toBe(DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024);
   });
 });
 

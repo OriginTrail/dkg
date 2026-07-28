@@ -10,7 +10,13 @@ import {
   jobSubject,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
-import { storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
+import {
+  KA_VM_EXECUTOR_TX_HASH,
+  KA_VM_KA_UAL,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+  stageKnowledgeAssetShareSnapshot,
+} from './_helpers/ka-vm-publish.js';
 
 describe('KA async VM publish broadcast progress', () => {
   let now = 1_000;
@@ -35,62 +41,12 @@ describe('KA async VM publish broadcast progress', () => {
     });
   }
 
-  function kaVmPublishRequest(overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
-    return {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'share-op-1',
-      roots: [],
-      contentScopeVersion: 2 as const,
-      kaUal,
-      assertionVersion: '1',
-      publicTripleCount: 2,
-      privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: {
-          r: (`0x${'34'.repeat(32)}`) as `0x${string}`,
-          vs: (`0x${'56'.repeat(32)}`) as `0x${string}`,
-        },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: `sha256:${'ab'.repeat(32)}`,
-      wmCurrentAssertion: '12'.repeat(32),
-      swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(),
-      reservedUal: kaUal,
-      ...overrides,
-    };
-  }
-
   async function stageShareSnapshot(): Promise<void> {
-    const request = kaVmPublishRequest();
-    await storeKnowledgeAssetOperationPublicQuads({
-      store,
-      graphManager,
-      contextGraphId: 'music-social',
-      shareOperationId: 'share-op-1',
-      kaUal: request.kaUal,
-      assertionVersion: request.assertionVersion,
-      publisherPeerId: 'peer-1',
-      quads: [
-        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-      ],
-    });
+    await stageKnowledgeAssetShareSnapshot({ store, graphManager });
   }
 
   it('persists KA broadcast tx hash when executor write-ahead fires before completion', async () => {
-    const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
+    const txHash = KA_VM_EXECUTOR_TX_HASH;
     let jobId = '';
     let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
     const publisher = createPublisher({
@@ -127,13 +83,7 @@ describe('KA async VM publish broadcast progress', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash, walletId: 'wallet-1' },
@@ -162,11 +112,22 @@ describe('KA async VM publish broadcast progress', () => {
     const txHash = `0x${'aa'.repeat(32)}` as `0x${string}`;
     const request = kaVmPublishRequest();
     const kaId = request.seal.reservedKaId!;
-    const ual = `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`;
+    // GH#1966: the production recovery resolver returns the graph-local queued UAL
+    // (author + low-96 KA number) for named/graph-scoped KAs, not the contract/packed
+    // receipt form. finalizeRecovered is stubbed here, so this proves the durable
+    // recover() cycle finalizes exactly once and passes the resolver's graph-local
+    // UAL through faithfully — validator acceptance of that form is covered by the
+    // agent unit + e2e suites (named-ka-publish-recovery.test.ts, e2e-memory-layers).
+    const ual = KA_VM_KA_UAL;
     const finalized: Array<{ jobId: string; status: string }> = [];
     const publisher = createPublisher({
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { txHash, blockNumber: 42, blockTimestamp: 2_000 },
+        inclusion: {
+          txHash,
+          blockNumber: 42,
+          blockHash: `0x${'ab'.repeat(32)}`,
+          blockTimestamp: 2_000,
+        },
         finalization: {
           mode: 'published',
           txHash,
@@ -179,6 +140,7 @@ describe('KA async VM publish broadcast progress', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
       knowledgeAssetVmPublishHandler: {
@@ -195,13 +157,7 @@ describe('KA async VM publish broadcast progress', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash, walletId: 'wallet-1', merkleRoot: request.sealMerkleRoot },
@@ -221,13 +177,7 @@ describe('KA async VM publish broadcast progress', () => {
     const includedJobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
     await publisher.claimNext('wallet-1');
     await publisher.update(includedJobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(includedJobId, 'broadcast', {
       broadcast: { txHash, walletId: 'wallet-1', merkleRoot: request.sealMerkleRoot },
@@ -244,6 +194,11 @@ describe('KA async VM publish broadcast progress', () => {
     ]);
     expect(includedJob?.status).toBe('finalized');
     expect(includedJob?.recovery?.recoveredFromStatus).toBe('included');
+
+    // GH#1966: once finalized from the confirmed transaction, a further recovery
+    // sweep must not re-process either job — no second on-chain submission.
+    expect(await publisher.recover()).toBe(0);
+    expect(finalized).toHaveLength(2);
   });
 
   it('keeps confirmed KA jobs tx-bearing while local lifecycle recovery is blocked', async () => {
@@ -254,11 +209,15 @@ describe('KA async VM publish broadcast progress', () => {
     const publisher = createPublisher({
       recoveryLookupTimeoutMs: 1,
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { txHash, blockNumber: 43 },
+        inclusion: {
+          txHash,
+          blockNumber: 43,
+          blockHash: `0x${'ab'.repeat(32)}`,
+        },
         finalization: {
           mode: 'published',
           txHash,
-          ual: `did:dkg:evm:31337/0x3333333333333333333333333333333333333333/${kaId}`,
+          ual: KA_VM_KA_UAL,
           batchId: kaId,
           startKAId: kaId,
           endKAId: kaId,
@@ -267,6 +226,7 @@ describe('KA async VM publish broadcast progress', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
       knowledgeAssetVmPublishHandler: {
@@ -281,13 +241,7 @@ describe('KA async VM publish broadcast progress', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash, walletId: 'wallet-1', merkleRoot: request.sealMerkleRoot },

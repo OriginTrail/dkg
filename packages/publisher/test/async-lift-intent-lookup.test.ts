@@ -12,6 +12,7 @@ import {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
+import { KA_VM_BROADCAST_TX, KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
 
 // #1828 — durable-admission recovery: exact intent lookup keyed on the lifecycle
 // facts a client retains, with a materialized index and deterministic
@@ -37,40 +38,6 @@ describe('#1828 async lift intent lookup', () => {
     });
   }
 
-  function kaVmPublishRequest(overrides: Record<string, unknown> = {}) {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
-    return {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'share-op-1',
-      roots: [] as string[],
-      contentScopeVersion: 2 as const,
-      kaUal,
-      assertionVersion: '1',
-      publicTripleCount: 2,
-      privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: { r: (`0x${'34'.repeat(32)}`) as `0x${string}`, vs: (`0x${'56'.repeat(32)}`) as `0x${string}` },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: `sha256:${'ab'.repeat(32)}`,
-      wmCurrentAssertion: '12'.repeat(32),
-      swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(),
-      reservedUal: kaUal,
-      ...overrides,
-    };
-  }
-
   // The facts a recovering client retains (never the jobId or intentKey).
   const facts = { contextGraphId: 'music-social', name: 'albums' };
 
@@ -78,18 +45,8 @@ describe('#1828 async lift intent lookup', () => {
     const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
     await publisher.claimNext('wallet-1');
-    await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
-    });
-    await publisher.update(jobId, 'broadcast', {
-      broadcast: { txHash: `0x${'ef'.repeat(32)}` as `0x${string}`, walletId: 'wallet-1' },
-    });
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', { broadcast: KA_VM_BROADCAST_TX });
     now += 20;
     await publisher.recover();
     const job = await publisher.getStatus(jobId);

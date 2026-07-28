@@ -240,7 +240,7 @@ lifecycle (`finalize` = seal; a full `share` seals by default, so the explicit f
 knowledge into Shared Working Memory, author it as a **named knowledge asset** (`dkg_knowledge_asset_create`
 → `dkg_knowledge_asset_share`); there is no separate loose-write or direct-bridge publish tool.
 
-**Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_knowledge_asset_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/knowledge-assets/<name>/wm/write` payloads under the 10 MB body cap, keep `/api/knowledge-assets/<name>/swm/share` payloads under the 256 KB body cap, and remember that promotion can still fail at the 10 MB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/knowledge-assets/<name>/swm/share-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
+**Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_knowledge_asset_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/knowledge-assets/<name>/wm/write` payloads under the 10 MB body cap, keep `/api/knowledge-assets/<name>/swm/share` payloads under the 256 KB body cap, and remember that promotion can still fail at the 4 MiB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/knowledge-assets/<name>/swm/share-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
 
 ### HTTP-only operations (no tool wrapper)
 
@@ -313,10 +313,37 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 
 **Canonical publish (the agent path):** `POST /api/knowledge-assets/{name}/vm/publish`.
 Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
-select the assertion and encode the author, so this endpoint takes **no selector** —
-`assertionName`, author overrides, and any `selection` other than `"all"` are
-rejected `400`. It is multi-root-safe (the seal commits the whole assertion).
-Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+select the assertion and encode the author, so authorship cannot be **overridden** here:
+`assertionName`, `authorAgentAddress`, `preSignedAuthorAttestation`, and any `selection`
+other than `"all"` are rejected `400`. It is multi-root-safe (the seal commits the whole
+assertion).
+Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "selectedAuthorAgentAddress"?: "0x...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+
+**Choosing among several authors (GH#1786).** When two or more OTHER members have a
+finalized assertion with this name, publish returns
+`409 { code: "AMBIGUOUS_ASSERTION_AUTHOR", candidates: [...] }`. Retry with
+`selectedAuthorAgentAddress` set to one of those `candidates` to publish that member's KA;
+the authenticated caller remains the identity used for context-graph registration and
+curator stamping. The field **selects among authors that already have a finalized
+assertion** — it never confers authorship. It must be **top level** (inside `options` it is
+rejected `400`), and an address that is not a resident candidate is rejected
+`409 { code: "ASSERTION_AUTHOR_NOT_RESIDENT", candidates: [...] }` rather than publishing
+anything. Publishing another author's KA works for the initial **mint** (their sealed
+attestation is replayed), but an **update** of a foreign author's KA needs that author's key
+to be custodial on this node — otherwise use `/api/update` with a pre-signed
+`UpdateAuthorAttestation`.
+
+How that surfaces differs by lane, deliberately. On the **synchronous** `vm/publish` the node
+knows the signer, so it answers `409 PUBLISH_AUTHOR_NOT_CUSTODIAL` immediately. On
+**`vm/publish-async`** the publisher wallet is chosen later by whichever worker claims the
+job, so at accept time the node cannot know which signer will run it; rather than refuse a
+publish a different wallet could have made, it accepts (`202`) and the condition surfaces
+when the worker runs — as a **terminal** job failure with
+`code: "authority_forbidden"` (`retryable: false`, `resolution: "fail_job"`), carrying the
+signer's message. It is deliberately *not* retried: no amount of retrying makes the node able
+to sign for that author. Poll `/api/publisher/job` for that failure, or read the
+`agentAddress` echoed in the 202 body to confirm which author was selected before the job
+runs.
 **Preconditions:** the assertion must be finalized **and** present in SWM (else
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the
@@ -527,7 +554,7 @@ Respect these when producing writes — they're enforced at the node and produce
 
 - **Reorganizing assertions.** There is no rename-assertion or move-between-sub-graphs endpoint. To reorganize, create a new assertion (with `subGraphName?` for a different partition), copy the triples over via `/wm/write`, then `/wm/discard` the original. A new assertion starts a fresh lifecycle record in `_meta`.
 - **Reserved subject IRIs.** Subjects matching `urn:dkg:file:*` or `urn:dkg:extraction:*` are reserved for internal file/extraction metadata and are rejected at write time. Use a different subject IRI.
-- **SWM gossip size cap (10 MB).** A single share (`/swm/share`) must fit in one 10 MB gossip message. Split larger assertions by root entity before sharing — use the `entities` parameter on `/swm/share` to share subsets.
+- **SWM gossip size cap (4 MiB).** A single share (`/swm/share`) must fit in one 4 MiB gossip message. Split larger assertions by root entity before sharing — use the `entities` parameter on `/swm/share` to share subsets.
 - **SWM entity ownership (first-writer-wins).** The first peer to write a root entity in SWM becomes its owner; other peers' promotes or writes against that same root entity are rejected with an ownership error. Partition work by agent-owned root entities to avoid conflicts.
 - **Blank nodes are auto-skolemized.** Any `_:b0`-style blank nodes you submit are deterministically rewritten to UUID-backed URIs before storage, so IDs stay stable across sync and on-chain anchoring. Prefer explicit IRIs in production data.
 
@@ -830,7 +857,7 @@ Failure classifications you'll see in `attempt.lastError.classification`:
 | Classification | Retry? | Typical cause | Operator action |
 |---|---|---|---|
 | `transient` | yes (until `maxRetries=5` reached) | `fetch failed` / `ECONNRESET` / `timeout` | Wait — the worker will pick it up after backoff. |
-| `cap_exceeded` | no | `Promoted assertion too large for gossip` (10 MB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice — the queue can't subdivide on its own. |
+| `cap_exceeded` | no | `Promoted assertion too large for gossip` (4 MiB) or `Request body too large` (256 KB) | Re-enqueue with a smaller `entities` slice — the queue can't subdivide on its own. |
 | `fatal` | no | Bad request, missing assertion, etc. | Inspect the error message, fix the cause, then `POST /api/knowledge-assets/swm/share-jobs/{jobId}/recover`. |
 
 ### TRAC auto-approve policy (V10 publish + update)

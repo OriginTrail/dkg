@@ -3,19 +3,19 @@
  *
  * Audit findings covered:
  *
- *   P-4 (HIGH) — 10 MB SHARE gossip boundary.
+ *   P-4 (HIGH) — 4 MiB SHARE gossip boundary.
  *                `packages/publisher/src/dkg-publisher.ts` enforces
  *                `DKG_GOSSIP_MAX_MESSAGE_BYTES`. The existing
  *                suite never sends a payload near that limit, so a
  *                silent change to the cap (or a regression that stops
  *                measuring the encoded protobuf length) would not be
  *                detected. These tests pin both sides of the boundary:
- *                  • a multi-MB payload below 10 MB must succeed; and
- *                  • a payload just over 10 MB must fail with a clear,
+ *                  • a multi-MB payload below 4 MiB must succeed; and
+ *                  • a payload just over 4 MiB must fail with a clear,
  *                    caller-actionable error that mentions the limit.
  *
- * Per QA policy: do NOT modify production code or spec docs. If the
- * boundary ever drifts, the failing assertion IS the bug evidence.
+ * Keep these assertions and the operator guidance aligned whenever the shared
+ * protocol limit changes.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -56,7 +56,7 @@ function makePublisher(store: OxigraphStore, eventBus: TypedEventBus): Promise<D
   })();
 }
 
-describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
+describe('P-4: SWM share() 4 MiB gossip-message boundary', () => {
   let store: OxigraphStore;
   let eventBus: TypedEventBus;
   let publisher: DKGPublisher;
@@ -67,7 +67,7 @@ describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
     publisher = await makePublisher(store, eventBus);
   });
 
-  it('accepts a multi-MB payload below the 10 MB cap and returns an encoded message', async () => {
+  it('accepts a multi-MB payload below the 4 MiB cap and returns an encoded message', async () => {
     // Many modest literals match the large-context-graph shape without
     // stressing storage's single-literal formatter.
     const under = buildQuadsWithTotalPayload(2 * 1024 * 1024);
@@ -84,8 +84,8 @@ describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
     expect(result.message.length).toBeGreaterThan(1024 * 1024); // sanity: did we actually build big
   });
 
-  it('rejects a payload just over the 10 MB cap with a clear, actionable error', async () => {
-    // Well over the 10 MB cap so there is no ambiguity about the exit path.
+  it('rejects a payload just over the 4 MiB cap with a clear, actionable error', async () => {
+    // Well over the 4 MiB cap so there is no ambiguity about the exit path.
     // Use many Blazegraph-safe literals so this exercises the aggregate
     // gossip-message boundary rather than the per-literal safety guard.
     const over = buildQuadsWithTotalPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
@@ -104,11 +104,11 @@ describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
     // without attaching a debugger. We also assert the remediation
     // guidance (split by root entity) per spec §04.
     expect(msg).toMatch(/too large/i);
-    expect(msg).toMatch(/10\s*MB/);
+    expect(msg).toMatch(/4\s*MB/);
     expect(msg).toMatch(/split/i);
   });
 
-  it('the cap is 10 MB — an oversized payload fails, a multi-MB payload passes', async () => {
+  it('the cap is 4 MiB — an oversized payload fails, a multi-MB payload passes', async () => {
     // Pin the constant. If someone reduces the cap without updating
     // the guidance in the error or the spec, BOTH
     // halves of this test flip status and the regression is noisy.
@@ -121,6 +121,6 @@ describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
 
     await expect(
       publisher.share(CG, justOver, { publisherPeerId: PEER }),
-    ).rejects.toThrow(/too large.*10\s*MB/i);
+    ).rejects.toThrow(/too large.*4\s*MB/i);
   });
 });

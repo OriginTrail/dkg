@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "rootDir": "../..",
+    "skipLibCheck": true,
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "*.ts",
+    "../rfc64-gate2-multi-asset-completeness/agent-child.ts",
+    "../rfc64-gate2-multi-asset-completeness/model.ts",
+    "../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts",
+    "../rfc64-persistence-lifecycle/evidence.ts",
+    "../rfc64-persistence-lifecycle/process-lifecycle.ts"
+  ]
+}

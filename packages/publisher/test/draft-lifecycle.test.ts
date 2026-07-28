@@ -1211,11 +1211,12 @@ describe('Working Memory Assertion Lifecycle', () => {
     const bothClaimsInserted = new Promise<void>((resolve) => {
       releaseClaims = resolve;
     });
+    const shareOperationIdPredicateToken = `<${SHARE_OPERATION_ID_PREDICATE}>`;
     store.query = async (sparql) => {
       const result = await query(sparql);
       if (
         sparql.includes('SELECT ?shareOperationId')
-        && sparql.includes(SHARE_OPERATION_ID_PREDICATE)
+        && sparql.split(/\s+/u).some((token) => token === shareOperationIdPredicateToken)
       ) {
         initialClaimReads += 1;
         if (initialClaimReads === 2) releaseInitialReads();
@@ -1921,7 +1922,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     }
   });
 
-  it('promote accepts a payload above the old 512 KB cap and below 10 MB', async () => {
+  it('promote accepts a payload above the old 512 KB cap and below 4 MiB', async () => {
     await publisher.assertionCreate(CG_ID, 'large-promote', AGENT);
     const quads = largePayloadQuads('large-promote', 2 * 1024 * 1024);
     await publisher.assertionWrite(CG_ID, 'large-promote', AGENT, quads);
@@ -1937,7 +1938,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(result.gossipMessage!.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
   });
 
-  it('promote rejects payloads above 10 MB before mutating WM or SWM', async () => {
+  it('promote rejects payloads above 4 MiB before mutating WM or SWM', async () => {
     await publisher.assertionCreate(CG_ID, 'too-large-promote', AGENT);
     const quads = largePayloadQuads('too-large-promote', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
     await publisher.assertionWrite(CG_ID, 'too-large-promote', AGENT, quads);
@@ -1945,7 +1946,7 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     await expect(
       publisher.assertionPromote(CG_ID, 'too-large-promote', AGENT, { publisherPeerId: PEER }),
-    ).rejects.toThrow(/Promoted assertion too large for gossip.*10\s*MB/i);
+    ).rejects.toThrow(/Promoted assertion too large for gossip.*4\s*MB/i);
 
     const assertionQuads = await publisher.assertionQuery(CG_ID, 'too-large-promote', AGENT);
     expect(assertionQuads.length).toBe(quads.length);

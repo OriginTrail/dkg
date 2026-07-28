@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  contextGraphCatalogUri,
+  DEFAULT_MAX_READ_BYTES,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
@@ -15,6 +20,7 @@ import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
 } from '../src/sync/responder/graph-plan.js';
+import { resolveDurableDataRequestPolicy } from '../src/sync/responder/durable-data-request-policy.js';
 import {
   linesFromNquads,
   registerTestSyncHandler,
@@ -31,6 +37,26 @@ function makeCtx(): OperationContext {
 function noopLog(): void {}
 
 describe('byte-budget sync pagination', () => {
+  it('advertises byte-budget paging in an unauthenticated public request', async () => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'data',
+      needsAuth: false,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+    });
+
+    expect(new TextDecoder().decode(encoded)).toBe(
+      `${CG_ID}|0|${SYNC_REQUEST_PAGE_SIZE}|data`
+      + `|page-mode|${SYNC_BYTE_BUDGET_PAGE_MODE}|page-rows|${SYNC_REQUEST_PAGE_SIZE}`,
+    );
+  });
+
   it('keeps the authenticated legacy limit signed while adding the larger hint', async () => {
     const wallet = ethers.Wallet.createRandom();
     const signedLimits: number[] = [];
@@ -58,6 +84,65 @@ describe('byte-budget sync pagination', () => {
     expect(request.pageMode).toBe(SYNC_BYTE_BUDGET_PAGE_MODE);
     expect(request.pageRowsHint).toBe(SYNC_REQUEST_PAGE_SIZE);
     expect(request.requesterSignatureR).toMatch(/^0x/);
+  });
+
+  // #1916: durable META now negotiates byte-budget paging exactly like durable
+  // DATA. These two cases pin the request-builder's meta advertisement directly:
+  // a regression dropping 'meta' from the useByteBudgetPage condition would
+  // silently break the wire negotiation, and the handler-level tests (which
+  // hand-craft the pageMode field) would not catch it.
+  it('advertises the byte-budget page mode for a durable meta request above the legacy cap', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const signedLimits: number[] = [];
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'meta',
+      needsAuth: true,
+      computeSyncDigest: (_cg, _offset, limit) => {
+        signedLimits.push(limit);
+        return new Uint8Array(32);
+      },
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    // The larger hint rides while the signed legacy limit stays 500-row capped,
+    // so digests remain wire-compatible with an old responder.
+    expect(signedLimits).toEqual([SYNC_PAGE_SIZE]);
+    expect(request.limit).toBe(SYNC_PAGE_SIZE);
+    expect(request.pageMode).toBe(SYNC_BYTE_BUDGET_PAGE_MODE);
+    expect(request.pageRowsHint).toBe(SYNC_REQUEST_PAGE_SIZE);
+  });
+
+  it('does not advertise byte-budget paging for a durable meta request at the legacy cap', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'meta',
+      needsAuth: true,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    // At the 500-row cap there is no larger page to negotiate, so the responder
+    // must see an unmodified legacy meta request (no pageMode field).
+    expect(request.pageMode).toBeUndefined();
+    expect(request.pageRowsHint).toBeUndefined();
   });
 
   it('continues after an old responder returns a short legacy page', async () => {
@@ -201,7 +286,103 @@ describe('byte-budget sync pagination', () => {
     await store.close();
   });
 
+  it('never emits an oversized legacy response frame and keeps negotiated data under 4 MiB', async () => {
+    const store = new OxigraphStore();
+    const graph = `did:dkg:context-graph:${CG_ID}/context/oversized`;
+    const largeObject = `"${'x'.repeat(22_000)}"`;
+    await store.insert(Array.from({ length: SYNC_PAGE_SIZE }, (_, i) => ({
+      graph,
+      subject: `urn:large-subject:${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: largeObject,
+    })));
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+
+    await expect(cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      syncSessionId: 'oversized-legacy-session',
+    })).rejects.toThrow(
+      new RegExp(`exceeds ${DEFAULT_MAX_READ_BYTES}-byte transport frame cap`),
+    );
+
+    const negotiated = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      syncSessionId: 'oversized-negotiated-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    });
+    const negotiatedBytes = new TextEncoder().encode(negotiated).byteLength;
+    expect(negotiatedBytes).toBeGreaterThan(0);
+    expect(negotiatedBytes).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+    expect(linesFromNquads(negotiated).length).toBeLessThan(SYNC_PAGE_SIZE);
+
+    await store.close();
+  });
+
+  it('guards an oversized prepared catalog response at the common protocol boundary', async () => {
+    const store = new OxigraphStore();
+    const graph = contextGraphCatalogUri(CG_ID);
+    const largeObject = `"${'c'.repeat(22_000)}"`;
+    await store.insert(Array.from({ length: SYNC_PAGE_SIZE }, (_, i) => ({
+      graph,
+      subject: `urn:catalog-subject:${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: largeObject,
+    })));
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+
+    await expect(cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'catalog',
+    })).rejects.toThrow(
+      new RegExp(`exceeds ${DEFAULT_MAX_READ_BYTES}-byte transport frame cap`),
+    );
+
+    await store.close();
+  });
+
   it('retains the 64-row transport fallback floor', () => {
     expect(SYNC_REQUEST_SAFE_PAGE_SIZE).toBe(64);
+  });
+
+  it('derives exact-fetch resource policy without trusting signature fields', () => {
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+      hasExactAssetFilter: true,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      cacheMode: 'page-only',
+      exactGraphReadMode: 'page-only',
+    });
+
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: SYNC_PAGE_SIZE,
+      includeSharedMemory: false,
+      phase: 'data',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+      hasExactAssetFilter: false,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      cacheMode: 'session-snapshot',
+      exactGraphReadMode: 'snapshot-or-page',
+    });
   });
 });

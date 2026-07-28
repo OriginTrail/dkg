@@ -284,20 +284,27 @@ export function classifyChainRpcTransportStatus(
   const { code } = err;
   const msg = sanitizeRpcMessage(typeof err.message === "string" ? err.message : "");
   const txHash = typeof err.txHash === "string" && err.txHash ? err.txHash : "";
+  const transportBody = (error: string, responseCode: string): Record<string, unknown> => ({
+    error,
+    code: responseCode,
+    ...(txHash ? { txHash } : {}),
+  });
   // Exhaustive over ChainRpcTransportCode: a new code added to the boundary
   // without a case here is a COMPILE error (the `never` default), so the
   // classifier can never silently inherit timeout/504 semantics for a new code.
   switch (code) {
     case "RPC_ENDPOINTS_EXHAUSTED":
-      return { status: 503, body: { error: msg || "Configured chain RPC endpoints were exhausted.", code } };
+      return {
+        status: 503,
+        body: transportBody(msg || "Configured chain RPC endpoints were exhausted.", code),
+      };
     case "RPC_RECEIPT_LOOKUP_FAILED":
       return {
         status: 503,
-        body: {
-          error: msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
+        body: transportBody(
+          msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
           code,
-          ...(txHash ? { txHash } : {}),
-        },
+        ),
       };
     case "RPC_TIMEOUT":
       // Internal, chain-namespaced timeout code. Expose the public/legacy
@@ -305,7 +312,7 @@ export function classifyChainRpcTransportStatus(
       // wire contract stable while the boundary stays namespaced internally.
       return {
         status: 504,
-        body: { error: msg || "Chain transaction timed out.", code: "TIMEOUT", ...(txHash ? { txHash } : {}) },
+        body: transportBody(msg || "Chain transaction timed out.", "TIMEOUT"),
       };
     default: {
       const _exhaustive: never = code;

@@ -4,6 +4,10 @@ import {
 } from './constants.js';
 import type { MemoryLayer } from './memory-model.js';
 import { assertSafeIri, isSafeIri } from './sparql-safe.js';
+import {
+  assertNetworkIdV1,
+  type NetworkIdV1,
+} from './sync-wire-identifiers.js';
 
 /** Existing V10 KAs may be resolved through the quarantined read-only path. */
 export const LEGACY_ROOT_CONTENT_SCOPE_VERSION = 1 as const;
@@ -60,6 +64,12 @@ export interface DeterministicKnowledgeAssetUalParts {
   readonly kaNumber: string;
 }
 
+export interface DeterministicRootlessKnowledgeAssetIdentity
+  extends DeterministicKnowledgeAssetUalParts {
+  /** Canonical base-10 packed `(uint160(author) << 96) | uint96(number)` id. */
+  readonly kaId: string;
+}
+
 export class LegacyKnowledgeAssetReadOnlyError extends Error {
   readonly code = 'LEGACY_KA_READ_ONLY';
 
@@ -77,6 +87,8 @@ const DETERMINISTIC_KA_UAL_RE = /^did:dkg:([^/]+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)
  * through the packed identity are valid graph identities.
  */
 export const MAX_KNOWLEDGE_ASSET_NUMBER = (1n << 96n) - 1n;
+const MAX_PACKED_ROOTLESS_KNOWLEDGE_ASSET_ID = (1n << 256n) - 1n;
+const PACKED_ROOTLESS_KNOWLEDGE_ASSET_NUMBER_BITS = 96n;
 
 /**
  * Parse and canonicalize the deterministic Option-1 UAL used as graph identity.
@@ -113,6 +125,31 @@ export function parseDeterministicKnowledgeAssetUal(
     agentAddress,
     kaNumber,
   };
+}
+
+/**
+ * Unpack the canonical rootless on-chain KA id into the same deterministic
+ * identity used by graph-scoped content. Legacy sequential ids have no author
+ * bits and therefore fail closed instead of aliasing a graph identity.
+ */
+export function unpackDeterministicRootlessKnowledgeAssetId(
+  networkId: NetworkIdV1,
+  kaId: bigint,
+): Readonly<DeterministicRootlessKnowledgeAssetIdentity> {
+  assertNetworkIdV1(networkId, 'rootless Knowledge Asset networkId');
+  if (typeof kaId !== 'bigint' || kaId < 1n || kaId > MAX_PACKED_ROOTLESS_KNOWLEDGE_ASSET_ID) {
+    throw new Error('Rootless Knowledge Asset id must be a nonzero uint256');
+  }
+  const authorValue = kaId >> PACKED_ROOTLESS_KNOWLEDGE_ASSET_NUMBER_BITS;
+  if (authorValue === 0n) {
+    throw new Error('Rootless Knowledge Asset id does not contain a packed author');
+  }
+  const agentAddress = `0x${authorValue.toString(16).padStart(40, '0')}`;
+  const kaNumber = (kaId & MAX_KNOWLEDGE_ASSET_NUMBER).toString(10);
+  const parsed = parseDeterministicKnowledgeAssetUal(
+    `did:dkg:${networkId}/${agentAddress}/${kaNumber}`,
+  );
+  return Object.freeze({ ...parsed, kaId: kaId.toString(10) });
 }
 
 export function canonicalAssertionVersion(

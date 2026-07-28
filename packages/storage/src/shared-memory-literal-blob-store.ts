@@ -130,6 +130,27 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     );
   }
 
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceSubject',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    // Externalize oversized literals before the replace, exactly like insert() /
+    // replaceGraph() — so a large job payload is stored as a blob ref rather than
+    // inline, keeping the atomic path byte-consistent with the fallback.
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    await this.inner.replaceSubject(graphUri, subject, externalized, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');

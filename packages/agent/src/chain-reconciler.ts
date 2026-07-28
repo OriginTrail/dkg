@@ -58,6 +58,26 @@ export interface OrdinalRecoveryTarget {
   reason: 'no-swm' | 'verified-vm-metadata-pending';
 }
 
+export interface PendingOrdinalRecoveryResult {
+  /** Revalidated outcomes for ordinals attempted during this recovery pass. */
+  outcomes: ReadonlyMap<number, OrdinalOutcome>;
+  /** Ordinals whose exact-fetch attempts consumed this pass's recovery budget. */
+  attemptedOrdinals: readonly number[];
+  /**
+   * First target remaining in the ordered recovery queue. This survives a
+   * cooldown-only pass so the next network-eligible pass resumes fairly
+   * instead of snapping back to the watermark.
+   */
+  continuationOrdinal: number | undefined;
+  /**
+   * True only when recovery intentionally skipped networking because its
+   * per-CG cooldown is active. This preserves the continuation without
+   * scheduling an immediate retry; ordinary no-eligible-peer outcomes keep
+   * the fair scan moving through unvisited ordinals.
+   */
+  cooldownOnly?: boolean;
+}
+
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
   getKCCount: (onChainCgId: bigint) => Promise<number>;
@@ -95,7 +115,7 @@ export interface ChainReconcilerDeps {
     onChainCgId: bigint,
     targets: readonly OrdinalRecoveryTarget[],
     headBlock: number | undefined,
-  ) => Promise<ReadonlyMap<number, OrdinalOutcome>>;
+  ) => Promise<PendingOrdinalRecoveryResult>;
   /**
    * Revalidate the local-CG -> on-chain-CG binding between ordinals. An active
    * pass must stop when discovery repairs a stale/reused chain id.
@@ -174,6 +194,9 @@ export async function reconcileContextGraph(
   let reconciled = 0;
   let processed = 0;
   let staleTarget = false;
+  let recoveryContinuationOrdinal: number | undefined;
+  let recoveryAttempted = false;
+  let recoveryCooldownOnly = false;
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -245,7 +268,7 @@ export async function reconcileContextGraph(
       )
       .map((outcome) => outcome.recovery!);
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
-      const recovered = await deps.recoverPendingOrdinals(
+      const recovery = await deps.recoverPendingOrdinals(
         localCgId,
         onChainCgId,
         recoveryTargets,
@@ -258,7 +281,10 @@ export async function reconcileContextGraph(
       if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
         staleTarget = true;
       } else {
-        for (const [ordinal, outcome] of recovered) outcomes.set(ordinal, outcome);
+        for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
+        recoveryContinuationOrdinal = recovery.continuationOrdinal;
+        recoveryAttempted = recovery.attemptedOrdinals.length > 0;
+        recoveryCooldownOnly = recovery.cooldownOnly === true;
       }
     }
 
@@ -284,14 +310,28 @@ export async function reconcileContextGraph(
     }
   }
 
-  if (staleTarget || headUnavailable || !hasUnvisitedCandidates) {
+  if (staleTarget || headUnavailable) {
+    state.scanOrdinal = state.watermark;
+  } else if (
+    recoveryContinuationOrdinal !== undefined
+    && (recoveryAttempted || recoveryCooldownOnly || !hasUnvisitedCandidates)
+  ) {
+    state.scanOrdinal = Math.max(state.watermark, recoveryContinuationOrdinal);
+  } else if (!hasUnvisitedCandidates) {
     state.scanOrdinal = state.watermark;
   } else if (ordinals.length > 0) {
     state.scanOrdinal = ordinals[ordinals.length - 1]! + 1;
   }
 
   const pending = ordinalsToReconcile(state, head).length;
-  const hasMore = !headUnavailable && !staleTarget && hasUnvisitedCandidates;
+  const hasMore = !headUnavailable
+    && !staleTarget
+    && !recoveryCooldownOnly
+    && (
+      recoveryAttempted
+        ? recoveryContinuationOrdinal !== undefined || hasUnvisitedCandidates
+        : hasUnvisitedCandidates
+    );
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);

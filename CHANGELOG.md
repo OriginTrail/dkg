@@ -4,6 +4,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Changed
+
+- **SWM gossip payload ceiling aligned with StorageACK:** one encoded SWM share or promotion is now capped at 4 MiB, matching the untrusted inline StorageACK staging ceiling. GossipSub retains 256 KiB of framing headroom, while the general direct-protocol frame/read limit remains 10 MiB.
+
 ## [10.0.9] - 2026-07-21
 
 Public Context Graphs work fully: any agent can reliably sync both SWM and VM, including late joiners and Context Graphs whose operation history exceeds the previous snapshot ceiling. This release consolidates the testnet-canary line previously rolled out to nodes by branch ref, plus the fifa-class metadata ceiling fix, validated by a devnet hold-out proof (a node absent during publication reconstructs the full corpus with per-graph digest verification) and by the testnet fleet. **No smart-contract changes — no deployment required** (no Solidity source or ABI changes since 10.0.7).

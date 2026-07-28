@@ -86,6 +86,21 @@ describe('EPCIS resource-exhaustion guard (CodeQL js/resource-exhaustion-from-de
     expect(elapsed).toBeLessThan(1000);
   });
 
+  it('fails fast instead of accumulating errors across a wide invalid event list', () => {
+    const document = {
+      ...VALID_OBJECT_EVENT_DOC,
+      epcisBody: {
+        eventList: Array.from({ length: 10_000 }, () => ({ type: 'ObjectEvent' })),
+      },
+    };
+
+    const result = validator.validate(document);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors?.length ?? 0).toBeGreaterThan(0);
+    expect(result.errors?.length ?? 0).toBeLessThan(20);
+  });
+
   it('accepts documents at the boundary of the limits (depth = MAX, nodes < MAX)', () => {
     // depth exactly MAX_EPCIS_DEPTH must pass the guard (then fail
     // schema, which is fine — the guard's job is to ensure Ajv runs).

@@ -10,6 +10,8 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
+  mergeSameVersionGraphKnowledgeAssetMetadataV1,
+  readGraphKnowledgeAssetConfirmationKindV1,
   readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
@@ -45,6 +47,7 @@ export interface AuthenticatedGraphScopedAsset {
 export type VerifyContextGraphBinding = (
   localContextGraphId: string,
   onChainContextGraphId: bigint,
+  signal?: AbortSignal,
 ) => Promise<boolean>;
 
 export type GraphScopedMaterializationOutcome = 'applied' | 'stale' | 'quarantined';
@@ -61,6 +64,7 @@ export async function authenticateVerifiedGraphScopedAsset(
   asset: VerifiedGraphScopedAsset,
   verifyContextGraphBinding?: VerifyContextGraphBinding,
   receivedAt = new Date(),
+  options: { signal?: AbortSignal } = {},
 ): Promise<AuthenticatedGraphScopedAsset> {
   const receivedAtMs = receivedAt.getTime();
   if (!Number.isFinite(receivedAtMs)) {
@@ -80,6 +84,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       graph: asset.metaGraph,
     },
   ];
+  const structuralMetadata = asset.metadataQuads.filter((quad) => (
+    quad.predicate !== PUBLISHED_AT
+    && quad.predicate !== STATUS
+    && quad.predicate !== MATERIALIZED_VERSION
+  ));
   // The timestamp above is local receive time, not peer metadata. It is safe
   // for discovery ordering and keeps graph-scoped KAs visible without trusting
   // a peer-controlled dkg:publishedAt value. No-chain mode remains explicitly
@@ -88,7 +97,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     return {
       asset: {
         ...asset,
-        metadataQuads: [...asset.metadataQuads, ...locallyVisibleMetadata('tentative')],
+        metadataQuads: [...structuralMetadata, ...locallyVisibleMetadata('tentative')],
       },
       onChainContextGraphId: null,
     };
@@ -119,9 +128,9 @@ export async function authenticateVerifiedGraphScopedAsset(
     throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
   }
   const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-    chain.getLatestMerkleRoot(kaId),
-    chain.getMerkleRootCount(kaId),
-    chain.getKAContextGraphId(kaId),
+    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
+    chain.getMerkleRootCount(kaId, { signal: options.signal }),
+    chain.getKAContextGraphId(kaId, { signal: options.signal }),
   ]);
   if (latestRoot.length !== 32 || !bytesEqual(latestRoot, roots[0]!)) {
     throw Object.assign(
@@ -152,7 +161,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
     );
   }
-  if (!(await verifyContextGraphBinding(asset.contextGraphId, boundContextGraphId))) {
+  if (!(await verifyContextGraphBinding(
+    asset.contextGraphId,
+    boundContextGraphId,
+    options.signal,
+  ))) {
     throw Object.assign(
       new Error(
         `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
@@ -164,27 +177,56 @@ export async function authenticateVerifiedGraphScopedAsset(
   const transactionHashes = asset.metadataQuads
     .filter((quad) => quad.predicate === TRANSACTION_HASH)
     .map((quad) => parseTransactionHashLiteral(quad.object));
-  if (transactionHashes.length !== 1) {
+  if (transactionHashes.length > 1) {
     throw Object.assign(
       new Error(
-        `Graph-scoped durable sync ${asset.ual} requires one receipt transaction hash, `
+        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
           + `got ${transactionHashes.length}`,
       ),
-      { code: 'VM_CHAIN_PROVENANCE_MISSING' },
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
     );
   }
-  const transactionHash = transactionHashes[0]!;
 
+  const confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads);
   let materializedBlock: number;
   let materializedTxIndex: number;
-  if (asset.assertionVersion === 1n) {
+  if (confirmationKind === 'finalized-materialization') {
+    if (transactionHashes.length !== 0) {
+      throw Object.assign(
+        new Error(
+          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
+        ),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
+    // RFC-64 finalized VM materialization deliberately has no receipt claim:
+    // it is reconstructed from a pinned finalized chain snapshot. A later
+    // durable-sync requester must not trust the serving peer's local
+    // materializedVersion, and the requester strips that field before this
+    // boundary. The independently read current root, root count, KA->CG
+    // binding, and local CG name binding above fully authenticate the exact
+    // current assertion. Use a neutral LOCAL ordering stamp; assertionVersion
+    // remains the authoritative stale-write guard for this receiptless lane.
+    materializedBlock = 0;
+    materializedTxIndex = 0;
+  } else if (transactionHashes.length !== 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  } else if (asset.assertionVersion === 1n) {
+    const transactionHash = transactionHashes[0]!;
     if (!chain.resolvePublishByTxHash) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    const resolved = await chain.resolvePublishByTxHash(transactionHash);
+    const resolved = await chain.resolvePublishByTxHash(transactionHash, {
+      signal: options.signal,
+    });
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
       !resolved
@@ -201,14 +243,22 @@ export async function authenticateVerifiedGraphScopedAsset(
     materializedBlock = resolved.blockNumber;
     materializedTxIndex = resolved.txIndex ?? 0;
   } else {
+    const transactionHash = transactionHashes[0]!;
     if (!chain.verifyKAUpdate || !chain.getLatestMerkleRootPublisher) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed update verification'),
         { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
       );
     }
-    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId);
-    const verified = await chain.verifyKAUpdate(transactionHash, kaId, publisherAddress);
+    const publisherAddress = await chain.getLatestMerkleRootPublisher(kaId, {
+      signal: options.signal,
+    });
+    const verified = await chain.verifyKAUpdate(
+      transactionHash,
+      kaId,
+      publisherAddress,
+      { signal: options.signal },
+    );
     if (
       !verified.verified
       || verified.onChainMerkleRoot === undefined
@@ -237,7 +287,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     asset: {
       ...asset,
       metadataQuads: [
-        ...asset.metadataQuads,
+        ...structuralMetadata,
         ...locallyVisibleMetadata('confirmed'),
         {
           subject: asset.ual,
@@ -285,17 +335,17 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     }
     let replacementMetadata = asset.metadataQuads;
     if (currentVersion === asset.assertionVersion) {
-      const currentPublishedAt = await readCurrentPublishedAt(
+      const currentMetadata = await readCurrentGraphKnowledgeAssetMetadata(
         store,
         asset.metaGraph,
         asset.ual,
         options,
       );
-      if (currentPublishedAt) {
-        replacementMetadata = [
-          ...asset.metadataQuads.filter((quad) => quad.predicate !== PUBLISHED_AT),
-          currentPublishedAt,
-        ];
+      if (currentMetadata) {
+        replacementMetadata = mergeSameVersionGraphKnowledgeAssetMetadataV1(
+          replacementMetadata,
+          currentMetadata,
+        );
       }
     }
     const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
@@ -325,24 +375,28 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   });
 }
 
-async function readCurrentPublishedAt(
+/** Read the current subject once; publisher metadata helpers own typed merging. */
+async function readCurrentGraphKnowledgeAssetMetadata(
   store: TripleStore,
   metaGraph: string,
   ual: string,
   options: QueryOptions,
-): Promise<Quad | undefined> {
+): Promise<Quad[] | undefined> {
   const result = await store.query(`
-    SELECT ?publishedAt WHERE {
+    SELECT ?predicate ?object WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(ual)}> <${PUBLISHED_AT}> ?publishedAt .
+        <${assertSafeIri(ual)}> ?predicate ?object .
       }
     }
   `, options);
-  if (result.type !== 'bindings' || result.bindings.length !== 1) return undefined;
-  const object = result.bindings[0]?.publishedAt;
-  const lexical = object?.match(/^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^.*|@.*)?$/)?.[1];
-  if (!object || !lexical || !Number.isFinite(Date.parse(lexical))) return undefined;
-  return { subject: ual, predicate: PUBLISHED_AT, object, graph: metaGraph };
+  if (result.type !== 'bindings') return undefined;
+  if (result.bindings.some((row) => !row.predicate || !row.object)) return undefined;
+  return result.bindings.map((row) => ({
+    subject: ual,
+    predicate: row.predicate!,
+    object: row.object!,
+    graph: metaGraph,
+  }));
 }
 
 async function readCurrentAssertionVersion(
@@ -383,11 +437,21 @@ function parseBytes32Literal(raw: string, field: string): Uint8Array {
 }
 
 function parseTransactionHashLiteral(raw: string): string {
-  const lexical = raw.match(/^"([^"]*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
+  const lexical = parseRdfLiteral(raw) ?? raw;
   if (!/^0x[0-9a-f]{64}$/i.test(lexical)) {
     throw new Error('Graph-scoped durable sync transactionHash must be a 32-byte hex literal');
   }
   return lexical;
+}
+
+function parseRdfLiteral(raw: string): string | undefined {
+  const encoded = /^("(?:\\.|[^"\\])*")/.exec(raw)?.[1];
+  if (encoded === undefined) return undefined;
+  try {
+    return JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

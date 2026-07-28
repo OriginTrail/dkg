@@ -17,7 +17,6 @@ import {
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   createLiftJobFailureMetadata,
-  storeKnowledgeAssetOperationPublicQuads,
   type AsyncLiftPublisherConfig,
   type AsyncLiftPublisherRecoveryResult,
   type LiftRequest,
@@ -51,6 +50,12 @@ import {
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
 import { withLegacyRawLiftTestSeeder } from './_helpers/legacy-raw-lift.js';
+import {
+  KA_VM_KA_UAL,
+  KA_VM_VALIDATION,
+  kaVmPublishRequest,
+  stageKnowledgeAssetShareSnapshot,
+} from './_helpers/ka-vm-publish.js';
 
 describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
@@ -61,7 +66,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   let _kav10Address: string;
   let _provider: ethers.JsonRpcProvider;
   const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  const ROOTLESS_UAL = 'did:dkg:31337/0x1111111111111111111111111111111111111111/7';
+  const ROOTLESS_UAL = KA_VM_KA_UAL;
 
   function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
     // OT-RFC-43 Option-1: wire a KA-number allocator so the real EVM adapter
@@ -104,55 +109,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     authority: { type: 'owner', proofRef: 'proof:owner:1' },
   });
 
-  const kaVmPublishRequest = (overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) => {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const base = {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'share-op-1',
-      roots: [],
-      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      kaUal: ROOTLESS_UAL,
-      assertionVersion: '1',
-      publicTripleCount: 2,
-      privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: {
-          r: (`0x${'34'.repeat(32)}`) as `0x${string}`,
-          vs: (`0x${'56'.repeat(32)}`) as `0x${string}`,
-        },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: 'sha256:' + 'ab'.repeat(32),
-      wmCurrentAssertion: '12'.repeat(32),
-      swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(),
-      reservedUal: ROOTLESS_UAL,
-    };
-    return { ...base, ...overrides };
-  };
-
   async function stageRootlessSnapshot(shareOperationId: string): Promise<void> {
-    await storeKnowledgeAssetOperationPublicQuads({
+    await stageKnowledgeAssetShareSnapshot({
       store,
-      graphManager: new GraphManager(store),
-      contextGraphId: 'music-social',
       shareOperationId,
-      kaUal: ROOTLESS_UAL,
       assertionVersion: 1,
-      quads: [
-        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-      ],
-      publisherPeerId: 'peer-1',
       accessPolicy: 'public',
     });
   }
@@ -1861,13 +1822,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },
@@ -1900,13 +1855,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     await publisher.claimNext('wallet-1');
     await publisher.update(jobId, 'validated', {
-      validation: {
-        canonicalRoots: [],
-        canonicalRootMap: {},
-        swmQuadCount: 2,
-        authorityProofRef: 'knowledge-asset-lifecycle',
-        transitionType: 'CREATE',
-      },
+      validation: KA_VM_VALIDATION,
     });
     await publisher.update(jobId, 'broadcast', {
       broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },

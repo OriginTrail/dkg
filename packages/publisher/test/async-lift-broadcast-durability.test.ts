@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { NO_FUNDED_PUBLISHER_WALLET_CODE, PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
+  mapPublishExceptionToLiftJobFailure,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
-import { storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
+// Internal recovery policy — imported directly from the module, deliberately not re-exported
+// from the package barrel (kept off the public API surface).
+import { isDefinitivePreAcceptanceSendFailure } from '../src/async-lift-publish-result.js';
 import {
   DEFAULT_JOURNAL_GRAPH_URI,
   JOURNAL_SEQ,
@@ -16,6 +19,11 @@ import {
   parseIntegerLiteral,
   parseLiteral,
 } from '../src/async-lift-control-plane.js';
+import {
+  KA_VM_EXECUTOR_TX_HASH,
+  kaVmPublishRequest,
+  stageKnowledgeAssetShareSnapshot,
+} from './_helpers/ka-vm-publish.js';
 
 // Read the journal kinds (seq-ordered) straight from the node-local journal graph.
 async function journalKinds(store: OxigraphStore): Promise<string[]> {
@@ -70,56 +78,10 @@ describe('async lift publisher broadcast durability', () => {
     });
   }
 
-  function kaVmPublishRequest() {
-    const authorAddress = '0x1111111111111111111111111111111111111111';
-    const kaNumber = 7n;
-    const kaUal = `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`;
-    return {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'share-op-1',
-      roots: [] as string[],
-      contentScopeVersion: 2 as const,
-      kaUal,
-      assertionVersion: '1',
-      publicTripleCount: 2,
-      privateTripleCount: 0,
-      seal: {
-        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-        authorAddress: authorAddress as `0x${string}`,
-        signature: { r: (`0x${'34'.repeat(32)}`) as `0x${string}`, vs: (`0x${'56'.repeat(32)}`) as `0x${string}` },
-        schemeVersion: 1,
-        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
-      intentKey: `sha256:${'ab'.repeat(32)}`,
-      wmCurrentAssertion: '12'.repeat(32),
-      swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: kaNumber.toString(),
-      reservedUal: kaUal,
-    };
-  }
-
-  const TX_HASH = `0x${'cd'.repeat(32)}` as `0x${string}`;
+  const TX_HASH = KA_VM_EXECUTOR_TX_HASH;
 
   async function stageShareSnapshot(targetStore: OxigraphStore): Promise<void> {
-    const request = kaVmPublishRequest();
-    await storeKnowledgeAssetOperationPublicQuads({
-      store: targetStore,
-      graphManager: new GraphManager(targetStore),
-      contextGraphId: 'music-social',
-      shareOperationId: 'share-op-1',
-      kaUal: request.kaUal,
-      assertionVersion: request.assertionVersion,
-      publisherPeerId: 'peer-1',
-      quads: [
-        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
-        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
-      ],
-    });
+    await stageKnowledgeAssetShareSnapshot({ store: targetStore });
   }
 
   // A VM-publish executor that fires the pre-send write-ahead (onPhase → records
@@ -320,6 +282,68 @@ describe('async lift publisher broadcast durability', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
   });
 
+  // GH#1786 (@lupuszr on PR #1969) — the full late-worker proof, not just the mapper unit.
+  // The async lane deliberately ACCEPTS a selected foreign-author UPDATE while wallet
+  // selection is still deferred, so "this node cannot re-sign for that author" is only
+  // discovered here, in the worker. It must be recorded as a PERMANENT authority failure:
+  // before the fix it mapped to retryable `rpc_unavailable`, so the queue reset and retried a
+  // job that can never finalize — the forever-retry trap #1013/#1121 fixed for unfundable
+  // publishes. Drives the real cycle (enqueue → processNext → stored-job readback) rather
+  // than asserting the classifier in isolation.
+  it('records a non-custodial selected-author UPDATE as a TERMINAL authority failure, never retried', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: {
+        execute: async () => {
+          // Exactly what _buildPrecomputedUpdateAttestationForSeal raises when the claiming
+          // wallet is neither custodial for the author nor the publisher EOA.
+          throw Object.assign(
+            new Error(
+              'publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation '
+              + 'for author 0xA32f1cc125401B55911678847426759094055B2d — no custodial key on file '
+              + 'and it is not the publisher EOA.',
+            ),
+            { code: PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE },
+          );
+        },
+      },
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    // Authority, not transport — and explicitly NOT the retryable default it used to get.
+    expect(processed?.failure?.code).toBe('authority_forbidden');
+    expect(processed?.failure?.code).not.toBe('rpc_unavailable');
+    expect(processed?.failure?.retryable).toBe(false);
+    expect(processed?.failure?.resolution).toBe('fail_job');
+    // The refusal is raised while BUILDING the attestation, strictly before the write-ahead
+    // records 'broadcast', so NO transaction was sent. The record must say so: recording
+    // 'broadcast' here would publish a phantom broadcast (and mislabel the phase with it).
+    expect(processed?.failure?.failedFromState).toBe('validated');
+    expect(processed?.failure?.phase).toBe('validation');
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.inclusion).toBeUndefined();
+
+    // Stored-job readback: the persisted record carries the same terminal classification,
+    // which is what an operator polling /api/publisher/job actually sees.
+    const persisted = await publisher.getStatus(jobId);
+    expect(persisted?.status).toBe('failed');
+    expect(persisted?.failure?.code).toBe('authority_forbidden');
+    expect(persisted?.failure?.retryable).toBe(false);
+    expect(persisted?.failure?.resolution).toBe('fail_job');
+    expect(persisted?.failure?.failedFromState).toBe('validated');
+    expect(persisted?.failure?.phase).toBe('validation');
+    // No tx metadata anywhere in the persisted record.
+    expect(persisted?.broadcast).toBeUndefined();
+    expect(persisted?.inclusion).toBeUndefined();
+
+    // No tx was sent, so recovery must not adopt it, and it must not be reset for retry.
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
   // #1829 — the flush-fail rollback (recordDurableBroadcastBeforeSend → writeJob(current))
   // must NOT append a duplicate 'validated' journal entry: that re-write passes the
   // 'rollback-noop' sentinel so appendJournal no-ops. The journal records the pre-flush
@@ -352,5 +376,231 @@ describe('async lift publisher broadcast durability', () => {
     expect(kinds).toEqual(['admission', 'claimed', 'validated', 'broadcast', 'failed']);
     expect(kinds.filter((k) => k === 'validated')).toHaveLength(1);
     expect(kinds.filter((k) => k === 'broadcast')).toHaveLength(1);
+  });
+
+  // A VM-publish executor that fires the pre-send write-ahead (records a durable
+  // 'broadcast'), then throws `error` — the post-write-ahead failure #1867 classifies.
+  function firesBroadcastThenThrows(
+    error: unknown,
+  ): NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> {
+    return {
+      execute: async (input) => {
+        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+        throw error;
+      },
+    };
+  }
+
+  // #1867 — a send that fails DEFINITIVELY before mempool acceptance (insufficient funds
+  // at eth_sendRawTransaction) throws AFTER the durable 'broadcast' record. Instead of
+  // stranding the job on the ~15-min recovery chase (ending in recovery_state_inconsistent),
+  // it must be an immediate terminal broadcast-phase failure — insufficient_funds — with no
+  // recovery lookup and no resend.
+  it('records an immediate terminal insufficient_funds when the send is rejected before acceptance (#1867)', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
+        new Error('insufficient funds for gas * price + value'),
+      ),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    // Terminal failure now — NOT left as 'broadcast' for recovery to chase.
+    expect(processed?.status).toBe('failed');
+    expect(processed?.status).not.toBe('broadcast');
+    expect(processed?.failure?.code).toBe('insufficient_funds');
+    // Terminal, off the chain-recovery track (fail_job, non-retryable).
+    expect(processed?.failure?.resolution).toBe('fail_job');
+    expect(processed?.failure?.resolution).not.toBe('retry_recovery');
+    expect(processed?.failure?.retryable).toBe(false);
+    // The attempted broadcast tx hash is retained on the failed job for diagnostics.
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+
+    // recover() must NOT chase or resubmit a never-accepted tx: no work, job stays failed.
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+  });
+
+  // #1867 SAFETY (throw-safe classifier) — a pathological, non-stringifiable thrown value
+  // (null-prototype object → String() TypeError) thrown AFTER the durable-broadcast record
+  // must NOT let the classifier throw: that would skip the ambiguous-recovery branch and
+  // strand the job off the recovery track. An unstringifiable error is classified
+  // non-definitive → the job stays 'broadcast' on the recovery track, never terminates,
+  // never resends.
+  it('keeps a non-stringifiable thrown value on the recovery track (throw-safe classifier)', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(Object.create(null) as unknown),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
+  // #1867 SAFETY (throw-safe classifier — #1918 round-5 🔴) — inspecting the thrown value must
+  // be guarded for MORE than String(): a throwing `code` accessor (or a Proxy) makes the very
+  // first property read throw. Thrown AFTER the durable-broadcast record, that would escape the
+  // catch before it can return the persisted broadcast job, stranding the job off recovery. The
+  // classifier must treat such a value as non-definitive → the job stays 'broadcast'.
+  it('keeps a value with a throwing "code" accessor on the recovery track (throw-safe classifier)', async () => {
+    const throwingCode = Object.defineProperty(new Error('rpc timeout'), 'code', {
+      get() {
+        throw new Error('code getter failed');
+      },
+    });
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(throwingCode),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
+  // #1867 (#1918 round-6 🔴) — a mined-then-reverted tx whose revert string happens to contain
+  // "insufficient funds" is NOT a pre-acceptance reject. A revert is post-mempool by definition
+  // (the tx was accepted and mined), so it must stay on the recovery track like every other
+  // revert (see the plain-revert case in the safety matrix below) — never taken by the
+  // pre-acceptance shortcut. This keeps the whitelist strictly to node-level pre-send rejects;
+  // go-ethereum's `insufficient funds for gas * price + value` contains no "revert", so the
+  // genuine pre-acceptance case (next test) is unaffected.
+  it('keeps a revert message that contains "insufficient funds" on the recovery track (revert is post-mempool)', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
+        new Error('execution reverted: insufficient funds'),
+      ),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
+  // The genuine node-level pre-send reject (contains no "revert") still terminal-fails.
+  it('still terminal-fails a node-level "insufficient funds for gas" pre-send reject', async () => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
+        new Error('insufficient funds for gas * price + value'),
+      ),
+    });
+
+    await stageShareSnapshot(store);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.code).toBe('insufficient_funds');
+  });
+
+  // #1867 SAFETY INVARIANT (double-submit guard) — every AMBIGUOUS post-write-ahead error
+  // (one that could correspond to a tx already in the mempool or mined) MUST stay on the
+  // recovery early-return: left as 'broadcast', never terminated, never resent. If a future
+  // change broadens the whitelist to any of these, these cases fail loudly. Reverts here
+  // deliberately do NOT contain "insufficient funds" (that collision is the locked edge above).
+  it.each([
+    ['a plain RPC timeout', 'ETIMEDOUT: request timed out'],
+    ['a nonce race', 'nonce too low'],
+    ['a replacement-underpriced reject', 'replacement transaction underpriced'],
+    ['an already-known tx', 'already known'],
+    ['a plain on-chain revert', 'execution reverted: KnowledgeCollection: not authorized'],
+    ['an opaque executor error', 'stop after the durable write-ahead'],
+  ])('keeps %s on the recovery track (stays broadcast, no resend)', async (_label, message) => {
+    const publisher = createPublisher(store, {
+      knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(new Error(message)),
+    });
+
+    await stageShareSnapshot(store);
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+
+    // Left on the recovery track: the durable 'broadcast' is preserved, NOT terminated.
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.status).not.toBe('failed');
+    expect(processed?.broadcast?.txHash).toBe(TX_HASH);
+    // Without a chain recovery resolver, recover() cannot resolve it and must not resend
+    // (recover() returns 0 recovered work here; the job stays 'broadcast').
+    expect(await publisher.recover()).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+  });
+
+  // Pure classifier contract for the conservative whitelist — locks the exact boundary
+  // independently of the wiring (the invariant test above proves the wiring honors it).
+  it('isDefinitivePreAcceptanceSendFailure whitelists only unambiguous pre-mempool rejects', () => {
+    // Whitelisted — provably before mempool admission.
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('insufficient funds for gas * price + value'))).toBe(true);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('INSUFFICIENT FUNDS'))).toBe(true);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      Object.assign(new Error('re-wrapped'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE }),
+    )).toBe(true);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      new Error('No operational wallet has enough funds to publish'),
+    )).toBe(true);
+
+    // Excluded — each can correspond to a tx already in the mempool or mined.
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('nonce too low'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('replacement transaction underpriced'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('already known'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('execution reverted: not authorized'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('ETIMEDOUT: request timed out'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(undefined)).toBe(false);
+    // A revert is post-mempool even when its string contains "insufficient funds": excluded.
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('execution reverted: insufficient funds'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(new Error('reverted: not enough; insufficient funds'))).toBe(false);
+
+    // Throw-safe: an unstringifiable value, a throwing `code` accessor, and a throwing Proxy
+    // are each classified non-definitive rather than throwing out of the classifier.
+    expect(isDefinitivePreAcceptanceSendFailure(Object.create(null) as unknown)).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(Symbol('opaque'))).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      Object.defineProperty(new Error('x'), 'code', { get() { throw new Error('boom'); } }),
+    )).toBe(false);
+    expect(isDefinitivePreAcceptanceSendFailure(
+      new Proxy({}, { get() { throw new Error('proxy trap'); } }),
+    )).toBe(false);
+  });
+
+  // Whitelist ↔ mapper invariant — the classifier and mapPublishExceptionToLiftJobFailure are
+  // kept as SEPARATE functions on purpose (the whitelist must stay conservative-by-construction
+  // and must NOT silently widen if the mapper later gains new broadcast-phase codes; unifying
+  // via the mapper would also reintroduce the throw path the classifier deliberately avoids).
+  // This test pins their agreement without coupling: every whitelisted error maps to the
+  // terminal insufficient_funds failure from the 'broadcast' state.
+  it('every whitelisted error maps to a terminal insufficient_funds from broadcast', () => {
+    const whitelisted: unknown[] = [
+      new Error('insufficient funds for gas * price + value'),
+      Object.assign(new Error('re-wrapped'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE }),
+      new Error('No operational wallet has enough funds to publish'),
+    ];
+    for (const error of whitelisted) {
+      expect(isDefinitivePreAcceptanceSendFailure(error)).toBe(true);
+      const failure = mapPublishExceptionToLiftJobFailure({
+        error,
+        failedFromState: 'broadcast',
+        errorPayloadRef: 'urn:dkg:test:error',
+      });
+      expect(failure.code).toBe('insufficient_funds');
+      expect(failure.mode).toBe('terminal');
+      expect(failure.retryable).toBe(false);
+    }
   });
 });

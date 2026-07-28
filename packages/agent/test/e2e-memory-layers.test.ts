@@ -689,14 +689,18 @@ describe('rootless graph-scoped KA lifecycle', () => {
         inclusion: {
           txHash,
           blockNumber: onChain.blockNumber,
+          blockHash: `0x${'ab'.repeat(32)}`,
           blockTimestamp: onChain.blockTimestamp,
         },
         finalization: {
           mode: 'published',
           txHash,
-          // Production recovery resolver shape: contract + packed KA id. The
-          // finalizer must keep using intent.kaUal for the local exact graph.
-          ual: receiptUal,
+          // GH#1966: for graph-scoped named KAs the production CLI recovery
+          // resolver overrides finalization.ual with the graph-local queued UAL
+          // (author + low-96 KA number) — the same identity a normal publish
+          // records — NOT the contract/packed-id receipt form. Recovery must
+          // accept it; the finalizer keeps using intent.kaUal for the local graph.
+          ual: intent.kaUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -705,6 +709,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
         publishProof: {
           merkleRoot: intent.sealMerkleRoot,
           authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
         },
       },
       publisher: recoveryPublisher,
@@ -824,7 +829,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
     expect(history?.status).toBe('vm-confirmed');
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
-    expect(history?.publishedUal).toBe(receiptUal);
+    // GH#1966: recovery stamps the graph-local UAL the resolver returned, matching
+    // what a normal named-KA publish records (not the contract/packed receipt form).
+    expect(history?.publishedUal).toBe(intent.kaUal);
     expect(history?.assertionGraph).toBe(contextGraphLayerUri(
       CG_ID,
       MemoryLayer.VerifiableMemory,
@@ -1351,6 +1358,90 @@ describe('rootless graph-scoped KA lifecycle', () => {
     if (processed?.status !== 'finalized') {
       throw new Error(`Expected queued sub-graph update to finalize: ${JSON.stringify((processed as any)?.failure)}`);
     }
+    if (
+      !processed.broadcast
+      || !processed.inclusion
+      || processed.finalization.mode === 'local'
+      || !processed.finalization.txHash
+      || !processed.finalization.publisherAddress
+    ) {
+      throw new Error('Expected a chain-finalized queued sub-graph update');
+    }
+
+    const finalizationHandler = agent.getOrCreateFinalizationHandler();
+    const reconcile = vi.spyOn(finalizationHandler, 'handleChainReconciledKC');
+    const recoveryChain = (agent as any).chain;
+    const recoveryReceiptUal = buildKnowledgeAssetUal(
+      recoveryChain.chainId,
+      await recoveryChain.getDKGKnowledgeAssetsAddress(),
+      BigInt(intent.seal.reservedKaId!),
+    );
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      walletId: 'wallet-1',
+      request: intent,
+      job: {
+        jobId: 'subgraph-recovery-job',
+        jobSlug: 'subgraph-recovery-job',
+        request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: intent },
+        status: 'broadcast',
+        broadcast: processed.broadcast,
+        timestamps: { acceptedAt: 1, broadcastAt: 2, updatedAt: 2 },
+        retries: { retryCount: 0, maxRetries: 10 },
+        controlPlane: {},
+      },
+      recovery: {
+        inclusion: {
+          ...processed.inclusion,
+          blockHash: `0x${'ab'.repeat(32)}`,
+        },
+        finalization: {
+          ...processed.finalization,
+          ual: recoveryReceiptUal,
+          batchId: intent.seal.reservedKaId,
+          startKAId: intent.seal.reservedKaId,
+          endKAId: intent.seal.reservedKaId,
+        },
+        publishProof: {
+          merkleRoot: intent.sealMerkleRoot,
+          authorAddress: intent.seal.authorAddress,
+          txIndex: 4,
+        },
+      },
+      publisher: (agent as any).publisher,
+    } as any);
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      subGraphName,
+      publisherAddress: processed.finalization.publisherAddress,
+      authorAddress: intent.seal.authorAddress,
+      versionBlock: processed.inclusion.blockNumber,
+      trustedAssertionEvidence: expect.objectContaining({
+        subGraphName,
+        publisherAddress: processed.finalization.publisherAddress,
+        authorAddress: intent.seal.authorAddress,
+        blockNumber: processed.inclusion.blockNumber,
+        txIndex: 4,
+      }),
+    }), expect.anything());
+    const recoveredInput = reconcile.mock.calls.at(-1)?.[0];
+    if (!recoveredInput?.trustedAssertionEvidence || !intent.kaUal) {
+      throw new Error('Expected trusted named-recovery evidence');
+    }
+    reconcile.mockRestore();
+
+    await expect(finalizationHandler.handleChainReconciledKC({
+      ...recoveredInput,
+      trustedAssertionEvidence: {
+        ...recoveredInput.trustedAssertionEvidence,
+        transactionHash: `0x${'cd'.repeat(32)}`,
+        txIndex: 1,
+      },
+    }, createOperationContext('system'))).resolves.toBe('stale-target');
+    const recoveredVersionSurvives = await (agent as any).store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(CG_ID)}> { <${intent.kaUal}> `
+        + `<http://dkg.io/ontology/materializedVersion> "${processed.inclusion.blockNumber}:4" ; `
+        + `<http://dkg.io/ontology/transactionHash> "${recoveredInput.trustedAssertionEvidence.transactionHash}" . } }`,
+    );
+    expect(recoveredVersionSurvives).toMatchObject({ type: 'boolean', value: true });
 
     const subgraphVm = await agent.query(
       `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
@@ -1551,21 +1642,25 @@ describe('rootless graph-scoped KA lifecycle', () => {
   // is still present as a deeper backstop, but the marker gate wins here.)
   it('FIX 2: unregistered CG + finalized-but-UNSHARED asset rejects BEFORE registration (no gas burned)', async () => {
     const agent = await createAgent('NoQuadsBeforeRegisterBot');
+    // Keep this chain assertion independent from the preceding test, which
+    // deliberately registers CG_ID before it completes. Reusing CG_ID made
+    // the poller race decide whether this test observed that earlier mint.
+    const unregisteredCgId = `${CG_ID}-unshared-precondition`;
     // DELIBERATELY unregistered, local-only CG.
-    await agent.createContextGraph({ id: CG_ID, name: 'No Quads Before Register E2E' });
+    await agent.createContextGraph({ id: unregisteredCgId, name: 'No Quads Before Register E2E' });
 
     const name = 'empty-swm-seal';
-    await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
+    await agent.assertion.create(unregisteredCgId, name);
+    await agent.assertion.write(unregisteredCgId, name, [
       { subject: `${ENTITY_BASE}:nq`, predicate: 'http://schema.org/name', object: '"No Quads"' },
     ]);
     // Finalize the WM draft (seals it) WITHOUT promoting — SWM stays empty and
     // NO full-share marker is set.
-    await agent.assertion.finalize(CG_ID, name);
+    await agent.assertion.finalize(unregisteredCgId, name);
 
     let thrown: any;
     try {
-      await agent.publishFromFinalizedAssertion(CG_ID, name);
+      await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     } catch (e) {
       thrown = e;
     }
@@ -1576,7 +1671,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(thrown.code).not.toBe('CG_NOT_REGISTERED');
 
     // And the CG was NEVER registered as a side effect (no gas burned).
-    const onChainId = await agent.getContextGraphOnChainId(CG_ID);
+    const onChainId = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainId == null).toBe(true);
   }, 30_000);
 

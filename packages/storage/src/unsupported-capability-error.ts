@@ -5,7 +5,8 @@
 export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
-  | 'replaceGraphAndSubject';
+  | 'replaceGraphAndSubject'
+  | 'replaceSubject';
 
 /**
  * Typed signal that an optional store capability is unavailable.
@@ -45,5 +46,12 @@ export function isReplaceGraphAndSubjectCapabilityRefusal(error: unknown): boole
   return (
     error instanceof UnsupportedTripleStoreCapabilityError &&
     error.capability === 'replaceGraphAndSubject'
+  );
+}
+
+export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError &&
+    error.capability === 'replaceSubject'
   );
 }

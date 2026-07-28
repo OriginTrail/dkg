@@ -5,6 +5,7 @@ import {
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
   tryReplaceGraphAtomically,
+  tryReplaceSubjectAtomically,
   type Quad,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
@@ -580,6 +581,60 @@ describe('SparqlHttpStore (test server)', () => {
       managedByDkg: true,
     });
     await expect(tryReplaceGraphAtomically(managedStore, 'http://ex.org/g1', replacement))
+      .resolves.toBe(true);
+    expect(insertedQuads).toHaveLength(1);
+  });
+
+  it('replaceSubject sends one subject-scoped DELETE WHERE + INSERT DATA when the endpoint declares atomic updates', async () => {
+    insertedQuads.length = 0;
+    const atomicStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      atomicUpdates: true,
+    });
+    const ok = await tryReplaceSubjectAtomically(atomicStore, 'http://ex.org/g1', 'http://ex.org/job', [{
+      subject: 'http://ex.org/job',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }]);
+    expect(ok).toBe(true);
+    // One HTTP update, subject-scoped: DELETE WHERE for the subject + INSERT DATA,
+    // no whole-graph staging/MOVE (that would clobber the other jobs in the graph).
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE WHERE');
+    expect(insertedQuads[0]).toContain('<http://ex.org/job> ?p ?o');
+    expect(insertedQuads[0]).toContain('INSERT DATA');
+    expect(insertedQuads[0]).toContain('<http://ex.org/g1>');
+    expect(insertedQuads[0]).not.toContain('MOVE GRAPH');
+  });
+
+  it('replaceSubject fails closed for endpoints without a declared atomicity guarantee', async () => {
+    insertedQuads.length = 0;
+    const replacement = [{
+      subject: 'http://ex.org/job',
+      predicate: 'http://ex.org/p',
+      object: '"new"',
+      graph: 'http://ex.org/g1',
+    }];
+    // A generic endpoint may apply DELETE WHERE; INSERT DATA sequentially, so the
+    // adapter must refuse BEFORE sending any update → callers take the fallback.
+    await expect(store.replaceSubject!('http://ex.org/g1', 'http://ex.org/job', replacement))
+      .rejects.toMatchObject({
+        name: 'UnsupportedTripleStoreCapabilityError',
+        capability: 'replaceSubject',
+      });
+    await expect(tryReplaceSubjectAtomically(store, 'http://ex.org/g1', 'http://ex.org/job', replacement))
+      .resolves.toBe(false);
+    expect(insertedQuads).toHaveLength(0);
+
+    // Daemon-owned endpoints are oxigraph-server (transactional) and keep it.
+    const managedStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      managedByDkg: true,
+    });
+    await expect(tryReplaceSubjectAtomically(managedStore, 'http://ex.org/g1', 'http://ex.org/job', replacement))
       .resolves.toBe(true);
     expect(insertedQuads).toHaveLength(1);
   });

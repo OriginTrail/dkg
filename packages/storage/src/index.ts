@@ -18,14 +18,17 @@ export {
   tryUpdateWithTouchedGraphs,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
+  tryReplaceSubjectAtomically,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
 } from './triple-store.js';
 export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  assertSubjectReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
@@ -34,6 +37,7 @@ export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
+  isReplaceSubjectCapabilityRefusal,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {
@@ -86,6 +90,7 @@ export {
   quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
+  readExactGraphPagedWithDiscoveredCount,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,

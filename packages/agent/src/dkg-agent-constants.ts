@@ -30,8 +30,9 @@ export const SYNC_PAGE_SIZE = 500;
  * remaining four MiB admits 64 maximum-sized literal rows. That value remains
  * the retry floor for pathological payloads.
  *
- * Upgraded authenticated peers negotiate a byte-budgeted page through
- * additive unsigned hints. The signed `limit` stays capped at the legacy 500,
+ * Upgraded durable-sync peers negotiate a byte-budgeted page through additive
+ * hints. Authenticated JSON requests keep the signed `limit` capped at the
+ * legacy 500,
  * so an old responder authenticates the request and simply returns 500 rows;
  * a new responder may return up to the row hint but serializes only a bounded
  * response body. EOF-only pagination makes both responses unambiguous. A
@@ -45,7 +46,7 @@ export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
     JAVA_WRITE_UTF_MAX_BYTES,
   ),
 );
-/** Additive wire capability understood by upgraded authenticated responders. */
+/** Additive wire capability understood by upgraded durable-sync responders. */
 export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
 /** Maximum rows a responder may materialize for one byte-budgeted durable page. */
 export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;

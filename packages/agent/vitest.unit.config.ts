@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
 
+import { RFC64_UNIT_TESTS } from "./vitest.rfc64-unit-tests";
+
 // generic-sql-source.test.ts uses `import('node:sqlite')`, which is
 // `--experimental-sqlite`-gated on Node 22.5–23.x. The flag is a
 // process-level toggle, so mirror `vitest.config.ts`: switch to the
@@ -13,6 +15,7 @@ const SQLITE_EXEC_ARGV = [
 export default defineConfig({
   test: {
     include: [
+      ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",
@@ -21,7 +24,9 @@ export default defineConfig({
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
+      "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
+      "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/sync-envelope-cursor.test.ts",
       "test/exact-assets.test.ts",
@@ -40,6 +45,7 @@ export default defineConfig({
       "test/sync-durable-worker-wire.test.ts",
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
+      "test/durable-sync-budget.test.ts",
       "test/durable-sync-graph-scoped-materialization.test.ts",
       "test/durable-sync-lifecycle-binding.test.ts",
       "test/durable-progress.test.ts",
@@ -54,6 +60,7 @@ export default defineConfig({
       "test/durable-meta-admission.test.ts",
       "test/sync-responder-log-volume.test.ts",
       "test/sync-responder-snapshot-cache.test.ts",
+      "test/sync-responder-durable-meta-subject-atomic.test.ts",
       "test/sync-responder-cursor.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-swm-meta-ceiling.test.ts",
@@ -64,6 +71,7 @@ export default defineConfig({
       "test/sync-memory-metrics.test.ts",
       "test/sync-responder-metrics.test.ts",
       "test/sync-fetch-coalescing.test.ts",
+      "test/sync-fetch-coalescing-durable.test.ts",
       "test/sync-backpressure.test.ts",
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
@@ -71,6 +79,7 @@ export default defineConfig({
       "test/rootless-durable-skips-legacy-partition.test.ts",
       "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery.test.ts",
+      "test/dkg-agent-snapshot-store-injection.test.ts",
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
@@ -86,6 +95,12 @@ export default defineConfig({
       "test/finalization-reconcile-negative-memo.test.ts",
       "test/startup-jitter.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
+      "test/finalization-handler.test.ts",
+      "test/finalization-handler-chain-truth.test.ts",
+      "test/finalization-handler-defensive-cg-id.test.ts",
+      "test/finalization-recovery.test.ts",
+      "test/finalization-recovery-sqlite-store.test.ts",
+      "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
       "test/swm-slice-ka-bound.test.ts",
       "test/ka-lifecycle-asset-ual-timeout.test.ts",
@@ -114,6 +129,7 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-snapshot-materializer.test.ts",
+      "test/replace-subject-agent-wrapper.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

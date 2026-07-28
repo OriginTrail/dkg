@@ -44,6 +44,7 @@ import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-que
 import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -506,6 +507,42 @@ export class SparqlHttpStore implements TripleStore {
     }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
+      // operations, re-exposing the transient-empty subject. Fail closed before
+      // any request so callers take their non-atomic delete-then-insert fallback.
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
+    }
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceSubject',
+    });
+    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    try {
+      await this.postUpdate(
+        update,
+        { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
+        'replaceSubject',
+      );
+    } catch (error) {
+      // Indeterminate remote failure: a timeout / lost response can occur AFTER
+      // the endpoint committed the DELETE/INSERT (which may have added the graph's
+      // first row or removed its last). Invalidate the graph-list cache before
+      // rethrowing so a direct managed caller never serves stale membership —
+      // mirrors replaceGraph / replaceGraphAndSubject.
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

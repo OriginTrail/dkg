@@ -1,4 +1,5 @@
 import { isOversizedRdfLiteralError } from '@origintrail-official/dkg-core';
+import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
 type SyncErrorTag = 'syncPeerResponded' | 'syncTransportFailure';
 
@@ -53,7 +54,7 @@ export function isSyncPermanentRejection(error: unknown): boolean {
 }
 
 export function isSyncBackoffWorthyError(error: unknown): boolean {
-  if (isSyncTransportFailure(error)) return true;
+  if (isSyncTransportFailure(error) || isChainRpcTransportError(error)) return true;
 
   const message = error instanceof Error
     ? error.message.toLowerCase()

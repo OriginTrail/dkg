@@ -165,8 +165,19 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
 
         expect(peerStoreReads).toBe(3);
-        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
-        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
+        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([
+          remotePeer.toString(),
+          ['runtime-contextGraph'],
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+        ]);
+        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([
+          remotePeer.toString(),
+          ['runtime-contextGraph'],
+          undefined,
+        ]);
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(1);
         expect(result.peersTried).toBe(1);
