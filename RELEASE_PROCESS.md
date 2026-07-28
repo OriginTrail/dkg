@@ -141,7 +141,14 @@ One OTP covers the batch; a TOTP code can expire mid-loop, so if some fail, re-r
 
 ### 6c) Create the GitHub Release (manual)
 
-Because there is no tag-triggered release workflow, make the Release by hand from the signed tag, with notes taken from the matching `CHANGELOG.md` section (theme header, npm + channel line, PR-tagged bullets, a `compare/vPREV...vNEW` link):
+Because there is no tag-triggered release workflow, make the Release by hand from the signed tag. **This section owns GitHub Release note generation.** The notes are the matching `CHANGELOG.md` section copied *verbatim* — including its `### Upgrading from <PRIOR>` matrix, if §10 put one there — with only fixed metadata added around it. Do not reword, reorder, or drop bullets while assembling; if the notes need to say something the CHANGELOG does not, fix the CHANGELOG first so the two cannot drift.
+
+Assemble `notes.md` as:
+
+1. A `# DKG vX.Y.Z` title line.
+2. The CHANGELOG section body verbatim, minus its own `## [X.Y.Z] - DATE` heading.
+3. An npm + channel line directly under the theme paragraph: ``**npm:** `@origintrail-official/dkg@X.Y.Z` — dist-tags `latest`, `testnet`, `mainnet``, naming only the tags this release actually moved.
+4. A closing `**Full changelog:** https://github.com/OriginTrail/dkg/compare/vPREV...vX.Y.Z` link.
 
 ```bash
 gh release create vX.Y.Z --repo OriginTrail/dkg --verify-tag \
@@ -223,9 +230,13 @@ dkg start
 
 ## 10) Builder upgrade guides (per release)
 
-Every breaking or builder-impacting release ships a focused upgrade guide alongside the CHANGELOG entry. The guide lives at `docs/UPGRADE_<PRIOR>_TO_<NEW>.md` (e.g. `docs/UPGRADE_RC11_TO_RC12.md`).
+Every breaking or builder-impacting release ships upgrade guidance alongside the CHANGELOG entry. Scale the artifact to the migration:
 
-A good upgrade guide:
+This section defines **when** upgrade guidance is required and **where it is written**. §6c owns how it reaches the GitHub Release: it copies the matching CHANGELOG section verbatim, so anything placed in that section ships to builders automatically and the two cannot drift.
+
+**Small migrations (a handful of discrete changes) — default.** Put an `### Upgrading from <PRIOR>` section directly in the release's `CHANGELOG.md` entry, immediately after the theme paragraph, as a `Change | Impact | Action` matrix. No standalone document is required.
+
+**Large migrations (mass renames, contract/ABI changes, economic changes).** Write a standalone guide at `docs/release-notes/<version>.md` (e.g. `docs/release-notes/v10-1-0.md`) and link it from the `### Upgrading from <PRIOR>` section. One file per release, never a growing shared file: shipped notes are immutable, per-release files stay directly linkable from the CHANGELOG and the GitHub Release, and they do not conflict on every release. A good standalone guide:
 
 - Opens with an agent-prompt template builders can paste into Cursor / Claude Code / Codex CLI / any AGENTS.md-honouring tool to drive the migration end-to-end.
 - Includes a breaking-change matrix at the top so a reader can grep for what affects them in 30 seconds.
@@ -233,7 +244,9 @@ A good upgrade guide:
 - Documents every economic / contract / wire-format change a downstream caller could trip on, with concrete `tokenAmount`, ABI, and Hub-registration steps.
 - Cross-links the relevant `CHANGELOG.md` section for per-PR detail.
 
-Cross-link the new guide from [`docs/RELEASE.md`](docs/RELEASE.md) § "Upgrading from a prior release" before tagging.
+**Keep release notes out of GitBook.** GitBook syncs the `docs/` tree and builds its navigation from `docs/SUMMARY.md`, so a file under `docs/` that is **not** listed in `SUMMARY.md` is not published. `docs/release-notes/` must stay unlisted, matching `docs/reports/`, `docs/rfcs/`, and `docs/adr/`, which already live in `docs/` outside the navigation. Do not add a `SUMMARY.md` entry when adding a release-notes file.
+
+This document is the authoritative release runbook. Superseded V9-era material — the old `RELEASE.md` runbook and the rc-line `UPGRADE_RC11_TO_*.md` guides — is retained under `docs/archive/internal/` for history only and should not be followed or extended.
 
 ## 11) Promotion policy
 
