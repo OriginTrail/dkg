@@ -13,6 +13,11 @@
 //   mcp                     -> the client configs `dkg mcp setup` knows about,
 //                              via detectClients() + readRegisteredServerKeys()
 //   others                  -> undetectable; 'unknown', never 'not installed'
+//
+// The same rule applies to detection that FAILS rather than comes back empty:
+// if `npm ls -g` cannot run, npm-installable entries report 'unknown', not
+// 'not installed'. "We looked and it is absent" and "we could not look" are
+// different answers and the output must not conflate them.
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -33,15 +38,25 @@ export interface InstalledRow {
 
 /** Injectable so tests spawn no npm and touch no real config files. */
 export interface DetectDeps {
-  listGlobalNpm?: () => Promise<Record<string, string>>;
+  /** Resolves `null` when the probe could not run — NOT an empty map. */
+  listGlobalNpm?: () => Promise<Record<string, string> | null>;
   /** Defaults to the same client targets `dkg mcp setup` registers into. */
   clients?: ClientTarget[];
   /** Defaults to reading each client's registered server keys. */
   readServerKeys?: (target: ClientTarget) => string[];
 }
 
-/** `npm ls -g --json --depth=0` -> { packageName: version }. Empty on failure. */
-async function listGlobalNpmPackages(): Promise<Record<string, string>> {
+/**
+ * `npm ls -g --json --depth=0` -> { packageName: version }.
+ *
+ * Resolves `null` when the probe could not run — npm missing from PATH, a
+ * permissions error, or output we cannot parse. That is DELIBERATELY distinct
+ * from `{}`: an empty map means "npm answered, and nothing is installed
+ * globally", which is a real answer. Collapsing the two would make every
+ * npm-installable entry read as "not installed" on a machine where we simply
+ * failed to look — the exact false negative the three-state model prevents.
+ */
+async function listGlobalNpmPackages(): Promise<Record<string, string> | null> {
   try {
     // npm exits non-zero on extraneous/peer warnings while still emitting valid
     // JSON, so parse stdout regardless of exit code.
@@ -49,7 +64,25 @@ async function listGlobalNpmPackages(): Promise<Record<string, string>> {
       maxBuffer: 8 * 1024 * 1024,
       shell: process.platform === 'win32',
     }).catch((err: { stdout?: string }) => ({ stdout: err?.stdout ?? '' }));
-    if (!stdout.trim()) return {};
+    return parseGlobalNpmList(stdout);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Split out from the spawn so the failure-vs-empty distinction is testable
+ * without mocking a child process. This is where the false negative would come
+ * back if someone "simplified" a `null` return to `{}`, so it is covered
+ * directly rather than only through an injected fake.
+ *
+ * `null` = we have no answer. `{}` = npm answered, nothing is installed.
+ * A machine with no global packages still emits valid JSON (`{"dependencies":{}}`),
+ * so empty stdout genuinely means the probe failed rather than came back empty.
+ */
+export function parseGlobalNpmList(stdout: string): Record<string, string> | null {
+  if (!stdout.trim()) return null;
+  try {
     const parsed = JSON.parse(stdout) as { dependencies?: Record<string, { version?: string }> };
     const out: Record<string, string> = {};
     for (const [name, meta] of Object.entries(parsed.dependencies ?? {})) {
@@ -57,7 +90,7 @@ async function listGlobalNpmPackages(): Promise<Record<string, string>> {
     }
     return out;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -106,6 +139,16 @@ export async function detectInstalled(
   return entries.map((e): InstalledRow => {
     const npmPkg = globalNpmPackageFor(e.install);
     if (npmPkg) {
+      // The probe failed, so we know nothing about this entry either way.
+      // Reporting 'not installed' here would be a claim we cannot support.
+      if (globals === null) {
+        return {
+          slug: e.slug,
+          kind: e.install.kind,
+          state: 'unknown',
+          detail: 'could not inspect global npm packages',
+        };
+      }
       const found = globals[npmPkg.package];
       if (found === undefined) {
         return { slug: e.slug, kind: e.install.kind, state: 'not installed', detail: '' };

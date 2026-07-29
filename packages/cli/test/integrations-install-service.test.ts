@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { installService } from '../src/integrations/install-service.js';
-import { detectInstalled } from '../src/integrations/detect-installed.js';
+import { detectInstalled, parseGlobalNpmList } from '../src/integrations/detect-installed.js';
 import type { IntegrationEntry } from '../src/integrations/schema.js';
 import type { ProvenanceCheckResult } from '../src/integrations/verify-npm-provenance.js';
 
@@ -208,6 +208,61 @@ describe('detectInstalled', () => {
     );
     expect(row!.detail).toContain('2.5.0');
     expect(row!.detail).toContain('registry pins 1.0.0');
+  });
+
+  // Covers the real probe's parsing, not just an injected fake — this is where
+  // the false negative originated (returning `{}` for output we could not read).
+  describe('parseGlobalNpmList', () => {
+    it('returns null for output it cannot interpret', () => {
+      // npm absent / spawn failed / permissions error -> nothing on stdout.
+      expect(parseGlobalNpmList('')).toBeNull();
+      expect(parseGlobalNpmList('   \n ')).toBeNull();
+      // A warning banner or truncated output is not an answer either.
+      expect(parseGlobalNpmList('npm ERR! code ENOENT')).toBeNull();
+    });
+
+    it('returns an EMPTY MAP when npm reports no global packages', () => {
+      // Distinct from null: npm answered, and the answer is "nothing".
+      expect(parseGlobalNpmList('{"dependencies":{}}')).toEqual({});
+      expect(parseGlobalNpmList('{}')).toEqual({});
+    });
+
+    it('maps package names to versions', () => {
+      expect(
+        parseGlobalNpmList('{"dependencies":{"@acme/cli":{"version":"1.2.3"}}}'),
+      ).toEqual({ '@acme/cli': '1.2.3' });
+    });
+  });
+
+  // "npm answered, the package is absent" and "we could not ask npm" are
+  // different facts. These two cases must not collapse into one another, so
+  // they are asserted as a pair: the null case pins the fix, and the `{}` case
+  // is the control that stops a regression to "report unknown for everything"
+  // from passing. Break either direction and exactly one of them fails.
+  it('reports npm-installable entries as unknown when the npm probe fails', async () => {
+    const rows = await detectInstalled(
+      [
+        entry('a-cli', { kind: 'cli', package: '@acme/cli', version: '1.0.0', binary: 'c' }),
+        entry('a-svc', {
+          kind: 'service',
+          runtime: 'npm-global',
+          npmGlobal: { package: '@acme/svc', version: '1.0.0' },
+        }),
+      ],
+      { listGlobalNpm: async () => null },
+    );
+    for (const r of rows) {
+      expect(r.state).toBe('unknown');
+      expect(r.detail).toContain('could not inspect');
+    }
+  });
+
+  it('still reports "not installed" when npm answers with no global packages', async () => {
+    const [row] = await detectInstalled(
+      [entry('a-cli', { kind: 'cli', package: '@acme/cli', version: '1.0.0', binary: 'c' })],
+      { listGlobalNpm: async () => ({}) },
+    );
+    expect(row!.state).toBe('not installed');
   });
 
   it('detects an mcp entry across every client that registers it', async () => {
