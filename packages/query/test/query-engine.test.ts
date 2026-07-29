@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  type Quad,
+  type QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -114,12 +118,19 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
   });
 
-  it('propagates cancellation, priority, and source to the final store query', async () => {
+  it('propagates cancellation, priority, and source to every unshared store read', async () => {
     class OptionsRecordingStore extends OxigraphStore {
-      queryOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      readOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
       async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
-        this.queryOptions.push(options);
+        this.readOptions.push(options);
         return super.query(sparql, options);
+      }
+      async listGraphsByPrefix(
+        prefix: string,
+        options?: StoreQueryOptions,
+      ) {
+        this.readOptions.push(options);
+        return (await super.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
       }
     }
 
@@ -134,17 +145,90 @@ describe('DKGQueryEngine', () => {
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
       {
         contextGraphId: CONTEXT_GRAPH,
+        includeSharedMemory: true,
         signal: controller.signal,
         priority: 'background',
         source: 'api.query',
       },
     );
 
-    expect(recordingStore.queryOptions.at(-1)).toMatchObject({
-      signal: controller.signal,
+    expect(recordingStore.readOptions.length).toBeGreaterThanOrEqual(4);
+    for (const options of recordingStore.readOptions) {
+      expect(options).toMatchObject({
+        signal: controller.signal,
+        priority: 'background',
+        source: 'api.query',
+      });
+    }
+  });
+
+  it('keeps caller cancellation out of shared graph-discovery flights', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => {
+      releaseDiscovery = resolve;
+    });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      discoveryStarted = resolve;
+    });
+
+    class SharedFlightRecordingStore extends OxigraphStore {
+      sharedOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      private held = false;
+
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options);
+          if (!this.held) {
+            this.held = true;
+            discoveryStarted();
+            await discoveryGate;
+          }
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const sharedStore = new SharedFlightRecordingStore();
+    const sharedEngine = new DKGQueryEngine(sharedStore);
+    await sharedStore.insert([
+      q('urn:shared:s', 'http://schema.org/name', '"Shared"', GRAPH),
+    ]);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const scopedQuery =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: firstController.signal,
+    });
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: secondController.signal,
+    });
+    await Promise.resolve();
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseDiscovery();
+
+    await expect(second).resolves.toBeDefined();
+    expect(sharedStore.sharedOptions).toHaveLength(1);
+    expect(sharedStore.sharedOptions[0]).toMatchObject({
       priority: 'background',
       source: 'api.query',
     });
+    expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
   });
 
   it('returns all triples for entity', async () => {

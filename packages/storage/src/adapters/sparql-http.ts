@@ -51,46 +51,16 @@ import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
+  classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-
-function composeAbortSignals(
-  primary: AbortSignal | undefined,
-  secondary: AbortSignal | undefined,
-): AbortSignal | undefined {
-  if (!primary) return secondary;
-  if (!secondary) return primary;
-  const AnyImpl = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (AnyImpl) return AnyImpl([primary, secondary]);
-  const combined = new AbortController();
-  let settled = false;
-  const cleanup = () => {
-    primary.removeEventListener('abort', forwardPrimary);
-    secondary.removeEventListener('abort', forwardSecondary);
-  };
-  const forwardPrimary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    combined.abort(primary.reason);
-  };
-  const forwardSecondary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    combined.abort(secondary.reason);
-  };
-  if (primary.aborted) combined.abort(primary.reason);
-  else if (secondary.aborted) combined.abort(secondary.reason);
-  else {
-    primary.addEventListener('abort', forwardPrimary, { once: true });
-    secondary.addEventListener('abort', forwardSecondary, { once: true });
-  }
-  return combined.signal;
-}
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+} from '../abortable-store-work-lifecycle.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -190,9 +160,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
-  private closeController = new AbortController();
-  private readonly inFlight = new Set<Promise<unknown>>();
-  private closePromise: Promise<void> | null = null;
+  private readonly workLifecycle = new AbortableStoreWorkLifecycle();
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -235,18 +203,15 @@ export class SparqlHttpStore implements TripleStore {
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
-    const signal = composeAbortSignals(options?.signal, this.closeController.signal);
-    const task = externalStorePriorityScheduler.run(
-      options?.priority,
-      options?.source ?? `sparql-http.${operation}`,
-      () => work(signal),
-      signal,
+    return this.workLifecycle.run(
+      options?.signal,
+      (signal) => externalStorePriorityScheduler.run(
+        options?.priority,
+        options?.source ?? `sparql-http.${operation}`,
+        () => work(signal),
+        signal,
+      ),
     );
-    this.inFlight.add(task);
-    void task.finally(() => {
-      this.inFlight.delete(task);
-    }).catch(() => undefined);
-    return task;
   }
 
   getPressureSnapshot(): StorePressureSnapshot {
@@ -761,29 +726,11 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    if (this.closePromise) return this.closePromise;
-    const controller = this.closeController;
-    controller.abort(new Error('SparqlHttpStore closed'));
-    const draining = [...this.inFlight];
-    const task = (async () => {
-      // A managed endpoint is stopped immediately after store.close(). Wait
-      // for every queued/in-flight fetch to observe cancellation and unwind
-      // before returning, so slow-query completions cannot appear after daemon
-      // `Stopped.` and no request races the managed server teardown (#1989).
-      await Promise.allSettled(draining);
-      // Preserve the adapter's historical reusable-close contract for direct
-      // remote endpoint callers. Daemon shutdown issues no later operations,
-      // while tests/integrators may deliberately close twice and reuse.
-      if (this.closeController === controller) {
-        this.closeController = new AbortController();
-      }
-    })();
-    this.closePromise = task;
-    try {
-      await task;
-    } finally {
-      if (this.closePromise === task) this.closePromise = null;
-    }
+    // A managed endpoint is stopped immediately after store.close(). The
+    // lifecycle owns one complete generation, aborting and draining every
+    // operation admitted before close while rejecting work attempted during
+    // close. A fresh generation is installed only after the drain completes.
+    await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
 }
 
@@ -805,28 +752,14 @@ function normalizeQuerySource(source: string | undefined): string {
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
-  let remaining = sparql.trimStart();
-  // SPARQL prologues precede the query form. The old startsWith check labeled
-  // every real-world PREFIX-heavy query as `unknown`, including #1989's stable
-  // 24,051-byte SELECT fingerprint.
-  for (;;) {
-    if (remaining.startsWith('#')) {
-      const newline = remaining.indexOf('\n');
-      remaining = newline === -1 ? '' : remaining.slice(newline + 1).trimStart();
-      continue;
-    }
-    const prologue = remaining.match(
-      /^(?:PREFIX\s+(?:[A-Za-z_][\w.-]*)?:\s*<[^>]*>|BASE\s*<[^>]*>)\s*/i,
-    );
-    if (!prologue) break;
-    remaining = remaining.slice(prologue[0].length).trimStart();
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind !== 'read') return 'unknown';
+  switch (operation.form) {
+    case 'SELECT': return 'select';
+    case 'ASK': return 'ask';
+    case 'CONSTRUCT': return 'construct';
+    case 'DESCRIBE': return 'describe';
   }
-  const upper = remaining.toUpperCase();
-  if (upper.startsWith('SELECT')) return 'select';
-  if (upper.startsWith('ASK')) return 'ask';
-  if (upper.startsWith('CONSTRUCT')) return 'construct';
-  if (upper.startsWith('DESCRIBE')) return 'describe';
-  return 'unknown';
 }
 
 function hashQuery(sparql: string): string {

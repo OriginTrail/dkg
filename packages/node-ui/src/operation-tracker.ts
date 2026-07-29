@@ -83,6 +83,36 @@ export class OperationTracker {
     }
   }
 
+  cancel(ctx: OperationContext, reason: unknown): void {
+    if (!this.db) return;
+    const now = Date.now();
+    const startedAt = this.starts.get(ctx.operationId);
+    this.starts.delete(ctx.operationId);
+    const message = reason instanceof Error ? reason.message : String(reason);
+    try {
+      const prefix = ctx.operationId + ':';
+      const activeKeys = [...this.phaseStarts.keys()].filter(k => k.startsWith(prefix));
+      for (const key of activeKeys) {
+        const phase = key.slice(prefix.length);
+        const phaseStartedAt = this.phaseStarts.get(key);
+        this.phaseStarts.delete(key);
+        this.db.cancelPhase({
+          operation_id: ctx.operationId,
+          phase,
+          duration_ms: phaseStartedAt ? now - phaseStartedAt : 0,
+          error_message: message,
+        });
+      }
+      this.db.cancelOperation({
+        operation_id: ctx.operationId,
+        duration_ms: startedAt ? now - startedAt : 0,
+        error_message: message,
+      });
+    } catch {
+      // Must never break the node
+    }
+  }
+
   startPhase(ctx: OperationContext, phase: string): void {
     if (!this.db) return;
     const now = Date.now();

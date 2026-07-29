@@ -2285,6 +2285,18 @@ export class DashboardDB {
     `).run(op);
   }
 
+  cancelOperation(op: {
+    operation_id: string;
+    duration_ms: number;
+    error_message: string;
+  }): void {
+    this.stmt('cancelOp', `
+      UPDATE operations SET status = 'cancelled', duration_ms = @duration_ms,
+        error_message = @error_message
+      WHERE operation_id = @operation_id AND status = 'in_progress'
+    `).run(op);
+  }
+
   getOperations(opts: {
     name?: string;
     names?: string[];
@@ -2457,6 +2469,14 @@ export class DashboardDB {
   failPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
     this.stmt('failPhase', `
       UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
+        details = @error_message
+      WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
+    `).run(op);
+  }
+
+  cancelPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
+    this.stmt('cancelPhase', `
+      UPDATE operation_phases SET status = 'cancelled', duration_ms = @duration_ms,
         details = @error_message
       WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
     `).run(op);
