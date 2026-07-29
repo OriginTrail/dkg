@@ -114,6 +114,39 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
   });
 
+  it('propagates cancellation, priority, and source to the final store query', async () => {
+    class OptionsRecordingStore extends OxigraphStore {
+      queryOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queryOptions.push(options);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new OptionsRecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    await recordingStore.insert([
+      q('urn:options:s', 'http://schema.org/name', '"Options"', GRAPH),
+    ]);
+    const controller = new AbortController();
+
+    await recordingEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        signal: controller.signal,
+        priority: 'background',
+        source: 'api.query',
+      },
+    );
+
+    expect(recordingStore.queryOptions.at(-1)).toMatchObject({
+      signal: controller.signal,
+      priority: 'background',
+      source: 'api.query',
+    });
+  });
+
   it('returns all triples for entity', async () => {
     const result = await engine.query(
       `SELECT ?s ?p ?o WHERE { ?s ?p ?o }`,
@@ -1495,6 +1528,83 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['g']).toBe(GRAPH);
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('does not re-inject the full graph allow-list when top-level VALUES already narrows GRAPH ?g', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    // Mirror issue #1989's cardinality: the Blackbox metadata query returned
+    // 249 rows, of which 125 confirmed VM graphs were materialized locally.
+    // The caller selected only five of those graphs.
+    const vmGraphs = Array.from(
+      { length: 125 },
+      (_, index) => `${GRAPH}/_verifiable_memory/0xagent/${index + 128}`,
+    );
+    await recordingStore.insert(vmGraphs.map((graph, index) => (
+      q(`urn:vm:${index}`, 'http://schema.org/name', `"${index}"`, graph)
+    )));
+    recordingStore.queries.length = 0;
+
+    const sparql = `SELECT ?sourceGraph ?name WHERE {
+      VALUES ?sourceGraph { ${vmGraphs.slice(0, 5).map((graph) => `<${graph}>`).join(' ')} }
+      GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+    } ORDER BY ?sourceGraph`;
+    const result = await recordingEngine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings.map((row) => row['name'])).toEqual([
+      '"0"',
+      '"1"',
+      '"2"',
+      '"3"',
+      '"4"',
+    ]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
+    expect(executed).toBe(sparql);
+    expect(executed).not.toContain(vmGraphs[5]);
+  });
+
+  it('retains the allow-list intersection when caller VALUES contains an out-of-scope graph', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/1`;
+    const foreign = 'did:dkg:context-graph:foreign/_verifiable_memory/0xagent/1';
+    await recordingStore.insert([
+      q('urn:vm:allowed', 'http://schema.org/name', '"allowed"', vm),
+      q('urn:vm:foreign', 'http://schema.org/name', '"foreign"', foreign),
+    ]);
+    recordingStore.queries.length = 0;
+
+    const result = await recordingEngine.query(
+      `SELECT ?sourceGraph ?name WHERE {
+        VALUES ?sourceGraph { <${vm}> <${foreign}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
   });
 
   it('rejects mixed GRAPH-variable and default-graph triple patterns', async () => {

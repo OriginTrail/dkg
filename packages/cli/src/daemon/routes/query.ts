@@ -578,29 +578,54 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           });
         }
       }
-      const result = await agent.query(sparql, {
-        contextGraphId,
-        graphSuffix,
-        includeSharedMemory,
-        includeContextGraphPartitions,
-        view,
-        agentAddress,
-        verifiedGraph,
-        assertionName,
-        subGraphName,
-        callerAgentAddress,
-        // the daemon admin
-        // token is the authorisation anchor for cross-agent WM reads
-        // (adapter-openclaw and the CLI rely on this). Pass it through
-        // so DKGAgent.query knows to skip the multi-agent signed-proof
-        // gate. Per-agent tokens still go through the regular caller-
-        // matches-target invariant inside DKGAgent.query.
-        // NOTE: `adminAuthenticated` pass-through scoped out for the same
-        // reason as `agentAuthSignature` above — DKGAgent.query on this
-        // branch doesn't accept it; it's landing via the agent-side fixes.
-        minTrust: minTrust as TrustLevel | undefined,
-        operationCtx: ctx,
-      });
+      // API reads are untrusted, potentially planner-heavy work. Keep them on
+      // the background lane so a slow dashboard/plugin query cannot occupy the
+      // normal slots needed by promotion, reconciliation, gossip validation,
+      // and SWM catch-up (issue #1989). Thread connection cancellation all the
+      // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
+      // its queued/in-flight store request must not remain as orphan work.
+      const queryAbortController = new AbortController();
+      const abortDisconnectedQuery = () => {
+        if (!queryAbortController.signal.aborted) {
+          queryAbortController.abort(new Error('API query caller disconnected'));
+        }
+      };
+      req.once('aborted', abortDisconnectedQuery);
+      res.once('close', abortDisconnectedQuery);
+      if (req.aborted || res.destroyed) abortDisconnectedQuery();
+
+      let result;
+      try {
+        result = await agent.query(sparql, {
+          contextGraphId,
+          graphSuffix,
+          includeSharedMemory,
+          includeContextGraphPartitions,
+          view,
+          agentAddress,
+          verifiedGraph,
+          assertionName,
+          subGraphName,
+          callerAgentAddress,
+          signal: queryAbortController.signal,
+          priority: 'background',
+          source: 'api.query',
+          // the daemon admin
+          // token is the authorisation anchor for cross-agent WM reads
+          // (adapter-openclaw and the CLI rely on this). Pass it through
+          // so DKGAgent.query knows to skip the multi-agent signed-proof
+          // gate. Per-agent tokens still go through the regular caller-
+          // matches-target invariant inside DKGAgent.query.
+          // NOTE: `adminAuthenticated` pass-through scoped out for the same
+          // reason as `agentAuthSignature` above — DKGAgent.query on this
+          // branch doesn't accept it; it's landing via the agent-side fixes.
+          minTrust: minTrust as TrustLevel | undefined,
+          operationCtx: ctx,
+        });
+      } finally {
+        req.removeListener('aborted', abortDisconnectedQuery);
+        res.removeListener('close', abortDisconnectedQuery);
+      }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });

@@ -1,4 +1,9 @@
-import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
+import type {
+  TripleStore,
+  Quad,
+  QueryResult as StoreQueryResult,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
   GraphManager,
@@ -57,6 +62,15 @@ export class ScopedQueryViolationError extends Error {
     super(`Scoped query violation: ${message}`);
     this.name = 'ScopedQueryViolationError';
   }
+}
+
+function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
+  if (!options?.signal && !options?.priority && !options?.source) return undefined;
+  return {
+    signal: options.signal,
+    priority: options.priority,
+    source: options.source,
+  };
 }
 
 /**
@@ -429,8 +443,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         const sharedMemorySparql = swmGraphs.length > 0
           ? (wrapWithGraphUnion(sparql, swmGraphs) ?? wrapWithGraph(sparql, sharedMemoryGraph))
           : wrapWithGraph(sparql, sharedMemoryGraph);
-        const dataResult = await this.store.query(dataSparql);
-        const smResult = await this.store.query(sharedMemorySparql);
+        const dataResult = await this.store.query(dataSparql, storeOptions(options));
+        const smResult = await this.store.query(sharedMemorySparql, storeOptions(options));
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
       if (options?.graphSuffix === '_shared_memory') {
@@ -450,7 +464,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       }
     }
 
-    const result = await this.execAndNormalize(effectiveSparql);
+    const result = await this.execAndNormalize(effectiveSparql, storeOptions(options));
 
     // Strip results originating from excluded graphs (e.g. private CGs).
     if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
@@ -630,15 +644,20 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     if (allGraphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(effectiveSparql, allGraphs[0]));
+      return this.execAndNormalize(
+        wrapWithGraph(effectiveSparql, allGraphs[0]),
+        storeOptions(options),
+      );
     }
 
     if (view === 'verifiable-memory') {
       const rewritten = this.wrapVerifiableMemoryGraphSet(effectiveSparql, allGraphs);
-      if (rewritten !== null) return this.execAndNormalize(rewritten);
+      if (rewritten !== null) {
+        return this.execAndNormalize(rewritten, storeOptions(options));
+      }
     }
 
-    return this.queryMultipleGraphs(effectiveSparql, allGraphs);
+    return this.queryMultipleGraphs(effectiveSparql, allGraphs, storeOptions(options));
   }
 
   /** Canonical graph rewrite for root + per-KA/per-cgId verifiable-memory reads. */
@@ -650,10 +669,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       ?? wrapWithGraphUnion(sparql, graphs);
   }
 
-  private async queryMultipleGraphs(sparql: string, graphs: string[]): Promise<QueryResult> {
+  private async queryMultipleGraphs(
+    sparql: string,
+    graphs: string[],
+    options?: StoreQueryOptions,
+  ): Promise<QueryResult> {
     if (graphs.length === 0) return { bindings: [] };
     if (graphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]));
+      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]), options);
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -666,7 +689,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // around the injected block.
     const valuesSparql = wrapWithGraphValues(sparql, graphs);
     if (valuesSparql !== null) {
-      return this.execAndNormalize(valuesSparql);
+      return this.execAndNormalize(valuesSparql, options);
     }
     // Residual shapes `wrapWithGraphValues` declines (an inner top-level
     // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
@@ -674,7 +697,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // cross-graph merge below is preserved unchanged.
     const unionSparql = wrapWithGraphUnion(sparql, graphs);
     if (unionSparql !== null) {
-      return this.execAndNormalize(unionSparql);
+      return this.execAndNormalize(unionSparql, options);
     }
     // Fallback: the inner body contains a UNION so we cannot safely wrap
     // in a single query without either crashing Blazegraph (nested
@@ -693,7 +716,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // constructed from multiple source graphs).
       const merged: Quad[] = [];
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(sparql, g));
+        const r = await this.execAndNormalize(wrapWithGraph(sparql, g), options);
         if (r.quads) merged.push(...r.quads);
       }
       return { bindings: [], quads: dedupeQuads(merged) };
@@ -703,7 +726,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Boolean result: true iff the pattern matches in ANY graph.
       // Short-circuit on the first positive graph.
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(sparql, g));
+        const r = await this.execAndNormalize(wrapWithGraph(sparql, g), options);
         if (r.bindings[0]?.result === 'true') {
           return { bindings: [{ result: 'true' }] };
         }
@@ -730,7 +753,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const all: Record<string, string>[] = [];
     for (const g of graphs) {
-      const r = await this.execAndNormalize(wrapWithGraph(sparql, g));
+      const r = await this.execAndNormalize(wrapWithGraph(sparql, g), options);
       all.push(...r.bindings);
     }
     return { bindings: all };
@@ -1007,8 +1030,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return uris;
   }
 
-  private async execAndNormalize(sparql: string): Promise<QueryResult> {
-    const result = await this.store.query(sparql);
+  private async execAndNormalize(
+    sparql: string,
+    options?: StoreQueryOptions,
+  ): Promise<QueryResult> {
+    const result = await this.store.query(sparql, options);
 
     if (result.type === 'bindings') {
       if (result.bindings.length === 0) {
@@ -1518,14 +1544,135 @@ function constrainGraphVariablesToAllowedSet(sparql: string, allowedGraphs: stri
   assertGraphVariablesAreTopLevel(sparql, braceStart);
   assertNoTopLevelDefaultGraphPatternsWithGraphVariables(sparql, braceStart);
 
+  const allowed = new Set(allowedGraphs);
+  const variablesNeedingConstraint = graphVariables.filter((variable) => {
+    const callerValues = readTopLevelStaticGraphValues(sparql, braceStart, variable);
+    // A top-level `VALUES ?g { <g1> ... }` already constrains every use of
+    // `GRAPH ?g` in this group. When its values are all inside the DKG
+    // allow-list, injecting the complete allow-list again is redundant and can
+    // be catastrophic at scale: the Blackbox VM reader supplied five exact
+    // partitions, while DKG added all 249 known VM graphs and turned a ~3 KB
+    // query into the stable 24,051-byte planner stall from issue #1989.
+    //
+    // If the VALUES shape is dynamic/unsupported or contains an out-of-scope
+    // IRI, retain the existing intersection rewrite. This preserves the
+    // fail-closed behavior without broadening access.
+    return callerValues === null || callerValues.some((graph) => !allowed.has(graph));
+  });
+  if (variablesNeedingConstraint.length === 0) return sparql;
+
   const values = allowedGraphs
     .map((g) => `<${assertSafeIri(g)}>`)
     .join(' ');
-  const constraints = graphVariables
+  const constraints = variablesNeedingConstraint
     .map((variable) => `VALUES ${variable} { ${values} }`)
     .join(' ');
 
   return `${sparql.slice(0, braceStart + 1)} ${constraints} ${sparql.slice(braceStart + 1)}`;
+}
+
+/**
+ * Return a graph variable's simple top-level static VALUES list.
+ *
+ * Only the scalar SPARQL form used by graph-batch callers is accepted:
+ * `VALUES ?g { <iri> prefix:name ... }`. Tuple VALUES, variables, literals,
+ * UNDEF, nested groups, and malformed tokens return `null`, which makes the
+ * caller retain the full allow-list intersection rewrite.
+ */
+function readTopLevelStaticGraphValues(
+  sparql: string,
+  braceStart: number,
+  variable: string,
+): string[] | null {
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
+  if (braceEnd === -1) return null;
+  const prefixes = collectPrefixDeclarations(sparql);
+  let depth = 0;
+  let i = braceStart + 1;
+
+  while (i < braceEnd) {
+    const ch = sparql[i];
+    if (ch === '#') {
+      while (i < braceEnd && sparql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i = skipSparqlStringLiteral(sparql, i);
+      continue;
+    }
+    if (ch === '<') {
+      i = skipSparqlIriRef(sparql, i) ?? i + 1;
+      continue;
+    }
+    if (ch === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === '}') {
+      depth = Math.max(0, depth - 1);
+      i++;
+      continue;
+    }
+    if (depth !== 0 || !isKeywordStart(sparql, i)) {
+      i++;
+      continue;
+    }
+
+    let keywordEnd = i + 1;
+    while (keywordEnd < braceEnd && isWordContinuation(sparql[keywordEnd])) keywordEnd++;
+    if (!isSparqlKeyword(sparql, i, keywordEnd, 'VALUES')) {
+      i = keywordEnd;
+      continue;
+    }
+
+    const variableStart = skipSparqlSpaceAndLineComments(sparql, keywordEnd);
+    const candidate = readSparqlVariable(sparql, variableStart);
+    if (candidate !== variable) {
+      i = keywordEnd;
+      continue;
+    }
+    const valuesStart = skipSparqlSpaceAndLineComments(
+      sparql,
+      variableStart + candidate.length,
+    );
+    if (sparql[valuesStart] !== '{') return null;
+    const valuesEnd = findMatchingCloseBrace(sparql, valuesStart);
+    if (valuesEnd === -1 || valuesEnd > braceEnd) return null;
+    return parseStaticGraphValues(sparql, valuesStart + 1, valuesEnd, prefixes);
+  }
+
+  return null;
+}
+
+function parseStaticGraphValues(
+  sparql: string,
+  start: number,
+  end: number,
+  prefixes: Map<string, string>,
+): string[] | null {
+  const values: string[] = [];
+  let i = start;
+  while (i < end) {
+    i = skipSparqlSpaceAndLineComments(sparql, i);
+    if (i >= end) break;
+
+    if (sparql[i] === '<') {
+      const iriEnd = skipSparqlIriRef(sparql, i);
+      if (!iriEnd || iriEnd > end) return null;
+      values.push(sparql.slice(i + 1, iriEnd - 1));
+      i = iriEnd;
+      continue;
+    }
+
+    const prefixedName = readSparqlPrefixName(sparql, i);
+    if (!prefixedName) return null;
+    const iri = resolveSparqlPrefixedName(prefixedName, prefixes);
+    if (!iri) return null;
+    values.push(iri);
+    i += prefixedName.length;
+  }
+  return values;
 }
 
 function assertNoTopLevelDefaultGraphPatternsWithGraphVariables(sparql: string, braceStart: number): void {

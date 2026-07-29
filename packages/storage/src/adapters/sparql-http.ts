@@ -190,6 +190,9 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
+  private closeController = new AbortController();
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private closePromise: Promise<void> | null = null;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -230,14 +233,20 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWork<T>(
     operation: string,
     options: QueryOptions | undefined,
-    work: () => Promise<T>,
+    work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
-    return externalStorePriorityScheduler.run(
+    const signal = composeAbortSignals(options?.signal, this.closeController.signal);
+    const task = externalStorePriorityScheduler.run(
       options?.priority,
       options?.source ?? `sparql-http.${operation}`,
-      work,
-      options?.signal,
+      () => work(signal),
+      signal,
     );
+    this.inFlight.add(task);
+    void task.finally(() => {
+      this.inFlight.delete(task);
+    }).catch(() => undefined);
+    return task;
   }
 
   getPressureSnapshot(): StorePressureSnapshot {
@@ -289,9 +298,9 @@ export class SparqlHttpStore implements TripleStore {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
-    return this.runStoreWork(operation, options, async () => {
+    return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
-      const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
+      const signal = composeAbortSignals(lifecycleSignal, timeoutSignal) ?? timeoutSignal;
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
@@ -546,9 +555,13 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async () => {
+    return this.runStoreWork('query', options, async (lifecycleSignal) => {
+      const effectiveOptions: SparqlHttpQueryOptions = {
+        ...options,
+        signal: lifecycleSignal,
+      };
       const startedAt = this.now();
-      throwIfAborted(options?.signal);
+      throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
       const isAsk = upper.startsWith('ASK');
@@ -557,22 +570,26 @@ export class SparqlHttpStore implements TripleStore {
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, options);
+          return await this.queryConstruct(trimmed, effectiveOptions);
         }
 
-        const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
+        const res = await this.postQuery(
+          trimmed,
+          'application/sparql-results+json',
+          effectiveOptions,
+        );
         if (!res.ok) {
-          const text = await (options?.maxResponseBytes === undefined
+          const text = await (effectiveOptions.maxResponseBytes === undefined
             ? res.text()
-            : readResponseTextBounded(res, options.maxResponseBytes)
+            : readResponseTextBounded(res, effectiveOptions.maxResponseBytes)
           ).catch(() => '');
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = options?.maxResponseBytes === undefined
+        const json = effectiveOptions.maxResponseBytes === undefined
           ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
           : JSON.parse(
-              await readResponseTextBounded(res, options.maxResponseBytes),
+              await readResponseTextBounded(res, effectiveOptions.maxResponseBytes),
             ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
@@ -744,7 +761,29 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    // Remote service — nothing to close.
+    if (this.closePromise) return this.closePromise;
+    const controller = this.closeController;
+    controller.abort(new Error('SparqlHttpStore closed'));
+    const draining = [...this.inFlight];
+    const task = (async () => {
+      // A managed endpoint is stopped immediately after store.close(). Wait
+      // for every queued/in-flight fetch to observe cancellation and unwind
+      // before returning, so slow-query completions cannot appear after daemon
+      // `Stopped.` and no request races the managed server teardown (#1989).
+      await Promise.allSettled(draining);
+      // Preserve the adapter's historical reusable-close contract for direct
+      // remote endpoint callers. Daemon shutdown issues no later operations,
+      // while tests/integrators may deliberately close twice and reuse.
+      if (this.closeController === controller) {
+        this.closeController = new AbortController();
+      }
+    })();
+    this.closePromise = task;
+    try {
+      await task;
+    } finally {
+      if (this.closePromise === task) this.closePromise = null;
+    }
   }
 }
 
@@ -766,7 +805,23 @@ function normalizeQuerySource(source: string | undefined): string {
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
-  const upper = sparql.trimStart().toUpperCase();
+  let remaining = sparql.trimStart();
+  // SPARQL prologues precede the query form. The old startsWith check labeled
+  // every real-world PREFIX-heavy query as `unknown`, including #1989's stable
+  // 24,051-byte SELECT fingerprint.
+  for (;;) {
+    if (remaining.startsWith('#')) {
+      const newline = remaining.indexOf('\n');
+      remaining = newline === -1 ? '' : remaining.slice(newline + 1).trimStart();
+      continue;
+    }
+    const prologue = remaining.match(
+      /^(?:PREFIX\s+(?:[A-Za-z_][\w.-]*)?:\s*<[^>]*>|BASE\s*<[^>]*>)\s*/i,
+    );
+    if (!prologue) break;
+    remaining = remaining.slice(prologue[0].length).trimStart();
+  }
+  const upper = remaining.toUpperCase();
   if (upper.startsWith('SELECT')) return 'select';
   if (upper.startsWith('ASK')) return 'ask';
   if (upper.startsWith('CONSTRUCT')) return 'construct';
