@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { Command } from 'commander';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,7 @@ import {
   isGithubHost,
 } from '../src/integrations/registry-client.js';
 import { isIntegrationEntry } from '../src/integrations/schema.js';
+import { registerIntegrationCommands } from '../src/integrations/commands.js';
 import { installCli } from '../src/integrations/install-cli.js';
 import { installMcp } from '../src/integrations/install-mcp.js';
 import { normalizeRepoUrl } from '../src/integrations/verify-npm-provenance.js';
@@ -756,5 +758,129 @@ describe('installMcp with an args-less entry', () => {
       mcpServers: Record<string, { args: string[] }>;
     };
     expect(parsed.mcpServers['with-args']!.args).toEqual(['-y', 'pkg@1.0.0']);
+  });
+});
+
+// ── Commander layer: the public `dkg integration …` contracts ──────────────
+// Everything above tests helpers. The wiring between them — argument parsing,
+// tier defaults, which envelope key each verb prints — lives only in
+// commands.ts, so a regression there (a `search` that ignores its keyword, an
+// `installed` that prints `{ entries }`) would leave every helper test green.
+// These drive the real Commander tree against the real local registry server.
+describe('integration commands (Commander layer, real wire)', () => {
+  const manualEntry = (slug: string, name: string, tier: 'community' | 'verified'): IntegrationEntry =>
+    ({
+      ...baseEntry,
+      slug,
+      name,
+      description: `${name} integration for testing`,
+      install: { kind: 'manual', docsUrl: 'https://example.com/README.md' },
+      trustTier: tier,
+    }) as unknown as IntegrationEntry;
+
+  // `manual` entries keep detectInstalled off the network and off npm: with no
+  // cli/mcp/npm-global candidates it performs no I/O at all, so `installed`
+  // stays deterministic here and still exercises the real command path.
+  const alpha = manualEntry('alpha-chat', 'Alpha Chat', 'verified');
+  const beta = manualEntry('beta-graph', 'Beta Graph', 'verified');
+  const communityOnly = manualEntry('gamma-tool', 'Gamma Tool', 'community');
+
+  let savedIndex: string | undefined;
+  let savedRaw: string | undefined;
+
+  beforeEach(() => {
+    savedIndex = process.env.DKG_REGISTRY_INDEX_URL;
+    savedRaw = process.env.DKG_REGISTRY_RAW_BASE;
+    // commands.ts calls resolveRegistryConfig() with no argument, so the
+    // redirect has to happen through the real environment.
+    process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
+    process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
+
+    for (const e of [alpha, beta, communityOnly]) {
+      registryRoutes.set(`/raw/${e.slug}.json`, { status: 200, body: JSON.stringify(e) });
+    }
+    registryRoutes.set('/index', {
+      status: 200,
+      body: JSON.stringify([alpha, beta, communityOnly].map((e) => ({ name: `${e.slug}.json` }))),
+    });
+  });
+
+  afterEach(() => {
+    if (savedIndex === undefined) delete process.env.DKG_REGISTRY_INDEX_URL;
+    else process.env.DKG_REGISTRY_INDEX_URL = savedIndex;
+    if (savedRaw === undefined) delete process.env.DKG_REGISTRY_RAW_BASE;
+    else process.env.DKG_REGISTRY_RAW_BASE = savedRaw;
+  });
+
+  /** Runs the real command tree and returns whatever it printed to stdout. */
+  async function runCli(argv: string[]): Promise<string> {
+    const program = new Command();
+    program.exitOverride(); // never let a parse error kill the test runner
+    registerIntegrationCommands(program);
+    const out: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      out.push(args.map(String).join(' '));
+    });
+    try {
+      await program.parseAsync(['node', 'dkg', ...argv]);
+    } finally {
+      spy.mockRestore();
+    }
+    return out.join('\n');
+  }
+
+  it('`search <keyword> --json` filters by the keyword', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'search', 'alpha', '--json']));
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug)).toEqual(['alpha-chat']);
+  });
+
+  // The control for the test above: without it, a `search` that dropped its
+  // keyword and returned everything would still need the filtered case to fail,
+  // but a `search` that returned NOTHING would pass it vacuously.
+  it('`search --json` with no keyword returns every entry at the tier', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'search', '--json']));
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug).sort()).toEqual([
+      'alpha-chat',
+      'beta-graph',
+    ]);
+  });
+
+  it('`list --json` keeps its shipped { entries, failures } envelope', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'list', '--json']));
+    expect(Object.keys(parsed).sort()).toEqual(['entries', 'failures']);
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug).sort()).toEqual([
+      'alpha-chat',
+      'beta-graph',
+    ]);
+  });
+
+  // `installed` reports something different from `list`/`search`, so it prints a
+  // different key. Printing `{ entries }` here would silently look like a
+  // registry listing to any script consuming it.
+  it('`installed --json` prints { installed, failures }, never { entries }', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'installed', '--json']));
+    expect(Object.keys(parsed).sort()).toEqual(['failures', 'installed']);
+    expect(parsed.entries).toBeUndefined();
+    expect(Array.isArray(parsed.installed)).toBe(true);
+  });
+
+  // The two verbs deliberately default to different tiers: browsing surfaces
+  // vetted entries, while "what is on my machine" must not hide a
+  // community-tier install the user actually has.
+  it('defaults `search` to verified but `installed` to community', async () => {
+    const searched = JSON.parse(await runCli(['integration', 'search', '--json']));
+    expect(searched.entries.map((e: IntegrationEntry) => e.slug)).not.toContain('gamma-tool');
+
+    const inst = JSON.parse(await runCli(['integration', 'installed', '--json']));
+    expect(inst.installed.map((r: { slug: string }) => r.slug)).toContain('gamma-tool');
+  });
+
+  it('`search --tier community --json` widens to community entries', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'search', '--tier', 'community', '--json']));
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug).sort()).toEqual([
+      'alpha-chat',
+      'beta-graph',
+      'gamma-tool',
+    ]);
   });
 });
