@@ -1058,7 +1058,16 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
   if (cursor === null || typeof cursor !== 'object') {
     return { ok: false, reason: `malformed server container in ${target.displayPath}` };
   }
-  return { ok: true, keys: Object.keys(cursor as Record<string, unknown>) };
+  // Only entries that could actually launch count as registrations. `classify`
+  // above already treats `{ dkg: null }` as not-registered (deliberately —
+  // pre-F7 it read as `stale` and claimed there was a value to refresh); a key
+  // whose value is null, scalar, or an array is the same non-registration, and
+  // reporting it as an install would be a false positive in the other
+  // direction from the unreadable-config case.
+  const entries = Object.entries(cursor as Record<string, unknown>).filter(
+    ([, v]) => v !== null && typeof v === 'object' && !Array.isArray(v),
+  );
+  return { ok: true, keys: entries.map(([k]) => k) };
 }
 
 function serialiseTomlEntryOnly(

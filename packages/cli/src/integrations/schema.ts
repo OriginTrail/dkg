@@ -55,7 +55,12 @@ export interface InstallService {
   npmGlobal?: {
     package: string;
     version: string;
-    binary: string;
+    // Optional in the registry schema (only package + version are required),
+    // and genuinely optional here: an entry whose binary name matches its
+    // package name omits it. `resolveBinary` in install-service.ts is the
+    // single normalization point that falls back to the package name — the
+    // type must not claim a guarantee the registry does not make.
+    binary?: string;
     env?: Record<string, string>;
   };
   // Named `binary` to match the registry schema exactly. A maintainer

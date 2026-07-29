@@ -785,6 +785,29 @@ describe('integration commands (Commander layer, real wire)', () => {
   const beta = manualEntry('beta-graph', 'Beta Graph', 'verified');
   const communityOnly = manualEntry('gamma-tool', 'Gamma Tool', 'community');
 
+  // npm-global service WITHOUT `npmGlobal.binary` — schema-valid, and the shape
+  // resolveBinary's package-name fallback exists for.
+  const svcEntry = {
+    ...baseEntry,
+    slug: 'svc-ok',
+    name: 'Service OK',
+    install: {
+      kind: 'service',
+      runtime: 'npm-global',
+      npmGlobal: { package: '@acme/svc', version: '2.0.0' },
+    },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
+  // Schema-valid (only kind + runtime are required) but NOT automatable.
+  const svcNoMeta = {
+    ...baseEntry,
+    slug: 'svc-bare',
+    name: 'Service Bare',
+    install: { kind: 'service', runtime: 'npm-global' },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
   let savedIndex: string | undefined;
   let savedRaw: string | undefined;
 
@@ -796,9 +819,13 @@ describe('integration commands (Commander layer, real wire)', () => {
     process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
     process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
 
-    for (const e of [alpha, beta, communityOnly]) {
+    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta]) {
       registryRoutes.set(`/raw/${e.slug}.json`, { status: 200, body: JSON.stringify(e) });
     }
+    // Only the manual entries are indexed: `installed` runs detectInstalled over
+    // everything the index returns, and keeping npm-backed kinds out of it means
+    // no test here ever shells out to npm. `install <slug>` fetches by slug, so
+    // the service entries are still reachable by the install tests below.
     registryRoutes.set('/index', {
       status: 200,
       body: JSON.stringify([alpha, beta, communityOnly].map((e) => ({ name: `${e.slug}.json` }))),
@@ -882,5 +909,65 @@ describe('integration commands (Commander layer, real wire)', () => {
       'beta-graph',
       'gamma-tool',
     ]);
+  });
+
+  // ── install dispatch ────────────────────────────────────────────────────
+  // The branches below are reachable only through the command; the helpers
+  // cannot tell you whether the dispatcher picked the right one or forwarded
+  // its options. Exit codes are captured rather than allowed to run, or a
+  // process.exit would take the test runner with it.
+  async function runInstall(argv: string[]): Promise<{ out: string; err: string; exit: number | null }> {
+    const program = new Command();
+    program.exitOverride();
+    registerIntegrationCommands(program);
+    const out: string[] = [];
+    const err: string[] = [];
+    let exit: number | null = null;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      out.push(a.map(String).join(' '));
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      err.push(a.map(String).join(' '));
+    });
+    // Records rather than throws. Throwing would be caught by the command's own
+    // try/catch, which then calls process.exit(1) — turning every asserted exit
+    // code into 1 and hiding which branch actually ran. Only the FIRST code is
+    // kept for the same reason: it is the one the real process would have used.
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      if (exit === null) exit = code ?? 0;
+      return undefined;
+    }) as never);
+    try {
+      await program.parseAsync(['node', 'dkg', ...argv]);
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+    return { out: out.join('\n'), err: err.join('\n'), exit };
+  }
+
+  it('`install <manual>` prints the docs link and does not exit non-zero', async () => {
+    const r = await runInstall(['integration', 'install', 'alpha-chat']);
+    expect(r.exit).toBeNull();
+    expect(r.out).toContain('https://example.com/README.md');
+  });
+
+  it('`install <npm-global service> --dry-run` reaches the service installer with the pin', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-ok', '--dry-run']);
+    expect(r.exit).toBeNull();
+    // Proves dispatch reached installService AND that --dry-run was forwarded.
+    expect(r.out).toContain('@acme/svc@2.0.0');
+    expect(r.out).toContain('Dry-run');
+  });
+
+  // A schema-valid npm-global service with no npmGlobal block cannot be
+  // automated. It must take the same graceful path docker/binary take, not
+  // throw out of installService into the generic "install failed".
+  it('`install` falls back gracefully for an npm-global service with no package metadata', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-bare']);
+    expect(r.exit).toBe(2);
+    expect(r.err).toContain('no npmGlobal.package/version');
+    expect(r.err).not.toMatch(/undefined/);
   });
 });

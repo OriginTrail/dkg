@@ -105,6 +105,26 @@ describe('readRegisteredServerKeys', () => {
     expect(readRegisteredServerKeys(t)).toEqual({ ok: true, keys: [] });
   });
 
+  // The inverse false report: a key whose value cannot launch anything is not
+  // a registration. `classify()` in the same module already treats `{ dkg: null }`
+  // as not-registered, so counting it here would have made `installed` claim an
+  // integration was present that no client could start.
+  it('ignores keys whose value is not a usable server block', async () => {
+    const t = await target(
+      'mixed.json',
+      JSON.stringify({
+        mcpServers: {
+          good: { command: 'npx', args: ['-y', 'p'] },
+          nulled: null,
+          scalar: 'npx -y p',
+          listy: [],
+        },
+      }),
+    );
+    // The readable-config status is unchanged — this is a filter, not a failure.
+    expect(keysOf(readRegisteredServerKeys(t))).toEqual(['good']);
+  });
+
   it('distinguishes an empty container from a parse error', async () => {
     const empty = await target('empty.json', JSON.stringify({ mcpServers: {} }));
     const broken = await target('broken2.json', '{ nope');

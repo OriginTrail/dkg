@@ -287,6 +287,23 @@ export function registerIntegrationCommands(program: Command): void {
               process.exit(2);
               break;
             }
+            // The schema requires only kind + runtime for a service, so
+            // `{ kind: 'service', runtime: 'npm-global' }` with no npmGlobal
+            // block is a READABLE entry that simply cannot be automated.
+            // Dispatching on runtime alone sent it into installService, which
+            // threw and surfaced as a generic "install failed" — a worse
+            // experience than the docker/binary case, which exits cleanly with
+            // a pointer to the integration's own docs. Same treatment here.
+            const npm = entry.install.npmGlobal;
+            if (!npm?.package || !npm?.version) {
+              console.error(
+                `This entry declares runtime "npm-global" but carries no npmGlobal.package/version, ` +
+                  `so the CLI cannot install it automatically.\n` +
+                  `Follow the integration's own instructions at ${entry.repo}.`,
+              );
+              process.exit(2);
+              break;
+            }
             const result = await installService({
               entry,
               dryRun: opts.dryRun,
