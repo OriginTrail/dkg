@@ -12,7 +12,8 @@
 //   - the metrics $node variable discovers nodes via the profiled label;
 //   - per-node alert expressions group by the profiled label and their
 //     summaries reference `$labels.<label>`;
-//   - the metrics notification route groups by the profiled label;
+//   - actionable notification routes aggregate by environment rather than
+//     splitting by alert, priority or node identity;
 //   - when the profile is NOT the default, no unprofiled `instance` label
 //     survives anywhere in a label-position (matcher, group-by, legend,
 //     label_values, $labels.) across the metrics dashboard and the
@@ -224,10 +225,13 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
       'react',
       'check_first',
       'evidence',
-      'dashboard_url',
-      'runbook_url',
+      '__dashboardUid__',
+      '__panelId__',
     ]) {
       if (!rule.annotations?.[key]) fail(where, `human annotation "${key}" missing`);
+    }
+    if (/runbook_url|dashboard_url|logs_url/i.test(JSON.stringify(rule.annotations ?? {}))) {
+      fail(where, 'retired broad/runbook link annotation survived');
     }
     if (!['P1', 'P2', 'P3'].includes(rule.labels?.priority)) {
       fail(where, `priority must be P1/P2/P3, got ${JSON.stringify(rule.labels?.priority)}`);
@@ -261,15 +265,19 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   const routeFor = (sig) => routes.find((r) => (r.object_matchers ?? []).some(([k, , v]) => k === 'signal' && v === sig));
   const metricsRoute = routeFor('metrics');
   if (!metricsRoute) fail(alertsFile, 'no metrics policy route');
-  else {
-    const groupBy = metricsRoute.group_by ?? [];
-    if (!groupBy.includes(LABEL)) fail(alertsFile, `metrics route group_by ${JSON.stringify(groupBy)} lacks profiled label '${LABEL}'`);
-    if (profiled && groupBy.includes(DEFAULT_LABEL)) fail(alertsFile, `metrics route group_by ${JSON.stringify(groupBy)} still carries unprofiled '${DEFAULT_LABEL}'`);
+  else if (JSON.stringify(metricsRoute.group_by ?? []) !== JSON.stringify(['deployment_environment'])) {
+    fail(alertsFile, `metrics route must aggregate by environment, got ${JSON.stringify(metricsRoute.group_by ?? [])}`);
   }
   const logsRoute = routeFor('logs');
   if (!logsRoute) fail(alertsFile, 'no logs policy route');
-  else if (!(logsRoute.group_by ?? []).includes('service_instance_id')) fail(alertsFile, `logs route group_by ${JSON.stringify(logsRoute.group_by)} lacks service_instance_id`);
-  if (!routeFor('traces')) fail(alertsFile, 'no traces policy route');
+  else if (JSON.stringify(logsRoute.group_by ?? []) !== JSON.stringify(['deployment_environment'])) {
+    fail(alertsFile, `logs route must aggregate by environment, got ${JSON.stringify(logsRoute.group_by ?? [])}`);
+  }
+  const tracesRoute = routeFor('traces');
+  if (!tracesRoute) fail(alertsFile, 'no traces policy route');
+  else if (JSON.stringify(tracesRoute.group_by ?? []) !== JSON.stringify(['deployment_environment'])) {
+    fail(alertsFile, `traces route must aggregate by environment, got ${JSON.stringify(tracesRoute.group_by ?? [])}`);
+  }
   const p3Routes = routes.filter((route) =>
     (route.object_matchers ?? []).some(([key, op, value]) =>
       key === 'priority' && op === '=' && value === 'P3'));
@@ -293,8 +301,12 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
     if (template.name !== 'dkg-readable') fail(alertsFile, `unexpected template name ${template.name}`);
     if (!template.template?.includes('[RECOVERED]')) fail(alertsFile, 'template lacks recovery message');
     if (!template.template?.includes('*What happened:*')) fail(alertsFile, 'template lacks What happened field');
-    if (/localhost|node\(s\) affected|who owns/i.test(template.template ?? '')) {
-      fail(alertsFile, 'template contains broken/generic/ownership wording');
+    if (!template.template?.includes('Open exact incident')) fail(alertsFile, 'template lacks exact incident link');
+    if (!template.template?.includes('.PanelURL')) fail(alertsFile, 'template does not use Grafana PanelURL');
+    if (!template.template?.includes('.StartsAt.Add')) fail(alertsFile, 'template lacks incident start-time context');
+    if (!template.template?.includes('.EndsAt.UnixMilli')) fail(alertsFile, 'template lacks recovery end time');
+    if (/node\(s\) affected|who owns|runbook_url|dashboard_url|logs_url|Open dashboard|Open logs|Runbook/i.test(template.template ?? '')) {
+      fail(alertsFile, 'template contains retired/generic/ownership wording');
     }
   }
   for (const cp of payload.contactPoints ?? []) {

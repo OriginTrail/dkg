@@ -31,9 +31,10 @@ Slack is an **incident feed**, not a copy of the log stream:
   post instead of emitted on every threshold crossing.
 
 Every notification includes the plain-language symptom, affected surface,
-reaction, first check, evidence, and a direct dashboard/runbook link. Grafana
-groups P1/P2 by alert + environment + node, so another node entering or leaving
-the same state cannot rewrite a fleet-sized Slack notification. Generic
+reaction, first check, evidence, and one exact incident link. That link opens
+the relevant panel with the incident time range and available node/log filters.
+Grafana groups P1/P2 by channel + environment, so failures which start together
+and recoveries which finish together arrive in one Slack post. Generic
 ERROR/WARN volume remains visible in dashboards but does not page.
 
 | Alert | First response |
@@ -56,9 +57,9 @@ otherwise Grafana will correctly treat the old name as missing.
 
 ### Recovery and duplicates
 
-- A recovery notification means the alert condition is no longer true; it
-  includes the incident duration. Confirm the linked dashboard before closing a
-  P1 follow-up.
+- A recovery notification means the alert condition is no longer true; related
+  recoveries are grouped and each includes its incident duration and exact
+  incident link.
 - P1/P2 repeats are every 4 hours only while still unresolved. P3 requires a
   sustained 24-hour condition before its grouped daily notification.
 - During a total log blackout, the node-silent rule has a fleet-presence guard,

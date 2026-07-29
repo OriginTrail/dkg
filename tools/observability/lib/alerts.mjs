@@ -10,10 +10,7 @@ import {
   DKG_NOTIFICATION_TEMPLATE,
   DKG_NOTIFICATION_TEMPLATE_NAME,
 } from './notification-template.mjs';
-
-export const GRAFANA_PUBLIC_URL = 'http://100.81.85.62:3000';
-export const RUNBOOK_URL =
-  'https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md';
+import { INCIDENT_PANELS } from './dashboards.mjs';
 
 export const ALERT_EVALUATION_GROUPS = [
   { name: 'dkg-node-telemetry', interval: 60 },
@@ -43,14 +40,6 @@ export const EXPECTED_LOG_NODES = [
   'saturn_station',
   'umanitek',
 ].map((node) => ({ node, environment: 'mainnet' }));
-
-const fleetDashboard = `${GRAFANA_PUBLIC_URL}/d/dkg-fleet-logs?orgId=1`;
-const nodeLogsDashboard =
-  `${GRAFANA_PUBLIC_URL}/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}`;
-const nodeMetricsDashboard = (label) =>
-  `${GRAFANA_PUBLIC_URL}/d/dkg-node-metrics?orgId=1&var-node={{ $labels.${label} }}`;
-const nodeTracesDashboard =
-  `${GRAFANA_PUBLIC_URL}/d/dkg-node-traces?orgId=1&var-node={{ $labels.service_instance_id }}`;
 
 // The datasource registry owns each backend's complete Grafana query model.
 export const ALERT_DATASOURCES = {
@@ -101,8 +90,7 @@ const humanAnnotations = ({
   react,
   check,
   evidence,
-  dashboard,
-  logs,
+  incident,
 }) => ({
   summary: title,
   slack_title: title,
@@ -111,9 +99,13 @@ const humanAnnotations = ({
   react,
   check_first: check,
   evidence,
-  dashboard_url: dashboard,
-  ...(logs ? { logs_url: logs } : {}),
-  runbook_url: RUNBOOK_URL,
+  __dashboardUid__: incident.dashboardUid,
+  __panelId__: String(incident.panelId),
+  ...(incident.nodeLabel
+    ? { incident_node_label: incident.nodeLabel }
+    : {}),
+  ...(incident.level ? { incident_level: incident.level } : {}),
+  ...(incident.search ? { incident_search: incident.search } : {}),
 });
 
 export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
@@ -184,8 +176,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — check the node soon.',
         check: 'Confirm that the node process and telemetry exporter are running.',
         evidence: 'No signal for 15 minutes from a node in the expected production roster.',
-        dashboard: nodeLogsDashboard,
-        logs: nodeLogsDashboard,
+        incident: {
+          ...INCIDENT_PANELS.nodeLogs,
+          nodeLabel: 'service_instance_id',
+        },
       }),
     },
     {
@@ -212,8 +206,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — check this immediately.',
         check: 'Confirm that the telemetry collector and Loki are running, then check fleet reachability.',
         evidence: '0 mainnet nodes are reporting.',
-        dashboard: fleetDashboard,
-        logs: fleetDashboard,
+        incident: INCIDENT_PANELS.fleetPresence,
       }),
     },
     {
@@ -238,8 +231,12 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — investigate this soon.',
         check: 'Check Blazegraph health and the storage scheduler queue.',
         evidence: '{{ printf "%.0f" $values.B }} storage timeouts in 10 minutes; alert threshold is 20.',
-        dashboard: nodeLogsDashboard,
-        logs: `${nodeLogsDashboard}&var-level=ERROR&var-search=Store%20scheduler%7CBlazegraph%20operation`,
+        incident: {
+          ...INCIDENT_PANELS.nodeLogs,
+          nodeLabel: 'service_instance_id',
+          level: 'ERROR',
+          search: 'Store scheduler|Blazegraph operation',
+        },
       }),
     },
     {
@@ -268,8 +265,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'No immediate action is required; review it in the daily summary.',
         check: 'Check which blockchain operation is generating the requests.',
         evidence: '{{ printf "%.0f" $values.B }} requests in the last hour; watch level is 8,000.',
-        dashboard: nodeLogsDashboard,
-        logs: `${nodeLogsDashboard}&var-search=rpc_usage`,
+        incident: {
+          ...INCIDENT_PANELS.nodeRpcUsage,
+          nodeLabel: 'service_instance_id',
+        },
       }),
     },
     {
@@ -292,7 +291,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — investigate the monitoring pipeline.',
         check: 'Check collector errors and its connection to Loki.',
         evidence: '{{ humanize $values.B }} log records per second failed to export during the last 10 minutes.',
-        dashboard: fleetDashboard,
+        incident: INCIDENT_PANELS.collectorExport,
       }),
     },
     {
@@ -315,7 +314,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — check the monitoring pipeline immediately.',
         check: 'Check the collector, Loki connection and available storage.',
         evidence: 'Collector queue is {{ humanizePercentage $values.B }} full; critical level is 80%.',
-        dashboard: fleetDashboard,
+        incident: INCIDENT_PANELS.collectorQueue,
       }),
     },
     {
@@ -343,7 +342,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — check this immediately.',
         check: 'Check failed transactions, node balance and chain RPC connectivity.',
         evidence: '{{ printf "%.1f" $values.B }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.',
-        dashboard: nodeMetricsDashboard(PROM_NODE_LABEL),
+        incident: {
+          ...INCIDENT_PANELS.publishOutcomes,
+          nodeLabel: PROM_NODE_LABEL,
+        },
       }),
     },
     {
@@ -368,7 +370,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — investigate this soon.',
         check: 'Check connectivity and ACK responses from the selected nodes.',
         evidence: '{{ printf "%.0f" $values.B }} ACK quorum failures in 15 minutes; alert threshold is 2.',
-        dashboard: nodeMetricsDashboard(PROM_NODE_LABEL),
+        incident: {
+          ...INCIDENT_PANELS.ackQuorum,
+          nodeLabel: PROM_NODE_LABEL,
+        },
       }),
     },
     {
@@ -393,7 +398,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — check this immediately.',
         check: 'Test the configured RPC endpoints and provider limits.',
         evidence: '{{ printf "%.0f" $values.B }} exhausted-provider event(s) in the last 5 minutes.',
-        dashboard: nodeMetricsDashboard(PROM_NODE_LABEL),
+        incident: {
+          ...INCIDENT_PANELS.rpcFailover,
+          nodeLabel: PROM_NODE_LABEL,
+        },
       }),
     },
     {
@@ -419,7 +427,10 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         react: 'Yes — investigate this soon.',
         check: 'Open the failed traces and identify the shared failing step.',
         evidence: '{{ printf "%.1f" $values.B }}% of at least 20 traces failed in 15 minutes; alert level is 10%.',
-        dashboard: nodeTracesDashboard,
+        incident: {
+          ...INCIDENT_PANELS.traceErrors,
+          nodeLabel: 'service_instance_id',
+        },
       }),
     },
   ];
@@ -499,11 +510,11 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
       ['signal', '=', signal],
       actionablePriorities,
     ],
-    groupBy: signal === 'logs'
-      ? ['alertname', 'priority', 'deployment_environment', 'service_instance_id']
-      : signal === 'metrics'
-        ? ['alertname', 'priority', 'deployment_environment', 'service_instance_id', PROM_NODE_LABEL]
-        : ['alertname', 'priority', 'deployment_environment', 'service_instance_id'],
+    // The signal matcher already separates Slack channels. Environment is the
+    // only notification-group dimension so alerts which begin or recover
+    // together become one readable Slack post instead of a message per rule,
+    // priority or node.
+    groupBy: ['deployment_environment'],
     groupWait: '30s',
     groupInterval: '5m',
     repeatInterval: '4h',
@@ -521,7 +532,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
     ],
     // One grouped daily post for a sustained watch condition; individual node
     // churn cannot create the old 15-minute stream of RPC notifications.
-    groupBy: ['alertname', 'priority', 'deployment_environment'],
+    groupBy: ['deployment_environment'],
     groupWait: '24h',
     groupInterval: '24h',
     repeatInterval: '24h',

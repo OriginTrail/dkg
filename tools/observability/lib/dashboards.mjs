@@ -11,6 +11,23 @@ const VM = { type: 'prometheus', uid: '${vm}' };
 const TEMPO = { type: 'tempo', uid: '${tempo}' };
 const dashLinks = [{ type: 'dashboards', tags: ['dkg'], asDropdown: true, title: 'DKG dashboards', includeVars: false, keepTime: true }];
 const lokiVarVisible = { name: 'loki', type: 'datasource', query: 'loki', label: 'Loki', current: {} };
+
+// Stable dashboard/panel identity used by Grafana alert rules. Grafana turns
+// these into alert-specific PanelURL values; the notification template adds
+// the actual firing/recovery time window and available filters. Keep the title
+// assertions in alerting-contract.test.mjs in sync if a dashboard is
+// reorganized.
+export const INCIDENT_PANELS = Object.freeze({
+  fleetPresence: { dashboardUid: 'dkg-fleet-logs', panelId: 1 },
+  nodeLogs: { dashboardUid: 'dkg-node-logs', panelId: 1 },
+  nodeRpcUsage: { dashboardUid: 'dkg-node-logs', panelId: 3 },
+  publishOutcomes: { dashboardUid: 'dkg-node-metrics', panelId: 3 },
+  ackQuorum: { dashboardUid: 'dkg-node-metrics', panelId: 5 },
+  rpcFailover: { dashboardUid: 'dkg-node-metrics', panelId: 13 },
+  collectorExport: { dashboardUid: 'dkg-node-metrics', panelId: 18 },
+  collectorQueue: { dashboardUid: 'dkg-node-metrics', panelId: 19 },
+  traceErrors: { dashboardUid: 'dkg-node-traces', panelId: 3 },
+});
 // Node-identity discovery model: each dashboard's $node dropdown is sourced
 // from ITS OWN datasource, so the selector reflects exactly the nodes that
 // signal has data for (a node shipping metrics but not logs still appears on
@@ -51,7 +68,14 @@ const layout = (rows) => {
         throw new Error(`layout: panel def (type ${def.type}) needs a string title (may be empty) — a missing title must fail here, not silently drop from the rendered JSON`);
       }
       const { title, ...rest } = def;
-      panels.push({ title, gridPos: { h, w, x, y }, ...rest });
+      // Explicit deterministic IDs are required for alert-to-panel links.
+      // They also prevent an import/save round trip from rewriting IDs.
+      panels.push({
+        id: panels.length + 1,
+        title,
+        gridPos: { h, w, x, y },
+        ...rest,
+      });
       x += w;
       rowH = Math.max(rowH, h);
     }

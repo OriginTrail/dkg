@@ -61,18 +61,19 @@ never in this repository.
 - Generic ERROR/WARN counts remain useful in dashboards, but do **not** page
   Slack. Rules classify the actual event or operational symptom.
 - Every firing message answers: what happened, what is affected, whether to
-  react, what to check first, the evidence, and working dashboard/runbook links.
-  Recovery includes the incident duration and states that no immediate action
-  is required.
+  react, what to check first, and the evidence. Its single incident link opens
+  the relevant panel, node filters and alert time range. Recovery includes the
+  incident duration and the same exact link.
 
 ## Routing model
 
 ${routesTable(routes)}
 
-Routes are appended as children of the root notification policy. P1/P2 group by
-stable incident identity so node churn cannot rewrite a fleet-sized message:
-${groupingSentence(routes)}. P3 deliberately groups nodes for one daily watch
-post. Every rule carries \`team=dkg\`, \`signal=<x>\`, \`priority=P1|P2|P3\`,
+Routes are appended as children of the root notification policy. Each
+signal-specific Slack channel groups by environment, so failures which start
+together and recoveries which finish together become one post:
+${groupingSentence(routes)}. P3 uses the same grouping for one daily watch post.
+Every rule carries \`team=dkg\`, \`signal=<x>\`, \`priority=P1|P2|P3\`,
 \`component\`, \`entity_kind\`, and stable \`alert_id\` labels.
 
 The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace

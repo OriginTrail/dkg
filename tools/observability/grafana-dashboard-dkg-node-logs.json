@@ -75,6 +75,7 @@
   },
   "panels": [
     {
+      "id": 1,
       "title": "Logs — $node",
       "gridPos": {
         "h": 20,
@@ -105,6 +106,7 @@
       ]
     },
     {
+      "id": 2,
       "title": "Log volume by level — $node",
       "gridPos": {
         "h": 6,
@@ -136,6 +138,7 @@
       ]
     },
     {
+      "id": 3,
       "title": "RPC requests by method — $node",
       "gridPos": {
         "h": 8,
@@ -167,6 +170,7 @@
       ]
     },
     {
+      "id": 4,
       "title": "RPC requests — $node (selected range)",
       "gridPos": {
         "h": 8,

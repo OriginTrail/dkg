@@ -19,9 +19,9 @@ never in this repository.
 - Generic ERROR/WARN counts remain useful in dashboards, but do **not** page
   Slack. Rules classify the actual event or operational symptom.
 - Every firing message answers: what happened, what is affected, whether to
-  react, what to check first, the evidence, and working dashboard/runbook links.
-  Recovery includes the incident duration and states that no immediate action
-  is required.
+  react, what to check first, and the evidence. Its single incident link opens
+  the relevant panel, node filters and alert time range. Recovery includes the
+  incident duration and the same exact link.
 
 ## Routing model
 
@@ -32,10 +32,11 @@ never in this repository.
 | P1/P2 | `#node-traces` | `DKG node traces (Slack)` | `team=dkg`, `signal=traces`, `priority=~P1|P2` | wait 30s; update 5m; repeat 4h |
 | P3 | `#node-metrics` | `DKG node metrics (Slack)` | `team=dkg`, `priority=P3` | wait 24h; update 24h; repeat 24h |
 
-Routes are appended as children of the root notification policy. P1/P2 group by
-stable incident identity so node churn cannot rewrite a fleet-sized message:
-logs group by `alertname, priority, deployment_environment, service_instance_id`; metrics group by `alertname, priority, deployment_environment, service_instance_id, instance`; traces group by `alertname, priority, deployment_environment, service_instance_id`; metrics group by `alertname, priority, deployment_environment`. P3 deliberately groups nodes for one daily watch
-post. Every rule carries `team=dkg`, `signal=<x>`, `priority=P1|P2|P3`,
+Routes are appended as children of the root notification policy. Each
+signal-specific Slack channel groups by environment, so failures which start
+together and recoveries which finish together become one post:
+logs group by `deployment_environment`; metrics group by `deployment_environment`; traces group by `deployment_environment`; metrics group by `deployment_environment`. P3 uses the same grouping for one daily watch post.
+Every rule carries `team=dkg`, `signal=<x>`, `priority=P1|P2|P3`,
 `component`, `entity_kind`, and stable `alert_id` labels.
 
 The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace

@@ -1,17 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildAlerts, EXPECTED_LOG_NODES } from './lib/alerts.mjs';
+import {
+  buildDashboards,
+  INCIDENT_PANELS,
+} from './lib/dashboards.mjs';
 import { promNodeProfile } from './lib/profile.mjs';
 import {
   DKG_NOTIFICATION_TEMPLATE,
+  renderSlackGroupPreview,
   renderSlackPreview,
 } from './lib/notification-template.mjs';
 
+const nodeProfile = promNodeProfile('instance');
 const { alerts, specs, routes } = buildAlerts({
-  nodeProfile: promNodeProfile('instance'),
+  nodeProfile,
   VM_UID: 'vm-test',
   LOKI_UID: 'loki-test',
 });
+const dashboards = buildDashboards({ nodeProfile });
 
 const requiredAnnotations = [
   'slack_title',
@@ -20,8 +27,8 @@ const requiredAnnotations = [
   'react',
   'check_first',
   'evidence',
-  'dashboard_url',
-  'runbook_url',
+  '__dashboardUid__',
+  '__panelId__',
 ];
 
 test('catalog has a stable unique event-specific inventory', () => {
@@ -39,9 +46,43 @@ test('every rule supplies the complete human response contract without ownership
     }
     const text = JSON.stringify(spec.annotations);
     assert.doesNotMatch(text, /who owns|owner|owned by/i, `${spec.id} contains ownership text`);
+    assert.doesNotMatch(
+      text,
+      /runbook_url|dashboard_url|logs_url/i,
+      `${spec.id} contains a retired broad link`,
+    );
     assert.match(spec.annotations.react, /Yes|No immediate/i, `${spec.id} react answer is ambiguous`);
-    assert.match(spec.annotations.dashboard_url, /^http:\/\/100\.81\.85\.62:3000\//);
-    assert.match(spec.annotations.runbook_url, /^https:\/\/github\.com\/OriginTrail\/dkg\//);
+    assert.match(spec.annotations.__dashboardUid__, /^dkg-/);
+    assert.match(spec.annotations.__panelId__, /^[1-9][0-9]*$/);
+  }
+});
+
+test('every linked incident panel has a stable ID and the expected purpose', () => {
+  const byUid = Object.fromEntries(
+    Object.values(dashboards).map((dashboard) => [dashboard.uid, dashboard]),
+  );
+  const expectedTitles = new Map([
+    [INCIDENT_PANELS.fleetPresence, 'Nodes reporting (last 10m)'],
+    [INCIDENT_PANELS.nodeLogs, 'Logs — $node'],
+    [INCIDENT_PANELS.nodeRpcUsage, 'RPC requests by method — $node'],
+    [INCIDENT_PANELS.publishOutcomes, 'Publish rate by outcome'],
+    [INCIDENT_PANELS.ackQuorum, 'ACK quorum outcomes'],
+    [INCIDENT_PANELS.rpcFailover, 'RPC endpoint failover exhaustion'],
+    [INCIDENT_PANELS.collectorExport, 'Collector log records/s: accepted vs exported'],
+    [INCIDENT_PANELS.collectorQueue, 'Collector exporter queue'],
+    [INCIDENT_PANELS.traceErrors, 'Errored operations'],
+  ]);
+  for (const [incident, expectedTitle] of expectedTitles) {
+    const dashboard = byUid[incident.dashboardUid];
+    assert.ok(dashboard, `missing dashboard ${incident.dashboardUid}`);
+    const ids = dashboard.panels.map((panel) => panel.id);
+    assert.equal(new Set(ids).size, ids.length, `${dashboard.uid} has duplicate panel IDs`);
+    const panel = dashboard.panels.find(({ id }) => id === incident.panelId);
+    assert.equal(
+      panel?.title,
+      expectedTitle,
+      `${incident.dashboardUid} panel ${incident.panelId} drifted`,
+    );
   }
 });
 
@@ -85,30 +126,24 @@ test('query evaluation cadence keeps expensive watches out of the one-minute loo
   }
 });
 
-test('P1/P2 are real-time per incident while P3 is one delayed grouped route', () => {
+test('alerts and recoveries aggregate by channel and environment', () => {
   const actionRoutes = routes.filter((route) => route.priorities === 'P1/P2');
   assert.equal(actionRoutes.length, 3);
   for (const route of actionRoutes) {
     assert.equal(route.groupWait, '30s');
     assert.equal(route.groupInterval, '5m');
     assert.equal(route.repeatInterval, '4h');
-    assert.ok(route.groupBy.includes('alertname'));
-    assert.ok(route.groupBy.includes('priority'));
-    assert.ok(route.groupBy.includes('deployment_environment'));
-    assert.ok(
-      route.groupBy.includes('service_instance_id') || route.groupBy.includes('instance'),
-      `${route.id} is not grouped by node`,
-    );
+    assert.deepEqual(route.groupBy, ['deployment_environment']);
   }
   const p3 = routes.find((route) => route.priorities === 'P3');
   assert.ok(p3);
   assert.equal(p3.groupWait, '24h');
   assert.equal(p3.groupInterval, '24h');
   assert.equal(p3.repeatInterval, '24h');
-  assert.equal(p3.groupBy.includes('service_instance_id'), false);
+  assert.deepEqual(p3.groupBy, ['deployment_environment']);
 });
 
-test('Slack firing and recovery previews are readable and complete', () => {
+test('Slack groups related firing and recovery alerts with exact incident links', () => {
   const annotations = {
     slack_title: 'Cinna storage is overloaded',
     what_happened: 'Database requests are timing out.',
@@ -116,44 +151,107 @@ test('Slack firing and recovery previews are readable and complete', () => {
     react: 'Yes — investigate this soon.',
     check_first: 'Check Blazegraph and the storage queue.',
     evidence: '95 timeouts in 10 minutes.',
-    dashboard_url: 'http://100.81.85.62:3000/d/dkg-node-logs',
-    logs_url: 'http://100.81.85.62:3000/d/dkg-node-logs?var-level=ERROR',
-    runbook_url: 'https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md',
+    __dashboardUid__: 'dkg-node-logs',
+    __panelId__: '1',
+    incident_node_label: 'service_instance_id',
+    incident_level: 'ERROR',
+    incident_search: 'Store scheduler|Blazegraph operation',
   };
-  const firing = renderSlackPreview({
-    status: 'firing',
-    labels: { priority: 'P2', deployment_environment: 'mainnet' },
+  const panelUrl =
+    'http://localhost:3000/d/dkg-node-logs?orgId=1&viewPanel=1';
+  const common = {
+    labels: {
+      priority: 'P2',
+      deployment_environment: 'mainnet',
+      service_instance_id: 'Trace Labs Node 7',
+    },
     annotations,
+    panelUrl,
+    startsAt: 1720000000000,
+    endsAt: 1720000900000,
+  };
+  const grouped = renderSlackGroupPreview({
+    firing: [
+      common,
+      {
+        ...common,
+        labels: { ...common.labels, priority: 'P1' },
+        annotations: {
+          ...annotations,
+          slack_title: 'Publishing is failing',
+        },
+      },
+    ],
+    resolved: [
+      { ...common, duration: '18m0s' },
+      {
+        ...common,
+        annotations: {
+          ...annotations,
+          slack_title: 'RPC providers recovered',
+        },
+        duration: '7m0s',
+      },
+    ],
   });
   for (const phrase of [
+    '2 active DKG incidents',
+    '2 recovered DKG incidents',
     '[P2 — ACTION]',
     'What happened:',
     'Affected:',
     'React:',
     'Check first:',
     'Evidence:',
-    'Open dashboard',
-    'Open logs',
-    'Runbook',
+    'Open exact incident',
+    '[RECOVERED][P2]',
   ]) {
-    assert.match(firing, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(grouped, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
-  assert.doesNotMatch(firing, /localhost|owner/i);
-
-  const recovered = renderSlackPreview({
-    status: 'resolved',
-    labels: { priority: 'P2', deployment_environment: 'mainnet' },
-    annotations,
-    duration: '18m0s',
-  });
-  assert.match(recovered, /\[RECOVERED\]\[P2\]/);
-  assert.match(recovered, /lasted 18m0s/);
-  assert.match(recovered, /No immediate action is required/);
+  assert.match(grouped, /from=1719996400000/);
+  assert.match(grouped, /to=now/);
+  assert.match(grouped, /to=1720000900000/);
+  assert.match(grouped, /viewPanel=1/);
+  assert.match(grouped, /var-node=Trace\+Labs\+Node\+7/);
+  assert.match(grouped, /var-level=ERROR/);
+  assert.match(grouped, /var-search=Store\+scheduler%7CBlazegraph\+operation/);
+  assert.match(grouped, /lasted 18m0s/);
+  assert.match(grouped, /No immediate action is required/);
+  assert.doesNotMatch(
+    grouped,
+    /localhost|owner|runbook|Open dashboard|Open logs/i,
+  );
 });
 
-test('Grafana template avoids the broken localhost title and generic node wording', () => {
+test('single-alert preview remains a grouped one-incident message', () => {
+  const preview = renderSlackPreview({
+    status: 'firing',
+    labels: { priority: 'P1', deployment_environment: 'mainnet' },
+    annotations: {
+      slack_title: 'Publishing is failing',
+      what_happened: 'Publishes failed.',
+      __dashboardUid__: 'dkg-node-metrics',
+      __panelId__: '3',
+    },
+    panelUrl:
+      'http://localhost:3000/d/dkg-node-metrics?orgId=1&viewPanel=3',
+  });
+  assert.match(preview, /1 active DKG incident/);
+});
+
+test('Grafana template uses grouped exact links and avoids retired wording', () => {
   assert.match(DKG_NOTIFICATION_TEMPLATE, /define "dkg\.title" \}\}\{\{ end/);
-  assert.doesNotMatch(DKG_NOTIFICATION_TEMPLATE, /localhost|node\(s\) affected|Who owns/i);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /len \.Alerts\.Firing/);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /len \.Alerts\.Resolved/);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /\.PanelURL/);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /\.StartsAt\.Add/);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /\.EndsAt\.UnixMilli/);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /urlquery/);
+  assert.match(DKG_NOTIFICATION_TEMPLATE, /Open exact incident/);
+  assert.doesNotMatch(
+    DKG_NOTIFICATION_TEMPLATE,
+    /node\(s\) affected|Who owns|runbook_url|dashboard_url|logs_url|Open dashboard|Open logs|Runbook/i,
+  );
   assert.equal(alerts.notificationTemplates.length, 1);
   for (const contact of alerts.contactPoints) {
     assert.equal(contact.settings.title, '{{ template "dkg.title" . }}');

@@ -22,7 +22,7 @@
   "notificationTemplates": [
     {
       "name": "dkg-readable",
-      "template": "{{ define \"dkg.title\" }}{{ end }}\n{{ define \"dkg.body\" -}}\n{{- if .Alerts.Firing -}}\n{{- range .Alerts.Firing }}\n{{ if eq .Labels.priority \"P1\" }}🔴{{ else if eq .Labels.priority \"P2\" }}🟠{{ else if eq .Labels.priority \"P3\" }}🟡{{ else }}🔵{{ end }} *[{{ if eq .Labels.priority \"P1\" }}P1 — CRITICAL{{ else if eq .Labels.priority \"P2\" }}P2 — ACTION{{ else if eq .Labels.priority \"P3\" }}P3 — WATCH{{ else }}TEST{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\n{{ with index .Labels \"deployment_environment\" }}*Environment:* {{ . }}\n{{ end }}{{ with .Annotations.what_happened }}*What happened:* {{ . }}\n{{ end }}{{ with .Annotations.affected }}*Affected:* {{ . }}\n{{ end }}{{ with .Annotations.react }}*React:* {{ . }}\n{{ end }}{{ with .Annotations.check_first }}*Check first:* {{ . }}\n{{ end }}{{ with .Annotations.evidence }}*Evidence:* {{ . }}\n{{ end }}{{ if or .Annotations.dashboard_url .Annotations.logs_url .Annotations.runbook_url }}*Links:*{{ with .Annotations.dashboard_url }} <{{ . }}|Open dashboard>{{ end }}{{ with .Annotations.logs_url }} · <{{ . }}|Open logs>{{ end }}{{ with .Annotations.runbook_url }} · <{{ . }}|Runbook>{{ end }}\n{{ end }}\n{{- end -}}\n{{- end -}}\n{{- if .Alerts.Resolved -}}\n{{- range .Alerts.Resolved }}\n✅ *[RECOVERED][{{ with .Labels.priority }}{{ . }}{{ else }}DKG{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\nThe alert is no longer firing. The issue lasted {{ .EndsAt.Sub .StartsAt }}. No immediate action is required.\n{{ if or .Annotations.dashboard_url .Annotations.logs_url .Annotations.runbook_url }}*Links:*{{ with .Annotations.dashboard_url }} <{{ . }}|Open dashboard>{{ end }}{{ with .Annotations.logs_url }} · <{{ . }}|Open logs>{{ end }}{{ with .Annotations.runbook_url }} · <{{ . }}|Runbook>{{ end }}\n{{ end }}\n{{- end -}}\n{{- end -}}\n{{- end }}"
+      "template": "{{ define \"dkg.title\" }}{{ end }}\n{{ define \"dkg.incident_link\" -}}\n{{- $from := .StartsAt.Add -3600000000000 -}}\n<{{ reReplaceAll \"^https?://localhost:3000\" \"http://100.81.85.62:3000\" .PanelURL }}&from={{ $from.UnixMilli }}&to={{ if eq .Status \"resolved\" }}{{ .EndsAt.UnixMilli }}{{ else }}now{{ end }}{{ with .Annotations.incident_node_label }}&var-node={{ index $.Labels . | urlquery }}{{ end }}{{ with .Annotations.incident_level }}&var-level={{ . | urlquery }}{{ end }}{{ with .Annotations.incident_search }}&var-search={{ . | urlquery }}{{ end }}|Open exact incident>\n{{- end }}\n{{ define \"dkg.body\" -}}\n{{- if .Alerts.Firing -}}\n🚨 *{{ len .Alerts.Firing }} active DKG {{ if eq (len .Alerts.Firing) 1 }}incident{{ else }}incidents{{ end }}*\n{{- range .Alerts.Firing }}\n{{ if eq .Labels.priority \"P1\" }}🔴{{ else if eq .Labels.priority \"P2\" }}🟠{{ else if eq .Labels.priority \"P3\" }}🟡{{ else }}🔵{{ end }} *[{{ if eq .Labels.priority \"P1\" }}P1 — CRITICAL{{ else if eq .Labels.priority \"P2\" }}P2 — ACTION{{ else if eq .Labels.priority \"P3\" }}P3 — WATCH{{ else }}TEST{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\n{{ with index .Labels \"deployment_environment\" }}*Environment:* {{ . }}\n{{ end }}{{ with .Annotations.what_happened }}*What happened:* {{ . }}\n{{ end }}{{ with .Annotations.affected }}*Affected:* {{ . }}\n{{ end }}{{ with .Annotations.react }}*React:* {{ . }}\n{{ end }}{{ with .Annotations.check_first }}*Check first:* {{ . }}\n{{ end }}{{ with .Annotations.evidence }}*Evidence:* {{ . }}\n{{ end }}*Link:* {{ template \"dkg.incident_link\" . }}\n{{- end -}}\n{{- end -}}\n{{- if .Alerts.Resolved -}}\n✅ *{{ len .Alerts.Resolved }} recovered DKG {{ if eq (len .Alerts.Resolved) 1 }}incident{{ else }}incidents{{ end }}*\n{{- range .Alerts.Resolved }}\n*[RECOVERED][{{ with .Labels.priority }}{{ . }}{{ else }}DKG{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\nThe alert is no longer firing. The issue lasted {{ .EndsAt.Sub .StartsAt }}. No immediate action is required.\n*Link:* {{ template \"dkg.incident_link\" . }}\n{{- end -}}\n{{- end -}}\n{{- end }}"
     }
   ],
   "contactPoints": [
@@ -78,10 +78,7 @@
         ]
       ],
       "group_by": [
-        "alertname",
-        "priority",
-        "deployment_environment",
-        "service_instance_id"
+        "deployment_environment"
       ],
       "group_wait": "30s",
       "group_interval": "5m",
@@ -108,11 +105,7 @@
         ]
       ],
       "group_by": [
-        "alertname",
-        "priority",
-        "deployment_environment",
-        "service_instance_id",
-        "instance"
+        "deployment_environment"
       ],
       "group_wait": "30s",
       "group_interval": "5m",
@@ -139,10 +132,7 @@
         ]
       ],
       "group_by": [
-        "alertname",
-        "priority",
-        "deployment_environment",
-        "service_instance_id"
+        "deployment_environment"
       ],
       "group_wait": "30s",
       "group_interval": "5m",
@@ -164,8 +154,6 @@
         ]
       ],
       "group_by": [
-        "alertname",
-        "priority",
         "deployment_environment"
       ],
       "group_wait": "24h",
@@ -256,9 +244,9 @@
         "react": "Yes — check the node soon.",
         "check_first": "Confirm that the node process and telemetry exporter are running.",
         "evidence": "No signal for 15 minutes from a node in the expected production roster.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}",
-        "logs_url": "http://100.81.85.62:3000/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-logs",
+        "__panelId__": "1",
+        "incident_node_label": "service_instance_id"
       }
     },
     {
@@ -343,9 +331,8 @@
         "react": "Yes — check this immediately.",
         "check_first": "Confirm that the telemetry collector and Loki are running, then check fleet reachability.",
         "evidence": "0 mainnet nodes are reporting.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-fleet-logs?orgId=1",
-        "logs_url": "http://100.81.85.62:3000/d/dkg-fleet-logs?orgId=1",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-fleet-logs",
+        "__panelId__": "1"
       }
     },
     {
@@ -429,9 +416,11 @@
         "react": "Yes — investigate this soon.",
         "check_first": "Check Blazegraph health and the storage scheduler queue.",
         "evidence": "{{ printf \"%.0f\" $values.B }} storage timeouts in 10 minutes; alert threshold is 20.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}",
-        "logs_url": "http://100.81.85.62:3000/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}&var-level=ERROR&var-search=Store%20scheduler%7CBlazegraph%20operation",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-logs",
+        "__panelId__": "1",
+        "incident_node_label": "service_instance_id",
+        "incident_level": "ERROR",
+        "incident_search": "Store scheduler|Blazegraph operation"
       }
     },
     {
@@ -515,9 +504,9 @@
         "react": "No immediate action is required; review it in the daily summary.",
         "check_first": "Check which blockchain operation is generating the requests.",
         "evidence": "{{ printf \"%.0f\" $values.B }} requests in the last hour; watch level is 8,000.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}",
-        "logs_url": "http://100.81.85.62:3000/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}&var-search=rpc_usage",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-logs",
+        "__panelId__": "3",
+        "incident_node_label": "service_instance_id"
       }
     },
     {
@@ -602,8 +591,8 @@
         "react": "Yes — investigate the monitoring pipeline.",
         "check_first": "Check collector errors and its connection to Loki.",
         "evidence": "{{ humanize $values.B }} log records per second failed to export during the last 10 minutes.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-fleet-logs?orgId=1",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-metrics",
+        "__panelId__": "18"
       }
     },
     {
@@ -688,8 +677,8 @@
         "react": "Yes — check the monitoring pipeline immediately.",
         "check_first": "Check the collector, Loki connection and available storage.",
         "evidence": "Collector queue is {{ humanizePercentage $values.B }} full; critical level is 80%.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-fleet-logs?orgId=1",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-metrics",
+        "__panelId__": "19"
       }
     },
     {
@@ -774,8 +763,9 @@
         "react": "Yes — check this immediately.",
         "check_first": "Check failed transactions, node balance and chain RPC connectivity.",
         "evidence": "{{ printf \"%.1f\" $values.B }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-metrics?orgId=1&var-node={{ $labels.instance }}",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-metrics",
+        "__panelId__": "3",
+        "incident_node_label": "instance"
       }
     },
     {
@@ -860,8 +850,9 @@
         "react": "Yes — investigate this soon.",
         "check_first": "Check connectivity and ACK responses from the selected nodes.",
         "evidence": "{{ printf \"%.0f\" $values.B }} ACK quorum failures in 15 minutes; alert threshold is 2.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-metrics?orgId=1&var-node={{ $labels.instance }}",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-metrics",
+        "__panelId__": "5",
+        "incident_node_label": "instance"
       }
     },
     {
@@ -946,8 +937,9 @@
         "react": "Yes — check this immediately.",
         "check_first": "Test the configured RPC endpoints and provider limits.",
         "evidence": "{{ printf \"%.0f\" $values.B }} exhausted-provider event(s) in the last 5 minutes.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-metrics?orgId=1&var-node={{ $labels.instance }}",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-metrics",
+        "__panelId__": "13",
+        "incident_node_label": "instance"
       }
     },
     {
@@ -1032,8 +1024,9 @@
         "react": "Yes — investigate this soon.",
         "check_first": "Open the failed traces and identify the shared failing step.",
         "evidence": "{{ printf \"%.1f\" $values.B }}% of at least 20 traces failed in 15 minutes; alert level is 10%.",
-        "dashboard_url": "http://100.81.85.62:3000/d/dkg-node-traces?orgId=1&var-node={{ $labels.service_instance_id }}",
-        "runbook_url": "https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md"
+        "__dashboardUid__": "dkg-node-traces",
+        "__panelId__": "3",
+        "incident_node_label": "service_instance_id"
       }
     }
   ]

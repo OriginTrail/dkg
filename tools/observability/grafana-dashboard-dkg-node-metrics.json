@@ -61,6 +61,7 @@
   },
   "panels": [
     {
+      "id": 1,
       "title": "",
       "gridPos": {
         "h": 3,
@@ -76,6 +77,7 @@
       "transparent": true
     },
     {
+      "id": 2,
       "title": "Publishing",
       "gridPos": {
         "h": 1,
@@ -87,6 +89,7 @@
       "collapsed": false
     },
     {
+      "id": 3,
       "title": "Publish rate by outcome",
       "gridPos": {
         "h": 8,
@@ -118,6 +121,7 @@
       ]
     },
     {
+      "id": 4,
       "title": "Publish duration p50/p95",
       "gridPos": {
         "h": 8,
@@ -158,6 +162,7 @@
       ]
     },
     {
+      "id": 5,
       "title": "ACK quorum outcomes",
       "gridPos": {
         "h": 8,
@@ -189,6 +194,7 @@
       ]
     },
     {
+      "id": 6,
       "title": "ACK peer results (publisher side)",
       "gridPos": {
         "h": 8,
@@ -220,6 +226,7 @@
       ]
     },
     {
+      "id": 7,
       "title": "ACK declines by code + handler outcomes",
       "gridPos": {
         "h": 8,
@@ -260,6 +267,7 @@
       ]
     },
     {
+      "id": 8,
       "title": "Chain / RPC",
       "gridPos": {
         "h": 1,
@@ -271,6 +279,7 @@
       "collapsed": false
     },
     {
+      "id": 9,
       "title": "Raw RPC requests by method (billing unit — post-#1409 node builds)",
       "gridPos": {
         "h": 8,
@@ -302,6 +311,7 @@
       ]
     },
     {
+      "id": 10,
       "title": "Raw RPC requests per node (post-#1409 node builds)",
       "gridPos": {
         "h": 8,
@@ -333,6 +343,7 @@
       ]
     },
     {
+      "id": 11,
       "title": "Logical chain ops by method/outcome",
       "gridPos": {
         "h": 8,
@@ -364,6 +375,7 @@
       ]
     },
     {
+      "id": 12,
       "title": "Chain RPC p95 latency by method",
       "gridPos": {
         "h": 8,
@@ -395,6 +407,7 @@
       ]
     },
     {
+      "id": 13,
       "title": "RPC endpoint failover exhaustion",
       "gridPos": {
         "h": 8,
@@ -426,6 +439,7 @@
       ]
     },
     {
+      "id": 14,
       "title": "P2P / Sync",
       "gridPos": {
         "h": 1,
@@ -437,6 +451,7 @@
       "collapsed": false
     },
     {
+      "id": 15,
       "title": "Sync requests & responses by outcome",
       "gridPos": {
         "h": 8,
@@ -477,6 +492,7 @@
       ]
     },
     {
+      "id": 16,
       "title": "Protocol send rate + p95 by protocol",
       "gridPos": {
         "h": 8,
@@ -517,6 +533,7 @@
       ]
     },
     {
+      "id": 17,
       "title": "Pipeline health (collector — live now)",
       "gridPos": {
         "h": 1,
@@ -528,6 +545,7 @@
       "collapsed": false
     },
     {
+      "id": 18,
       "title": "Collector log records/s: accepted vs exported",
       "gridPos": {
         "h": 8,
@@ -577,6 +595,7 @@
       ]
     },
     {
+      "id": 19,
       "title": "Collector exporter queue",
       "gridPos": {
         "h": 8,
@@ -617,6 +636,7 @@
       ]
     },
     {
+      "id": 20,
       "title": "Collector CPU / memory",
       "gridPos": {
         "h": 8,

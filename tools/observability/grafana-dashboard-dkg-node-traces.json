@@ -65,6 +65,7 @@
   },
   "panels": [
     {
+      "id": 1,
       "title": "",
       "gridPos": {
         "h": 3,
@@ -80,6 +81,7 @@
       "transparent": true
     },
     {
+      "id": 2,
       "title": "Recent traces",
       "gridPos": {
         "h": 9,
@@ -108,6 +110,7 @@
       ]
     },
     {
+      "id": 3,
       "title": "Errored operations",
       "gridPos": {
         "h": 9,
@@ -136,6 +139,7 @@
       ]
     },
     {
+      "id": 4,
       "title": "Slow publishes (>5s)",
       "gridPos": {
         "h": 9,
@@ -164,6 +168,7 @@
       ]
     },
     {
+      "id": 5,
       "title": "Slow chain ops (>2s)",
       "gridPos": {
         "h": 9,
@@ -192,6 +197,7 @@
       ]
     },
     {
+      "id": 6,
       "title": "ACK collection rounds",
       "gridPos": {
         "h": 9,
