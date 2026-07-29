@@ -1015,7 +1015,14 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
 /** The launch shape of one registered MCP server, as the client stores it. */
 export interface RegisteredMcpServer {
   command: string;
-  args: string[];
+  /**
+   * The declared launch arguments. `[]` means the key was absent — a legitimate
+   * args-less server. `null` means the key was PRESENT but is not a string
+   * array, which is not a launch block we can compare. The distinction matters:
+   * quietly dropping a non-string element would rewrite `args: [123]` into `[]`
+   * and let it match an args-less registry entry, manufacturing an install.
+   */
+  args: string[] | null;
   /** String-valued env entries only; non-string values are not represented. */
   env?: Record<string, string>;
 }
@@ -1090,13 +1097,15 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
         if (typeof val === 'string') env[k] = val;
       }
     }
-    servers[name] = {
-      command: block.command,
-      args: Array.isArray(block.args)
-        ? block.args.filter((a): a is string => typeof a === 'string')
-        : [],
-      env,
-    };
+    let args: string[] | null;
+    if (block.args === undefined) {
+      args = []; // absent: a legitimate args-less server
+    } else if (Array.isArray(block.args) && block.args.every((a) => typeof a === 'string')) {
+      args = block.args as string[];
+    } else {
+      args = null; // present but not a string array — not comparable
+    }
+    servers[name] = { command: block.command, args, env };
   }
   return { ok: true, servers };
 }

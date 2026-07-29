@@ -408,6 +408,66 @@ describe('detectInstalled', () => {
     expect(rows[0]!.detail).toContain('DKG_AUTH_TOKEN');
   });
 
+  // One stale block must not hide a real install elsewhere. Judged per client:
+  // a filled Cursor config plus an old Windsurf block still carrying the
+  // placeholder is INSTALLED, with the incomplete sibling noted.
+  it('reports installed when one client is complete and another has placeholders', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
+      {
+        clients,
+        readServerKeys: (t) => ({
+          ok: true as const,
+          servers: {
+            'mcp-slug': {
+              command: 'npx',
+              args: ['-y', 'p'],
+              env:
+                t.name === 'Cursor'
+                  ? { DKG_AUTH_TOKEN: 'dkg_live_abc' }
+                  : { DKG_AUTH_TOKEN: '<DKG_AUTH_TOKEN>' },
+            },
+          },
+        }),
+      },
+    );
+    expect(rows[0]!.state).toBe('installed');
+    expect(rows[0]!.detail).toContain('Cursor');
+    expect(rows[0]!.detail).toContain('incomplete block in Windsurf');
+  });
+
+  // Dropping non-string args would rewrite [123] into [] and let it match an
+  // args-less entry — manufacturing an install from a malformed block.
+  it('does not match an args-less entry when args are present but malformed', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'my-server' })],
+      {
+        clients,
+        readServerKeys: () => ({
+          ok: true as const,
+          servers: { 'mcp-slug': { command: 'my-server', args: null } },
+        }),
+      },
+    );
+    expect(rows[0]!.state).not.toBe('installed');
+  });
+
+  // The control for the case above: an args-less entry DOES match a block whose
+  // args key is genuinely absent (normalized to []).
+  it('matches an args-less entry when the block has no args key', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'my-server' })],
+      {
+        clients,
+        readServerKeys: () => ({
+          ok: true as const,
+          servers: { 'mcp-slug': { command: 'my-server', args: [] } },
+        }),
+      },
+    );
+    expect(rows[0]!.state).toBe('installed');
+  });
+
   // The control: a FILLED env must still read as installed, or the check above
   // would pass simply by never reporting installed for anything with env.
   it('reports installed when env values are real', async () => {

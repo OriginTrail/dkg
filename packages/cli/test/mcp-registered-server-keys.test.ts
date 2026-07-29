@@ -131,6 +131,27 @@ describe('readRegisteredServerKeys', () => {
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['good']);
   });
 
+  // Missing args and malformed args are different facts. Normalizing `[123]`
+  // to `[]` would let a malformed block match an args-less registry entry.
+  it('distinguishes an absent args key from a malformed one', async () => {
+    const t = await target(
+      'args.json',
+      JSON.stringify({
+        mcpServers: {
+          absent: { command: 'my-server' },
+          malformed: { command: 'my-server', args: [123] },
+          good: { command: 'npx', args: ['-y', 'p'] },
+        },
+      }),
+    );
+    const probe = readRegisteredServerKeys(t);
+    expect(probe.ok).toBe(true);
+    if (!probe.ok) return;
+    expect(probe.servers.absent!.args).toEqual([]);
+    expect(probe.servers.malformed!.args).toBeNull();
+    expect(probe.servers.good!.args).toEqual(['-y', 'p']);
+  });
+
   it('distinguishes an empty container from a parse error', async () => {
     const empty = await target('empty.json', JSON.stringify({ mcpServers: {} }));
     const broken = await target('broken2.json', '{ nope');

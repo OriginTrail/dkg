@@ -828,6 +828,20 @@ describe('integration commands (Commander layer, real wire)', () => {
     trustTier: 'verified',
   } as unknown as IntegrationEntry;
 
+  // A runtime the CLI does not automate at all. Readable, and this branch is now
+  // its public install behaviour.
+  const svcBinary = {
+    ...baseEntry,
+    slug: 'svc-binary',
+    name: 'Service Binary',
+    install: {
+      kind: 'service',
+      runtime: 'binary',
+      binary: { url: 'https://example.com/svc' },
+    },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
   let savedIndex: string | undefined;
   let savedRaw: string | undefined;
 
@@ -839,7 +853,7 @@ describe('integration commands (Commander layer, real wire)', () => {
     process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
     process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
 
-    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta]) {
+    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta, svcBinary]) {
       registryRoutes.set(`/raw/${e.slug}.json`, { status: 200, body: JSON.stringify(e) });
     }
     // Only the manual entries are indexed: `installed` runs detectInstalled over
@@ -989,5 +1003,18 @@ describe('integration commands (Commander layer, real wire)', () => {
     expect(r.exit).toBe(2);
     expect(r.err).toContain('no npmGlobal.package/version');
     expect(r.err).not.toMatch(/undefined/);
+  });
+
+  // Making docker/binary services readable also made this branch their public
+  // install behaviour. A regression routing them into installService would
+  // surface a generic "Install failed" (exit 1) instead of the graceful
+  // runtime-not-automated message — and no helper test would notice.
+  it('`install` gives a non-automated runtime the graceful path, not a generic failure', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-binary']);
+    expect(r.exit).toBe(2);
+    expect(r.err).toContain('binary');
+    expect(r.err).toContain('not yet');
+    // The generic catch-all path would say this instead.
+    expect(r.err).not.toContain('Install failed');
   });
 });

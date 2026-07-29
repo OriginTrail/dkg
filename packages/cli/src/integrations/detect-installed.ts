@@ -41,8 +41,23 @@ const execFileAsync = promisify(execFile);
  */
 function mcpServerMatches(server: RegisteredMcpServer, install: InstallMcp): boolean {
   if (server.command !== install.command) return false;
+  // `null` = args were present but are not a string array. That is not the
+  // declared launch block, so it cannot match — including against an args-less
+  // entry, which is what silently dropping the bad elements would have allowed.
+  if (server.args === null) return false;
   const expected = install.args ?? [];
-  return server.args.length === expected.length && expected.every((a, i) => a === server.args[i]);
+  const actual = server.args;
+  return actual.length === expected.length && expected.every((a, i) => a === actual[i]);
+}
+
+/**
+ * Env keys still holding an installMcp placeholder (`<NAME>`). A block carrying
+ * one was pasted but never completed, so it would start unauthenticated.
+ */
+function unfilledPlaceholders(server: RegisteredMcpServer): string[] {
+  return Object.entries(server.env ?? {})
+    .filter(([, v]) => /^<[A-Za-z0-9_]+>$/.test(v))
+    .map(([k]) => k);
 }
 
 export type InstalledState = 'installed' | 'not installed' | 'unknown';
@@ -215,28 +230,32 @@ export async function detectInstalled(
         // clients can supply env from the parent process, so a user who keeps
         // secrets out of the config file is correctly installed. An unfilled
         // placeholder is unambiguous; an absent key is not.
-        const unfilled = [
-          ...new Set(
-            matching.flatMap((m) =>
-              Object.entries(m.server.env ?? {})
-                .filter(([, v]) => /^<[A-Za-z0-9_]+>$/.test(v))
-                .map(([k]) => k),
-            ),
-          ),
-        ];
-        if (unfilled.length > 0) {
+        // Judged PER CLIENT. Aggregating across clients let one stale block
+        // hide a real install: a filled Cursor config plus an old Claude
+        // Desktop block still carrying `<DKG_AUTH_TOKEN>` reported the whole
+        // entry as unknown. One complete registration is enough to be
+        // installed; the incomplete siblings are worth mentioning, not worth
+        // overriding positive evidence with.
+        const complete = matching.filter((m) => unfilledPlaceholders(m.server).length === 0);
+        const incomplete = matching.filter((m) => unfilledPlaceholders(m.server).length > 0);
+        if (complete.length > 0) {
+          const note =
+            incomplete.length > 0
+              ? ` (incomplete block in ${incomplete.map((m) => m.client).join(', ')})`
+              : '';
           return {
             slug: e.slug,
             kind: 'mcp',
-            state: 'unknown',
-            detail: `registered but placeholder values are unfilled: ${unfilled.join(', ')}`,
+            state: 'installed',
+            detail: `wired into ${complete.map((m) => m.client).join(', ')}${note}`,
           };
         }
+        const unfilled = [...new Set(incomplete.flatMap((m) => unfilledPlaceholders(m.server)))];
         return {
           slug: e.slug,
           kind: 'mcp',
-          state: 'installed',
-          detail: `wired into ${matching.map((m) => m.client).join(', ')}`,
+          state: 'unknown',
+          detail: `registered but placeholder values are unfilled: ${unfilled.join(', ')}`,
         };
       }
       // Something IS registered under this slug, but it launches a different
