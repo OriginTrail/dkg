@@ -11,6 +11,24 @@ export interface OperationContext {
 }
 
 /**
+ * Low-cardinality operational fields used by Loki/Grafana to classify an event
+ * without parsing its human message. Values must be bounded enums/codes — never
+ * put operation IDs, peer IDs, UALs or free-form error messages here.
+ */
+export interface LogSemanticAttributes {
+  /** Stable dotted event code, e.g. `rs.loop.tick-threw`. */
+  eventCode?: string;
+  /** Bounded subsystem name, e.g. `random-sampling` or `storage`. */
+  component?: string;
+  /** Bounded result such as `success`, `degraded` or `failure`. */
+  outcome?: string;
+  /** Whether retrying later is safe for this failure. */
+  retryable?: boolean;
+  /** Stable machine error code, e.g. `STORE_SCHEDULER_BUSY`. */
+  errorCode?: string;
+}
+
+/**
  * The canonical structured log record emitted on every Logger call. This is
  * the single shape that flows to the local dashboard DB and to any remote
  * shipper (syslog, OTLP). Keep it stable — redaction and the OTLP exporter
@@ -23,6 +41,11 @@ export interface LogRecord {
   sourceOperationId?: string;
   module: string;
   message: string;
+  eventCode?: string;
+  component?: string;
+  outcome?: string;
+  retryable?: boolean;
+  errorCode?: string;
   /** Hex W3C trace/span id of the active span when logged (when a span is recording), for trace↔log correlation. */
   traceId?: string;
   spanId?: string;
@@ -53,7 +76,12 @@ export class Logger {
    * span's trace/span id when one is recording (no-op/empty otherwise), so logs
    * emitted inside an instrumented boundary correlate to its trace.
    */
-  private emit(level: string, ctx: OperationContext, message: string): void {
+  private emit(
+    level: string,
+    ctx: OperationContext,
+    message: string,
+    semantic: LogSemanticAttributes = {},
+  ): void {
     if (!Logger.sink) return;
     Logger.sink({
       level,
@@ -62,27 +90,28 @@ export class Logger {
       sourceOperationId: ctx.sourceOperationId,
       module: this.moduleName,
       message,
+      ...semantic,
       ...currentTraceIds(),
     });
   }
 
-  debug(ctx: OperationContext, message: string): void {
-    this.emit('debug', ctx, message);
+  debug(ctx: OperationContext, message: string, semantic?: LogSemanticAttributes): void {
+    this.emit('debug', ctx, message, semantic);
   }
 
-  info(ctx: OperationContext, message: string): void {
+  info(ctx: OperationContext, message: string, semantic?: LogSemanticAttributes): void {
     process.stdout.write(`${this.format(ctx, message)}\n`);
-    this.emit('info', ctx, message);
+    this.emit('info', ctx, message, semantic);
   }
 
-  warn(ctx: OperationContext, message: string): void {
+  warn(ctx: OperationContext, message: string, semantic?: LogSemanticAttributes): void {
     process.stderr.write(`${this.format(ctx, message)} [WARN]\n`);
-    this.emit('warn', ctx, message);
+    this.emit('warn', ctx, message, semantic);
   }
 
-  error(ctx: OperationContext, message: string): void {
+  error(ctx: OperationContext, message: string, semantic?: LogSemanticAttributes): void {
     process.stderr.write(`${this.format(ctx, message)} [ERROR]\n`);
-    this.emit('error', ctx, message);
+    this.emit('error', ctx, message, semantic);
   }
 
   private format(ctx: OperationContext, message: string): string {

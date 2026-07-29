@@ -1,148 +1,563 @@
-// Alert catalog for the DKG observability Grafana — the declarative
-// ALERT_SPECS model plus its ONE derivation: Grafana provisioning payloads.
-// The markdown documentation rendering of the same specs lives in docs.mjs;
-// CLI handling and --check live in ../generate-observability.mjs.
-import { dkgLogStream, severityIs, RPC_USAGE_PIPELINE, sumByLokiNode, countByLokiNode } from './queries.mjs';
+// Alert catalog for the DKG observability Grafana — one declarative model for
+// rules, human Slack content, notification templates, contact points and
+// policy routing. Generated JSON and operator docs derive from this file.
+import {
+  dkgLogStream,
+  RPC_USAGE_PIPELINE,
+  sumByLokiNode,
+} from './queries.mjs';
+import {
+  DKG_NOTIFICATION_TEMPLATE,
+  DKG_NOTIFICATION_TEMPLATE_NAME,
+} from './notification-template.mjs';
 
-// The datasource registry OWNS each datasource's full rendering contract —
-// display name (docs.mjs), UID selection, and the Grafana query-model shape.
-// specToRule dispatches through this registry, so adding a datasource is one
-// self-contained entry here with no adjacent conditional that can drift
-// (a typoed `ds:` value still fails generation loudly).
+export const GRAFANA_PUBLIC_URL = 'http://100.81.85.62:3000';
+export const RUNBOOK_URL =
+  'https://github.com/OriginTrail/dkg/blob/main/tools/observability/RUNBOOK.md';
+
+export const ALERT_EVALUATION_GROUPS = [
+  { name: 'dkg-node-telemetry', interval: 60 },
+  { name: 'dkg-node-health', interval: 300 },
+  { name: 'dkg-capacity-watch', interval: 3600 },
+];
+
+// Production roster used by the lightweight node-silence rule. Exact label
+// matchers let Loki answer each 15-minute absence check from only that node's
+// chunks; the previous "discover nodes from three hours of all logs" query
+// exhausted the single-binary Loki process. Update this reviewed list when a
+// production node is added, renamed or intentionally retired.
+export const EXPECTED_LOG_NODES = [
+  'Anacreon',
+  'Cinna',
+  'DMaaST',
+  'Decentralized Science',
+  'EG - Luigi',
+  'Helicon',
+  'Oliwav',
+  'Rhodia',
+  'SBB',
+  'Terminus',
+  'Trace Labs Node 7',
+  'cosmo_cluster',
+  'luna_lander',
+  'saturn_station',
+  'umanitek',
+].map((node) => ({ node, environment: 'mainnet' }));
+
+const fleetDashboard = `${GRAFANA_PUBLIC_URL}/d/dkg-fleet-logs?orgId=1`;
+const nodeLogsDashboard =
+  `${GRAFANA_PUBLIC_URL}/d/dkg-node-logs?orgId=1&var-node={{ $labels.service_instance_id }}`;
+const nodeMetricsDashboard = (label) =>
+  `${GRAFANA_PUBLIC_URL}/d/dkg-node-metrics?orgId=1&var-node={{ $labels.${label} }}`;
+const nodeTracesDashboard =
+  `${GRAFANA_PUBLIC_URL}/d/dkg-node-traces?orgId=1&var-node={{ $labels.service_instance_id }}`;
+
+// The datasource registry owns each backend's complete Grafana query model.
 export const ALERT_DATASOURCES = {
   loki: {
     name: 'Loki',
     uid: ({ LOKI_UID }) => LOKI_UID,
-    model: (s, uid) => ({ refId: 'A', expr: s.expr, queryType: 'range', intervalMs: 60000, maxDataPoints: s.maxDataPoints ?? 100, datasource: { type: 'loki', uid } }),
+    model: (s, uid) => ({
+      refId: 'A',
+      expr: s.expr,
+      queryType: 'range',
+      intervalMs: Math.max(60000, s.windowSec * 1000),
+      // Every rule immediately reduces to the latest point. Asking Loki for
+      // dozens/hundreds of overlapping range-window evaluations is wasteful
+      // and can time out after a cold restart; one range point is sufficient.
+      maxDataPoints: s.maxDataPoints ?? 1,
+      datasource: { type: 'loki', uid },
+    }),
   },
   vm: {
     name: 'VictoriaMetrics',
     uid: ({ VM_UID }) => VM_UID,
-    model: (s, uid) => ({ refId: 'A', expr: s.expr, range: true, instant: false, intervalMs: 60000, maxDataPoints: 100, datasource: { type: 'prometheus', uid } }),
+    model: (s, uid) => ({
+      refId: 'A',
+      expr: s.expr,
+      range: true,
+      instant: false,
+      intervalMs: Math.max(60000, s.windowSec * 1000),
+      maxDataPoints: s.maxDataPoints ?? 1,
+      datasource: { type: 'prometheus', uid },
+    }),
   },
 };
+
 export const alertDatasource = (spec) => {
-  const d = ALERT_DATASOURCES[spec.ds];
-  if (!d) throw new Error(`unknown datasource '${spec.ds}' in alert spec "${spec.title}" — known: ${Object.keys(ALERT_DATASOURCES).join(', ')}`);
-  return d;
+  const datasource = ALERT_DATASOURCES[spec.ds];
+  if (!datasource) {
+    throw new Error(
+      `unknown datasource '${spec.ds}' in alert spec "${spec.title}" — known: ${Object.keys(ALERT_DATASOURCES).join(', ')}`,
+    );
+  }
+  return datasource;
 };
+
+const humanAnnotations = ({
+  title,
+  what,
+  affected,
+  react,
+  check,
+  evidence,
+  dashboard,
+  logs,
+}) => ({
+  summary: title,
+  slack_title: title,
+  what_happened: what,
+  affected,
+  react,
+  check_first: check,
+  evidence,
+  dashboard_url: dashboard,
+  ...(logs ? { logs_url: logs } : {}),
+  runbook_url: RUNBOOK_URL,
+});
 
 export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
   const PROM_NODE_LABEL = nodeProfile.label;
-  // Declarative spec layer: each entry below is the SINGLE definition of one
-  // alert. The Grafana provisioning payload (data blocks, condition, labels) AND
-  // the markdown summary table in example-alerts.md are both derived from it —
-  // change a threshold here and both stay in sync by regenerating.
+  const PROM_NODE_GROUP = `${PROM_NODE_LABEL}, deployment_environment`;
+  const promByNode = (inner) => `sum by (${PROM_NODE_GROUP}) (${inner})`;
+
+  const currentFleetCount =
+    `count(sum by (service_instance_id, deployment_environment) (` +
+    `count_over_time(${dkgLogStream()}[15m])))`;
+  const silentNodes = EXPECTED_LOG_NODES.map(({ node, environment }) =>
+    `absent_over_time(${dkgLogStream(
+      `deployment_environment=${JSON.stringify(environment)}, ` +
+      `service_instance_id=${JSON.stringify(node)}`,
+    )}[15m])`).join(' or ');
+
+  const storageOverloadRegex =
+    'Store scheduler (queue wait timeout|queue full).*blazegraph\\.(query|update)' +
+    '|Blazegraph operation exceeded its [0-9]+ms deadline';
+
+  const rpcOneHour = sumByLokiNode(
+    `sum_over_time(${dkgLogStream()}${RPC_USAGE_PIPELINE}[1h])`,
+  );
+  const rpcRecent = sumByLokiNode(
+    `sum_over_time(${dkgLogStream()}${RPC_USAGE_PIPELINE}[15m])`,
+  );
+
+  const publishFailures = promByNode(
+    'increase(dkg_publish_total{outcome=~"failed|error"}[15m])',
+  );
+  const publishTotal = promByNode('increase(dkg_publish_total[15m])');
+  const traceFailures =
+    'sum by (service_instance_id, deployment_environment) ' +
+    '(increase(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))';
+  const traceTotal =
+    'sum by (service_instance_id, deployment_environment) ' +
+    '(increase(traces_spanmetrics_calls_total[15m]))';
+
+  /**
+   * Priority contract:
+   * P1 — immediate action, confirmed service/fleet impact or data-loss risk.
+   * P2 — sustained node/component degradation that needs investigation.
+   * P3 — watch item; held for the daily grouped Slack digest.
+   */
   const ALERT_SPECS = [
-    { title: 'Node silent — seen in last 3h, quiet 15m (per node)', signal: 'logs',
-      ds: 'loki', windowSec: 600, maxDataPoints: 50,
-      expr: `${countByLokiNode(`count_over_time(${dkgLogStream()}[3h] offset 15m)`)} unless ${countByLokiNode(`count_over_time(${dkgLogStream()}[15m])`)}`,
-      condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
-      summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving.' },
-    { title: 'Fleet blackout — NO node logs reaching Loki', signal: 'logs',
-      ds: 'loki', windowSec: 600, maxDataPoints: 50,
-      expr: `count(sum by (service_instance_id) (count_over_time(${dkgLogStream()}[15m])))`,
-      condition: { op: '<', value: 1 }, forDur: '5m', noData: 'Alerting',
-      summary: 'Zero nodes have shipped any logs in 15m — the whole fleet or the ingest pipeline (collector/Loki) is down.' },
-    { title: 'Error spike on a node (>10 ERROR / 10m)', signal: 'logs',
-      ds: 'loki', windowSec: 600,
-      expr: sumByLokiNode(`count_over_time(${dkgLogStream()}${severityIs('ERROR')} [10m])`),
-      condition: { op: '>', value: 10 }, forDur: '5m', noData: 'OK',
-      summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) logged {{ $values.B }} ERRORs in 10m.' },
-    { title: 'Warn spike on a node (>150 WARN / 10m)', signal: 'logs',
-      ds: 'loki', windowSec: 600,
-      expr: sumByLokiNode(`count_over_time(${dkgLogStream()}${severityIs('WARN')} [10m])`),
-      condition: { op: '>', value: 150 }, forDur: '10m', noData: 'OK',
-      summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues).' },
-    { title: 'RPC credit burn spike (armed — needs nodes on a post-#1409 build)', signal: 'metrics',
-      ds: 'loki', windowSec: 3600,
-      expr: sumByLokiNode(`sum_over_time(${dkgLogStream()}${RPC_USAGE_PIPELINE}[1h])`),
-      condition: { op: '>', value: 6000 }, forDur: '5m', noData: 'OK',
-      summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build.' },
-    { title: 'Log pipeline export failing (collector cannot ship to Loki)', signal: 'metrics',
-      ds: 'vm', windowSec: 900,
+    {
+      id: 'node-silent',
+      ruleGroup: 'dkg-node-health',
+      title: 'Node stopped reporting',
+      signal: 'logs',
+      priority: 'P2',
+      component: 'node',
+      entityKind: 'node',
+      ds: 'loki',
+      windowSec: 10800,
+      maxDataPoints: 1,
+      // The reviewed roster makes a missing node observable without scanning
+      // hours of logs. The fleet-presence guard suppresses one P2 per node
+      // during a total ingest/fleet blackout; the P1 fleet rule owns that case.
+      expr: `(${silentNodes}) and on() (${currentFleetCount} > 0)`,
+      condition: { op: '>', value: 0 },
+      forDur: '5m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: 'Node {{ $labels.service_instance_id }} stopped reporting',
+        what: 'No logs or health signals have been received from this node.',
+        affected: 'We cannot confirm whether this node is working. Other nodes are still reporting.',
+        react: 'Yes — check the node soon.',
+        check: 'Confirm that the node process and telemetry exporter are running.',
+        evidence: 'No signal for 15 minutes from a node in the expected production roster.',
+        dashboard: nodeLogsDashboard,
+        logs: nodeLogsDashboard,
+      }),
+    },
+    {
+      id: 'fleet-blackout-mainnet',
+      title: 'Mainnet fleet stopped reporting',
+      signal: 'logs',
+      priority: 'P1',
+      component: 'telemetry',
+      entityKind: 'fleet',
+      staticLabels: { deployment_environment: 'mainnet' },
+      ds: 'loki',
+      windowSec: 900,
+      maxDataPoints: 1,
+      expr:
+        'count(sum by (service_instance_id) ' +
+        '(count_over_time({service_name="dkg-node", deployment_environment="mainnet"}[15m])))',
+      condition: { op: '<', value: 1 },
+      forDur: '5m',
+      noData: 'Alerting',
+      annotations: humanAnnotations({
+        title: 'MAINNET monitoring has stopped',
+        what: 'Grafana has not received logs from any DKG mainnet node for 15 minutes.',
+        affected: 'The whole mainnet fleet, or the monitoring pipeline.',
+        react: 'Yes — check this immediately.',
+        check: 'Confirm that the telemetry collector and Loki are running, then check fleet reachability.',
+        evidence: '0 mainnet nodes are reporting.',
+        dashboard: fleetDashboard,
+        logs: fleetDashboard,
+      }),
+    },
+    {
+      id: 'storage-overloaded',
+      title: 'Node storage overloaded',
+      signal: 'logs',
+      priority: 'P2',
+      component: 'storage',
+      entityKind: 'node',
+      ds: 'loki',
+      windowSec: 600,
+      expr: sumByLokiNode(
+        `count_over_time(${dkgLogStream()} |~ \`${storageOverloadRegex}\` [10m])`,
+      ),
+      condition: { op: '>', value: 20 },
+      forDur: '10m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: 'Node {{ $labels.service_instance_id }} storage is overloaded',
+        what: 'Database requests are waiting too long and timing out.',
+        affected: 'Random Sampling work on this node is being delayed.',
+        react: 'Yes — investigate this soon.',
+        check: 'Check Blazegraph health and the storage scheduler queue.',
+        evidence: '{{ printf "%.0f" $values.B }} storage timeouts in 10 minutes; alert threshold is 20.',
+        dashboard: nodeLogsDashboard,
+        logs: `${nodeLogsDashboard}&var-level=ERROR&var-search=Store%20scheduler%7CBlazegraph%20operation`,
+      }),
+    },
+    {
+      id: 'rpc-usage-watch',
+      ruleGroup: 'dkg-capacity-watch',
+      title: 'RPC usage unusually high',
+      signal: 'metrics',
+      priority: 'P3',
+      component: 'chain-rpc',
+      entityKind: 'node',
+      ds: 'loki',
+      windowSec: 3600,
+      // Entry requires both an elevated hour and elevated recent usage. This
+      // removes the old 6k boundary flap and the 30m pending window filters
+      // short bursts. P3 routing then groups persistent items into a daily post.
+      expr:
+        `(${rpcOneHour}) and on (service_instance_id, deployment_environment) ` +
+        `((${rpcRecent}) * 4 > 7200)`,
+      condition: { op: '>', value: 8000 },
+      forDur: '30m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: 'RPC usage is unusually high on {{ $labels.service_instance_id }}',
+        what: 'This node has used more blockchain RPC requests than normal for a sustained period.',
+        affected: 'No service failure is confirmed, but provider costs may increase.',
+        react: 'No immediate action is required; review it in the daily summary.',
+        check: 'Check which blockchain operation is generating the requests.',
+        evidence: '{{ printf "%.0f" $values.B }} requests in the last hour; watch level is 8,000.',
+        dashboard: nodeLogsDashboard,
+        logs: `${nodeLogsDashboard}&var-search=rpc_usage`,
+      }),
+    },
+    {
+      id: 'telemetry-export-failing',
+      title: 'Telemetry collector cannot export logs',
+      signal: 'metrics',
+      priority: 'P2',
+      component: 'telemetry',
+      entityKind: 'collector',
+      ds: 'vm',
+      windowSec: 900,
       expr: 'sum(rate(otelcol_exporter_send_failed_log_records[10m]))',
-      condition: { op: '>', value: 0 }, forDur: '10m', noData: 'OK',
-      summary: 'The otel collector is failing to export log records ({{ $values.B }}/s) — logs are being dropped or queued.' },
-    { title: 'Collector exporter queue near capacity (>80%)', signal: 'metrics',
-      ds: 'vm', windowSec: 900,
+      condition: { op: '>', value: 0 },
+      forDur: '10m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: 'The collector is failing to send DKG logs',
+        what: 'Some logs cannot be exported to Loki.',
+        affected: 'Grafana may show incomplete information, but DKG nodes may still be working.',
+        react: 'Yes — investigate the monitoring pipeline.',
+        check: 'Check collector errors and its connection to Loki.',
+        evidence: '{{ humanize $values.B }} log records per second failed to export during the last 10 minutes.',
+        dashboard: fleetDashboard,
+      }),
+    },
+    {
+      id: 'telemetry-queue-critical',
+      title: 'Telemetry collector queue almost full',
+      signal: 'metrics',
+      priority: 'P1',
+      component: 'telemetry',
+      entityKind: 'collector',
+      ds: 'vm',
+      windowSec: 900,
       expr: 'max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity)',
-      condition: { op: '>', value: 0.8 }, forDur: '10m', noData: 'OK',
-      summary: 'Collector export queue at {{ $values.B }} of capacity — backpressure building, log loss imminent.' },
-    { title: 'Publish failures on a node (armed — needs node metrics enabled)', signal: 'metrics',
-      ds: 'vm', windowSec: 900,
-      expr: nodeProfile.by('rate(dkg_publish_total{outcome=~"failed|error"}[15m])'),
-      condition: { op: '>', value: 0.02 }, forDur: '5m', noData: 'OK',
-      summary: `Node {{ $labels.${PROM_NODE_LABEL} }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)` },
-    { title: 'Chain RPC failover exhausted on a node (armed — needs node metrics enabled)', signal: 'metrics',
-      ds: 'vm', windowSec: 900,
-      expr: nodeProfile.by('rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m])'),
-      condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
-      summary: `ALL configured RPC endpoints failed for node {{ $labels.${PROM_NODE_LABEL} }} — chain connectivity is down for it. (The metric contract also documents reason="recovered"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)` },
-    { title: 'Errored spans rate (armed — needs traces + spanmetrics enabled)', signal: 'traces',
-      ds: 'vm', windowSec: 900,
-      expr: 'sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))',
-      condition: { op: '>', value: 0.05 }, forDur: '5m', noData: 'OK',
-      summary: 'DKG operations are producing errored trace spans at {{ $values.B }}/s. (Silent until traces + Tempo metrics-generator are enabled.)' },
+      condition: { op: '>', value: 0.8 },
+      forDur: '10m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: 'The telemetry queue is almost full',
+        what: 'Grafana’s collector cannot send data quickly enough.',
+        affected: 'DKG logs may soon be lost. The nodes themselves may still be working.',
+        react: 'Yes — check the monitoring pipeline immediately.',
+        check: 'Check the collector, Loki connection and available storage.',
+        evidence: 'Collector queue is {{ humanizePercentage $values.B }} full; critical level is 80%.',
+        dashboard: fleetDashboard,
+      }),
+    },
+    {
+      id: 'publish-failures',
+      title: 'Publishing failure ratio high',
+      signal: 'metrics',
+      priority: 'P1',
+      component: 'publishing',
+      entityKind: 'node',
+      ds: 'vm',
+      windowSec: 900,
+      // A ratio without a minimum volume pages on one failure out of one. The
+      // vector match returns the percentage only when at least five publishes
+      // occurred in the same node/window.
+      expr:
+        `(100 * (${publishFailures}) / clamp_min((${publishTotal}), 1)) ` +
+        `and on (${PROM_NODE_GROUP}) ((${publishTotal}) >= 5)`,
+      condition: { op: '>', value: 10 },
+      forDur: '5m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: `Publishing is failing on node {{ $labels.${PROM_NODE_LABEL} }}`,
+        what: 'A significant percentage of publish operations are failing.',
+        affected: `Publishing through node {{ $labels.${PROM_NODE_LABEL} }} is unreliable.`,
+        react: 'Yes — check this immediately.',
+        check: 'Check failed transactions, node balance and chain RPC connectivity.',
+        evidence: '{{ printf "%.1f" $values.B }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.',
+        dashboard: nodeMetricsDashboard(PROM_NODE_LABEL),
+      }),
+    },
+    {
+      id: 'ack-quorum-failures',
+      title: 'Storage ACK quorum repeatedly missed',
+      signal: 'metrics',
+      priority: 'P2',
+      component: 'storage-ack',
+      entityKind: 'node',
+      ds: 'vm',
+      windowSec: 900,
+      expr: promByNode(
+        'increase(dkg_ack_quorum_total{outcome=~"timeout|impossible"}[15m])',
+      ),
+      condition: { op: '>', value: 2 },
+      forDur: '5m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: `Node {{ $labels.${PROM_NODE_LABEL} }} is not receiving enough storage ACKs`,
+        what: 'Published data is repeatedly failing to receive the required acknowledgements.',
+        affected: 'Publish finalization on this node may be delayed or fail.',
+        react: 'Yes — investigate this soon.',
+        check: 'Check connectivity and ACK responses from the selected nodes.',
+        evidence: '{{ printf "%.0f" $values.B }} ACK quorum failures in 15 minutes; alert threshold is 2.',
+        dashboard: nodeMetricsDashboard(PROM_NODE_LABEL),
+      }),
+    },
+    {
+      id: 'rpc-failover-exhausted',
+      title: 'All chain RPC providers failed',
+      signal: 'metrics',
+      priority: 'P1',
+      component: 'chain-rpc',
+      entityKind: 'node',
+      ds: 'vm',
+      windowSec: 300,
+      expr: promByNode(
+        'increase(dkg_chain_rpc_failover_total{reason="exhausted"}[5m])',
+      ),
+      condition: { op: '>', value: 0 },
+      forDur: '1m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: `Node {{ $labels.${PROM_NODE_LABEL} }} cannot connect to its blockchain`,
+        what: 'Every configured chain RPC provider failed.',
+        affected: 'Blockchain operations on this node cannot continue.',
+        react: 'Yes — check this immediately.',
+        check: 'Test the configured RPC endpoints and provider limits.',
+        evidence: '{{ printf "%.0f" $values.B }} exhausted-provider event(s) in the last 5 minutes.',
+        dashboard: nodeMetricsDashboard(PROM_NODE_LABEL),
+      }),
+    },
+    {
+      id: 'trace-errors',
+      title: 'Operation trace failure ratio high',
+      signal: 'traces',
+      priority: 'P2',
+      component: 'operations',
+      entityKind: 'node',
+      ds: 'vm',
+      windowSec: 900,
+      expr:
+        `(100 * (${traceFailures}) / clamp_min((${traceTotal}), 1)) ` +
+        'and on (service_instance_id, deployment_environment) ' +
+        `((${traceTotal}) >= 20)`,
+      condition: { op: '>', value: 10 },
+      forDur: '5m',
+      noData: 'OK',
+      annotations: humanAnnotations({
+        title: 'Operations are failing on node {{ $labels.service_instance_id }}',
+        what: 'Multiple operation traces are ending with an error.',
+        affected: 'Operations on this node may be unreliable.',
+        react: 'Yes — investigate this soon.',
+        check: 'Open the failed traces and identify the shared failing step.',
+        evidence: '{{ printf "%.1f" $values.B }}% of at least 20 traces failed in 15 minutes; alert level is 10%.',
+        dashboard: nodeTracesDashboard,
+      }),
+    },
   ];
 
   const EXPR = '__expr__';
-  const specToRule = (s) => {
-    // The registry entry owns UID selection AND the query-model shape —
-    // a loud failure on a typoed enum, and no Loki-vs-everything-else branch
-    // here that could drift from the registry.
-    const ds = alertDatasource(s);
-    const dsUid = ds.uid({ VM_UID, LOKI_UID });
-    const queryModel = ds.model(s, dsUid);
+  const specToRule = (spec) => {
+    const datasource = alertDatasource(spec);
+    const datasourceUid = datasource.uid({ VM_UID, LOKI_UID });
     return {
-      orgID: 1, folderUID: 'dkg-observability', ruleGroup: 'dkg-node-telemetry', title: s.title,
+      orgID: 1,
+      folderUID: 'dkg-observability',
+      ruleGroup: spec.ruleGroup ?? 'dkg-node-telemetry',
+      title: spec.title,
       condition: 'C',
       data: [
-        { refId: 'A', relativeTimeRange: { from: s.windowSec, to: 0 }, datasourceUid: dsUid, model: queryModel },
-        { refId: 'B', relativeTimeRange: { from: 0, to: 0 }, datasourceUid: EXPR,
-          model: { refId: 'B', type: 'reduce', expression: 'A', reducer: 'last', datasource: { type: '__expr__', uid: EXPR } } },
-        { refId: 'C', relativeTimeRange: { from: 0, to: 0 }, datasourceUid: EXPR,
-          model: { refId: 'C', type: 'math', expression: `$B ${s.condition.op} ${s.condition.value}`, datasource: { type: '__expr__', uid: EXPR } } },
+        {
+          refId: 'A',
+          // The LogQL/PromQL expression already declares its own lookback
+          // window. Grafana only needs one recent evaluation timestamp here;
+          // repeating a 3h range function across a 3h outer range multiplies
+          // the same Loki scan and its memory cost.
+          relativeTimeRange: { from: spec.evaluationRangeSec ?? 60, to: 0 },
+          datasourceUid,
+          model: datasource.model(spec, datasourceUid),
+        },
+        {
+          refId: 'B',
+          relativeTimeRange: { from: 0, to: 0 },
+          datasourceUid: EXPR,
+          model: {
+            refId: 'B',
+            type: 'reduce',
+            expression: 'A',
+            reducer: 'last',
+            datasource: { type: EXPR, uid: EXPR },
+          },
+        },
+        {
+          refId: 'C',
+          relativeTimeRange: { from: 0, to: 0 },
+          datasourceUid: EXPR,
+          model: {
+            refId: 'C',
+            type: 'math',
+            expression: `$B ${spec.condition.op} ${spec.condition.value}`,
+            datasource: { type: EXPR, uid: EXPR },
+          },
+        },
       ],
-      noDataState: s.noData, execErrState: 'Error', for: s.forDur,
-      labels: { team: 'dkg', signal: s.signal }, annotations: { summary: s.summary },
+      noDataState: spec.noData,
+      // A broken query must not become a false human incident. Query health is
+      // verified separately by CI/import and Grafana exposes evaluation errors.
+      execErrState: 'KeepLast',
+      for: spec.forDur,
+      labels: {
+        team: 'dkg',
+        signal: spec.signal,
+        priority: spec.priority,
+        component: spec.component,
+        entity_kind: spec.entityKind,
+        alert_id: spec.id,
+        ...(spec.staticLabels ?? {}),
+      },
+      annotations: spec.annotations,
     };
   };
 
-  // The routing model in ONE place: signal -> Slack channel, contact-point
-  // name, and per-signal grouping. Both the Grafana payload (contactPoints +
-  // policyRoutes below) and the generated docs table (docs.mjs) derive from
-  // this — a routing change cannot desynchronize payload from runbook.
-  const SIGNAL_ROUTES = ['logs', 'metrics', 'traces'].map(sig => ({
-    signal: sig,
-    channel: `#node-${sig}`,
-    contactPoint: `DKG node ${sig} (Slack)`,
-    matchers: [['team', '=', 'dkg'], ['signal', '=', sig]],
-    groupBy: sig === 'logs' ? ['alertname', 'service_instance_id', 'deployment_environment']
-      : sig === 'metrics' ? ['alertname', ...new Set(['service_instance_id', PROM_NODE_LABEL]), 'deployment_environment']
-      : ['alertname'],
+  const actionablePriorities = ['priority', '=~', 'P1|P2'];
+  const baseRoutes = ['logs', 'metrics', 'traces'].map((signal) => ({
+    id: `${signal}-actionable`,
+    signal,
+    priorities: 'P1/P2',
+    channel: `#node-${signal}`,
+    contactPoint: `DKG node ${signal} (Slack)`,
+    matchers: [
+      ['team', '=', 'dkg'],
+      ['signal', '=', signal],
+      actionablePriorities,
+    ],
+    groupBy: signal === 'logs'
+      ? ['alertname', 'priority', 'deployment_environment', 'service_instance_id']
+      : signal === 'metrics'
+        ? ['alertname', 'priority', 'deployment_environment', 'service_instance_id', PROM_NODE_LABEL]
+        : ['alertname', 'priority', 'deployment_environment', 'service_instance_id'],
+    groupWait: '30s',
+    groupInterval: '5m',
+    repeatInterval: '4h',
   }));
 
+  const P3_ROUTE = {
+    id: 'metrics-daily-watch',
+    signal: 'metrics',
+    priorities: 'P3',
+    channel: '#node-metrics',
+    contactPoint: 'DKG node metrics (Slack)',
+    matchers: [
+      ['team', '=', 'dkg'],
+      ['priority', '=', 'P3'],
+    ],
+    // One grouped daily post for a sustained watch condition; individual node
+    // churn cannot create the old 15-minute stream of RPC notifications.
+    groupBy: ['alertname', 'priority', 'deployment_environment'],
+    groupWait: '24h',
+    groupInterval: '24h',
+    repeatInterval: '24h',
+  };
+  const SIGNAL_ROUTES = [...baseRoutes, P3_ROUTE];
+
+  const contactSignals = ['logs', 'metrics', 'traces'];
   const alerts = {
     _readme: [
-      'Secret-free mirror of the alerting on the DKG observability Grafana. GENERATED by generate-observability.mjs (from ALERT_SPECS) - edit that script, not this file.',
-      'The committed artifact keeps <VM_DATASOURCE_UID> as a placeholder (instance-specific UID). Render an importable payload for your instance with:',
-      '  node generate-observability.mjs /tmp/render --vm-uid <your-vm-uid> [--loki-uid <your-loki-uid>]',
-      'Import with an admin session and header X-Disable-Provenance: true (keeps everything UI-editable):',
-      '  1. For each entry in contactPoints: POST /api/v1/provisioning/contact-points  (fill url from your password manager first)',
-      '  2. GET /api/v1/provisioning/policies, APPEND policyRoutes to .routes, PUT the tree back (a PUT replaces the WHOLE tree - never PUT without GET+append)',
-      '  3. For each entry in rules: POST /api/v1/provisioning/alert-rules',
-      `Verified: this exact payload (rendered with the production UIDs) was imported into the production Grafana 11.4.0 on 2026-07-02; all ${ALERT_SPECS.length} rules evaluate health=ok on the scheduler and route to the three Slack channels.`,
+      'Secret-free mirror of DKG Grafana alerting. GENERATED — edit lib/alerts.mjs and lib/notification-template.mjs.',
+      'The committed artifact keeps datasource and Slack webhook placeholders. Render a live payload with generate-observability.mjs.',
+      'The apply script preserves existing Slack webhook secrets, backs up live state, upserts generated resources, removes the explicitly listed legacy rules, and verifies the result.',
+      `Human incident contract: ${ALERT_SPECS.length} event-specific rules; P1/P2 real-time, sustained P3 grouped daily; no generic ERROR/WARN paging.`,
     ],
-    contactPoints: SIGNAL_ROUTES.map(r => ({
-      name: r.contactPoint, type: 'slack',
-      settings: { url: `<SLACK_WEBHOOK_NODE_${r.signal.toUpperCase()}>` }, disableResolveMessage: false,
+    evaluationGroups: ALERT_EVALUATION_GROUPS,
+    notificationTemplates: [
+      { name: DKG_NOTIFICATION_TEMPLATE_NAME, template: DKG_NOTIFICATION_TEMPLATE },
+    ],
+    contactPoints: contactSignals.map((signal) => ({
+      name: `DKG node ${signal} (Slack)`,
+      type: 'slack',
+      settings: {
+        url: `<SLACK_WEBHOOK_NODE_${signal.toUpperCase()}>`,
+        title: '{{ template "dkg.title" . }}',
+        text: '{{ template "dkg.body" . }}',
+      },
+      disableResolveMessage: false,
     })),
-    policyRoutes: SIGNAL_ROUTES.map(r => ({
-      receiver: r.contactPoint,
-      object_matchers: r.matchers,
-      group_by: r.groupBy,
-      group_wait: '30s', group_interval: '5m', repeat_interval: '4h', continue: false,
+    policyRoutes: SIGNAL_ROUTES.map((route) => ({
+      receiver: route.contactPoint,
+      object_matchers: route.matchers,
+      group_by: route.groupBy,
+      group_wait: route.groupWait,
+      group_interval: route.groupInterval,
+      repeat_interval: route.repeatInterval,
+      continue: false,
     })),
     rules: ALERT_SPECS.map(specToRule),
   };

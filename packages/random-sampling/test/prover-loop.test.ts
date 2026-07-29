@@ -87,7 +87,11 @@ describe('startProverLoop', () => {
     const prover = fakeProver(async () => {
       if (throwOnce) {
         throwOnce = false;
-        throw new Error('transient RPC failure');
+        const error = Object.assign(new Error('transient RPC failure'), {
+          code: 'RPC_ENDPOINTS_EXHAUSTED',
+          retryable: true,
+        });
+        throw error;
       }
       return { kind: 'period-closed' };
     });
@@ -97,7 +101,11 @@ describe('startProverLoop', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(log.error).toHaveBeenCalledWith(
       'rs.loop.tick-threw',
-      expect.objectContaining({ err: expect.stringContaining('transient') }),
+      expect.objectContaining({
+        err: expect.stringContaining('transient'),
+        errorCode: 'RPC_ENDPOINTS_EXHAUSTED',
+        retryable: true,
+      }),
     );
     expect(prover.calls).toBeGreaterThan(1);
     const status = loop.getStatus();

@@ -3334,13 +3334,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   randomSamplingLogger(this: DKGAgent, ctx: OperationContext) {
+    const semantic = (
+      event: string,
+      fields: Record<string, unknown>,
+      outcome: 'success' | 'degraded' | 'failure',
+    ) => ({
+      eventCode: event,
+      component: 'random-sampling',
+      outcome,
+      ...(typeof fields.retryable === 'boolean' ? { retryable: fields.retryable } : {}),
+      ...(typeof fields.errorCode === 'string' ? { errorCode: fields.errorCode } : {}),
+    });
     return {
       info: (event: string, fields: Record<string, unknown>) =>
-        this.log.info(ctx, `[${event}] ${JSON.stringify(fields)}`),
+        this.log.info(
+          ctx,
+          `[${event}] ${JSON.stringify(fields)}`,
+          semantic(event, fields, 'success'),
+        ),
       warn: (event: string, fields: Record<string, unknown>) =>
-        this.log.warn(ctx, `[${event}] ${JSON.stringify(fields)}`),
+        this.log.warn(
+          ctx,
+          `[${event}] ${JSON.stringify(fields)}`,
+          semantic(event, fields, 'degraded'),
+        ),
       error: (event: string, fields: Record<string, unknown>) =>
-        this.log.error(ctx, `[${event}] ${JSON.stringify(fields)}`),
+        this.log.error(
+          ctx,
+          `[${event}] ${JSON.stringify(fields)}`,
+          semantic(event, fields, 'failure'),
+        ),
     };
   }
 

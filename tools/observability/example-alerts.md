@@ -2,34 +2,47 @@
      (rules table derives from lib/alerts.mjs ALERT_SPECS). Regenerate with:
      node tools/observability/generate-observability.mjs -->
 
-# Grafana alerting — live setup on the observability server
+# DKG human-readable Grafana alerting
 
-> **Status (2026-07-02):** everything below is **provisioned and healthy** on the
-> production observability Grafana (the dedicated server, Loki 3.x native-OTLP
-> stack — see RUNBOOK.md). This file documents it so it can be recreated from
-> scratch. Webhook URLs are **secrets** — they live only in Grafana contact
-> points, never in this repo.
+This generated file is the reproducible source for the dedicated observability
+Grafana. Webhook URLs are **secrets** — they live only in Grafana contact points,
+never in this repository.
 
-## Routing model — one Slack channel per signal
+## Human incident contract
 
-| Slack channel | Contact point | Route matchers |
-|---|---|---|
-| `#node-logs` | `DKG node logs (Slack)` | `team=dkg`, `signal=logs` |
-| `#node-metrics` | `DKG node metrics (Slack)` | `team=dkg`, `signal=metrics` |
-| `#node-traces` | `DKG node traces (Slack)` | `team=dkg`, `signal=traces` |
+- **P1 — CRITICAL:** immediate action; confirmed fleet/service impact or
+  telemetry-loss risk.
+- **P2 — ACTION:** sustained node/component degradation that needs
+  investigation.
+- **P3 — WATCH:** no confirmed service impact. Held and grouped as a daily
+  metrics-channel post instead of sent in real time.
+- Generic ERROR/WARN counts remain useful in dashboards, but do **not** page
+  Slack. Rules classify the actual event or operational symptom.
+- Every firing message answers: what happened, what is affected, whether to
+  react, what to check first, the evidence, and working dashboard/runbook links.
+  Recovery includes the incident duration and states that no immediate action
+  is required.
 
-Routes are appended as children of the root notification policy
-(`group_wait 30s`, `group_interval 5m`, `repeat_interval 4h`). Grouping is
-signal-aware: logs group by `alertname, service_instance_id, deployment_environment`; metrics group by `alertname, service_instance_id, instance, deployment_environment`; traces group by `alertname` (the metrics set covers both the
-Loki- and VictoriaMetrics-sourced rules). Every rule carries labels
-`team=dkg` + `signal=<x>`; add those two labels to any new rule and it routes
-itself.
+## Routing model
+
+| Priority | Slack channel | Contact point | Route matchers | Timing |
+|---|---|---|---|---|
+| P1/P2 | `#node-logs` | `DKG node logs (Slack)` | `team=dkg`, `signal=logs`, `priority=~P1|P2` | wait 30s; update 5m; repeat 4h |
+| P1/P2 | `#node-metrics` | `DKG node metrics (Slack)` | `team=dkg`, `signal=metrics`, `priority=~P1|P2` | wait 30s; update 5m; repeat 4h |
+| P1/P2 | `#node-traces` | `DKG node traces (Slack)` | `team=dkg`, `signal=traces`, `priority=~P1|P2` | wait 30s; update 5m; repeat 4h |
+| P3 | `#node-metrics` | `DKG node metrics (Slack)` | `team=dkg`, `priority=P3` | wait 24h; update 24h; repeat 24h |
+
+Routes are appended as children of the root notification policy. P1/P2 group by
+stable incident identity so node churn cannot rewrite a fleet-sized message:
+logs group by `alertname, priority, deployment_environment, service_instance_id`; metrics group by `alertname, priority, deployment_environment, service_instance_id, instance`; traces group by `alertname, priority, deployment_environment, service_instance_id`; metrics group by `alertname, priority, deployment_environment`. P3 deliberately groups nodes for one daily watch
+post. Every rule carries `team=dkg`, `signal=<x>`, `priority=P1|P2|P3`,
+`component`, `entity_kind`, and stable `alert_id` labels.
 
 The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace
 OriginTrail) — manage/rotate them at *api.slack.com/apps → DKG Grafana Alerts →
 Incoming Webhooks*.
 
-## The 10 rules (folder "DKG V10 Node Observability", group `dkg-node-telemetry`)
+## The 10 rules
 
 > **Machine-importable copy:** `alert-rules.provisioning.json` in this directory
 > holds the exact provisioning-API payloads (rules, contact-point templates with
@@ -45,100 +58,103 @@ All queries are **range queries** — on Loki 3.x an *instant* metric query over
 range ≥ a few hours is split internally and dies with `maximum of series (500)
 reached`; range+reduce avoids that class of failure entirely.
 
-| # | Alert | Channel | Datasource | Fires when | for | noData |
-|---|---|---|---|---|---|---|
-| 1 | Node silent — seen in last 3h, quiet 15m (per node) | #node-logs | Loki | `> 0` | 5m | OK |
-| 2 | Fleet blackout — NO node logs reaching Loki | #node-logs | Loki | `< 1` | 5m | Alerting |
-| 3 | Error spike on a node (>10 ERROR / 10m) | #node-logs | Loki | `> 10` | 5m | OK |
-| 4 | Warn spike on a node (>150 WARN / 10m) | #node-logs | Loki | `> 150` | 10m | OK |
-| 5 | RPC credit burn spike (armed — needs nodes on a post-#1409 build) | #node-metrics | Loki | `> 6000` | 5m | OK |
-| 6 | Log pipeline export failing (collector cannot ship to Loki) | #node-metrics | VictoriaMetrics | `> 0` | 10m | OK |
-| 7 | Collector exporter queue near capacity (>80%) | #node-metrics | VictoriaMetrics | `> 0.8` | 10m | OK |
-| 8 | Publish failures on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0.02` | 5m | OK |
-| 9 | Chain RPC failover exhausted on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0` | 5m | OK |
-| 10 | Errored spans rate (armed — needs traces + spanmetrics enabled) | #node-traces | VictoriaMetrics | `> 0.05` | 5m | OK |
+| # | Priority | Alert | Channel | Datasource | Fires when | for | noData |
+|---|---|---|---|---|---|---|---|
+| 1 | **P2** | Node stopped reporting | #node-logs | Loki | `> 0` | 5m | OK |
+| 2 | **P1** | Mainnet fleet stopped reporting | #node-logs | Loki | `< 1` | 5m | Alerting |
+| 3 | **P2** | Node storage overloaded | #node-logs | Loki | `> 20` | 10m | OK |
+| 4 | **P3** | RPC usage unusually high | #node-metrics | Loki | `> 8000` | 30m | OK |
+| 5 | **P2** | Telemetry collector cannot export logs | #node-metrics | VictoriaMetrics | `> 0` | 10m | OK |
+| 6 | **P1** | Telemetry collector queue almost full | #node-metrics | VictoriaMetrics | `> 0.8` | 10m | OK |
+| 7 | **P1** | Publishing failure ratio high | #node-metrics | VictoriaMetrics | `> 10` | 5m | OK |
+| 8 | **P2** | Storage ACK quorum repeatedly missed | #node-metrics | VictoriaMetrics | `> 2` | 5m | OK |
+| 9 | **P1** | All chain RPC providers failed | #node-metrics | VictoriaMetrics | `> 0` | 1m | OK |
+| 10 | **P2** | Operation trace failure ratio high | #node-traces | VictoriaMetrics | `> 10` | 5m | OK |
 
 **Queries** (range queries, reduced with `last`, evaluated against the condition above):
 
-1. Node silent — seen in last 3h, quiet 15m (per node)
+1. Node stopped reporting
 
 ```
-count by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[15m]))
+(absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Anacreon"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Cinna"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="DMaaST"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Decentralized Science"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="EG - Luigi"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Helicon"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Oliwav"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Rhodia"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="SBB"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Terminus"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="Trace Labs Node 7"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="cosmo_cluster"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="luna_lander"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="saturn_station"}[15m]) or absent_over_time({service_name="dkg-node", deployment_environment="mainnet", service_instance_id="umanitek"}[15m])) and on() (count(sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[15m]))) > 0)
 ```
 
-2. Fleet blackout — NO node logs reaching Loki
+2. Mainnet fleet stopped reporting
 
 ```
-count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))
+count(sum by (service_instance_id) (count_over_time({service_name="dkg-node", deployment_environment="mainnet"}[15m])))
 ```
 
-3. Error spike on a node (>10 ERROR / 10m)
+3. Node storage overloaded
 
 ```
-sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))
+sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} |~ `Store scheduler (queue wait timeout|queue full).*blazegraph\.(query|update)|Blazegraph operation exceeded its [0-9]+ms deadline` [10m]))
 ```
 
-4. Warn spike on a node (>150 WARN / 10m)
+4. RPC usage unusually high
 
 ```
-sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))
+(sum by (service_instance_id, deployment_environment) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))) and on (service_instance_id, deployment_environment) ((sum by (service_instance_id, deployment_environment) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [15m]))) * 4 > 7200)
 ```
 
-5. RPC credit burn spike (armed — needs nodes on a post-#1409 build)
-
-```
-sum by (service_instance_id, deployment_environment) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))
-```
-
-6. Log pipeline export failing (collector cannot ship to Loki)
+5. Telemetry collector cannot export logs
 
 ```
 sum(rate(otelcol_exporter_send_failed_log_records[10m]))
 ```
 
-7. Collector exporter queue near capacity (>80%)
+6. Telemetry collector queue almost full
 
 ```
 max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity)
 ```
 
-8. Publish failures on a node (armed — needs node metrics enabled)
+7. Publishing failure ratio high
 
 ```
-sum by (instance) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))
+(100 * (sum by (instance, deployment_environment) (increase(dkg_publish_total{outcome=~"failed|error"}[15m]))) / clamp_min((sum by (instance, deployment_environment) (increase(dkg_publish_total[15m]))), 1)) and on (instance, deployment_environment) ((sum by (instance, deployment_environment) (increase(dkg_publish_total[15m]))) >= 5)
 ```
 
-9. Chain RPC failover exhausted on a node (armed — needs node metrics enabled)
+8. Storage ACK quorum repeatedly missed
 
 ```
-sum by (instance) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))
+sum by (instance, deployment_environment) (increase(dkg_ack_quorum_total{outcome=~"timeout|impossible"}[15m]))
 ```
 
-10. Errored spans rate (armed — needs traces + spanmetrics enabled)
+9. All chain RPC providers failed
 
 ```
-sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))
+sum by (instance, deployment_environment) (increase(dkg_chain_rpc_failover_total{reason="exhausted"}[5m]))
 ```
 
-### Design notes (the "why" behind the table)
+10. Operation trace failure ratio high
 
-- **Node silent** keeps **node identity**: the `unless` form returns one series
-  per silent node, so the alert names the node and is immune to churn — a new
-  node joining cannot mask another node dying, which a count-vs-count
-  comparison would miss. Empty result (noData) = every known node reporting =
-  healthy, hence noData OK.
-- **Fleet blackout** complements it: the per-node `unless` form cannot fire
-  when *both* sides are empty, so total-outage detection (pipeline down, Loki
-  down, zero nodes) lives in its own rule with **noData = Alerting**.
-- **RPC credit burn** reads the `rpc_usage` log lines (delta counts, so
-  `sum_over_time` is exact) — needs nodes on a post-#1409 build.
+```
+(100 * (sum by (service_instance_id, deployment_environment) (increase(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))) / clamp_min((sum by (service_instance_id, deployment_environment) (increase(traces_spanmetrics_calls_total[15m]))), 1)) and on (service_instance_id, deployment_environment) ((sum by (service_instance_id, deployment_environment) (increase(traces_spanmetrics_calls_total[15m]))) >= 20)
+```
+
+### Design notes
+
+- **Node silent** uses lightweight 15-minute `absent_over_time` checks for the
+  reviewed production roster, preserving one series per missing node without a
+  multi-hour fleet scan. Its fleet-presence guard suppresses a node-by-node
+  storm during a total blackout.
+- **Fleet blackout** complements it with a separate mainnet-wide P1 rule and
+  **noData = Alerting**.
+- **Storage overload** classifies the currently observed scheduler/Blazegraph
+  timeout signatures instead of counting every unrelated ERROR equally.
+- **RPC usage watch** uses an 8k hourly entry level, a recent-usage guard, a
+  30-minute pending window, and delayed P3 grouping. This replaces the flapping
+  6k real-time rule.
+- **Publish failures** require both a failure ratio above 10% and at least five
+  publishes, preventing one-of-one low-volume false positives.
+- **ACK quorum** uses the bounded terminal outcomes `timeout|impossible`.
 - **Failover exhausted** filters `reason="exhausted"`: the metric contract also
-  documents `reason="recovered"`, and without the filter a recovery event would
-  page as an outage the moment that emission is added.
-- **"Armed" rules** (publish failures, failover, errored spans) evaluate
-  healthy with **noData OK** — zero noise now, they fire automatically once
-  nodes export the signal. If the eventual spanmetrics label names differ,
-  adjust the errored-spans matchers in `generate-observability.mjs`.
+  documents recovery events, which must never page as outages.
+- Node-metric and trace rules use **noData OK**, so they cannot pretend the
+  signal exists before ingestion is enabled. Query health is checked during
+  generation/import; evaluation errors keep the previous state instead of
+  becoming false human incidents.
 
 ## Re-provisioning from scratch (API recipe)
 
@@ -146,7 +162,10 @@ With an admin session, `X-Disable-Provenance: true` header keeps everything
 UI-editable:
 
 ```bash
-# 1. Contact points (one per channel; $HOOK_* from your password manager)
+# 1. Notification template + contact points
+PUT  /api/v1/provisioning/templates/dkg-readable
+
+# One contact point per channel; preserve the existing secure webhook URL.
 POST /api/v1/provisioning/contact-points
   { "name": "DKG node logs (Slack)", "type": "slack",
     "settings": { "url": "$HOOK_NODE_LOGS" } }          # ×3, one per signal
@@ -156,9 +175,11 @@ POST /api/v1/provisioning/contact-points
 GET  /api/v1/provisioning/policies
 PUT  /api/v1/provisioning/policies    # tree + appended routes (matchers above)
 
-# 3. Rules
+# 3. Rules (upsert generated titles, remove the explicit legacy inventory)
 POST /api/v1/provisioning/alert-rules # one per rule; folderUID of the
-                                      # dashboards folder, ruleGroup dkg-node-telemetry
+                                      # dashboards folder
+PUT  /api/v1/provisioning/folder/dkg-observability/rule-groups/<group>
+                                      # 1m incidents, 5m health, 1h P3 watch
 ```
 
 Legacy note: an earlier 4-rule single-channel version of this setup exists on

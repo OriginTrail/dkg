@@ -160,6 +160,17 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   // alerting surface must EXIST, not merely be well-formed where present
   if ((payload.rules ?? []).length < 1) fail(alertsFile, 'no alert rules — expected the DKG alert catalog');
   if ((payload.contactPoints ?? []).length < 3) fail(alertsFile, `expected 3 signal contact points, got ${(payload.contactPoints ?? []).length}`);
+  const expectedEvaluationGroups = new Map([
+    ['dkg-node-telemetry', 60],
+    ['dkg-node-health', 300],
+    ['dkg-capacity-watch', 3600],
+  ]);
+  for (const [name, interval] of expectedEvaluationGroups) {
+    const group = (payload.evaluationGroups ?? []).find((entry) => entry.name === name);
+    if (group?.interval !== interval) {
+      fail(alertsFile, `evaluation group "${name}" must run every ${interval}s`);
+    }
+  }
   // ── golden inventory tripwire ─────────────────────────────────────────────
   // DELIBERATELY duplicated from the alert catalog: the generated-artifact
   // check proves the files came from the generator, but not that the
@@ -168,16 +179,16 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   // check. Removing/adding a rule now requires consciously editing this list
   // in the same PR, which is exactly the review speed bump it exists to be.
   const EXPECTED_RULE_STEMS = [
-    'Node silent',
-    'Fleet blackout',
-    'Error spike',
-    'Warn spike',
-    'RPC credit burn spike',
-    'Log pipeline export failing',
-    'Collector exporter queue',
-    'Publish failures',
-    'Chain RPC failover exhausted',
-    'Errored spans rate',
+    'Node stopped reporting',
+    'Mainnet fleet stopped reporting',
+    'Node storage overloaded',
+    'RPC usage unusually high',
+    'Telemetry collector cannot export logs',
+    'Telemetry collector queue almost full',
+    'Publishing failure ratio high',
+    'Storage ACK quorum repeatedly missed',
+    'All chain RPC providers failed',
+    'Operation trace failure ratio high',
   ];
   for (const stem of EXPECTED_RULE_STEMS) {
     const n = (payload.rules ?? []).filter((r) => (r.title ?? '').startsWith(stem)).length;
@@ -199,12 +210,43 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
     if (wantUid === undefined) fail(where, `unexpected datasource type ${q.model.datasource.type}`);
     if (q.datasourceUid !== wantUid) fail(where, `data[0].datasourceUid is ${q.datasourceUid}, want ${wantUid}`);
     if (q.model.datasource.uid !== q.datasourceUid) fail(where, `model.datasource.uid (${q.model.datasource.uid}) != datasourceUid (${q.datasourceUid}) — partial substitution`);
+    if (q.model.maxDataPoints !== 1) fail(where, `query maxDataPoints must be 1, got ${q.model.maxDataPoints}`);
     for (const b of exprBlocks) {
       if (b.datasourceUid !== '__expr__') fail(where, `expression block ${b.refId} datasourceUid is ${b.datasourceUid}, want __expr__`);
     }
     // per-node metric alerts: grouped + summarized through the profile
     const expr = q.model.expr ?? '';
     const summary = rule.annotations?.summary ?? '';
+    for (const key of [
+      'slack_title',
+      'what_happened',
+      'affected',
+      'react',
+      'check_first',
+      'evidence',
+      'dashboard_url',
+      'runbook_url',
+    ]) {
+      if (!rule.annotations?.[key]) fail(where, `human annotation "${key}" missing`);
+    }
+    if (!['P1', 'P2', 'P3'].includes(rule.labels?.priority)) {
+      fail(where, `priority must be P1/P2/P3, got ${JSON.stringify(rule.labels?.priority)}`);
+    }
+    for (const label of ['alert_id', 'component', 'entity_kind', 'signal', 'team']) {
+      if (!rule.labels?.[label]) fail(where, `routing/classification label "${label}" missing`);
+    }
+    if (/owner|who owns/i.test(JSON.stringify(rule.annotations ?? {}))) {
+      fail(where, 'ownership text is forbidden by the approved Slack contract');
+    }
+    const expectedGroup =
+      rule.labels?.alert_id === 'node-silent'
+        ? 'dkg-node-health'
+        : rule.labels?.alert_id === 'rpc-usage-watch'
+          ? 'dkg-capacity-watch'
+          : 'dkg-node-telemetry';
+    if (rule.ruleGroup !== expectedGroup) {
+      fail(where, `rule must use evaluation group "${expectedGroup}", got "${rule.ruleGroup}"`);
+    }
     if (q.model.datasource.type === 'prometheus' && /dkg_/.test(expr)) {
       perNodeDkgRules++;
       if (!clauseLabels(expr).includes(LABEL)) fail(where, `per-node metric alert does not group by profiled label '${LABEL}': ${expr}`);
@@ -228,9 +270,38 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   if (!logsRoute) fail(alertsFile, 'no logs policy route');
   else if (!(logsRoute.group_by ?? []).includes('service_instance_id')) fail(alertsFile, `logs route group_by ${JSON.stringify(logsRoute.group_by)} lacks service_instance_id`);
   if (!routeFor('traces')) fail(alertsFile, 'no traces policy route');
+  const p3Routes = routes.filter((route) =>
+    (route.object_matchers ?? []).some(([key, op, value]) =>
+      key === 'priority' && op === '=' && value === 'P3'));
+  if (p3Routes.length !== 1) fail(alertsFile, `expected one P3 route, got ${p3Routes.length}`);
+  else {
+    const route = p3Routes[0];
+    if (route.group_wait !== '24h' || route.group_interval !== '24h' || route.repeat_interval !== '24h') {
+      fail(alertsFile, `P3 route is not daily-delayed: ${JSON.stringify(route)}`);
+    }
+  }
+  const actionableRoutes = routes.filter((route) =>
+    (route.object_matchers ?? []).some(([key, op, value]) =>
+      key === 'priority' && op === '=~' && value === 'P1|P2'));
+  if (actionableRoutes.length !== 3) {
+    fail(alertsFile, `expected 3 P1/P2 signal routes, got ${actionableRoutes.length}`);
+  }
+  if ((payload.notificationTemplates ?? []).length !== 1) {
+    fail(alertsFile, `expected one generated notification template, got ${(payload.notificationTemplates ?? []).length}`);
+  } else {
+    const template = payload.notificationTemplates[0];
+    if (template.name !== 'dkg-readable') fail(alertsFile, `unexpected template name ${template.name}`);
+    if (!template.template?.includes('[RECOVERED]')) fail(alertsFile, 'template lacks recovery message');
+    if (!template.template?.includes('*What happened:*')) fail(alertsFile, 'template lacks What happened field');
+    if (/localhost|node\(s\) affected|who owns/i.test(template.template ?? '')) {
+      fail(alertsFile, 'template contains broken/generic/ownership wording');
+    }
+  }
   for (const cp of payload.contactPoints ?? []) {
     const url = cp.settings?.url ?? '';
     if (!/^<SLACK_WEBHOOK_[A-Z_]+>$/.test(url)) fail(`contact point "${cp.name}"`, `settings.url must be a <SLACK_WEBHOOK_*> placeholder, got: ${url}`);
+    if (cp.settings?.title !== '{{ template "dkg.title" . }}') fail(`contact point "${cp.name}"`, 'title template is not dkg.title');
+    if (cp.settings?.text !== '{{ template "dkg.body" . }}') fail(`contact point "${cp.name}"`, 'text template is not dkg.body');
   }
 }
 

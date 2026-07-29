@@ -102,7 +102,17 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
     workers.push(w);
     w.start();
 
-    w.push(rec({ level: 'error', message: 'boom', operationId: 'op-1', sourceOperationId: 'op-src' }));
+    w.push(rec({
+      level: 'error',
+      message: 'boom',
+      operationId: 'op-1',
+      sourceOperationId: 'op-src',
+      eventCode: 'rs.loop.tick-threw',
+      component: 'random-sampling',
+      outcome: 'failure',
+      retryable: true,
+      errorCode: 'STORE_SCHEDULER_BUSY',
+    }));
     await waitFor(() => srv.received.length >= 1);
 
     const { body, headers } = srv.received[0];
@@ -132,6 +142,11 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
     expect(recAttrs['dkg.operation_id']).toBe('op-1');
     expect(recAttrs['dkg.source_operation_id']).toBe('op-src');
     expect(recAttrs['dkg.module']).toBe('publisher');
+    expect(recAttrs['dkg.event_code']).toBe('rs.loop.tick-threw');
+    expect(recAttrs['dkg.component']).toBe('random-sampling');
+    expect(recAttrs['dkg.outcome']).toBe('failure');
+    expect(recAttrs['dkg.retryable']).toBe('true');
+    expect(recAttrs['dkg.error_code']).toBe('STORE_SCHEDULER_BUSY');
   });
 
   it('batches multiple records into a single request', async () => {

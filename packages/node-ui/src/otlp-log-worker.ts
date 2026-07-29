@@ -98,7 +98,7 @@ interface OtlpAttribute {
   value: { stringValue: string };
 }
 
-function attr(key: string, value: string | undefined): OtlpAttribute | null {
+function attr(key: string, value: string | number | boolean | undefined): OtlpAttribute | null {
   if (value == null || value === '') return null;
   return { key, value: { stringValue: String(value) } };
 }
@@ -317,6 +317,11 @@ export function encodeOtlpLogPayload(
         attr('dkg.operation_name', r.operationName),
         attr('dkg.source_operation_id', r.sourceOperationId),
         attr('dkg.module', r.module),
+        attr('dkg.event_code', r.eventCode),
+        attr('dkg.component', r.component),
+        attr('dkg.outcome', r.outcome),
+        attr('dkg.retryable', r.retryable),
+        attr('dkg.error_code', r.errorCode),
       ].filter((a): a is OtlpAttribute => a !== null),
     };
   });

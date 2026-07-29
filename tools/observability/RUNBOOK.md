@@ -21,6 +21,63 @@ Datasources are template variables (`loki` / `vm` / `tempo`) — the dashboards
 bind to whatever datasources exist on import. Alerting (10 rules, 3 Slack
 channels): `example-alerts.md` (importable payloads: `alert-rules.provisioning.json`).
 
+## Human Slack alerts
+
+Slack is an **incident feed**, not a copy of the log stream:
+
+- **P1 — CRITICAL:** react immediately.
+- **P2 — ACTION:** investigate the sustained degradation soon.
+- **P3 — WATCH:** no confirmed impact; grouped into a daily metrics-channel
+  post instead of emitted on every threshold crossing.
+
+Every notification includes the plain-language symptom, affected surface,
+reaction, first check, evidence, and a direct dashboard/runbook link. Grafana
+groups P1/P2 by alert + environment + node, so another node entering or leaving
+the same state cannot rewrite a fleet-sized Slack notification. Generic
+ERROR/WARN volume remains visible in dashboards but does not page.
+
+| Alert | First response |
+|---|---|
+| Mainnet fleet stopped reporting | Check collector and Loki health, then verify whether any node is reachable. Do not assume all nodes are down until the ingest path is ruled out. |
+| Node stopped reporting | Confirm the daemon and telemetry exporter are running on that node. |
+| Node storage overloaded | Check Blazegraph health, request latency, scheduler queue depth/rejections, CPU, memory, and disk pressure. |
+| Publishing failure ratio high | Inspect failed transaction reasons, wallet balance, chain RPC health, and ACK results. |
+| Storage ACK quorum repeatedly missed | Check selected-peer connectivity, decline codes, and ACK transport errors. |
+| All chain RPC providers failed | Test every configured endpoint and provider quota/rate-limit status. |
+| Telemetry collector cannot export logs | Inspect collector exporter errors and Loki availability. Nodes may still be healthy. |
+| Telemetry collector queue almost full | Check collector/Loki throughput and disk capacity immediately; log loss is approaching. |
+| RPC usage unusually high | No immediate response. In the daily watch post, identify the method/component producing the sustained requests. |
+| Operation trace failure ratio high | Open the failed traces and identify the common operation/step before changing node code. |
+
+The expected production-node roster for the silence rule is
+`EXPECTED_LOG_NODES` in `tools/observability/lib/alerts.mjs`. Update that
+reviewed list whenever a node is added, renamed, or intentionally retired;
+otherwise Grafana will correctly treat the old name as missing.
+
+### Recovery and duplicates
+
+- A recovery notification means the alert condition is no longer true; it
+  includes the incident duration. Confirm the linked dashboard before closing a
+  P1 follow-up.
+- P1/P2 repeats are every 4 hours only while still unresolved. P3 requires a
+  sustained 24-hour condition before its grouped daily notification.
+- During a total log blackout, the node-silent rule has a fleet-presence guard,
+  so it does not generate one extra alert per node.
+- One-minute evaluation is reserved for incident checks. Node-presence scans
+  run every 5 minutes and the non-urgent RPC watch runs hourly; all alert
+  queries request a single range point before reduction to avoid overloading
+  Loki with overlapping window calculations.
+
+### Structured log classification
+
+New node builds attach bounded OTLP record attributes:
+`dkg.event_code`, `dkg.component`, `dkg.outcome`, `dkg.retryable`, and
+`dkg.error_code`. These are searchable structured metadata, not Loki index
+labels; keep high-cardinality values such as UALs, operation IDs and peer IDs
+out of them. During rollout, the storage alert also recognizes the existing
+Random Sampling scheduler/Blazegraph message signatures so old and new node
+builds are both covered.
+
 **Query shapes differ from the polaris/Alloy stack — do not mix them up:**
 - The log **line is the plain message body** (native OTLP ingest). There is
   **no** `| json | line_format "{{.body}}"` step.

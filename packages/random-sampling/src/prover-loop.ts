@@ -62,6 +62,18 @@ export interface ProverLoopHandle {
   getStatus(): ProverLoopStatus;
 }
 
+function operationalErrorFields(error: Error): Record<string, unknown> {
+  const tagged = error as Error & {
+    code?: unknown;
+    retryable?: unknown;
+  };
+  return {
+    err: error.message,
+    ...(typeof tagged.code === 'string' ? { errorCode: tagged.code } : {}),
+    ...(typeof tagged.retryable === 'boolean' ? { retryable: tagged.retryable } : {}),
+  };
+}
+
 export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
   let timer: ReturnType<typeof setInterval> | null = null;
   let started = false;
@@ -101,9 +113,7 @@ export function startProverLoop(opts: ProverLoopOptions): ProverLoopHandle {
       // variants. An exception here means an unmapped path
       // (typically a transient adapter / RPC issue). Log and keep
       // the timer alive so the next tick has a chance.
-      opts.log?.error('rs.loop.tick-threw', {
-        err: error.message,
-      });
+      opts.log?.error('rs.loop.tick-threw', operationalErrorFields(error));
       try {
         opts.onTick?.(lastOutcome);
       } catch (hookErr) {

@@ -2,18 +2,12 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   Logger,
   createOperationContext,
+  type LogRecord,
   type LogSink,
   type OperationContext,
 } from '../src/logger.js';
 
-interface LogEntry {
-  level: string;
-  operationName: string;
-  operationId: string;
-  sourceOperationId?: string;
-  module: string;
-  message: string;
-}
+type LogEntry = LogRecord;
 
 function collectSink(): { entries: LogEntry[]; sink: LogSink } {
   const entries: LogEntry[] = [];
@@ -156,6 +150,29 @@ describe('Logger', () => {
 
     const levels = entries.map(e => e.level);
     expect(levels).toEqual(['debug', 'info', 'warn', 'error']);
+  });
+
+  it('adds bounded semantic attributes without changing the human message', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const log = new Logger('RandomSampling');
+    captureStderr(() => log.error(ctx(), 'storage retry scheduled', {
+      eventCode: 'rs.loop.tick-threw',
+      component: 'random-sampling',
+      outcome: 'failure',
+      retryable: true,
+      errorCode: 'STORE_SCHEDULER_BUSY',
+    }));
+
+    expect(entries[0]).toMatchObject({
+      message: 'storage retry scheduled',
+      eventCode: 'rs.loop.tick-threw',
+      component: 'random-sampling',
+      outcome: 'failure',
+      retryable: true,
+      errorCode: 'STORE_SCHEDULER_BUSY',
+    });
   });
 });
 

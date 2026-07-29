@@ -39,6 +39,9 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      - name: Verify the human alerting contract and message previews
+        run: node --test tools/observability/alerting-contract.test.mjs
+
       - name: Verify committed artifacts match the generator
         run: node tools/observability/generate-observability.mjs --check
 

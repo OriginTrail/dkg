@@ -18,10 +18,10 @@ const fenced = (t) => {
 };
 const mdCell = (t) => String(t).replaceAll('|', '\\|');
 const rulesTable = (specs) => [
-  '| # | Alert | Channel | Datasource | Fires when | for | noData |',
-  '|---|---|---|---|---|---|---|',
+  '| # | Priority | Alert | Channel | Datasource | Fires when | for | noData |',
+  '|---|---|---|---|---|---|---|---|',
   ...specs.map((s, i) =>
-    `| ${i + 1} | ${mdCell(s.title)} | #node-${s.signal} | ${alertDatasource(s).name} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
+    `| ${i + 1} | **${s.priority}** | ${mdCell(s.title)} | #node-${s.signal} | ${alertDatasource(s).name} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
   '',
   '**Queries** (range queries, reduced with `last`, evaluated against the condition above):',
   '',
@@ -29,9 +29,12 @@ const rulesTable = (specs) => [
 ].join('\n').replace(/\n+$/, '');
 
 const routesTable = (routes) => [
-  '| Slack channel | Contact point | Route matchers |',
-  '|---|---|---|',
-  ...routes.map(r => `| \`${r.channel}\` | \`${r.contactPoint}\` | ${r.matchers.map(([k, , v]) => `\`${k}=${v}\``).join(', ')} |`),
+  '| Priority | Slack channel | Contact point | Route matchers | Timing |',
+  '|---|---|---|---|---|',
+  ...routes.map(r =>
+    `| ${r.priorities} | \`${r.channel}\` | \`${r.contactPoint}\` | ` +
+    `${r.matchers.map(([k, op, v]) => `\`${k}${op}${v}\``).join(', ')} | ` +
+    `wait ${r.groupWait}; update ${r.groupInterval}; repeat ${r.repeatInterval} |`),
 ].join('\n');
 const groupingSentence = (routes) =>
   routes.map(r => `${r.signal} group by \`${r.groupBy.join(', ')}\``).join('; ');
@@ -41,30 +44,42 @@ export const buildDocs = ({ specs, routes }) => ({
      (rules table derives from lib/alerts.mjs ALERT_SPECS). Regenerate with:
      node tools/observability/generate-observability.mjs -->
 
-# Grafana alerting — live setup on the observability server
+# DKG human-readable Grafana alerting
 
-> **Status (2026-07-02):** everything below is **provisioned and healthy** on the
-> production observability Grafana (the dedicated server, Loki 3.x native-OTLP
-> stack — see RUNBOOK.md). This file documents it so it can be recreated from
-> scratch. Webhook URLs are **secrets** — they live only in Grafana contact
-> points, never in this repo.
+This generated file is the reproducible source for the dedicated observability
+Grafana. Webhook URLs are **secrets** — they live only in Grafana contact points,
+never in this repository.
 
-## Routing model — one Slack channel per signal
+## Human incident contract
+
+- **P1 — CRITICAL:** immediate action; confirmed fleet/service impact or
+  telemetry-loss risk.
+- **P2 — ACTION:** sustained node/component degradation that needs
+  investigation.
+- **P3 — WATCH:** no confirmed service impact. Held and grouped as a daily
+  metrics-channel post instead of sent in real time.
+- Generic ERROR/WARN counts remain useful in dashboards, but do **not** page
+  Slack. Rules classify the actual event or operational symptom.
+- Every firing message answers: what happened, what is affected, whether to
+  react, what to check first, the evidence, and working dashboard/runbook links.
+  Recovery includes the incident duration and states that no immediate action
+  is required.
+
+## Routing model
 
 ${routesTable(routes)}
 
-Routes are appended as children of the root notification policy
-(\`group_wait 30s\`, \`group_interval 5m\`, \`repeat_interval 4h\`). Grouping is
-signal-aware: ${groupingSentence(routes)} (the metrics set covers both the
-Loki- and VictoriaMetrics-sourced rules). Every rule carries labels
-\`team=dkg\` + \`signal=<x>\`; add those two labels to any new rule and it routes
-itself.
+Routes are appended as children of the root notification policy. P1/P2 group by
+stable incident identity so node churn cannot rewrite a fleet-sized message:
+${groupingSentence(routes)}. P3 deliberately groups nodes for one daily watch
+post. Every rule carries \`team=dkg\`, \`signal=<x>\`, \`priority=P1|P2|P3\`,
+\`component\`, \`entity_kind\`, and stable \`alert_id\` labels.
 
 The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace
 OriginTrail) — manage/rotate them at *api.slack.com/apps → DKG Grafana Alerts →
 Incoming Webhooks*.
 
-## The ${specs.length} rules (folder "DKG V10 Node Observability", group \`dkg-node-telemetry\`)
+## The ${specs.length} rules
 
 > **Machine-importable copy:** \`alert-rules.provisioning.json\` in this directory
 > holds the exact provisioning-API payloads (rules, contact-point templates with
@@ -82,25 +97,28 @@ reached\`; range+reduce avoids that class of failure entirely.
 
 ${rulesTable(specs)}
 
-### Design notes (the "why" behind the table)
+### Design notes
 
-- **Node silent** keeps **node identity**: the \`unless\` form returns one series
-  per silent node, so the alert names the node and is immune to churn — a new
-  node joining cannot mask another node dying, which a count-vs-count
-  comparison would miss. Empty result (noData) = every known node reporting =
-  healthy, hence noData OK.
-- **Fleet blackout** complements it: the per-node \`unless\` form cannot fire
-  when *both* sides are empty, so total-outage detection (pipeline down, Loki
-  down, zero nodes) lives in its own rule with **noData = Alerting**.
-- **RPC credit burn** reads the \`rpc_usage\` log lines (delta counts, so
-  \`sum_over_time\` is exact) — needs nodes on a post-#1409 build.
+- **Node silent** uses lightweight 15-minute \`absent_over_time\` checks for the
+  reviewed production roster, preserving one series per missing node without a
+  multi-hour fleet scan. Its fleet-presence guard suppresses a node-by-node
+  storm during a total blackout.
+- **Fleet blackout** complements it with a separate mainnet-wide P1 rule and
+  **noData = Alerting**.
+- **Storage overload** classifies the currently observed scheduler/Blazegraph
+  timeout signatures instead of counting every unrelated ERROR equally.
+- **RPC usage watch** uses an 8k hourly entry level, a recent-usage guard, a
+  30-minute pending window, and delayed P3 grouping. This replaces the flapping
+  6k real-time rule.
+- **Publish failures** require both a failure ratio above 10% and at least five
+  publishes, preventing one-of-one low-volume false positives.
+- **ACK quorum** uses the bounded terminal outcomes \`timeout|impossible\`.
 - **Failover exhausted** filters \`reason="exhausted"\`: the metric contract also
-  documents \`reason="recovered"\`, and without the filter a recovery event would
-  page as an outage the moment that emission is added.
-- **"Armed" rules** (publish failures, failover, errored spans) evaluate
-  healthy with **noData OK** — zero noise now, they fire automatically once
-  nodes export the signal. If the eventual spanmetrics label names differ,
-  adjust the errored-spans matchers in \`generate-observability.mjs\`.
+  documents recovery events, which must never page as outages.
+- Node-metric and trace rules use **noData OK**, so they cannot pretend the
+  signal exists before ingestion is enabled. Query health is checked during
+  generation/import; evaluation errors keep the previous state instead of
+  becoming false human incidents.
 
 ## Re-provisioning from scratch (API recipe)
 
@@ -108,7 +126,10 @@ With an admin session, \`X-Disable-Provenance: true\` header keeps everything
 UI-editable:
 
 \`\`\`bash
-# 1. Contact points (one per channel; $HOOK_* from your password manager)
+# 1. Notification template + contact points
+PUT  /api/v1/provisioning/templates/dkg-readable
+
+# One contact point per channel; preserve the existing secure webhook URL.
 POST /api/v1/provisioning/contact-points
   { "name": "DKG node logs (Slack)", "type": "slack",
     "settings": { "url": "$HOOK_NODE_LOGS" } }          # ×3, one per signal
@@ -118,9 +139,11 @@ POST /api/v1/provisioning/contact-points
 GET  /api/v1/provisioning/policies
 PUT  /api/v1/provisioning/policies    # tree + appended routes (matchers above)
 
-# 3. Rules
+# 3. Rules (upsert generated titles, remove the explicit legacy inventory)
 POST /api/v1/provisioning/alert-rules # one per rule; folderUID of the
-                                      # dashboards folder, ruleGroup dkg-node-telemetry
+                                      # dashboards folder
+PUT  /api/v1/provisioning/folder/dkg-observability/rule-groups/<group>
+                                      # 1m incidents, 5m health, 1h P3 watch
 \`\`\`
 
 Legacy note: an earlier 4-rule single-channel version of this setup exists on
