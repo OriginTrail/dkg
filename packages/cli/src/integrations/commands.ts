@@ -142,12 +142,20 @@ export function registerIntegrationCommands(program: Command): void {
           }
           console.log('');
         }
+        // 'unknown' has more than one cause: an install kind the CLI cannot
+        // detect, or a probe that failed (npm missing from PATH, an unreadable
+        // MCP config). Each row carries its own reason in `detail`, so render
+        // that instead of one blanket explanation — telling someone their cli
+        // entry "is an install kind the CLI does not perform" when npm is
+        // simply absent sends them off to fix the wrong thing.
         const undetectable = rows.filter((r) => r.state === 'unknown');
         if (undetectable.length > 0) {
           console.log(
-            `${undetectable.length} entr${undetectable.length === 1 ? 'y' : 'ies'} cannot be detected ` +
-              `(install kinds the CLI does not perform): ${undetectable.map((r) => r.slug).join(', ')}`,
+            `${undetectable.length} entr${undetectable.length === 1 ? 'y' : 'ies'} could not be determined:\n`,
           );
+          for (const r of undetectable) {
+            console.log(`  ${r.slug.padEnd(24)}  [${r.kind}]  ${r.detail}`);
+          }
         }
         console.log('');
         console.log(

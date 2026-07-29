@@ -1013,6 +1013,12 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
 }
 
 /**
+ * Outcome of inspecting one client config for registered MCP servers.
+ * `ok: false` is "we could not look", never "we looked and found nothing".
+ */
+export type ServerKeyProbe = { ok: true; keys: string[] } | { ok: false; reason: string };
+
+/**
  * Names of every MCP server registered in a client's config, whatever container
  * that client uses (`mcpServers`, `servers`, `mcp_servers`) and whatever format
  * it is written in (JSON, TOML).
@@ -1023,24 +1029,36 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
  * same client targets and container paths that `dkg mcp setup` writes, rather
  * than maintaining a second, narrower list that silently misses clients.
  *
- * Returns [] for a missing, unreadable, or unparseable config — absence of
- * evidence, not evidence of absence.
+ * Absence of evidence is not evidence of absence, so the two are returned as
+ * different values rather than both as []. `ok: false` means we could not look
+ * — the file is present but unreadable, unparseable, or malformed at the
+ * container we needed. A caller that reports install state must not render
+ * that as "not installed": it would tell a user an integration is missing when
+ * the truth is that their config could not be read.
  */
-export function readRegisteredServerKeys(target: ClientTarget): string[] {
+export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
   let body: Record<string, unknown>;
   try {
     body = readConfigBody(target);
-  } catch {
-    return [];
+  } catch (err) {
+    // A config that does not exist IS a real answer: this client has
+    // registered nothing. Anything else means the file is there and we failed.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, keys: [] };
+    return { ok: false, reason: `could not read ${target.displayPath}` };
   }
   const { head } = splitEntryPath(target.entryPath);
   let cursor: unknown = body;
   for (const segment of head) {
-    if (cursor === null || typeof cursor !== 'object') return [];
+    if (cursor === null || typeof cursor !== 'object') return { ok: true, keys: [] };
     cursor = (cursor as Record<string, unknown>)[segment];
   }
-  if (cursor === null || typeof cursor !== 'object') return [];
-  return Object.keys(cursor as Record<string, unknown>);
+  // Missing container: readable config, nothing registered.
+  if (cursor === undefined) return { ok: true, keys: [] };
+  // Present but not an object: malformed exactly where we needed to read.
+  if (cursor === null || typeof cursor !== 'object') {
+    return { ok: false, reason: `malformed server container in ${target.displayPath}` };
+  }
+  return { ok: true, keys: Object.keys(cursor as Record<string, unknown>) };
 }
 
 function serialiseTomlEntryOnly(

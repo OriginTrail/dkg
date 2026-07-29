@@ -3,7 +3,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { readRegisteredServerKeys, type ClientTarget } from '../src/mcp-setup.js';
+import {
+  readRegisteredServerKeys,
+  type ClientTarget,
+  type ServerKeyProbe,
+} from '../src/mcp-setup.js';
 
 // `dkg integration installed` reads MCP client configs through this helper to
 // decide whether an integration is wired into a client. The detectInstalled
@@ -31,13 +35,19 @@ async function target(
   return { name: 'Test', configPath, displayPath: configPath, ...extra };
 }
 
+/** Fails loudly with the probe's own reason instead of a bare undefined. */
+function keysOf(probe: ServerKeyProbe): string[] {
+  if (!probe.ok) throw new Error(`expected a readable config, got: ${probe.reason}`);
+  return [...probe.keys].sort();
+}
+
 describe('readRegisteredServerKeys', () => {
   it('reads the default mcpServers container', async () => {
     const t = await target(
       'cursor.json',
       JSON.stringify({ mcpServers: { dkg: {}, 'buzz-dkg': {}, other: {} } }),
     );
-    expect(readRegisteredServerKeys(t).sort()).toEqual(['buzz-dkg', 'dkg', 'other']);
+    expect(keysOf(readRegisteredServerKeys(t))).toEqual(['buzz-dkg', 'dkg', 'other']);
   });
 
   // VSCode + Copilot Chat uses `servers.<name>` rather than `mcpServers.<name>`.
@@ -46,7 +56,7 @@ describe('readRegisteredServerKeys', () => {
     const t = await target('vscode.json', JSON.stringify({ servers: { dkg: {}, mine: {} } }), {
       entryPath: 'servers.dkg',
     });
-    expect(readRegisteredServerKeys(t).sort()).toEqual(['dkg', 'mine']);
+    expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
 
   // Codex CLI keeps MCP servers in TOML under `mcp_servers`.
@@ -55,33 +65,53 @@ describe('readRegisteredServerKeys', () => {
       format: 'toml',
       entryPath: 'mcp_servers.dkg',
     });
-    expect(readRegisteredServerKeys(t).sort()).toEqual(['dkg', 'mine']);
+    expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
 
-  it('returns [] for a malformed config rather than throwing', async () => {
+  // The cases below are the point of the probe type. "We read it, nothing is
+  // registered" and "we could not read it" must not be the same value, or a
+  // caller reporting install state turns an unreadable config into a confident
+  // "not installed". Each pair is asserted in BOTH directions so a regression
+  // that collapses them fails here rather than surfacing as a false negative.
+
+  it('reports a config it cannot parse as a FAILED probe', async () => {
     const t = await target('broken.json', '{ this is not json');
-    expect(readRegisteredServerKeys(t)).toEqual([]);
+    const probe = readRegisteredServerKeys(t);
+    expect(probe.ok).toBe(false);
+    if (!probe.ok) expect(probe.reason).toContain('could not read');
   });
 
-  it('returns [] when the config file does not exist', async () => {
+  it('reports a malformed server container as a FAILED probe', async () => {
+    // Readable JSON, but the container we need is a scalar — we cannot tell
+    // what is registered, so this is not evidence of absence.
+    const t = await target('b.json', JSON.stringify({ mcpServers: 'nope' }));
+    const probe = readRegisteredServerKeys(t);
+    expect(probe.ok).toBe(false);
+    if (!probe.ok) expect(probe.reason).toContain('malformed');
+  });
+
+  it('treats an absent config file as a SUCCESSFUL probe with no keys', async () => {
+    // Nothing to read is a real answer: this client registered nothing.
     const t: ClientTarget = {
       name: 'Absent',
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',
     };
-    expect(readRegisteredServerKeys(t)).toEqual([]);
+    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, keys: [] });
   });
 
-  it('returns [] when the container is missing or not an object', async () => {
-    const missing = await target('a.json', JSON.stringify({ somethingElse: {} }));
-    expect(readRegisteredServerKeys(missing)).toEqual([]);
-
-    const scalar = await target('b.json', JSON.stringify({ mcpServers: 'nope' }));
-    expect(readRegisteredServerKeys(scalar)).toEqual([]);
+  it('treats a missing container as a SUCCESSFUL probe with no keys', async () => {
+    const t = await target('a.json', JSON.stringify({ somethingElse: {} }));
+    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, keys: [] });
   });
 
-  it('returns [] for an empty container without conflating it with a parse error', async () => {
-    const t = await target('empty.json', JSON.stringify({ mcpServers: {} }));
-    expect(readRegisteredServerKeys(t)).toEqual([]);
+  it('distinguishes an empty container from a parse error', async () => {
+    const empty = await target('empty.json', JSON.stringify({ mcpServers: {} }));
+    const broken = await target('broken2.json', '{ nope');
+    // Same "no keys" outcome, DIFFERENT probe status — the previous version of
+    // this test compared both to [] and so could not have caught a regression
+    // that conflated them.
+    expect(readRegisteredServerKeys(empty)).toEqual({ ok: true, keys: [] });
+    expect(readRegisteredServerKeys(broken).ok).toBe(false);
   });
 });

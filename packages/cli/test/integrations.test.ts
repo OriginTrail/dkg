@@ -648,9 +648,17 @@ describe('registry ↔ CLI contract', () => {
   const schemaValidInstalls: Array<[string, Record<string, unknown>]> = [
     ['cli', { kind: 'cli', package: 'p', version: '1.0.0', binary: 'b' }],
     ['mcp (args present)', { kind: 'mcp', command: 'npx', args: ['-y', 'p'], supportedClients: ['cursor'] }],
-    // args is OPTIONAL in the schema — readable here, refused by installMcp.
+    // args is OPTIONAL in the schema; installMcp normalises a missing value to [].
     ['mcp (args absent)', { kind: 'mcp', command: 'npx', supportedClients: ['cursor'] }],
     ['service (npm-global)', { kind: 'service', runtime: 'npm-global', npmGlobal: { package: 'p', version: '1.0.0', binary: 'b' } }],
+    // The schema requires ONLY kind + runtime for a service; every payload
+    // object is optional. These minimal rows are the ones that actually pin
+    // the compatibility boundary — a validator that started demanding
+    // `npmGlobal` or `docker` would still pass the populated rows above and
+    // reject entries the registry considers valid, which is precisely the
+    // stricter-than-schema drift this PR exists to remove.
+    ['service (npm-global, minimal)', { kind: 'service', runtime: 'npm-global' }],
+    ['service (docker, minimal)', { kind: 'service', runtime: 'docker' }],
     ['service (docker)', { kind: 'service', runtime: 'docker', docker: { image: 'i', version: '1' } }],
     // 'binary' is in the schema's runtime enum.
     ['service (binary)', { kind: 'service', runtime: 'binary' }],

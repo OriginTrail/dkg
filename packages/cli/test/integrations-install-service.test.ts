@@ -270,7 +270,10 @@ describe('detectInstalled', () => {
       [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
       {
         clients,
-        readServerKeys: (t) => (t.name === 'Cursor' ? ['mcp-slug', 'other'] : ['mcp-slug']),
+        readServerKeys: (t) =>
+          t.name === 'Cursor'
+            ? { ok: true as const, keys: ['mcp-slug', 'other'] }
+            : { ok: true as const, keys: ['mcp-slug'] },
       },
     );
     expect(rows[0]).toMatchObject({ state: 'installed' });
@@ -281,9 +284,46 @@ describe('detectInstalled', () => {
   it('reports an mcp entry no client registers as not installed', async () => {
     const rows = await detectInstalled(
       [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
-      { clients, readServerKeys: () => [] },
+      { clients, readServerKeys: () => ({ ok: true as const, keys: [] }) },
     );
     expect(rows[0]).toMatchObject({ state: 'not installed' });
+  });
+
+  // Same pairing as the npm probe: an unreadable client config is not evidence
+  // that the server block is absent — it could be sitting in the file we could
+  // not parse. The `{ ok: true, keys: [] }` case above is the control; without
+  // it, always reporting 'unknown' would pass this test.
+  it('reports mcp as unknown when a client config could not be read', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
+      {
+        clients,
+        readServerKeys: (t) =>
+          t.name === 'Cursor'
+            ? { ok: false as const, reason: 'could not read ~/cursor.json' }
+            : { ok: true as const, keys: [] },
+      },
+    );
+    expect(rows[0]!.state).toBe('unknown');
+    expect(rows[0]!.detail).toContain('Cursor');
+  });
+
+  // A registration found in a READABLE config is still authoritative even when
+  // some other client's config is unreadable — the unknown state must not
+  // swallow positive evidence we actually have.
+  it('still reports installed when one config is unreadable but another registers it', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
+      {
+        clients,
+        readServerKeys: (t) =>
+          t.name === 'Cursor'
+            ? { ok: false as const, reason: 'could not read ~/cursor.json' }
+            : { ok: true as const, keys: ['mcp-slug'] },
+      },
+    );
+    expect(rows[0]!.state).toBe('installed');
+    expect(rows[0]!.detail).toContain('Windsurf');
   });
 
   it('reports kinds it cannot detect as unknown, never "not installed"', async () => {

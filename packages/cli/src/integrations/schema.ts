@@ -28,8 +28,10 @@ export interface InstallCli {
 export interface InstallMcp {
   kind: 'mcp';
   command: string;
-  // Optional per the registry schema. An entry without args is readable
-  // (listed, inspectable) but not installable — installMcp refuses it.
+  // Optional per the registry schema, and genuinely optional here: a server
+  // launched by a binary already on PATH needs none, so installMcp normalises
+  // a missing value to `args: []` rather than refusing the entry. Judging
+  // whether a given command needs arguments is the entry author's call.
   args?: string[];
   // Env var NAMES the MCP server expects. Per the registry schema,
   // DKG_AUTH_TOKEN and DKG_API_URL are auto-filled by the installer when

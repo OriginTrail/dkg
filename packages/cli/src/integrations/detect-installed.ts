@@ -21,7 +21,12 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { detectClients, readRegisteredServerKeys, type ClientTarget } from '../mcp-setup.js';
+import {
+  detectClients,
+  readRegisteredServerKeys,
+  type ClientTarget,
+  type ServerKeyProbe,
+} from '../mcp-setup.js';
 import type { IntegrationEntry } from './schema.js';
 
 const execFileAsync = promisify(execFile);
@@ -42,8 +47,12 @@ export interface DetectDeps {
   listGlobalNpm?: () => Promise<Record<string, string> | null>;
   /** Defaults to the same client targets `dkg mcp setup` registers into. */
   clients?: ClientTarget[];
-  /** Defaults to reading each client's registered server keys. */
-  readServerKeys?: (target: ClientTarget) => string[];
+  /**
+   * Defaults to probing each client's registered server keys. Returns a
+   * probe result, not a bare list, so "could not read this config" stays
+   * distinguishable from "read it, nothing registered".
+   */
+  readServerKeys?: (target: ClientTarget) => ServerKeyProbe;
 }
 
 /**
@@ -124,11 +133,20 @@ export async function detectInstalled(
 
   // slug -> the client(s) whose config registers a server under that name
   const wiredMcp = new Map<string, string[]>();
+  // Configs we could not inspect. A slug absent from every readable config is
+  // only genuinely absent if there were no unreadable ones — otherwise the
+  // registration could be sitting in a file we failed to parse.
+  const unreadableClients: string[] = [];
   if (needsMcp) {
     const clients = deps.clients ?? detectClients();
     const readKeys = deps.readServerKeys ?? readRegisteredServerKeys;
     for (const target of clients) {
-      for (const key of readKeys(target)) {
+      const probe = readKeys(target);
+      if (!probe.ok) {
+        unreadableClients.push(target.name);
+        continue;
+      }
+      for (const key of probe.keys) {
         const list = wiredMcp.get(key) ?? [];
         if (!list.includes(target.name)) list.push(target.name);
         wiredMcp.set(key, list);
@@ -170,6 +188,16 @@ export async function detectInstalled(
       // writes it — hence "wired into", not "installed by".
       const clients = wiredMcp.get(e.slug);
       if (!clients?.length) {
+        // Found in no readable config — but if some config was unreadable the
+        // block could be sitting in it, so we cannot claim absence.
+        if (unreadableClients.length > 0) {
+          return {
+            slug: e.slug,
+            kind: 'mcp',
+            state: 'unknown',
+            detail: `could not inspect ${unreadableClients.join(', ')} config`,
+          };
+        }
         return { slug: e.slug, kind: 'mcp', state: 'not installed', detail: '' };
       }
       return {
