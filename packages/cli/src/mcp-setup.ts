@@ -1016,6 +1016,8 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
 export interface RegisteredMcpServer {
   command: string;
   args: string[];
+  /** String-valued env entries only; non-string values are not represented. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -1082,11 +1084,18 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
     const block = value as Record<string, unknown>;
     if (typeof block.command !== 'string') continue;
+    const env: Record<string, string> = {};
+    if (block.env !== null && typeof block.env === 'object' && !Array.isArray(block.env)) {
+      for (const [k, val] of Object.entries(block.env as Record<string, unknown>)) {
+        if (typeof val === 'string') env[k] = val;
+      }
+    }
     servers[name] = {
       command: block.command,
       args: Array.isArray(block.args)
         ? block.args.filter((a): a is string => typeof a === 'string')
         : [],
+      env,
     };
   }
   return { ok: true, servers };

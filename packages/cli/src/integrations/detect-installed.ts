@@ -204,6 +204,34 @@ export async function detectInstalled(
       const found = mcpBlocks.get(e.slug) ?? [];
       const matching = found.filter((f) => mcpServerMatches(f.server, e.install as InstallMcp));
       if (matching.length > 0) {
+        // installMcp writes `<NAME>` placeholders for values it cannot supply
+        // (no local auth token, or any env var the entry declares that we do
+        // not fill). A block still carrying one was pasted but never completed,
+        // so the server is registered and will start unauthenticated. That is a
+        // half-install, and calling it "installed" is the same over-claim as
+        // the others fixed on this surface.
+        //
+        // Note we do NOT require every `envRequired` key to be PRESENT: MCP
+        // clients can supply env from the parent process, so a user who keeps
+        // secrets out of the config file is correctly installed. An unfilled
+        // placeholder is unambiguous; an absent key is not.
+        const unfilled = [
+          ...new Set(
+            matching.flatMap((m) =>
+              Object.entries(m.server.env ?? {})
+                .filter(([, v]) => /^<[A-Za-z0-9_]+>$/.test(v))
+                .map(([k]) => k),
+            ),
+          ),
+        ];
+        if (unfilled.length > 0) {
+          return {
+            slug: e.slug,
+            kind: 'mcp',
+            state: 'unknown',
+            detail: `registered but placeholder values are unfilled: ${unfilled.join(', ')}`,
+          };
+        }
         return {
           slug: e.slug,
           kind: 'mcp',

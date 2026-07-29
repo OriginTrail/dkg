@@ -3,7 +3,14 @@ import { Command } from 'commander';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// This package is `"type": "module"`. Vitest's transform happens to supply
+// `__dirname`, so the fixture tests below do run — but relying on that is a
+// latent trap for anyone executing this file outside vitest. Resolve it from
+// import.meta.url instead so the fixture paths do not depend on the runner.
+const testDir = dirname(fileURLToPath(import.meta.url));
 
 import {
   resolveRegistryConfig,
@@ -682,6 +689,19 @@ describe('registry ↔ CLI contract', () => {
       { kind: 'service' }, // runtime required
       { kind: 'service', runtime: 'kubernetes' }, // not in the enum
       { kind: 'not-a-kind' },
+      // Payload objects are optional, but the schema marks THEIR fields
+      // required when present — and these drive a global npm install, so a
+      // non-string package must not reach the installer as `[object Object]`.
+      {
+        kind: 'service',
+        runtime: 'npm-global',
+        npmGlobal: { package: { name: '@acme/svc' }, version: '1.0.0' },
+      },
+      { kind: 'service', runtime: 'npm-global', npmGlobal: { package: '@acme/svc' } },
+      { kind: 'service', runtime: 'npm-global', npmGlobal: 'not-an-object' },
+      { kind: 'service', runtime: 'docker', docker: { image: 'i' } }, // version required
+      { kind: 'service', runtime: 'binary', binary: {} }, // url required
+      { kind: 'service', runtime: 'npm-global', portsOpened: ['8080'] },
     ];
     for (const install of invalid) {
       expect(isIntegrationEntry({ ...contractBase, install })).toBe(false);
@@ -690,7 +710,7 @@ describe('registry ↔ CLI contract', () => {
 
   it('parses every vendored live registry entry', async () => {
     const { readdir, readFile } = await import('node:fs/promises');
-    const dir = join(__dirname, 'fixtures', 'registry');
+    const dir = join(testDir, 'fixtures', 'registry');
     const files = (await readdir(dir)).filter(
       (f) => f.endsWith('.json') && f !== 'integration.schema.json',
     );
@@ -704,7 +724,7 @@ describe('registry ↔ CLI contract', () => {
   it('covers every install kind the published schema defines', async () => {
     const { readFile } = await import('node:fs/promises');
     const schema = JSON.parse(
-      await readFile(join(__dirname, 'fixtures', 'registry', 'integration.schema.json'), 'utf8'),
+      await readFile(join(testDir, 'fixtures', 'registry', 'integration.schema.json'), 'utf8'),
     );
     const schemaKinds = Object.values(schema.$defs as Record<string, { properties: { kind: { const: string } } }>)
       .map((d) => d.properties.kind.const)

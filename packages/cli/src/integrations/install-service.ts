@@ -57,8 +57,15 @@ function assertNpmGlobalService(
     );
   }
   // The schema requires package + version; `binary` is optional and defaults to
-  // the package name (see resolveBinary).
-  if (!spec.npmGlobal?.package || !spec.npmGlobal?.version) {
+  // the package name (see resolveBinary). Checked by TYPE, not truthiness: a
+  // non-string `package` is truthy and would reach the npm spec as
+  // `[object Object]@1.0.0` instead of being rejected as malformed.
+  if (
+    typeof spec.npmGlobal?.package !== 'string' ||
+    typeof spec.npmGlobal.version !== 'string' ||
+    !spec.npmGlobal.package.trim() ||
+    !spec.npmGlobal.version.trim()
+  ) {
     throw new Error(
       `Registry entry declares runtime "npm-global" but no npmGlobal.package/version. ` +
         `Report this to the integration maintainer.`,
@@ -71,9 +78,18 @@ function assertNpmGlobalService(
  * OPTIONAL in the registry schema — it is only present "if different from the
  * package name" — so fall back to the package name rather than printing
  * "Start it with: undefined".
+ *
+ * For a SCOPED package the package name is not a runnable command: installing
+ * `@acme/svc` globally puts `svc` on PATH, not `@acme/svc`. Falling back to the
+ * full specifier would print a start command that cannot work, which is the
+ * same class of bad guidance as the `undefined` this fallback was added to fix.
+ * npm's own convention is the unscoped segment, so that is what we print.
  */
 function resolveBinary(npmGlobal: NpmGlobalService['npmGlobal']): string {
-  return npmGlobal.binary?.trim() || npmGlobal.package;
+  const explicit = npmGlobal.binary?.trim();
+  if (explicit) return explicit;
+  const pkg = npmGlobal.package;
+  return pkg.startsWith('@') && pkg.includes('/') ? pkg.slice(pkg.indexOf('/') + 1) : pkg;
 }
 
 function buildPostInstructions(entry: IntegrationEntry, binary: string): string[] {

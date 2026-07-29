@@ -222,8 +222,40 @@ function isValidInstallSpec(v: unknown): boolean {
         (v.envRequired === undefined || isStringArray(v.envRequired)) &&
         (v.supportedClients === undefined || isStringArray(v.supportedClients))
       );
-    case 'service':
-      return v.runtime === 'docker' || v.runtime === 'npm-global' || v.runtime === 'binary';
+    case 'service': {
+      if (v.runtime !== 'docker' && v.runtime !== 'npm-global' && v.runtime !== 'binary') {
+        return false;
+      }
+      // Every payload object is OPTIONAL per the schema, so a bare
+      // { kind, runtime } stays readable. But when one IS present the schema
+      // marks its own fields required, and these now drive a global npm
+      // install — so validating them here is schema-CONSISTENT, not stricter.
+      // Without it `npmGlobal: { package: { name: 'x' }, version: '1' }` parses
+      // and the installer builds `[object Object]@1`.
+      if (v.npmGlobal !== undefined) {
+        if (!isPlainObject(v.npmGlobal)) return false;
+        const n = v.npmGlobal;
+        if (typeof n.package !== 'string' || typeof n.version !== 'string') return false;
+        if (n.binary !== undefined && typeof n.binary !== 'string') return false;
+      }
+      if (v.docker !== undefined) {
+        if (!isPlainObject(v.docker)) return false;
+        const d = v.docker;
+        if (typeof d.image !== 'string' || typeof d.version !== 'string') return false;
+      }
+      if (v.binary !== undefined) {
+        if (!isPlainObject(v.binary)) return false;
+        if (typeof (v.binary as Record<string, unknown>).url !== 'string') return false;
+      }
+      if (v.envRequired !== undefined && !isStringArray(v.envRequired)) return false;
+      if (
+        v.portsOpened !== undefined &&
+        (!Array.isArray(v.portsOpened) || !v.portsOpened.every((p) => typeof p === 'number'))
+      ) {
+        return false;
+      }
+      return true;
+    }
     case 'agent-plugin':
       return (
         typeof v.framework === 'string' &&

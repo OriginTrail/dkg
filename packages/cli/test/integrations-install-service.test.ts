@@ -127,7 +127,10 @@ describe('installService (npm-global)', () => {
   // npmGlobal.binary is OPTIONAL in the registry schema ("if different from the
   // package name"), so an entry without it must still print a usable command
   // rather than "Start it with: undefined".
-  it('falls back to the package name when binary is omitted', async () => {
+  // Installing `@acme/svc` globally puts `svc` on PATH, not `@acme/svc`, so the
+  // fallback must drop the scope — printing the full specifier is the same
+  // class of unusable guidance as the `undefined` this fallback replaced.
+  it('falls back to the UNSCOPED package name when binary is omitted', async () => {
     const verifier = recordVerifier(okProv);
     const runner = recordRunner(0);
     const res = await installService({
@@ -136,9 +139,45 @@ describe('installService (npm-global)', () => {
       runner,
       logger: () => {},
     });
-    expect(res.binary).toBe('@acme/svc');
-    expect(res.postInstructions.join('\n')).toContain('@acme/svc');
-    expect(res.postInstructions.join('\n')).not.toContain('undefined');
+    expect(res.binary).toBe('svc');
+    const text = res.postInstructions.join('\n');
+    expect(text).not.toContain('undefined');
+    // The start command must not be the scoped specifier.
+    expect(text).not.toMatch(/Start it with:.*@acme\/svc/);
+  });
+
+  it('uses an unscoped package name as-is', async () => {
+    const res = await installService({
+      entry: svcEntry({ package: 'plainsvc', version: '1.0.0' }),
+      verifier: recordVerifier(okProv),
+      runner: recordRunner(0),
+      logger: () => {},
+    });
+    expect(res.binary).toBe('plainsvc');
+  });
+
+  // An explicit binary always wins — the scope-stripping is only a fallback.
+  it('prefers an explicit binary over the derived name', async () => {
+    const res = await installService({
+      entry: svcEntry({ package: '@acme/svc', version: '1.0.0', binary: 'custom-bin' }),
+      verifier: recordVerifier(okProv),
+      runner: recordRunner(0),
+      logger: () => {},
+    });
+    expect(res.binary).toBe('custom-bin');
+  });
+
+  // Truthiness is not enough: a non-string package would reach the npm spec and
+  // install `[object Object]@1.0.0`.
+  it('rejects npmGlobal.package that is not a string', async () => {
+    await expect(
+      installService({
+        entry: svcEntry({ package: { name: '@acme/svc' }, version: '1.0.0' }),
+        verifier: recordVerifier(okProv),
+        runner: recordRunner(0),
+        logger: () => {},
+      }),
+    ).rejects.toThrow(/no npmGlobal.package\/version/);
   });
 
   it('surfaces envRequired and portsOpened in post-install guidance', async () => {
@@ -343,6 +382,52 @@ describe('detectInstalled', () => {
     );
     expect(rows[0]!.state).toBe('unknown');
     expect(rows[0]!.detail).toContain('different server');
+  });
+
+  // installMcp emits `<DKG_AUTH_TOKEN>` when it cannot supply a value. A block
+  // still carrying it was pasted but never completed — registered, yet it will
+  // start unauthenticated.
+  it('does not report installed when placeholder env values were never filled', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
+      {
+        clients,
+        readServerKeys: () => ({
+          ok: true as const,
+          servers: {
+            'mcp-slug': {
+              command: 'npx',
+              args: ['-y', 'p'],
+              env: { DKG_API_URL: 'http://127.0.0.1:9200', DKG_AUTH_TOKEN: '<DKG_AUTH_TOKEN>' },
+            },
+          },
+        }),
+      },
+    );
+    expect(rows[0]!.state).toBe('unknown');
+    expect(rows[0]!.detail).toContain('DKG_AUTH_TOKEN');
+  });
+
+  // The control: a FILLED env must still read as installed, or the check above
+  // would pass simply by never reporting installed for anything with env.
+  it('reports installed when env values are real', async () => {
+    const rows = await detectInstalled(
+      [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
+      {
+        clients,
+        readServerKeys: () => ({
+          ok: true as const,
+          servers: {
+            'mcp-slug': {
+              command: 'npx',
+              args: ['-y', 'p'],
+              env: { DKG_AUTH_TOKEN: 'dkg_live_abc123' },
+            },
+          },
+        }),
+      },
+    );
+    expect(rows[0]!.state).toBe('installed');
   });
 
   it('does not report installed when the slug is registered with a different binary', async () => {
