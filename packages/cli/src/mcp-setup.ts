@@ -1012,11 +1012,24 @@ function readConfigBody(target: ClientTarget): Record<string, unknown> {
   }
 }
 
+/** The launch shape of one registered MCP server, as the client stores it. */
+export interface RegisteredMcpServer {
+  command: string;
+  args: string[];
+}
+
 /**
  * Outcome of inspecting one client config for registered MCP servers.
  * `ok: false` is "we could not look", never "we looked and found nothing".
+ *
+ * Carries the blocks rather than only their names. A server registered under a
+ * slug is evidence that THAT integration is installed only if it also launches
+ * what the registry entry says it should — the name alone cannot tell a real
+ * installation apart from an unrelated server that happens to share it.
  */
-export type ServerKeyProbe = { ok: true; keys: string[] } | { ok: false; reason: string };
+export type ServerKeyProbe =
+  | { ok: true; servers: Record<string, RegisteredMcpServer> }
+  | { ok: false; reason: string };
 
 /**
  * Names of every MCP server registered in a client's config, whatever container
@@ -1043,31 +1056,40 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
   } catch (err) {
     // A config that does not exist IS a real answer: this client has
     // registered nothing. Anything else means the file is there and we failed.
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, keys: [] };
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, servers: {} };
     return { ok: false, reason: `could not read ${target.displayPath}` };
   }
   const { head } = splitEntryPath(target.entryPath);
   let cursor: unknown = body;
   for (const segment of head) {
-    if (cursor === null || typeof cursor !== 'object') return { ok: true, keys: [] };
+    if (cursor === null || typeof cursor !== 'object') return { ok: true, servers: {} };
     cursor = (cursor as Record<string, unknown>)[segment];
   }
   // Missing container: readable config, nothing registered.
-  if (cursor === undefined) return { ok: true, keys: [] };
+  if (cursor === undefined) return { ok: true, servers: {} };
   // Present but not an object: malformed exactly where we needed to read.
   if (cursor === null || typeof cursor !== 'object') {
     return { ok: false, reason: `malformed server container in ${target.displayPath}` };
   }
   // Only entries that could actually launch count as registrations. `classify`
   // above already treats `{ dkg: null }` as not-registered (deliberately —
-  // pre-F7 it read as `stale` and claimed there was a value to refresh); a key
-  // whose value is null, scalar, or an array is the same non-registration, and
-  // reporting it as an install would be a false positive in the other
-  // direction from the unreadable-config case.
-  const entries = Object.entries(cursor as Record<string, unknown>).filter(
-    ([, v]) => v !== null && typeof v === 'object' && !Array.isArray(v),
-  );
-  return { ok: true, keys: entries.map(([k]) => k) };
+  // pre-F7 it read as `stale` and claimed there was a value to refresh). A
+  // value that is null, scalar, an array, or an object carrying no `command`
+  // is the same non-registration: nothing there can start. Counting one would
+  // be a false positive, the opposite failure from the unreadable-config case.
+  const servers: Record<string, RegisteredMcpServer> = {};
+  for (const [name, value] of Object.entries(cursor as Record<string, unknown>)) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    const block = value as Record<string, unknown>;
+    if (typeof block.command !== 'string') continue;
+    servers[name] = {
+      command: block.command,
+      args: Array.isArray(block.args)
+        ? block.args.filter((a): a is string => typeof a === 'string')
+        : [],
+    };
+  }
+  return { ok: true, servers };
 }
 
 function serialiseTomlEntryOnly(

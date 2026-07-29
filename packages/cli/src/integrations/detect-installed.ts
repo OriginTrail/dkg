@@ -25,11 +25,25 @@ import {
   detectClients,
   readRegisteredServerKeys,
   type ClientTarget,
+  type RegisteredMcpServer,
   type ServerKeyProbe,
 } from '../mcp-setup.js';
-import type { IntegrationEntry } from './schema.js';
+import type { InstallMcp, IntegrationEntry } from './schema.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Whether a registered block would actually launch what the entry declares.
+ *
+ * The slug alone is not evidence — a user can register anything under that
+ * name. Reporting "installed" for a block that runs a different package would
+ * hide a substituted or stale MCP server behind a reassuring green row.
+ */
+function mcpServerMatches(server: RegisteredMcpServer, install: InstallMcp): boolean {
+  if (server.command !== install.command) return false;
+  const expected = install.args ?? [];
+  return server.args.length === expected.length && expected.every((a, i) => a === server.args[i]);
+}
 
 export type InstalledState = 'installed' | 'not installed' | 'unknown';
 
@@ -131,8 +145,9 @@ export async function detectInstalled(
 
   const globals = needsNpm ? await (deps.listGlobalNpm ?? listGlobalNpmPackages)() : {};
 
-  // slug -> the client(s) whose config registers a server under that name
-  const wiredMcp = new Map<string, string[]>();
+  // slug -> every client registering a server under that name, with the block
+  // itself so the entry's declared command/args can be compared against it.
+  const mcpBlocks = new Map<string, Array<{ client: string; server: RegisteredMcpServer }>>();
   // Configs we could not inspect. A slug absent from every readable config is
   // only genuinely absent if there were no unreadable ones — otherwise the
   // registration could be sitting in a file we failed to parse.
@@ -146,10 +161,10 @@ export async function detectInstalled(
         unreadableClients.push(target.name);
         continue;
       }
-      for (const key of probe.keys) {
-        const list = wiredMcp.get(key) ?? [];
-        if (!list.includes(target.name)) list.push(target.name);
-        wiredMcp.set(key, list);
+      for (const [name, server] of Object.entries(probe.servers)) {
+        const list = mcpBlocks.get(name) ?? [];
+        list.push({ client: target.name, server });
+        mcpBlocks.set(name, list);
       }
     }
   }
@@ -186,26 +201,41 @@ export async function detectInstalled(
       // installMcp keys the server block on the entry slug, so that is what we
       // look for. Note this detects a config the USER pasted — the CLI never
       // writes it — hence "wired into", not "installed by".
-      const clients = wiredMcp.get(e.slug);
-      if (!clients?.length) {
-        // Found in no readable config — but if some config was unreadable the
-        // block could be sitting in it, so we cannot claim absence.
-        if (unreadableClients.length > 0) {
-          return {
-            slug: e.slug,
-            kind: 'mcp',
-            state: 'unknown',
-            detail: `could not inspect ${unreadableClients.join(', ')} config`,
-          };
-        }
-        return { slug: e.slug, kind: 'mcp', state: 'not installed', detail: '' };
+      const found = mcpBlocks.get(e.slug) ?? [];
+      const matching = found.filter((f) => mcpServerMatches(f.server, e.install as InstallMcp));
+      if (matching.length > 0) {
+        return {
+          slug: e.slug,
+          kind: 'mcp',
+          state: 'installed',
+          detail: `wired into ${matching.map((m) => m.client).join(', ')}`,
+        };
       }
-      return {
-        slug: e.slug,
-        kind: 'mcp',
-        state: 'installed',
-        detail: `wired into ${clients.join(', ')}`,
-      };
+      // Something IS registered under this slug, but it launches a different
+      // command. Neither 'installed' (it would start the wrong server) nor
+      // 'not installed' (that hides a name collision the user should know
+      // about) is honest, so say exactly what was found.
+      if (found.length > 0) {
+        return {
+          slug: e.slug,
+          kind: 'mcp',
+          state: 'unknown',
+          detail: `a different server is registered as "${e.slug}" in ${found
+            .map((f) => f.client)
+            .join(', ')}`,
+        };
+      }
+      // Found in no readable config — but if some config was unreadable the
+      // block could be sitting in it, so we cannot claim absence.
+      if (unreadableClients.length > 0) {
+        return {
+          slug: e.slug,
+          kind: 'mcp',
+          state: 'unknown',
+          detail: `could not inspect ${unreadableClients.join(', ')} config`,
+        };
+      }
+      return { slug: e.slug, kind: 'mcp', state: 'not installed', detail: '' };
     }
 
     return {

@@ -38,14 +38,17 @@ async function target(
 /** Fails loudly with the probe's own reason instead of a bare undefined. */
 function keysOf(probe: ServerKeyProbe): string[] {
   if (!probe.ok) throw new Error(`expected a readable config, got: ${probe.reason}`);
-  return [...probe.keys].sort();
+  return Object.keys(probe.servers).sort();
 }
+
+/** A minimal launchable block — anything without `command` is not a registration. */
+const blk = (command = 'npx', args: string[] = []) => ({ command, args });
 
 describe('readRegisteredServerKeys', () => {
   it('reads the default mcpServers container', async () => {
     const t = await target(
       'cursor.json',
-      JSON.stringify({ mcpServers: { dkg: {}, 'buzz-dkg': {}, other: {} } }),
+      JSON.stringify({ mcpServers: { dkg: blk(), 'buzz-dkg': blk(), other: blk() } }),
     );
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['buzz-dkg', 'dkg', 'other']);
   });
@@ -53,7 +56,7 @@ describe('readRegisteredServerKeys', () => {
   // VSCode + Copilot Chat uses `servers.<name>` rather than `mcpServers.<name>`.
   // A detector hardcoding `mcpServers` would silently report nothing here.
   it('honours a non-default entryPath container', async () => {
-    const t = await target('vscode.json', JSON.stringify({ servers: { dkg: {}, mine: {} } }), {
+    const t = await target('vscode.json', JSON.stringify({ servers: { dkg: blk(), mine: blk() } }), {
       entryPath: 'servers.dkg',
     });
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
@@ -90,19 +93,19 @@ describe('readRegisteredServerKeys', () => {
     if (!probe.ok) expect(probe.reason).toContain('malformed');
   });
 
-  it('treats an absent config file as a SUCCESSFUL probe with no keys', async () => {
+  it('treats an absent config file as a SUCCESSFUL probe with no servers', async () => {
     // Nothing to read is a real answer: this client registered nothing.
     const t: ClientTarget = {
       name: 'Absent',
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',
     };
-    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, keys: [] });
+    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, servers: {} });
   });
 
-  it('treats a missing container as a SUCCESSFUL probe with no keys', async () => {
+  it('treats a missing container as a SUCCESSFUL probe with no servers', async () => {
     const t = await target('a.json', JSON.stringify({ somethingElse: {} }));
-    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, keys: [] });
+    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, servers: {} });
   });
 
   // The inverse false report: a key whose value cannot launch anything is not
@@ -118,6 +121,9 @@ describe('readRegisteredServerKeys', () => {
           nulled: null,
           scalar: 'npx -y p',
           listy: [],
+          // An object with no `command` cannot launch either, so it is not a
+          // registration — review flagged `{}` under a slug being counted.
+          noCommand: { env: { A: '1' } },
         },
       }),
     );
@@ -131,7 +137,7 @@ describe('readRegisteredServerKeys', () => {
     // Same "no keys" outcome, DIFFERENT probe status — the previous version of
     // this test compared both to [] and so could not have caught a regression
     // that conflated them.
-    expect(readRegisteredServerKeys(empty)).toEqual({ ok: true, keys: [] });
+    expect(readRegisteredServerKeys(empty)).toEqual({ ok: true, servers: {} });
     expect(readRegisteredServerKeys(broken).ok).toBe(false);
   });
 });
