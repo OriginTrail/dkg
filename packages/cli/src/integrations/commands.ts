@@ -162,6 +162,19 @@ export function registerIntegrationCommands(program: Command): void {
             console.log(`  ${r.slug.padEnd(24)}  [${r.kind}]  ${r.detail}`);
           }
         }
+        // Unreadable registry entries were reported in --json but silently
+        // dropped here, so the human summary counted only what it could parse
+        // and gave no hint that anything was skipped. `list`/`search` already
+        // warn about these; the same evidence belongs in both places.
+        if (failures.length > 0) {
+          console.warn(
+            `Skipped ${failures.length} unreadable registry entr${failures.length === 1 ? 'y' : 'ies'} ` +
+              `(not considered for install detection):`,
+          );
+          for (const f of failures) {
+            console.warn(`  ${f.slug}: ${f.error}`);
+          }
+        }
         console.log('');
         console.log(
           `Checked ${known.length} detectable entr${known.length === 1 ? 'y' : 'ies'}. ` +

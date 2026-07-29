@@ -1076,8 +1076,13 @@ export function readRegisteredServerKeys(target: ClientTarget): ServerKeyProbe {
   }
   // Missing container: readable config, nothing registered.
   if (cursor === undefined) return { ok: true, servers: {} };
-  // Present but not an object: malformed exactly where we needed to read.
-  if (cursor === null || typeof cursor !== 'object') {
+  // Present but not a KEYED object: malformed exactly where we needed to read.
+  // An array counts — `typeof [] === 'object'`, so without the explicit check it
+  // fell through to Object.entries([]) and reported "readable, nothing
+  // registered": a confident claim about a container we cannot interpret. The
+  // entry-level filter below already rejected arrays; the container needed the
+  // same treatment.
+  if (cursor === null || typeof cursor !== 'object' || Array.isArray(cursor)) {
     return { ok: false, reason: `malformed server container in ${target.displayPath}` };
   }
   // Only entries that could actually launch count as registrations. `classify`

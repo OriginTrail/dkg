@@ -84,6 +84,16 @@ describe('readRegisteredServerKeys', () => {
     if (!probe.ok) expect(probe.reason).toContain('could not read');
   });
 
+  // `typeof [] === 'object'`, so an array container slipped past the malformed
+  // check and read as "readable, nothing registered" — a confident claim about
+  // a container we cannot interpret.
+  it('reports an ARRAY server container as a FAILED probe', async () => {
+    const t = await target('arr.json', JSON.stringify({ mcpServers: [] }));
+    const probe = readRegisteredServerKeys(t);
+    expect(probe.ok).toBe(false);
+    if (!probe.ok) expect(probe.reason).toContain('malformed');
+  });
+
   it('reports a malformed server container as a FAILED probe', async () => {
     // Readable JSON, but the container we need is a scalar — we cannot tell
     // what is registered, so this is not evidence of absence.
