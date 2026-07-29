@@ -72,6 +72,7 @@ import {
   LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
   loadConfig,
   saveConfig,
@@ -331,7 +332,6 @@ import type { RequestContext } from './context.js';
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
 const API_QUERY_CALLER_DISCONNECTED = 'API_QUERY_CALLER_DISCONNECTED';
-const STORE_SCHEDULER_BUSY = 'STORE_SCHEDULER_BUSY';
 
 export type ApiQueryPriority = 'normal' | 'background';
 
@@ -390,19 +390,16 @@ export function createApiQueryRequestLifecycle(
 
 /** Map retryable, pre-dispatch read shedding without changing write routes. */
 export function respondIfApiQueryStoreBusy(res: ServerResponse, err: unknown): boolean {
-  const shaped = err && typeof err === 'object'
-    ? err as Record<string, unknown>
-    : {};
-  if (shaped.code !== STORE_SCHEDULER_BUSY) return false;
+  if (!(err instanceof StoreSchedulerBusyError)) return false;
 
   jsonResponse(
     res,
     503,
     {
-      error: err instanceof Error ? err.message : 'Store scheduler busy',
-      code: STORE_SCHEDULER_BUSY,
-      reason: shaped.reason,
-      priority: shaped.priority,
+      error: err.message,
+      code: err.code,
+      reason: err.reason,
+      priority: err.priority,
       retryable: true,
     },
     undefined,

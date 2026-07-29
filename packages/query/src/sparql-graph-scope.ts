@@ -1,4 +1,13 @@
-import { skipSparqlStringLiteral } from './sparql-utils.js';
+import {
+  findMatchingSparqlCloseBrace as findMatchingCloseBrace,
+  isSparqlKeyword,
+  isSparqlKeywordStart as isKeywordStart,
+  isSparqlWordContinuation as isWordContinuation,
+  readSparqlVariable,
+  skipSparqlIriRef,
+  skipSparqlSpaceAndLineComments,
+  skipSparqlStringLiteral,
+} from './sparql-utils.js';
 
 export interface SparqlPrefixName {
   prefix: string;
@@ -192,129 +201,6 @@ function parseStaticGraphValues(
     i += prefixedName.length;
   }
   return values;
-}
-
-function findMatchingCloseBrace(sparql: string, openIdx: number): number {
-  if (sparql[openIdx] !== '{') return -1;
-  let depth = 0;
-  let i = openIdx;
-  while (i < sparql.length) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < sparql.length && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      if (iriEnd) {
-        i = iriEnd;
-        continue;
-      }
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return i;
-      if (depth < 0) return -1;
-    }
-    i++;
-  }
-  return -1;
-}
-
-function skipSparqlIriRef(sparql: string, start: number): number | null {
-  if (sparql[start] !== '<') return null;
-  const next = sparql[start + 1];
-  if (!next || !(/[A-Za-z]/.test(next) || '#_/.'.includes(next))) return null;
-  for (let i = start + 1; i < sparql.length; i++) {
-    const ch = sparql[i];
-    if (ch === '>') return i + 1;
-    if (
-      ch === '<' ||
-      ch === '"' ||
-      ch === '{' ||
-      ch === '}' ||
-      ch === '|' ||
-      ch === '\\' ||
-      ch === '^' ||
-      ch === '`' ||
-      /\s/.test(ch)
-    ) {
-      return null;
-    }
-  }
-  return null;
-}
-
-function readSparqlVariable(sparql: string, start: number): string | null {
-  const sigil = sparql[start];
-  if (sigil !== '?' && sigil !== '$') return null;
-  let end = start + 1;
-  if (!isVariableChar(sparql[end])) return null;
-  while (isVariableChar(sparql[end])) end++;
-  return sparql.slice(start, end);
-}
-
-function isVariableChar(ch: string | undefined): ch is string {
-  return !!ch && /[\p{L}\p{N}_\u00B7\u0300-\u036F\u203F-\u2040]/u.test(ch);
-}
-
-function skipSparqlSpaceAndLineComments(sparql: string, start: number): number {
-  let i = start;
-  while (i < sparql.length) {
-    if (/\s/.test(sparql[i])) {
-      i++;
-      continue;
-    }
-    if (sparql[i] === '#') {
-      while (i < sparql.length && sparql[i] !== '\n') i++;
-      continue;
-    }
-    break;
-  }
-  return i;
-}
-
-function isKeywordStart(src: string, idx: number): boolean {
-  const ch = src[idx];
-  if (!isWordStart(ch)) return false;
-  const prev = idx > 0 ? src[idx - 1] : '';
-  return !prev || (
-    !isWordContinuation(prev) &&
-    prev !== '?' &&
-    prev !== '$' &&
-    prev !== ':' &&
-    prev !== '#'
-  );
-}
-
-function isSparqlKeyword(
-  src: string,
-  start: number,
-  end: number,
-  keyword: string,
-): boolean {
-  const next = src[end];
-  return src.slice(start, end).toUpperCase() === keyword
-    && next !== ':'
-    && next !== '-'
-    && next !== '.';
-}
-
-function isWordStart(ch: string | undefined): boolean {
-  return !!ch && (
-    (ch >= 'A' && ch <= 'Z') ||
-    (ch >= 'a' && ch <= 'z') ||
-    ch === '_'
-  );
-}
-
-function isWordContinuation(ch: string | undefined): boolean {
-  return isWordStart(ch) || (!!ch && ch >= '0' && ch <= '9');
 }
 
 function isSparqlPrefixLabelChar(ch: string | undefined): ch is string {

@@ -2278,11 +2278,7 @@ export class DashboardDB {
     duration_ms: number;
     error_message: string;
   }): void {
-    this.stmt('failOp', `
-      UPDATE operations SET status = 'error', duration_ms = @duration_ms,
-        error_message = @error_message
-      WHERE operation_id = @operation_id AND status = 'in_progress'
-    `).run(op);
+    this.finishOperation({ ...op, status: 'error' });
   }
 
   cancelOperation(op: {
@@ -2290,8 +2286,17 @@ export class DashboardDB {
     duration_ms: number;
     error_message: string;
   }): void {
-    this.stmt('cancelOp', `
-      UPDATE operations SET status = 'cancelled', duration_ms = @duration_ms,
+    this.finishOperation({ ...op, status: 'cancelled' });
+  }
+
+  finishOperation(op: {
+    operation_id: string;
+    duration_ms: number;
+    error_message: string;
+    status: 'error' | 'cancelled';
+  }): void {
+    this.stmt('finishOperation', `
+      UPDATE operations SET status = @status, duration_ms = @duration_ms,
         error_message = @error_message
       WHERE operation_id = @operation_id AND status = 'in_progress'
     `).run(op);
@@ -2467,16 +2472,22 @@ export class DashboardDB {
   }
 
   failPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
-    this.stmt('failPhase', `
-      UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
-        details = @error_message
-      WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
-    `).run(op);
+    this.finishPhase({ ...op, status: 'error' });
   }
 
   cancelPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
-    this.stmt('cancelPhase', `
-      UPDATE operation_phases SET status = 'cancelled', duration_ms = @duration_ms,
+    this.finishPhase({ ...op, status: 'cancelled' });
+  }
+
+  finishPhase(op: {
+    operation_id: string;
+    phase: string;
+    duration_ms: number;
+    error_message: string;
+    status: 'error' | 'cancelled';
+  }): void {
+    this.stmt('finishPhase', `
+      UPDATE operation_phases SET status = @status, duration_ms = @duration_ms,
         details = @error_message
       WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
     `).run(op);
@@ -2538,6 +2549,7 @@ export class DashboardDB {
         COUNT(*) as totalCount,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
         SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
         AVG(gas_cost_eth) as avgGasCostEth,
         SUM(gas_cost_eth) as totalGasCostEth,
@@ -2550,7 +2562,9 @@ export class DashboardDB {
       totalCount: summaryRow.totalCount ?? 0,
       successCount: summaryRow.successCount ?? 0,
       errorCount: summaryRow.errorCount ?? 0,
-      successRate: summaryRow.totalCount > 0 ? (summaryRow.successCount ?? 0) / summaryRow.totalCount : 0,
+      successRate: summaryRow.healthCount > 0
+        ? (summaryRow.successCount ?? 0) / summaryRow.healthCount
+        : 0,
       avgDurationMs: summaryRow.avgDurationMs ?? 0,
       avgGasCostEth: summaryRow.avgGasCostEth ?? 0,
       totalGasCostEth: summaryRow.totalGasCostEth ?? 0,
@@ -2567,6 +2581,7 @@ export class DashboardDB {
         (CAST(started_at / ? AS INTEGER) * ?) as bucket,
         COUNT(*) as count,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
         AVG(gas_cost_eth) as avgGasCostEth,
         SUM(gas_cost_eth) as totalGasCostEth
@@ -2580,7 +2595,7 @@ export class DashboardDB {
       timeSeries: timeSeries.map((r: any) => ({
         bucket: r.bucket,
         count: r.count,
-        successRate: r.count > 0 ? r.successCount / r.count : 0,
+        successRate: r.healthCount > 0 ? r.successCount / r.healthCount : 0,
         avgDurationMs: r.avgDurationMs ?? 0,
         avgGasCostEth: r.avgGasCostEth ?? 0,
         totalGasCostEth: r.totalGasCostEth ?? 0,
@@ -2603,6 +2618,7 @@ export class DashboardDB {
         COUNT(*) as count,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgMs,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         SUM(gas_cost_eth) as gasCostEth
       FROM operations WHERE started_at >= ?
       GROUP BY bucket, operation_name ORDER BY bucket
@@ -2625,7 +2641,7 @@ export class DashboardDB {
         return {
           count: r?.count ?? 0,
           avgMs: r?.avgMs ?? 0,
-          successRate: r ? (r.count > 0 ? r.successCount / r.count : 0) : 0,
+          successRate: r ? (r.healthCount > 0 ? r.successCount / r.healthCount : 0) : 0,
           gasCostEth: r?.gasCostEth ?? 0,
         };
       });
@@ -2649,7 +2665,7 @@ export class DashboardDB {
       GROUP BY operation_name ORDER BY total DESC
     `).all(cutoff) as any[]).map(r => ({
       ...r,
-      rate: r.total > 0 ? r.success / r.total : 0,
+      rate: r.success + r.error > 0 ? r.success / (r.success + r.error) : 0,
       avgMs: r.avgMs ?? 0,
     }));
   }
