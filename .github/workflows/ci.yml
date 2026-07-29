@@ -1022,7 +1022,7 @@ jobs:
   #                                parallel; previously ~20 min single).
   #   - merge queue candidate    : same sharded suite against the exact
   #                                combined commit that is about to land.
-  #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
+  #   - push (trigger branches)  : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
   #                                the safety-net job unsharded).
@@ -1203,7 +1203,7 @@ jobs:
   #   * pull_request : runs only when the `changes` filter detects
   #                    contract-touching paths (mirrors the existing
   #                    Tornado: Solidity lane).
-  #   * push (main / v10-rc / …) : ALWAYS runs so the Security tab
+  #   * push (trigger branches) : ALWAYS runs so the Security tab
   #                    baseline refreshes after every merge. Without
   #                    this, post-merge findings would never bubble
   #                    up to Code Scanning even though they apply to
