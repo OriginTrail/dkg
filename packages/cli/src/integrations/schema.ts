@@ -46,11 +46,19 @@ export interface InstallMcp {
 export interface InstallService {
   kind: 'service';
   runtime: 'docker' | 'npm-global' | 'binary';
+  // Mirrors the registry schema's installService.docker exactly: it requires
+  // image + version and forbids anything beyond digest/composeUrl
+  // (additionalProperties: false), so no valid entry can carry more than this.
+  // `version` was missing here while the runtime guard validates it — a type
+  // that disagrees with its own validator is worse than either alone, because a
+  // future docker installer would be told the field exists by one and not the
+  // other. `ports` and `env` were invented, had no readers, and could never
+  // appear in a registry entry.
   docker?: {
     image: string;
+    version: string;
     digest?: string;
-    ports?: Array<{ container: number; host?: number }>;
-    env?: Record<string, string>;
+    composeUrl?: string;
   };
   npmGlobal?: {
     package: string;
@@ -61,7 +69,6 @@ export interface InstallService {
     // single normalization point that falls back to the package name — the
     // type must not claim a guarantee the registry does not make.
     binary?: string;
-    env?: Record<string, string>;
   };
   // Named `binary` to match the registry schema exactly. A maintainer
   // implementing runtime: 'binary' reads entry.install.binary.url from a real
