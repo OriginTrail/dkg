@@ -56,7 +56,10 @@ export interface InstallService {
     binary: string;
     env?: Record<string, string>;
   };
-  binaryDownload?: {
+  // Named `binary` to match the registry schema exactly. A maintainer
+  // implementing runtime: 'binary' reads entry.install.binary.url from a real
+  // entry, so the type must not invent a different name for it.
+  binary?: {
     url: string;
     checksumSha256?: string;
   };
