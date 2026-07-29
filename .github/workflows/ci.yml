@@ -11,9 +11,9 @@ name: CI
 #     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
   pull_request:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # When merge queue is enabled, this is the pre-merge full-CI safety net.
   # It validates the exact candidate that will land, without introducing a
@@ -231,7 +231,7 @@ jobs:
           key: turbo-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             turbo-${{ runner.os }}-${{ github.ref }}-
-            turbo-${{ runner.os }}-refs/heads/v10-rc-
+            turbo-${{ runner.os }}-refs/heads/main-
             turbo-${{ runner.os }}-
 
       - name: Build all Node packages (evm-module hardhat compile short-circuits)
@@ -1022,7 +1022,7 @@ jobs:
   #                                parallel; previously ~20 min single).
   #   - merge queue candidate    : same sharded suite against the exact
   #                                combined commit that is about to land.
-  #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
+  #   - push (trigger branches)  : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
   #                                the safety-net job unsharded).
@@ -1203,7 +1203,7 @@ jobs:
   #   * pull_request : runs only when the `changes` filter detects
   #                    contract-touching paths (mirrors the existing
   #                    Tornado: Solidity lane).
-  #   * push (main / v10-rc / …) : ALWAYS runs so the Security tab
+  #   * push (trigger branches) : ALWAYS runs so the Security tab
   #                    baseline refreshes after every merge. Without
   #                    this, post-merge findings would never bubble
   #                    up to Code Scanning even though they apply to
