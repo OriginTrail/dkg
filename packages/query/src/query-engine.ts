@@ -1,4 +1,4 @@
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
 
@@ -10,6 +10,12 @@ export interface QueryResult {
 export interface QueryOptions {
   contextGraphId?: string;
   timeout?: number;
+  /** Cancel queued and in-flight store work when the caller goes away. */
+  signal?: AbortSignal;
+  /** Store admission lane. External/API reads should use `background`. */
+  priority?: StoreWorkPriority;
+  /** Bounded operation label propagated to store diagnostics and slow-query telemetry. */
+  source?: string;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */

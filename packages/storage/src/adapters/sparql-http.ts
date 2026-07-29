@@ -51,46 +51,16 @@ import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
+  classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-
-function composeAbortSignals(
-  primary: AbortSignal | undefined,
-  secondary: AbortSignal | undefined,
-): AbortSignal | undefined {
-  if (!primary) return secondary;
-  if (!secondary) return primary;
-  const AnyImpl = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (AnyImpl) return AnyImpl([primary, secondary]);
-  const combined = new AbortController();
-  let settled = false;
-  const cleanup = () => {
-    primary.removeEventListener('abort', forwardPrimary);
-    secondary.removeEventListener('abort', forwardSecondary);
-  };
-  const forwardPrimary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    combined.abort(primary.reason);
-  };
-  const forwardSecondary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    combined.abort(secondary.reason);
-  };
-  if (primary.aborted) combined.abort(primary.reason);
-  else if (secondary.aborted) combined.abort(secondary.reason);
-  else {
-    primary.addEventListener('abort', forwardPrimary, { once: true });
-    secondary.addEventListener('abort', forwardSecondary, { once: true });
-  }
-  return combined.signal;
-}
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+} from '../abortable-store-work-lifecycle.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -190,6 +160,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
+  private readonly workLifecycle = new AbortableStoreWorkLifecycle();
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -230,13 +201,16 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWork<T>(
     operation: string,
     options: QueryOptions | undefined,
-    work: () => Promise<T>,
+    work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
-    return externalStorePriorityScheduler.run(
-      options?.priority,
-      options?.source ?? `sparql-http.${operation}`,
-      work,
+    return this.workLifecycle.run(
       options?.signal,
+      (signal) => externalStorePriorityScheduler.run(
+        options?.priority,
+        options?.source ?? `sparql-http.${operation}`,
+        () => work(signal),
+        signal,
+      ),
     );
   }
 
@@ -289,9 +263,9 @@ export class SparqlHttpStore implements TripleStore {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
-    return this.runStoreWork(operation, options, async () => {
+    return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
-      const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
+      const signal = composeAbortSignals(lifecycleSignal, timeoutSignal) ?? timeoutSignal;
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
@@ -546,9 +520,13 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async () => {
+    return this.runStoreWork('query', options, async (lifecycleSignal) => {
+      const effectiveOptions: SparqlHttpQueryOptions = {
+        ...options,
+        signal: lifecycleSignal,
+      };
       const startedAt = this.now();
-      throwIfAborted(options?.signal);
+      throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
       const isAsk = upper.startsWith('ASK');
@@ -557,22 +535,26 @@ export class SparqlHttpStore implements TripleStore {
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, options);
+          return await this.queryConstruct(trimmed, effectiveOptions);
         }
 
-        const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
+        const res = await this.postQuery(
+          trimmed,
+          'application/sparql-results+json',
+          effectiveOptions,
+        );
         if (!res.ok) {
-          const text = await (options?.maxResponseBytes === undefined
+          const text = await (effectiveOptions.maxResponseBytes === undefined
             ? res.text()
-            : readResponseTextBounded(res, options.maxResponseBytes)
+            : readResponseTextBounded(res, effectiveOptions.maxResponseBytes)
           ).catch(() => '');
           throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
         }
 
-        const json = options?.maxResponseBytes === undefined
+        const json = effectiveOptions.maxResponseBytes === undefined
           ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
           : JSON.parse(
-              await readResponseTextBounded(res, options.maxResponseBytes),
+              await readResponseTextBounded(res, effectiveOptions.maxResponseBytes),
             ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
         if (isAsk || 'boolean' in json) {
@@ -744,7 +726,11 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    // Remote service — nothing to close.
+    // A managed endpoint is stopped immediately after store.close(). The
+    // lifecycle owns one complete generation, aborting and draining every
+    // operation admitted before close while rejecting work attempted during
+    // close. A fresh generation is installed only after the drain completes.
+    await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
 }
 
@@ -766,12 +752,14 @@ function normalizeQuerySource(source: string | undefined): string {
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
-  const upper = sparql.trimStart().toUpperCase();
-  if (upper.startsWith('SELECT')) return 'select';
-  if (upper.startsWith('ASK')) return 'ask';
-  if (upper.startsWith('CONSTRUCT')) return 'construct';
-  if (upper.startsWith('DESCRIBE')) return 'describe';
-  return 'unknown';
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind !== 'read') return 'unknown';
+  switch (operation.form) {
+    case 'SELECT': return 'select';
+    case 'ASK': return 'ask';
+    case 'CONSTRUCT': return 'construct';
+    case 'DESCRIBE': return 'describe';
+  }
 }
 
 function hashQuery(sparql: string): string {

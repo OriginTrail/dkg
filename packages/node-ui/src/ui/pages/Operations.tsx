@@ -24,6 +24,7 @@ import {
 const STATUS_COLORS: Record<string, string> = {
   success: '#22c55e',
   error: '#ef4444',
+  cancelled: '#94a3b8',
   in_progress: '#f59e0b',
 };
 
@@ -1009,6 +1010,7 @@ function OperationsTab() {
           <option value="">All statuses</option>
           <option value="success">success</option>
           <option value="error">error</option>
+          <option value="cancelled">cancelled</option>
           <option value="in_progress">in_progress</option>
         </select>
         <input

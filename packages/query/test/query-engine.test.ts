@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  type Quad,
+  type QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -112,6 +116,119 @@ describe('DKGQueryEngine', () => {
     );
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('propagates cancellation, priority, and source to every unshared store read', async () => {
+    class OptionsRecordingStore extends OxigraphStore {
+      readOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.readOptions.push(options);
+        return super.query(sparql, options);
+      }
+      async listGraphsByPrefix(
+        prefix: string,
+        options?: StoreQueryOptions,
+      ) {
+        this.readOptions.push(options);
+        return (await super.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+      }
+    }
+
+    const recordingStore = new OptionsRecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    await recordingStore.insert([
+      q('urn:options:s', 'http://schema.org/name', '"Options"', GRAPH),
+    ]);
+    const controller = new AbortController();
+
+    await recordingEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      {
+        contextGraphId: CONTEXT_GRAPH,
+        includeSharedMemory: true,
+        signal: controller.signal,
+        priority: 'background',
+        source: 'api.query',
+      },
+    );
+
+    expect(recordingStore.readOptions.length).toBeGreaterThanOrEqual(4);
+    for (const options of recordingStore.readOptions) {
+      expect(options).toMatchObject({
+        signal: controller.signal,
+        priority: 'background',
+        source: 'api.query',
+      });
+    }
+  });
+
+  it('keeps caller cancellation out of shared graph-discovery flights', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => {
+      releaseDiscovery = resolve;
+    });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      discoveryStarted = resolve;
+    });
+
+    class SharedFlightRecordingStore extends OxigraphStore {
+      sharedOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      private held = false;
+
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options);
+          if (!this.held) {
+            this.held = true;
+            discoveryStarted();
+            await discoveryGate;
+          }
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const sharedStore = new SharedFlightRecordingStore();
+    const sharedEngine = new DKGQueryEngine(sharedStore);
+    await sharedStore.insert([
+      q('urn:shared:s', 'http://schema.org/name', '"Shared"', GRAPH),
+    ]);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const scopedQuery =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: firstController.signal,
+    });
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = sharedEngine.query(scopedQuery, {
+      ...common,
+      signal: secondController.signal,
+    });
+    await Promise.resolve();
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseDiscovery();
+
+    await expect(second).resolves.toBeDefined();
+    expect(sharedStore.sharedOptions).toHaveLength(1);
+    expect(sharedStore.sharedOptions[0]).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
   });
 
   it('returns all triples for entity', async () => {
@@ -1495,6 +1612,83 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['g']).toBe(GRAPH);
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
+  });
+
+  it('does not re-inject the full graph allow-list when top-level VALUES already narrows GRAPH ?g', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    // Mirror issue #1989's cardinality: the Blackbox metadata query returned
+    // 249 rows, of which 125 confirmed VM graphs were materialized locally.
+    // The caller selected only five of those graphs.
+    const vmGraphs = Array.from(
+      { length: 125 },
+      (_, index) => `${GRAPH}/_verifiable_memory/0xagent/${index + 128}`,
+    );
+    await recordingStore.insert(vmGraphs.map((graph, index) => (
+      q(`urn:vm:${index}`, 'http://schema.org/name', `"${index}"`, graph)
+    )));
+    recordingStore.queries.length = 0;
+
+    const sparql = `SELECT ?sourceGraph ?name WHERE {
+      VALUES ?sourceGraph { ${vmGraphs.slice(0, 5).map((graph) => `<${graph}>`).join(' ')} }
+      GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+    } ORDER BY ?sourceGraph`;
+    const result = await recordingEngine.query(
+      sparql,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings.map((row) => row['name'])).toEqual([
+      '"0"',
+      '"1"',
+      '"2"',
+      '"3"',
+      '"4"',
+    ]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(1);
+    expect(executed).toBe(sparql);
+    expect(executed).not.toContain(vmGraphs[5]);
+  });
+
+  it('retains the allow-list intersection when caller VALUES contains an out-of-scope graph', async () => {
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    const recordingStore = new RecordingStore();
+    const recordingEngine = new DKGQueryEngine(recordingStore);
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/1`;
+    const foreign = 'did:dkg:context-graph:foreign/_verifiable_memory/0xagent/1';
+    await recordingStore.insert([
+      q('urn:vm:allowed', 'http://schema.org/name', '"allowed"', vm),
+      q('urn:vm:foreign', 'http://schema.org/name', '"foreign"', foreign),
+    ]);
+    recordingStore.queries.length = 0;
+
+    const result = await recordingEngine.query(
+      `SELECT ?sourceGraph ?name WHERE {
+        VALUES ?sourceGraph { <${vm}> <${foreign}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
+    const executed = recordingStore.queries.at(-1) ?? '';
+    expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
   });
 
   it('rejects mixed GRAPH-variable and default-graph triple patterns', async () => {

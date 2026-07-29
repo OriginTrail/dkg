@@ -1,4 +1,9 @@
-import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
+import type {
+  TripleStore,
+  Quad,
+  QueryResult as StoreQueryResult,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
   GraphManager,
@@ -36,7 +41,17 @@ import {
   emptyResultForSparql,
   detectSparqlQueryForm,
 } from './sparql-guard.js';
-import { stripLiteralsAndComments } from './sparql-utils.js';
+import {
+  skipSparqlStringLiteral as scanSparqlStringLiteral,
+  stripLiteralsAndComments,
+} from './sparql-utils.js';
+import {
+  callerGraphValuesAreAuthorized,
+  collectPrefixDeclarations,
+  readSparqlPrefixName,
+  resolveSparqlPrefixedName,
+  type SparqlPrefixName,
+} from './sparql-graph-scope.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -57,6 +72,48 @@ export class ScopedQueryViolationError extends Error {
     super(`Scoped query violation: ${message}`);
     this.name = 'ScopedQueryViolationError';
   }
+}
+
+function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
+  if (!options?.signal && !options?.priority && !options?.source) return undefined;
+  return {
+    signal: options.signal,
+    priority: options.priority,
+    source: options.source,
+  };
+}
+
+function sharedDiscoveryStoreOptions(
+  options: StoreQueryOptions | undefined,
+): StoreQueryOptions | undefined {
+  if (!options?.priority && !options?.source) return undefined;
+  return {
+    priority: options.priority,
+    source: options.source,
+  };
+}
+
+function raceAgainstCallerAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    const reason = signal.reason;
+    return Promise.reject(
+      reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')),
+    );
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      const reason = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
 }
 
 /**
@@ -294,11 +351,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
       const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
-      const swmPerKaGraphs = swmRouted ? await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`) : [];
+      const swmPerKaGraphs = swmRouted
+        ? await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`, storeOptions(options))
+        : [];
       // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
       // for GRAPH-variable scans on any route that reads the data graph.
       const dataRouted = options?.graphSuffix !== '_shared_memory';
-      const vmPerKaGraphs = dataRouted ? await this.discoverGraphsByPrefix(`${dataGraph}/_verifiable_memory/`) : [];
+      const vmPerKaGraphs = dataRouted
+        ? await this.discoverGraphsByPrefix(
+            `${dataGraph}/_verifiable_memory/`,
+            storeOptions(options),
+          )
+        : [];
       const allowedGraphs = options?.includeSharedMemory ?? options?.includeWorkspace
         ? [dataGraph, ...vmPerKaGraphs, sharedMemoryGraph, ...swmPerKaGraphs]
         : options?.graphSuffix === '_shared_memory'
@@ -372,6 +436,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
             ...(await this.discoverGraphScopedPrivateGraphs(
               effectiveContextGraphId,
               subGraphName,
+              storeOptions(options),
             )),
           ]
         : [];
@@ -383,6 +448,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
             effectiveContextGraphId,
             explicitAllowedGraphs,
             { subGraphName, isSwmOnlyRoute },
+            storeOptions(options),
           )
         : explicitAllowedGraphs;
       // Explicit GRAPH IRIs remain limited to the static route-specific
@@ -419,30 +485,42 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphsInc = await this.discoverGraphsByPrefix(`${dataGraph}/_verifiable_memory/`);
+        const vmGraphsInc = await this.discoverGraphsByPrefix(
+          `${dataGraph}/_verifiable_memory/`,
+          storeOptions(options),
+        );
         const dataSparql = vmGraphsInc.length > 0
           ? (this.wrapVerifiableMemoryGraphSet(sparql, [dataGraph, ...vmGraphsInc])
             ?? wrapWithGraph(sparql, dataGraph))
           : wrapWithGraph(sparql, dataGraph);
         // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
-        const swmGraphs = await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`);
+        const swmGraphs = await this.discoverGraphsByPrefix(
+          `${sharedMemoryGraph}/`,
+          storeOptions(options),
+        );
         const sharedMemorySparql = swmGraphs.length > 0
           ? (wrapWithGraphUnion(sparql, swmGraphs) ?? wrapWithGraph(sparql, sharedMemoryGraph))
           : wrapWithGraph(sparql, sharedMemoryGraph);
-        const dataResult = await this.store.query(dataSparql);
-        const smResult = await this.store.query(sharedMemorySparql);
+        const dataResult = await this.store.query(dataSparql, storeOptions(options));
+        const smResult = await this.store.query(sharedMemorySparql, storeOptions(options));
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
       if (options?.graphSuffix === '_shared_memory') {
         // Uniform layout: SWM is per-KA …/_shared_memory/{addr}/{number}. Discover the
         // per-KA graphs under the prefix and union them (the legacy bucket is now empty).
-        const swmGraphs = await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`);
+        const swmGraphs = await this.discoverGraphsByPrefix(
+          `${sharedMemoryGraph}/`,
+          storeOptions(options),
+        );
         effectiveSparql = swmGraphs.length > 0
           ? (wrapWithGraphUnion(sparql, swmGraphs) ?? wrapWithGraph(sparql, sharedMemoryGraph))
           : wrapWithGraph(sparql, sharedMemoryGraph);
       } else {
         // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphs = await this.discoverGraphsByPrefix(`${dataGraph}/_verifiable_memory/`);
+        const vmGraphs = await this.discoverGraphsByPrefix(
+          `${dataGraph}/_verifiable_memory/`,
+          storeOptions(options),
+        );
         effectiveSparql = vmGraphs.length > 0
           ? (this.wrapVerifiableMemoryGraphSet(sparql, [dataGraph, ...vmGraphs])
             ?? wrapWithGraph(sparql, dataGraph))
@@ -450,7 +528,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       }
     }
 
-    const result = await this.execAndNormalize(effectiveSparql);
+    const result = await this.execAndNormalize(effectiveSparql, storeOptions(options));
 
     // Strip results originating from excluded graphs (e.g. private CGs).
     if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
@@ -500,6 +578,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         options.agentAddress,
         options.assertionName,
         options.subGraphName,
+        storeOptions(options),
       );
     }
 
@@ -519,7 +598,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const allGraphs = [...resolution.graphs];
 
     for (const prefix of resolution.graphPrefixes) {
-      const discovered = await this.discoverGraphsByPrefix(prefix);
+      const discovered = await this.discoverGraphsByPrefix(prefix, storeOptions(options));
       allGraphs.push(...discovered);
     }
 
@@ -528,7 +607,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // root. Include only the selected assertion's scoped child family.
     if (view === 'working-memory' && options.assertionName) {
       for (const rootGraph of resolution.graphs) {
-        allGraphs.push(...(await this.discoverGraphsByPrefix(`${rootGraph}${ASSERTION_NAMED_GRAPH_PREFIX}`)));
+        allGraphs.push(...(await this.discoverGraphsByPrefix(
+          `${rootGraph}${ASSERTION_NAMED_GRAPH_PREFIX}`,
+          storeOptions(options),
+        )));
       }
     }
 
@@ -543,7 +625,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // by-name WM read); fanning out would broaden it across every sub-graph's
     // VM partition and return unrelated rows.
     if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
-      const subNames = await this.discoverRegisteredSubGraphNames(contextGraphId);
+      const subNames = await this.discoverRegisteredSubGraphNames(
+        contextGraphId,
+        storeOptions(options),
+      );
       for (const sub of subNames) {
         const subResolution = resolveViewGraphs(view, contextGraphId, {
           agentAddress: options.agentAddress,
@@ -551,7 +636,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         });
         allGraphs.push(...subResolution.graphs);
         for (const prefix of subResolution.graphPrefixes) {
-          allGraphs.push(...(await this.discoverGraphsByPrefix(prefix)));
+          allGraphs.push(...(await this.discoverGraphsByPrefix(prefix, storeOptions(options))));
         }
       }
     }
@@ -568,7 +653,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // graphs (resolved from the store, so no subscription state is needed) into
     // the allow-set for an unscoped VM read.
     if (view === 'verifiable-memory' && !options.verifiedGraph && !options.subGraphName) {
-      allGraphs.push(...(await this.discoverContextGraphPerCgIdDataGraphs(contextGraphId)));
+      allGraphs.push(...(await this.discoverContextGraphPerCgIdDataGraphs(
+        contextGraphId,
+        storeOptions(options),
+      )));
     }
 
     // De-dup so a sub-graph never gets unioned twice.
@@ -630,15 +718,20 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     if (allGraphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(effectiveSparql, allGraphs[0]));
+      return this.execAndNormalize(
+        wrapWithGraph(effectiveSparql, allGraphs[0]),
+        storeOptions(options),
+      );
     }
 
     if (view === 'verifiable-memory') {
       const rewritten = this.wrapVerifiableMemoryGraphSet(effectiveSparql, allGraphs);
-      if (rewritten !== null) return this.execAndNormalize(rewritten);
+      if (rewritten !== null) {
+        return this.execAndNormalize(rewritten, storeOptions(options));
+      }
     }
 
-    return this.queryMultipleGraphs(effectiveSparql, allGraphs);
+    return this.queryMultipleGraphs(effectiveSparql, allGraphs, storeOptions(options));
   }
 
   /** Canonical graph rewrite for root + per-KA/per-cgId verifiable-memory reads. */
@@ -650,10 +743,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       ?? wrapWithGraphUnion(sparql, graphs);
   }
 
-  private async queryMultipleGraphs(sparql: string, graphs: string[]): Promise<QueryResult> {
+  private async queryMultipleGraphs(
+    sparql: string,
+    graphs: string[],
+    options?: StoreQueryOptions,
+  ): Promise<QueryResult> {
     if (graphs.length === 0) return { bindings: [] };
     if (graphs.length === 1) {
-      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]));
+      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]), options);
     }
     // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
     // read to the named-graph set as ONE basic graph pattern iterated over a
@@ -666,7 +763,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // around the injected block.
     const valuesSparql = wrapWithGraphValues(sparql, graphs);
     if (valuesSparql !== null) {
-      return this.execAndNormalize(valuesSparql);
+      return this.execAndNormalize(valuesSparql, options);
     }
     // Residual shapes `wrapWithGraphValues` declines (an inner top-level
     // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
@@ -674,7 +771,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // cross-graph merge below is preserved unchanged.
     const unionSparql = wrapWithGraphUnion(sparql, graphs);
     if (unionSparql !== null) {
-      return this.execAndNormalize(unionSparql);
+      return this.execAndNormalize(unionSparql, options);
     }
     // Fallback: the inner body contains a UNION so we cannot safely wrap
     // in a single query without either crashing Blazegraph (nested
@@ -693,7 +790,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // constructed from multiple source graphs).
       const merged: Quad[] = [];
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(sparql, g));
+        const r = await this.execAndNormalize(wrapWithGraph(sparql, g), options);
         if (r.quads) merged.push(...r.quads);
       }
       return { bindings: [], quads: dedupeQuads(merged) };
@@ -703,7 +800,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // Boolean result: true iff the pattern matches in ANY graph.
       // Short-circuit on the first positive graph.
       for (const g of graphs) {
-        const r = await this.execAndNormalize(wrapWithGraph(sparql, g));
+        const r = await this.execAndNormalize(wrapWithGraph(sparql, g), options);
         if (r.bindings[0]?.result === 'true') {
           return { bindings: [{ result: 'true' }] };
         }
@@ -730,14 +827,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const all: Record<string, string>[] = [];
     for (const g of graphs) {
-      const r = await this.execAndNormalize(wrapWithGraph(sparql, g));
+      const r = await this.execAndNormalize(wrapWithGraph(sparql, g), options);
       all.push(...r.bindings);
     }
     return { bindings: all };
   }
 
-  private async discoverGraphsByPrefix(prefix: string): Promise<string[]> {
-    const allGraphs = await listGraphsByPrefix(this.store, prefix);
+  private async discoverGraphsByPrefix(
+    prefix: string,
+    options?: StoreQueryOptions,
+  ): Promise<string[]> {
+    const allGraphs = await listGraphsByPrefix(this.store, prefix, options);
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
@@ -753,9 +853,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
    * `…/context/<id>/_shared_memory`, …) so a VM content read never pulls
    * private/SWM rows.
    */
-  private async discoverContextGraphPerCgIdDataGraphs(contextGraphId: string): Promise<string[]> {
+  private async discoverContextGraphPerCgIdDataGraphs(
+    contextGraphId: string,
+    options?: StoreQueryOptions,
+  ): Promise<string[]> {
     const base = `did:dkg:context-graph:${contextGraphId}/context/`;
-    const discovered = await this.discoverGraphsByPrefix(base);
+    const discovered = await this.discoverGraphsByPrefix(base, options);
     return discovered.filter((g) => {
       const rest = g.slice(base.length);
       return rest.length > 0 && !rest.includes('/');
@@ -773,6 +876,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async discoverGraphScopedPrivateGraphs(
     contextGraphId: string,
     subGraphName?: string,
+    options?: StoreQueryOptions,
   ): Promise<string[]> {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const subGraphClause = subGraphName
@@ -791,6 +895,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           ${subGraphClause}
         }
       }`,
+      options,
     );
     if (result.type !== 'bindings') return [];
 
@@ -847,6 +952,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     agentAddress: string,
     assertionName: string,
     subGraphName?: string,
+    options?: StoreQueryOptions,
   ): Promise<bigint | undefined> {
     // Mirror the writer (`assertionFinalize`): the `dkg:kaId` stamp lives in the
     // ROOT `_meta` graph, but keyed by the SUB-GRAPH-AWARE lifecycle URN
@@ -856,6 +962,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const res = await this.store.query(
       `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${urn}> <http://dkg.io/ontology/kaId> ?n } } LIMIT 1`,
+      options,
     );
     if (res.type === 'bindings' && res.bindings.length > 0) {
       const m = res.bindings[0]['n']?.match(/(\d+)/);
@@ -868,6 +975,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     contextGraphId: string,
     staticAllowedGraphs: string[],
     opts: { subGraphName?: string; isSwmOnlyRoute: boolean },
+    options?: StoreQueryOptions,
   ): Promise<string[]> {
     if (opts.isSwmOnlyRoute) {
       return staticAllowedGraphs;
@@ -877,6 +985,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const scopedContentGraphs = await this.resolveScopedContentGraphAllowList(
       contextGraphId,
       opts.subGraphName,
+      options,
     );
     for (const graph of scopedContentGraphs) {
       allowed.add(graph);
@@ -888,36 +997,56 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async resolveScopedContentGraphAllowList(
     contextGraphId: string,
     subGraphName?: string,
+    options?: StoreQueryOptions,
   ): Promise<string[]> {
-    const key = JSON.stringify([contextGraphId, subGraphName ?? null]);
+    const sharedOptions = sharedDiscoveryStoreOptions(options);
+    const key = JSON.stringify([
+      contextGraphId,
+      subGraphName ?? null,
+      sharedOptions?.priority ?? 'normal',
+      sharedOptions?.source ?? null,
+    ]);
     const cached = this.scopedContentGraphAllowListInFlight.get(key);
     if (cached) {
-      return cached;
+      return raceAgainstCallerAbort(cached, options?.signal);
     }
 
-    const promise = this.discoverScopedContentGraphAllowList(contextGraphId, subGraphName);
+    const promise = this.discoverScopedContentGraphAllowList(
+      contextGraphId,
+      subGraphName,
+      sharedOptions,
+    );
     this.scopedContentGraphAllowListInFlight.set(key, promise);
-
-    try {
-      return await promise;
-    } finally {
+    void promise.finally(() => {
       if (this.scopedContentGraphAllowListInFlight.get(key) === promise) {
         this.scopedContentGraphAllowListInFlight.delete(key);
       }
-    }
+    }).catch(() => undefined);
+    return raceAgainstCallerAbort(promise, options?.signal);
   }
 
   private async discoverScopedContentGraphAllowList(
     contextGraphId: string,
     subGraphName?: string,
+    options?: StoreQueryOptions,
   ): Promise<string[]> {
     const allowed = new Set<string>();
     const registeredSubGraphs = subGraphName
       ? new Set([subGraphName])
-      : await this.discoverRegisteredSubGraphNames(contextGraphId);
-    const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(contextGraphId);
-    const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(contextGraphId);
-    const allGraphs = await listGraphFamily(this.store, `did:dkg:context-graph:${contextGraphId}`);
+      : await this.discoverRegisteredSubGraphNames(contextGraphId, options);
+    const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(
+      contextGraphId,
+      options,
+    );
+    const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(
+      contextGraphId,
+      options,
+    );
+    const allGraphs = await listGraphFamily(
+      this.store,
+      `did:dkg:context-graph:${contextGraphId}`,
+      options,
+    );
 
     for (const graph of allGraphs) {
       if (
@@ -937,7 +1066,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return [...allowed];
   }
 
-  private async discoverRegisteredSubGraphNames(contextGraphId: string): Promise<Set<string>> {
+  private async discoverRegisteredSubGraphNames(
+    contextGraphId: string,
+    options?: StoreQueryOptions,
+  ): Promise<Set<string>> {
     const names = new Set<string>();
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const result = await this.store.query(
@@ -947,6 +1079,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
                     <http://schema.org/name> ?name .
         }
       }`,
+      options,
     );
     if (result.type !== 'bindings') return names;
 
@@ -959,7 +1092,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return names;
   }
 
-  private async discoverRegisteredAssertionGraphs(contextGraphId: string): Promise<Set<string>> {
+  private async discoverRegisteredAssertionGraphs(
+    contextGraphId: string,
+    options?: StoreQueryOptions,
+  ): Promise<Set<string>> {
     const graphs = new Set<string>();
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const result = await this.store.query(
@@ -968,6 +1104,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           ?assertion <http://dkg.io/ontology/assertionGraph> ?graph .
         }
       }`,
+      options,
     );
     if (result.type !== 'bindings') return graphs;
 
@@ -980,7 +1117,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return graphs;
   }
 
-  private async discoverKnownChildContextGraphUris(contextGraphId: string): Promise<Set<string>> {
+  private async discoverKnownChildContextGraphUris(
+    contextGraphId: string,
+    options?: StoreQueryOptions,
+  ): Promise<Set<string>> {
     const rootPrefix = `${contextGraphDataUri(contextGraphId)}/`;
     const result = await this.store.query(
       `SELECT DISTINCT ?ctxGraph WHERE {
@@ -994,6 +1134,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
         FILTER(STRSTARTS(STR(?ctxGraph), "${escapeSparqlLiteral(rootPrefix)}"))
       }`,
+      options,
     );
     const uris = new Set<string>();
     if (result.type !== 'bindings') return uris;
@@ -1007,8 +1148,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return uris;
   }
 
-  private async execAndNormalize(sparql: string): Promise<QueryResult> {
-    const result = await this.store.query(sparql);
+  private async execAndNormalize(
+    sparql: string,
+    options?: StoreQueryOptions,
+  ): Promise<QueryResult> {
+    const result = await this.store.query(sparql, options);
 
     if (result.type === 'bindings') {
       if (result.bindings.length === 0) {
@@ -1301,15 +1445,23 @@ function assertNoCallerDatasetClauses(sparql: string): void {
   }
 }
 
-async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+async function listGraphsByPrefix(
+  store: TripleStore,
+  prefix: string,
+  options?: StoreQueryOptions,
+): Promise<string[]> {
   return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix)
-    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+    ? store.listGraphsByPrefix(prefix, options)
+    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
 }
 
-async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
-  if (await store.hasGraph(rootGraph)) {
+async function listGraphFamily(
+  store: TripleStore,
+  rootGraph: string,
+  options?: StoreQueryOptions,
+): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`, options);
+  if (await store.hasGraph(rootGraph, options)) {
     graphs.unshift(rootGraph);
   }
   return graphs;
@@ -1358,97 +1510,6 @@ function assertExplicitGraphIrisAllowed(sparql: string, allowedGraphs: string[])
       );
     }
   }
-}
-
-function collectPrefixDeclarations(sparql: string): Map<string, string> {
-  const prefixes = new Map<string, string>();
-  const n = sparql.length;
-  let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'PREFIX')) {
-        const prefixStart = skipSparqlSpaceAndLineComments(sparql, j);
-        const prefix = readSparqlPrefixName(sparql, prefixStart);
-        if (!prefix || prefix.local.length > 0) {
-          i = j;
-          continue;
-        }
-        const iriStart = skipSparqlSpaceAndLineComments(sparql, prefixStart + prefix.length);
-        const iriEnd = skipSparqlIriRef(sparql, iriStart);
-        if (iriEnd) {
-          prefixes.set(prefix.prefix, sparql.slice(iriStart + 1, iriEnd - 1));
-          i = iriEnd;
-          continue;
-        }
-      }
-      i = j;
-      continue;
-    }
-    i++;
-  }
-
-  return prefixes;
-}
-
-interface SparqlPrefixName {
-  prefix: string;
-  local: string;
-  length: number;
-}
-
-function readSparqlPrefixName(sparql: string, start: number): SparqlPrefixName | null {
-  let colon = start;
-  while (colon < sparql.length && isSparqlPrefixLabelChar(sparql[colon])) colon++;
-  if (sparql[colon] !== ':') return null;
-
-  let end = colon + 1;
-  while (end < sparql.length && isSparqlPrefixedLocalChar(sparql[end])) end++;
-
-  return {
-    prefix: sparql.slice(start, colon),
-    local: sparql.slice(colon + 1, end),
-    length: end - start,
-  };
-}
-
-function isSparqlPrefixLabelChar(ch: string | undefined): ch is string {
-  return !!ch && (
-    (ch >= 'A' && ch <= 'Z') ||
-    (ch >= 'a' && ch <= 'z') ||
-    (ch >= '0' && ch <= '9') ||
-    ch === '_' ||
-    ch === '-'
-  );
-}
-
-function isSparqlPrefixedLocalChar(ch: string | undefined): ch is string {
-  return !!ch && !/\s/.test(ch) && ch !== '{' && ch !== '}' && ch !== '(' && ch !== ')' && ch !== ';' && ch !== ',';
-}
-
-function resolveSparqlPrefixedName(
-  prefixedName: SparqlPrefixName,
-  prefixes: Map<string, string>,
-): string | null {
-  const base = prefixes.get(prefixedName.prefix);
-  if (base === undefined) return null;
-  return `${base}${prefixedName.local}`;
 }
 
 interface GraphTarget {
@@ -1518,10 +1579,26 @@ function constrainGraphVariablesToAllowedSet(sparql: string, allowedGraphs: stri
   assertGraphVariablesAreTopLevel(sparql, braceStart);
   assertNoTopLevelDefaultGraphPatternsWithGraphVariables(sparql, braceStart);
 
+  const allowed = new Set(allowedGraphs);
+  const variablesNeedingConstraint = graphVariables.filter((variable) => {
+    // A top-level `VALUES ?g { <g1> ... }` already constrains every use of
+    // `GRAPH ?g` in this group. When its values are all inside the DKG
+    // allow-list, injecting the complete allow-list again is redundant and can
+    // be catastrophic at scale: the Blackbox VM reader supplied five exact
+    // partitions, while DKG added the complete 128-graph allow-list and turned a ~3 KB
+    // query into the stable 24,051-byte planner stall from issue #1989.
+    //
+    // If the VALUES shape is dynamic/unsupported or contains an out-of-scope
+    // IRI, retain the existing intersection rewrite. This preserves the
+    // fail-closed behavior without broadening access.
+    return !callerGraphValuesAreAuthorized(sparql, braceStart, variable, allowed);
+  });
+  if (variablesNeedingConstraint.length === 0) return sparql;
+
   const values = allowedGraphs
     .map((g) => `<${assertSafeIri(g)}>`)
     .join(' ');
-  const constraints = graphVariables
+  const constraints = variablesNeedingConstraint
     .map((variable) => `VALUES ${variable} { ${values} }`)
     .join(' ');
 
@@ -2159,41 +2236,7 @@ function isAsciiDigitChar(ch: string | undefined): ch is string {
  * in one place.
  */
 export function skipSparqlStringLiteral(src: string, i: number): number {
-  const n = src.length;
-  if (i >= n) return i;
-  const ch = src[i];
-  if (ch !== '"' && ch !== "'") return i;
-  // Long-form (triple-quoted) literal? Lookahead must match `ch ch ch`.
-  if (i + 2 < n && src[i + 1] === ch && src[i + 2] === ch) {
-    let j = i + 3;
-    while (j < n) {
-      // SPARQL 1.1 long-string grammar (§19.8 STRING_LITERAL_LONG*) allows
-      // `\<x>` style ECHAR escapes — skip the escaped byte so a `\\"` or
-      // a `\\'` does not prematurely terminate. Between escapes, look for
-      // the triple-quote terminator.
-      if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
-      if (
-        src[j] === ch &&
-        j + 2 < n &&
-        src[j + 1] === ch &&
-        src[j + 2] === ch
-      ) {
-        return j + 3;
-      }
-      j++;
-    }
-    return n;
-  }
-  // Short-form (single-line) literal. SPARQL 1.1 STRING_LITERAL1/2 forbid
-  // unescaped newlines, but we still defensively bail on EOL just like
-  // the previous helpers did.
-  let j = i + 1;
-  while (j < n) {
-    if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
-    if (src[j] === ch) { return j + 1; }
-    j++;
-  }
-  return j;
+  return scanSparqlStringLiteral(src, i);
 }
 
 /**
