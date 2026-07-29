@@ -1,14 +1,19 @@
 // Wires up the `dkg integration ...` subcommand tree on a Commander program.
 //
 // Exposed:
-//   dkg integration list          - enumerate entries in the registry
-//   dkg integration info <slug>   - show one entry
+//   dkg integration list             - browse the registry
+//   dkg integration search [keyword] - the same view, keyword-filtered
+//   dkg integration installed        - what is present on THIS machine
+//   dkg integration info <slug>      - show one entry
 //   dkg integration install <slug> [--allow-community] [--dry-run]
 //
-// Only install kinds currently in the registry (cli, mcp) are implemented.
-// Other kinds print an explicit "not implemented in this CLI version" error
-// pointing at the entry's repo and registry page so users can follow manual
-// install instructions.
+// Automation by install kind: `cli` and `service` install automatically — the
+// latter only for runtime `npm-global`, and only when the entry carries
+// npmGlobal.package/version, since the schema requires neither. `mcp` renders a
+// config block for the user to paste. `manual` prints the entry's docs link.
+// Everything else, including npm-global services without package metadata,
+// exits cleanly pointing at the integration's own instructions rather than
+// failing generically.
 
 import type { Command } from 'commander';
 import { detectInstalled } from './detect-installed.js';
