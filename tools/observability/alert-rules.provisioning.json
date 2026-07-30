@@ -22,7 +22,7 @@
   "notificationTemplates": [
     {
       "name": "dkg-readable",
-      "template": "{{ define \"dkg.title\" }}{{ end }}\n{{ define \"dkg.incident_link\" -}}\n{{- $from := .StartsAt.Add -3600000000000 -}}\n<{{ reReplaceAll \"^https?://localhost:3000\" \"http://100.81.85.62:3000\" .PanelURL }}&from={{ $from.UnixMilli }}&to={{ if eq .Status \"resolved\" }}{{ .EndsAt.UnixMilli }}{{ else }}now{{ end }}{{ with .Annotations.incident_node_label }}&var-node={{ index $.Labels . | urlquery }}{{ end }}{{ with .Annotations.incident_level }}&var-level={{ . | urlquery }}{{ end }}{{ with .Annotations.incident_search }}&var-search={{ . | urlquery }}{{ end }}|Open exact incident>\n{{- end }}\n{{ define \"dkg.body\" -}}\n{{- if .Alerts.Firing -}}\n🚨 *{{ len .Alerts.Firing }} active DKG {{ if eq (len .Alerts.Firing) 1 }}incident{{ else }}incidents{{ end }}*\n{{- range .Alerts.Firing }}\n{{ if eq .Labels.priority \"P1\" }}🔴{{ else if eq .Labels.priority \"P2\" }}🟠{{ else if eq .Labels.priority \"P3\" }}🟡{{ else }}🔵{{ end }} *[{{ if eq .Labels.priority \"P1\" }}P1 — CRITICAL{{ else if eq .Labels.priority \"P2\" }}P2 — ACTION{{ else if eq .Labels.priority \"P3\" }}P3 — WATCH{{ else }}TEST{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\n{{ with index .Labels \"deployment_environment\" }}*Environment:* {{ . }}\n{{ end }}{{ with .Annotations.what_happened }}*What happened:* {{ . }}\n{{ end }}{{ with .Annotations.affected }}*Affected:* {{ . }}\n{{ end }}{{ with .Annotations.react }}*React:* {{ . }}\n{{ end }}{{ with .Annotations.check_first }}*Check first:* {{ . }}\n{{ end }}{{ with .Annotations.evidence }}*Evidence:* {{ . }}\n{{ end }}*Link:* {{ template \"dkg.incident_link\" . }}\n{{- end -}}\n{{- end -}}\n{{- if .Alerts.Resolved -}}\n✅ *{{ len .Alerts.Resolved }} recovered DKG {{ if eq (len .Alerts.Resolved) 1 }}incident{{ else }}incidents{{ end }}*\n{{- range .Alerts.Resolved }}\n*[RECOVERED][{{ with .Labels.priority }}{{ . }}{{ else }}DKG{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\nThe alert is no longer firing. The issue lasted {{ .EndsAt.Sub .StartsAt }}. No immediate action is required.\n*Link:* {{ template \"dkg.incident_link\" . }}\n{{- end -}}\n{{- end -}}\n{{- end }}"
+      "template": "{{ define \"dkg.title\" }}{{ end }}\n{{ define \"dkg.incident_link\" -}}\n{{- $from := .StartsAt.Add -3600000000000 -}}\n<{{ reReplaceAll \"^https?://localhost:3000\" \"http://100.81.85.62:3000\" .PanelURL }}&from={{ $from.UnixMilli }}&to={{ if eq .Status \"resolved\" }}{{ .EndsAt.UnixMilli }}{{ else }}now{{ end }}{{ with .Annotations.incident_node_label }}&var-node={{ index $.Labels . | urlquery }}{{ end }}{{ with .Annotations.incident_level }}&var-level={{ . | urlquery }}{{ end }}{{ with .Annotations.incident_search }}&var-search={{ . | urlquery }}{{ end }}|Open exact incident>\n{{- end }}\n{{ define \"dkg.body\" -}}\n{{- if .Alerts.Firing -}}\n🚨 *{{ len .Alerts.Firing }} active DKG {{ if eq (len .Alerts.Firing) 1 }}incident{{ else }}incidents{{ end }}*\n{{- range .Alerts.Firing }}\n{{ if eq .Labels.priority \"P1\" }}🔴{{ else if eq .Labels.priority \"P2\" }}🟠{{ else if eq .Labels.priority \"P3\" }}🟡{{ else }}🔵{{ end }} *[{{ if eq .Labels.priority \"P1\" }}P1 — CRITICAL{{ else if eq .Labels.priority \"P2\" }}P2 — ACTION{{ else if eq .Labels.priority \"P3\" }}P3 — WATCH{{ else }}TEST{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\n{{ with index .Labels \"deployment_environment\" }}*Environment:* {{ . }}\n{{ end }}{{ with .Annotations.what_happened }}*What happened:* {{ . }}\n{{ end }}{{ with .Annotations.affected }}*Affected:* {{ . }}\n{{ end }}{{ with .Annotations.react }}*React:* {{ . }}\n{{ end }}{{ with .Annotations.check_first }}*Check first:* {{ . }}\n{{ end }}{{ with .Annotations.evidence }}*Evidence:* {{ . }}\n{{ end }}*Link:* {{ template \"dkg.incident_link\" . }}\n{{- end -}}\n{{- end -}}\n{{- if .Alerts.Resolved -}}\n✅ *{{ len .Alerts.Resolved }} recovered DKG {{ if eq (len .Alerts.Resolved) 1 }}incident{{ else }}incidents{{ end }}*\n{{- range .Alerts.Resolved }}\n*[RECOVERED][{{ with .Labels.priority }}{{ . }}{{ else }}DKG{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*\nThe alert is no longer firing. No immediate action is required.\n*Link:* {{ template \"dkg.incident_link\" . }}\n{{- end -}}\n{{- end -}}\n{{- end }}"
     }
   ],
   "contactPoints": [
@@ -415,7 +415,7 @@
         "affected": "Random Sampling work on this node is being delayed.",
         "react": "Yes — investigate this soon.",
         "check_first": "Check Blazegraph health and the storage scheduler queue.",
-        "evidence": "{{ printf \"%.0f\" $values.B }} storage timeouts in 10 minutes; alert threshold is 20.",
+        "evidence": "{{ printf \"%.0f\" $values.B.Value }} storage timeouts in 10 minutes; alert threshold is 20.",
         "__dashboardUid__": "dkg-node-logs",
         "__panelId__": "1",
         "incident_node_label": "service_instance_id",
@@ -503,7 +503,7 @@
         "affected": "No service failure is confirmed, but provider costs may increase.",
         "react": "No immediate action is required; review it in the daily summary.",
         "check_first": "Check which blockchain operation is generating the requests.",
-        "evidence": "{{ printf \"%.0f\" $values.B }} requests in the last hour; watch level is 8,000.",
+        "evidence": "{{ printf \"%.0f\" $values.B.Value }} requests in the last hour; watch level is 8,000.",
         "__dashboardUid__": "dkg-node-logs",
         "__panelId__": "3",
         "incident_node_label": "service_instance_id"
@@ -590,7 +590,7 @@
         "affected": "Grafana may show incomplete information, but DKG nodes may still be working.",
         "react": "Yes — investigate the monitoring pipeline.",
         "check_first": "Check collector errors and its connection to Loki.",
-        "evidence": "{{ humanize $values.B }} log records per second failed to export during the last 10 minutes.",
+        "evidence": "{{ humanize $values.B.Value }} log records per second failed to export during the last 10 minutes.",
         "__dashboardUid__": "dkg-node-metrics",
         "__panelId__": "18"
       }
@@ -676,7 +676,7 @@
         "affected": "DKG logs may soon be lost. The nodes themselves may still be working.",
         "react": "Yes — check the monitoring pipeline immediately.",
         "check_first": "Check the collector, Loki connection and available storage.",
-        "evidence": "Collector queue is {{ humanizePercentage $values.B }} full; critical level is 80%.",
+        "evidence": "Collector queue is {{ humanizePercentage $values.B.Value }} full; critical level is 80%.",
         "__dashboardUid__": "dkg-node-metrics",
         "__panelId__": "19"
       }
@@ -762,7 +762,7 @@
         "affected": "Publishing through node {{ $labels.instance }} is unreliable.",
         "react": "Yes — check this immediately.",
         "check_first": "Check failed transactions, node balance and chain RPC connectivity.",
-        "evidence": "{{ printf \"%.1f\" $values.B }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.",
+        "evidence": "{{ printf \"%.1f\" $values.B.Value }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.",
         "__dashboardUid__": "dkg-node-metrics",
         "__panelId__": "3",
         "incident_node_label": "instance"
@@ -849,7 +849,7 @@
         "affected": "Publish finalization on this node may be delayed or fail.",
         "react": "Yes — investigate this soon.",
         "check_first": "Check connectivity and ACK responses from the selected nodes.",
-        "evidence": "{{ printf \"%.0f\" $values.B }} ACK quorum failures in 15 minutes; alert threshold is 2.",
+        "evidence": "{{ printf \"%.0f\" $values.B.Value }} ACK quorum failures in 15 minutes; alert threshold is 2.",
         "__dashboardUid__": "dkg-node-metrics",
         "__panelId__": "5",
         "incident_node_label": "instance"
@@ -936,7 +936,7 @@
         "affected": "Blockchain operations on this node cannot continue.",
         "react": "Yes — check this immediately.",
         "check_first": "Test the configured RPC endpoints and provider limits.",
-        "evidence": "{{ printf \"%.0f\" $values.B }} exhausted-provider event(s) in the last 5 minutes.",
+        "evidence": "{{ printf \"%.0f\" $values.B.Value }} exhausted-provider event(s) in the last 5 minutes.",
         "__dashboardUid__": "dkg-node-metrics",
         "__panelId__": "13",
         "incident_node_label": "instance"
@@ -1023,7 +1023,7 @@
         "affected": "Operations on this node may be unreliable.",
         "react": "Yes — investigate this soon.",
         "check_first": "Open the failed traces and identify the shared failing step.",
-        "evidence": "{{ printf \"%.1f\" $values.B }}% of at least 20 traces failed in 15 minutes; alert level is 10%.",
+        "evidence": "{{ printf \"%.1f\" $values.B.Value }}% of at least 20 traces failed in 15 minutes; alert level is 10%.",
         "__dashboardUid__": "dkg-node-traces",
         "__panelId__": "3",
         "incident_node_label": "service_instance_id"

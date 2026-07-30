@@ -52,6 +52,11 @@ test('every rule supplies the complete human response contract without ownership
       `${spec.id} contains a retired broad link`,
     );
     assert.match(spec.annotations.react, /Yes|No immediate/i, `${spec.id} react answer is ambiguous`);
+    assert.doesNotMatch(
+      spec.annotations.evidence,
+      /\$values\.B(?!\.Value)/,
+      `${spec.id} formats the Grafana expression object instead of its numeric Value`,
+    );
     assert.match(spec.annotations.__dashboardUid__, /^dkg-/);
     assert.match(spec.annotations.__panelId__, /^[1-9][0-9]*$/);
   }
@@ -183,14 +188,13 @@ test('Slack groups related firing and recovery alerts with exact incident links'
       },
     ],
     resolved: [
-      { ...common, duration: '18m0s' },
+      common,
       {
         ...common,
         annotations: {
           ...annotations,
           slack_title: 'RPC providers recovered',
         },
-        duration: '7m0s',
       },
     ],
   });
@@ -215,8 +219,8 @@ test('Slack groups related firing and recovery alerts with exact incident links'
   assert.match(grouped, /var-node=Trace\+Labs\+Node\+7/);
   assert.match(grouped, /var-level=ERROR/);
   assert.match(grouped, /var-search=Store\+scheduler%7CBlazegraph\+operation/);
-  assert.match(grouped, /lasted 18m0s/);
   assert.match(grouped, /No immediate action is required/);
+  assert.doesNotMatch(grouped, /issue lasted|lasted 0s/i);
   assert.doesNotMatch(
     grouped,
     /localhost|owner|runbook|Open dashboard|Open logs/i,
@@ -248,6 +252,7 @@ test('Grafana template uses grouped exact links and avoids retired wording', () 
   assert.match(DKG_NOTIFICATION_TEMPLATE, /\.EndsAt\.UnixMilli/);
   assert.match(DKG_NOTIFICATION_TEMPLATE, /urlquery/);
   assert.match(DKG_NOTIFICATION_TEMPLATE, /Open exact incident/);
+  assert.doesNotMatch(DKG_NOTIFICATION_TEMPLATE, /\.EndsAt\.Sub \.StartsAt/);
   assert.doesNotMatch(
     DKG_NOTIFICATION_TEMPLATE,
     /node\(s\) affected|Who owns|runbook_url|dashboard_url|logs_url|Open dashboard|Open logs|Runbook/i,

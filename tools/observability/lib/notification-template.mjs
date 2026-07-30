@@ -33,7 +33,7 @@ export const DKG_NOTIFICATION_TEMPLATE = String.raw`{{ define "dkg.title" }}{{ e
 ✅ *{{ len .Alerts.Resolved }} recovered DKG {{ if eq (len .Alerts.Resolved) 1 }}incident{{ else }}incidents{{ end }}*
 {{- range .Alerts.Resolved }}
 *[RECOVERED][{{ with .Labels.priority }}{{ . }}{{ else }}DKG{{ end }}] {{ with .Annotations.slack_title }}{{ . }}{{ else }}{{ .Labels.alertname }}{{ end }}*
-The alert is no longer firing. The issue lasted {{ .EndsAt.Sub .StartsAt }}. No immediate action is required.
+The alert is no longer firing. No immediate action is required.
 *Link:* {{ template "dkg.incident_link" . }}
 {{- end -}}
 {{- end -}}
@@ -82,7 +82,6 @@ const renderAlertPreview = ({
   status,
   labels,
   annotations,
-  duration = '18m0s',
   panelUrl,
   startsAt,
   endsAt,
@@ -102,7 +101,7 @@ const renderAlertPreview = ({
   if (status === 'resolved') {
     return [
       `*[RECOVERED][${priority}] ${title}*`,
-      `The alert is no longer firing. The issue lasted ${duration}. No immediate action is required.`,
+      'The alert is no longer firing. No immediate action is required.',
       `*Link:* ${link}`,
     ].join('\n');
   }

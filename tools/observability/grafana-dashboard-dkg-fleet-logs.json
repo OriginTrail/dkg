@@ -92,7 +92,7 @@
     },
     {
       "id": 2,
-      "title": "Log volume per node",
+      "title": "Per-node log heartbeat (last 2m; missing node = absent)",
       "gridPos": {
         "h": 9,
         "w": 18,
@@ -103,10 +103,23 @@
         "type": "loki",
         "uid": "${loki}"
       },
-      "type": "timeseries",
+      "type": "bargauge",
+      "description": "Every expected node should appear here. A missing node has not sent any logs in the last two minutes.",
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       },
@@ -117,7 +130,7 @@
             "uid": "${loki}"
           },
           "refId": "A",
-          "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} [$__auto]))",
+          "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} [2m]))",
           "legendFormat": "{{service_instance_id}}"
         }
       ]

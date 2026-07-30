@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
@@ -35,6 +36,8 @@ import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
+const MAX_BLAZEGRAPH_ERROR_RESPONSE_BYTES = 64 * 1024;
+const MAX_BLAZEGRAPH_ERROR_SUMMARY_CHARS = 240;
 
 export interface BlazegraphStoreOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
@@ -71,6 +74,42 @@ function resolveOperationTimeout(configured: number | undefined): number {
 function abortError(signal: AbortSignal): Error {
   const reason = signal.reason;
   return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+function hashSparqlUpdate(update: string): string {
+  return createHash('sha256').update(update).digest('hex').slice(0, 16);
+}
+
+/**
+ * Blazegraph often echoes the submitted SPARQL update before the useful Java
+ * exception. Never put that RDF/query fragment into node logs: it is noisy,
+ * may contain published content, and makes otherwise identical failures look
+ * unique. Prefer the final exception line; keep a short plain response only
+ * when it is clearly not an echoed update.
+ */
+function summarizeBlazegraphUpdateFailureBody(text: string): string | undefined {
+  const normalized = text.replaceAll('\u0000', '').trim();
+  if (!normalized) return undefined;
+
+  const exceptionLines = normalized.match(
+    /(?:Caused by:\s*)?[A-Za-z_$][\w.$]*(?:Exception|Error):[^\r\n]*/g,
+  );
+  const exception = exceptionLines?.at(-1);
+  if (exception) {
+    return exception
+      .replace(/^Caused by:\s*/, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, MAX_BLAZEGRAPH_ERROR_SUMMARY_CHARS);
+  }
+
+  if (
+    /SPARQL-UPDATE:\s*updateStr=/i.test(normalized) ||
+    /\b(?:DROP|INSERT|DELETE|MOVE)\s+(?:SILENT\s+)?(?:GRAPH|DATA|WHERE)\b/i.test(normalized)
+  ) {
+    return undefined;
+  }
+
+  return normalized.replace(/\s+/g, ' ').slice(0, MAX_BLAZEGRAPH_ERROR_SUMMARY_CHARS);
 }
 
 function createStoreOperationDeadline(
@@ -581,8 +620,23 @@ export class BlazegraphStore implements TripleStore {
         signal: deadline.signal,
       }));
       if (!res.ok) {
-        const text = await deadline.waitFor(res.text().catch(() => ''));
-        throw new Error(`Blazegraph update failed (${res.status}): ${text.slice(0, 300)}`);
+        // Test doubles and a few fetch-compatible runtimes expose text()
+        // without a body stream. Keep that compatibility while bounding real
+        // Response streams so an error page cannot become another memory spike.
+        const responseText = res.body === undefined
+          ? res.text()
+          : readResponseTextBounded(res, MAX_BLAZEGRAPH_ERROR_RESPONSE_BYTES);
+        const text = await deadline.waitFor(
+          responseText.catch(() => ''),
+        );
+        const summary = summarizeBlazegraphUpdateFailureBody(text);
+        const updateBytes = Buffer.byteLength(update, 'utf8');
+        const updateHash = hashSparqlUpdate(update);
+        throw new Error(
+          `Blazegraph update failed (${res.status})` +
+          `${summary ? `: ${summary}` : ': backend response was empty, echoed the update, or exceeded the safe log limit'}` +
+          `; updateBytes=${updateBytes}; updateHash=${updateHash}`,
+        );
       }
     });
   }

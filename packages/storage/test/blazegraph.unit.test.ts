@@ -682,7 +682,41 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const s = new BlazegraphStore(baseUrl);
     await expect(
       s.update('DELETE WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }'),
-    ).rejects.toThrow(/Blazegraph update failed \(500\)/);
+    ).rejects.toThrow(
+      /Blazegraph update failed \(500\): boom; updateBytes=\d+; updateHash=[a-f0-9]{16}/,
+    );
+  });
+
+  it('update errors omit echoed RDF while retaining a compact backend cause', async () => {
+    setFetch(async () => new Response(
+      [
+        'SPARQL-UPDATE: updateStr=INSERT DATA {',
+        '  GRAPH <urn:sensitive:graph> { <urn:sensitive:subject> <urn:p> "private body" . }',
+        '}',
+        'Caused by: java.util.concurrent.TimeoutException: journal write timed out',
+      ].join('\n'),
+      { status: 500 },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+
+    let failure: unknown;
+    try {
+      await s.update(
+        'INSERT DATA { GRAPH <urn:sensitive:graph> { <urn:sensitive:subject> <urn:p> "private body" . } }',
+      );
+    } catch (err) {
+      failure = err;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain(
+      'java.util.concurrent.TimeoutException: journal write timed out',
+    );
+    expect(message).toMatch(/updateBytes=\d+; updateHash=[a-f0-9]{16}$/);
+    expect(message).not.toContain('SPARQL-UPDATE');
+    expect(message).not.toContain('urn:sensitive');
+    expect(message).not.toContain('private body');
   });
 
   it('delete is a no-op for empty quad list', async () => {

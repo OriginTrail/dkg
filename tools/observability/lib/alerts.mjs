@@ -230,7 +230,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'Random Sampling work on this node is being delayed.',
         react: 'Yes — investigate this soon.',
         check: 'Check Blazegraph health and the storage scheduler queue.',
-        evidence: '{{ printf "%.0f" $values.B }} storage timeouts in 10 minutes; alert threshold is 20.',
+        evidence: '{{ printf "%.0f" $values.B.Value }} storage timeouts in 10 minutes; alert threshold is 20.',
         incident: {
           ...INCIDENT_PANELS.nodeLogs,
           nodeLabel: 'service_instance_id',
@@ -264,7 +264,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'No service failure is confirmed, but provider costs may increase.',
         react: 'No immediate action is required; review it in the daily summary.',
         check: 'Check which blockchain operation is generating the requests.',
-        evidence: '{{ printf "%.0f" $values.B }} requests in the last hour; watch level is 8,000.',
+        evidence: '{{ printf "%.0f" $values.B.Value }} requests in the last hour; watch level is 8,000.',
         incident: {
           ...INCIDENT_PANELS.nodeRpcUsage,
           nodeLabel: 'service_instance_id',
@@ -290,7 +290,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'Grafana may show incomplete information, but DKG nodes may still be working.',
         react: 'Yes — investigate the monitoring pipeline.',
         check: 'Check collector errors and its connection to Loki.',
-        evidence: '{{ humanize $values.B }} log records per second failed to export during the last 10 minutes.',
+        evidence: '{{ humanize $values.B.Value }} log records per second failed to export during the last 10 minutes.',
         incident: INCIDENT_PANELS.collectorExport,
       }),
     },
@@ -313,7 +313,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'DKG logs may soon be lost. The nodes themselves may still be working.',
         react: 'Yes — check the monitoring pipeline immediately.',
         check: 'Check the collector, Loki connection and available storage.',
-        evidence: 'Collector queue is {{ humanizePercentage $values.B }} full; critical level is 80%.',
+        evidence: 'Collector queue is {{ humanizePercentage $values.B.Value }} full; critical level is 80%.',
         incident: INCIDENT_PANELS.collectorQueue,
       }),
     },
@@ -341,7 +341,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: `Publishing through node {{ $labels.${PROM_NODE_LABEL} }} is unreliable.`,
         react: 'Yes — check this immediately.',
         check: 'Check failed transactions, node balance and chain RPC connectivity.',
-        evidence: '{{ printf "%.1f" $values.B }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.',
+        evidence: '{{ printf "%.1f" $values.B.Value }}% failed in 15 minutes; minimum 5 publishes and alert level 10%.',
         incident: {
           ...INCIDENT_PANELS.publishOutcomes,
           nodeLabel: PROM_NODE_LABEL,
@@ -369,7 +369,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'Publish finalization on this node may be delayed or fail.',
         react: 'Yes — investigate this soon.',
         check: 'Check connectivity and ACK responses from the selected nodes.',
-        evidence: '{{ printf "%.0f" $values.B }} ACK quorum failures in 15 minutes; alert threshold is 2.',
+        evidence: '{{ printf "%.0f" $values.B.Value }} ACK quorum failures in 15 minutes; alert threshold is 2.',
         incident: {
           ...INCIDENT_PANELS.ackQuorum,
           nodeLabel: PROM_NODE_LABEL,
@@ -397,7 +397,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'Blockchain operations on this node cannot continue.',
         react: 'Yes — check this immediately.',
         check: 'Test the configured RPC endpoints and provider limits.',
-        evidence: '{{ printf "%.0f" $values.B }} exhausted-provider event(s) in the last 5 minutes.',
+        evidence: '{{ printf "%.0f" $values.B.Value }} exhausted-provider event(s) in the last 5 minutes.',
         incident: {
           ...INCIDENT_PANELS.rpcFailover,
           nodeLabel: PROM_NODE_LABEL,
@@ -426,7 +426,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
         affected: 'Operations on this node may be unreliable.',
         react: 'Yes — investigate this soon.',
         check: 'Open the failed traces and identify the shared failing step.',
-        evidence: '{{ printf "%.1f" $values.B }}% of at least 20 traces failed in 15 minutes; alert level is 10%.',
+        evidence: '{{ printf "%.1f" $values.B.Value }}% of at least 20 traces failed in 15 minutes; alert level is 10%.',
         incident: {
           ...INCIDENT_PANELS.traceErrors,
           nodeLabel: 'service_instance_id',

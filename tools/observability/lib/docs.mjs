@@ -62,8 +62,8 @@ never in this repository.
   Slack. Rules classify the actual event or operational symptom.
 - Every firing message answers: what happened, what is affected, whether to
   react, what to check first, and the evidence. Its single incident link opens
-  the relevant panel, node filters and alert time range. Recovery includes the
-  incident duration and the same exact link.
+  the relevant panel, node filters and alert time range. Recovery confirms that
+  the alert cleared and keeps the same exact link.
 
 ## Routing model
 

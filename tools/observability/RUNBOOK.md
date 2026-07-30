@@ -58,8 +58,8 @@ otherwise Grafana will correctly treat the old name as missing.
 ### Recovery and duplicates
 
 - A recovery notification means the alert condition is no longer true; related
-  recoveries are grouped and each includes its incident duration and exact
-  incident link.
+  recoveries are grouped and each confirms that the alert cleared with its
+  exact incident link.
 - P1/P2 repeats are every 4 hours only while still unresolved. P3 requires a
   sustained 24-hour condition before its grouped daily notification.
 - During a total log blackout, the node-silent rule has a fleet-presence guard,
