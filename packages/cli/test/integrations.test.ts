@@ -950,12 +950,15 @@ describe('integration commands (Commander layer, real wire)', () => {
   // cannot tell you whether the dispatcher picked the right one or forwarded
   // its options. Exit codes are captured rather than allowed to run, or a
   // process.exit would take the test runner with it.
-  async function runInstall(argv: string[]): Promise<{ out: string; err: string; exit: number | null }> {
+  async function runInstall(
+    argv: string[],
+  ): Promise<{ out: string; err: string; exit: number | null; exits: number[] }> {
     const program = new Command();
     program.exitOverride();
     registerIntegrationCommands(program);
     const out: string[] = [];
     const err: string[] = [];
+    const exits: number[] = [];
     let exit: number | null = null;
     const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
       out.push(a.map(String).join(' '));
@@ -967,7 +970,18 @@ describe('integration commands (Commander layer, real wire)', () => {
     // try/catch, which then calls process.exit(1) — turning every asserted exit
     // code into 1 and hiding which branch actually ran. Only the FIRST code is
     // kept for the same reason: it is the one the real process would have used.
+    // The spy RECORDS rather than throws, because throwing is caught by the
+    // command's own try/catch and converted into exit(1) — which collapses
+    // every asserted exit code to 1 and hides which branch ran.
+    //
+    // The cost of not throwing is that execution CONTINUES past a simulated
+    // exit, so a missing `break` would let a branch fall through into the
+    // generic failure path while `exit` still reports the first code. Every
+    // code is therefore recorded: `exits` having more than one entry means the
+    // real process would already have terminated, and the test is observing
+    // code that could never run.
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      exits.push(code ?? 0);
       if (exit === null) exit = code ?? 0;
       return undefined;
     }) as never);
@@ -978,7 +992,7 @@ describe('integration commands (Commander layer, real wire)', () => {
       errSpy.mockRestore();
       exitSpy.mockRestore();
     }
-    return { out: out.join('\n'), err: err.join('\n'), exit };
+    return { out: out.join('\n'), err: err.join('\n'), exit, exits };
   }
 
   it('`install <manual>` prints the docs link and does not exit non-zero', async () => {
@@ -1000,9 +1014,14 @@ describe('integration commands (Commander layer, real wire)', () => {
   // throw out of installService into the generic "install failed".
   it('`install` falls back gracefully for an npm-global service with no package metadata', async () => {
     const r = await runInstall(['integration', 'install', 'svc-bare']);
-    expect(r.exit).toBe(2);
     expect(r.err).toContain('no npmGlobal.package/version');
     expect(r.err).not.toMatch(/undefined/);
+    // Exactly one exit. Asserting only the FIRST code would still pass if the
+    // branch lost its `break` and fell through into installService, printing
+    // the graceful message and then the generic failure — the regression this
+    // test exists to catch.
+    expect(r.exits).toEqual([2]);
+    expect(r.err).not.toContain('Install failed');
   });
 
   // Making docker/binary services readable also made this branch their public
@@ -1011,7 +1030,7 @@ describe('integration commands (Commander layer, real wire)', () => {
   // runtime-not-automated message — and no helper test would notice.
   it('`install` gives a non-automated runtime the graceful path, not a generic failure', async () => {
     const r = await runInstall(['integration', 'install', 'svc-binary']);
-    expect(r.exit).toBe(2);
+    expect(r.exits).toEqual([2]);
     expect(r.err).toContain('binary');
     expect(r.err).toContain('not yet');
     // The generic catch-all path would say this instead.
