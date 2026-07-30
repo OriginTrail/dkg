@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2248,6 +2248,39 @@ describe('graph-scoped finalization handler', () => {
       queueBehindActiveWork: true,
     })).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  it('retries an explicit post-catchup cleanup after a transient scheduler timeout', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const originalQuery = store.query.bind(store);
+    let injectedBusyTimeout = false;
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (
+        !injectedBusyTimeout
+        && options?.source === 'agent.finalization.graphScopedSwmCleanup.discover'
+        && query.includes('SELECT ?scopeVersion ?kaUal ?assertionVersion')
+      ) {
+        injectedBusyTimeout = true;
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'background',
+          options.source,
+        );
+      }
+      return originalQuery(query, options);
+    });
+
+    await expect(handler.cleanupFinalizedGraphScopedSwmWhenIdle({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+      queueBehindActiveWork: true,
+    })).resolves.toBe(1);
+    expect(injectedBusyTimeout).toBe(true);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    querySpy.mockRestore();
   });
 
   it('repairs VM from the immutable operation snapshot after deferred SWM cleanup', async () => {

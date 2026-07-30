@@ -62,6 +62,8 @@ import {
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 const PROV_NS = 'http://www.w3.org/ns/prov#';
+const FINALIZED_SWM_CLEANUP_BUSY_RETRY_BUDGET_MS = 120_000;
+const FINALIZED_SWM_CLEANUP_BUSY_RETRY_DELAY_MS = 250;
 
 // Slow-query / canary tags for the finalization SWM slice (#1549). A healthy fleet
 // sees `.fallbackUnbounded` at ~0 relative to `.bounded`; a spike means the bound is
@@ -1642,7 +1644,31 @@ export class FinalizationHandler {
       priority: 'background',
       source: 'agent.finalization.graphScopedSwmCleanup.discover',
     };
-    const result = await this.store.query(
+    const busyRetryDeadline = input.queueBehindActiveWork
+      ? Date.now() + FINALIZED_SWM_CLEANUP_BUSY_RETRY_BUDGET_MS
+      : 0;
+    const runStoreOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
+      for (;;) {
+        try {
+          return await operation();
+        } catch (error) {
+          if (
+            !(error instanceof StoreSchedulerBusyError)
+            || !input.queueBehindActiveWork
+            || Date.now() >= busyRetryDeadline
+          ) {
+            throw error;
+          }
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, Math.min(
+              FINALIZED_SWM_CLEANUP_BUSY_RETRY_DELAY_MS,
+              Math.max(1, busyRetryDeadline - Date.now()),
+            ));
+          });
+        }
+      }
+    };
+    const result = await runStoreOperation(() => this.store.query(
       `SELECT DISTINCT ?head ?ual ?version ?root ?shareId ?subGraphName WHERE {
         GRAPH <${assertSafeIri(input.swmMetaGraph)}> {
           ?head <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root ;
@@ -1657,7 +1683,7 @@ export class FinalizationHandler {
         }
       } ORDER BY ?head LIMIT ${limit}`,
       background,
-    );
+    ));
     if (result.type !== 'bindings') return 0;
 
     let cleared = 0;
@@ -1698,16 +1724,19 @@ export class FinalizationHandler {
       const graphManager = new GraphManager(this.store);
       let expectedHead: KnowledgeAssetWorkspaceHead | undefined;
       try {
-        expectedHead = await resolveKnowledgeAssetWorkspaceHead({
+        expectedHead = await runStoreOperation(() => resolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager,
           contextGraphId: input.contextGraphId,
           kaUal: scope.ual,
           subGraphName,
           queryOptions: background,
-        });
+        }));
       } catch (error) {
-        if (error instanceof StoreSchedulerBusyError) break;
+        if (error instanceof StoreSchedulerBusyError) {
+          if (input.queueBehindActiveWork) throw error;
+          break;
+        }
         continue;
       }
       if (
@@ -1725,7 +1754,7 @@ export class FinalizationHandler {
       } catch {
         continue;
       }
-      const outcome = await this.clearMarkedFinalizedGraphScopedSwm({
+      const outcome = await runStoreOperation(() => this.clearMarkedFinalizedGraphScopedSwm({
         contextGraphId: input.contextGraphId,
         scope,
         expectedHead,
@@ -1733,7 +1762,7 @@ export class FinalizationHandler {
         privateMerkleRoot,
         subGraphName,
         ctx: createOperationContext('system'),
-      });
+      }));
       if (outcome === 'cleared' || outcome === 'absent') cleared += 1;
     }
     return cleared;
