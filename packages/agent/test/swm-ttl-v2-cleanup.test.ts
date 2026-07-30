@@ -10,7 +10,7 @@
  *      resolveKnowledgeAssetWorkspaceHead),
  *   3. the operation's public snapshot graph.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -236,4 +236,30 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
     expect(await graphTripleCount(store, assertionGraph)).toBe(0);
     expect(await graphTripleCount(store, seeded.snapshotGraph)).toBe(0);
   }, 60_000);
+
+  it('honors an explicit public owner/name context graph during finalized cleanup', async () => {
+    const cg = '0x1111111111111111111111111111111111111111/public-finalized-cleanup';
+    const cleanupFinalizedGraphScopedSwmWhenIdle = vi.fn().mockResolvedValue(0);
+    const handlerSpy = vi
+      .spyOn(node as unknown as { getOrCreateFinalizationHandler: () => unknown }, 'getOrCreateFinalizationHandler')
+      .mockReturnValue({ cleanupFinalizedGraphScopedSwmWhenIdle });
+
+    try {
+      await node.cleanupExpiredSharedMemory({
+        finalizedOnly: true,
+        contextGraphIds: [cg],
+        finalizedCleanupBudget: 4,
+        queueBehindActiveWork: true,
+      });
+    } finally {
+      handlerSpy.mockRestore();
+    }
+
+    expect(cleanupFinalizedGraphScopedSwmWhenIdle).toHaveBeenCalledWith({
+      contextGraphId: cg,
+      swmMetaGraph: contextGraphSharedMemoryMetaUri(cg),
+      maxCandidates: 4,
+      queueBehindActiveWork: true,
+    });
+  });
 });

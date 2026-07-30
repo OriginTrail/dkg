@@ -7609,11 +7609,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     try {
       const graphManager = new GraphManager(this.store);
-      const requestedContextGraphs = options?.contextGraphIds
-        ? new Set(options.contextGraphIds)
-        : undefined;
-      const contextGraphs = (await graphManager.listContextGraphs())
-        .filter((contextGraphId) => !requestedContextGraphs || requestedContextGraphs.has(contextGraphId));
+      // A deterministic caller already knows the exact CG IDs. Do not route
+      // those IDs through GraphManager.listContextGraphs(): that storage-level
+      // helper intentionally omits owner/name public IDs because it only
+      // recognizes legacy flat graph IDs.
+      const contextGraphs = options?.contextGraphIds
+        ? [...new Set(options.contextGraphIds)]
+        : await graphManager.listContextGraphs();
 
       for (const pid of contextGraphs) {
         let graphDeleted = 0;
