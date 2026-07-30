@@ -120,6 +120,59 @@ setInterval(() => {}, 60_000);
 }
 
 describe('SQLite finalization recovery store', () => {
+  it('lists only due live work in bounded oldest-first batches', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      let now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      await store.receive(received({ key: 'entry-1' }));
+      await store.receive(received({ key: 'entry-2' }));
+      await store.receive(received({ key: 'entry-3' }));
+      await store.recordAttempt('entry-1', 0, 'busy', 1_000);
+      await store.markVerified('entry-3', 0, evidence());
+      await store.transition('entry-3', 0, 'SETTLED');
+
+      await expect(store.listDue(16)).resolves.toMatchObject([
+        { key: 'entry-2', state: 'RECEIVED' },
+      ]);
+
+      now = 2_000;
+      await expect(store.listDue(16)).resolves.toMatchObject([
+        { key: 'entry-2', state: 'RECEIVED', attemptCount: 0 },
+        { key: 'entry-1', state: 'RECEIVED', attemptCount: 1 },
+      ]);
+      await expect(store.listDue(0)).resolves.toEqual([]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('lists a SETTLED receipt retry only after its persisted deadline', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      let now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      await store.receive(received());
+      await store.markVerified('entry-1', 0, evidence());
+      await store.transition('entry-1', 0, 'SETTLED');
+      await store.recordAttempt('entry-1', 0, 'receipt pending', 1_000);
+
+      await expect(store.listDue(16)).resolves.toEqual([]);
+      now = 2_000;
+      await expect(store.listDue(16)).resolves.toMatchObject([
+        { key: 'entry-1', state: 'SETTLED', lastError: 'receipt pending' },
+      ]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('durably transitions RECEIVED to VERIFIED to SETTLED across reopen', async () => {
     const directory = await temporaryDirectory();
     try {

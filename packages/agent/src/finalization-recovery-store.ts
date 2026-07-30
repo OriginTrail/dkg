@@ -113,6 +113,12 @@ export interface FinalizationRecoveryStore {
   clearSettledRetry(key: string, generation: number): Promise<void>;
   rejectSettled(key: string, generation: number, lastError: string): Promise<boolean>;
   isAttemptDue(entry: FinalizationRecoveryEntry): boolean;
+  /**
+   * Returns a bounded, oldest-first snapshot of entries whose persisted retry
+   * gate is open. Callers must still rely on generation-checked transitions:
+   * live gossip or reconciliation may update an entry after this read.
+   */
+  listDue(limit: number): Promise<FinalizationRecoveryEntry[]>;
   listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;

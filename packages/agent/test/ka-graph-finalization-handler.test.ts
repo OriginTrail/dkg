@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1209,6 +1209,83 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('autonomously drains a persisted busy finalization after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-worker-restart-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    let restarted: FinalizationHandler | undefined;
+    const query = store.query.bind(store);
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory, {
+        maxPerContextGraph: 1,
+      });
+      const pressured = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      let busyReads = 2;
+      store.query = async (sparql, options) => {
+        if (busyReads > 0) {
+          busyReads -= 1;
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'autonomous-finalization-recovery.query',
+          );
+        }
+        return query(sparql, options);
+      };
+
+      await pressured.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      expect(await inbox.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 1,
+        lastError: 'store scheduler remained busy',
+      }]);
+      expect(await inbox.health()).toMatchObject({
+        ready: false,
+        degradedReason: 'capacity-exhausted',
+      });
+
+      store.query = query;
+      await inbox.close();
+      inbox = await openSqliteFinalizationRecoveryStore(directory, {
+        maxPerContextGraph: 1,
+      });
+      restarted = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      restarted.startRecoveryWorker();
+
+      await vi.waitFor(async () => {
+        expect(await inbox!.list()).toMatchObject([{ state: 'SETTLED' }]);
+      });
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      const health = await inbox.health();
+      expect(health.ready).toBe(true);
+      expect(health).not.toHaveProperty('degradedReason');
+    } finally {
+      store.query = query;
+      await restarted?.stopRecoveryWorker();
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not mutate Oxigraph when the VERIFIED transaction cannot commit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -1233,6 +1310,7 @@ describe('graph-scoped finalization handler', () => {
         clearSettledRetry: inbox.clearSettledRetry.bind(inbox),
         rejectSettled: inbox.rejectSettled.bind(inbox),
         isAttemptDue: inbox.isAttemptDue.bind(inbox),
+        listDue: inbox.listDue.bind(inbox),
         listForKnowledgeAsset: inbox.listForKnowledgeAsset.bind(inbox),
         transition: inbox.transition.bind(inbox),
         recordAttempt: inbox.recordAttempt.bind(inbox),
@@ -1314,6 +1392,7 @@ describe('graph-scoped finalization handler', () => {
         clearSettledRetry: async () => {},
         rejectSettled: async () => false,
         isAttemptDue: () => true,
+        listDue: async () => [],
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
         recordAttempt: async () => {},

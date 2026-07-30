@@ -112,6 +112,99 @@ function recoveryMaterializer() {
 }
 
 describe('graph-scoped finalization recovery admission', () => {
+  it('autonomously settles a durable RECEIVED entry without a chain-cursor replay', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-worker-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      let applyCalls = 0;
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            applyCalls += 1;
+            return 'applied' as const;
+          },
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      expect(await store.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 0,
+      }]);
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(applyCalls).toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        attemptCount: 0,
+      }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('backs off a busy due entry before the autonomous worker retries it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-backoff-'));
+    try {
+      let now = 1_000;
+      let busy = true;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            if (busy) {
+              throw new StoreSchedulerBusyError(
+                'queue_wait_timeout',
+                'normal',
+                'finalization-recovery-worker',
+              );
+            }
+            return 'applied' as const;
+          },
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      const [deferred] = await store.list();
+      expect(deferred).toMatchObject({
+        state: 'VERIFIED',
+        attemptCount: 1,
+        lastError: 'replay store scheduler remained busy',
+      });
+      expect(deferred.nextAttemptAt).toBe(2_000);
+      await expect(recovery.processDueBatch(16)).resolves.toBe(0);
+
+      busy = false;
+      now = deferred.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('returns a typed parsed envelope for a valid singleton finalization', () => {
     expect(parseGraphScopedFinalization(message(), CONTEXT_GRAPH)).toMatchObject({
       ok: true,

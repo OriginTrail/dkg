@@ -79,6 +79,9 @@ import {
   type FinalizationRecoveryPreparedMaterialization,
   type FinalizationRecoveryReplayOutcome,
 } from './finalization-recovery.js';
+import {
+  FinalizationRecoveryWorker,
+} from './finalization-recovery-worker.js';
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
@@ -381,6 +384,7 @@ export class FinalizationHandler {
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+  private readonly recoveryWorker: FinalizationRecoveryWorker;
 
   constructor(
     store: TripleStore,
@@ -448,6 +452,21 @@ export class FinalizationHandler {
       },
       materializer,
     );
+    this.recoveryWorker = new FinalizationRecoveryWorker(
+      (limit) => this.recovery.processDueBatch(limit),
+      {
+        info: (message) => this.log.info(createOperationContext('system'), message),
+        warn: (message) => this.log.warn(createOperationContext('system'), message),
+      },
+    );
+  }
+
+  startRecoveryWorker(): void {
+    this.recoveryWorker.start();
+  }
+
+  stopRecoveryWorker(): Promise<void> {
+    return this.recoveryWorker.stop();
   }
 
   async handleFinalizationMessage(

@@ -422,6 +422,32 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return entry.nextAttemptAt === undefined || entry.nextAttemptAt <= this.#policy.now();
   }
 
+  async listDue(limit: number): Promise<FinalizationRecoveryEntry[]> {
+    if (this.#closed || this.#closing) return [];
+    if (!Number.isFinite(limit)) return [];
+    const boundedLimit = Math.min(
+      this.#policy.maxEntries,
+      Math.max(0, Math.trunc(limit)),
+    );
+    if (boundedLimit === 0) return [];
+    await this.#mutationTail;
+    if (this.#closed) return [];
+    const now = this.#policy.now();
+    return this.database.prepare(`
+      SELECT * FROM finalization_inbox_v1
+      WHERE (
+          state IN ('RECEIVED','VERIFIED','REORGED')
+          OR (
+            state = 'SETTLED'
+            AND (publisher_upgrade_pending = 1 OR next_attempt_at IS NOT NULL)
+          )
+        )
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+      ORDER BY COALESCE(next_attempt_at, updated_at), updated_at, key
+      LIMIT ?
+    `).all(now, boundedLimit).map(finalizationRecoveryRowToEntry);
+  }
+
   async listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;

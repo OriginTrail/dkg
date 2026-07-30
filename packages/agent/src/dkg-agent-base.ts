@@ -1664,6 +1664,7 @@ export class DKGAgentBase {
 
   /** Drain and checkpoint the inbox before releasing the broader persistence lifetime. */
   protected async closeFinalizationRecoveryStore(): Promise<void> {
+    await this.finalizationHandler?.stopRecoveryWorker();
     const store = this.finalizationRuntime.detachRecoveryStore();
     await store?.close();
   }
