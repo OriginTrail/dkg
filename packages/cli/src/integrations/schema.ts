@@ -102,6 +102,33 @@ export interface InstallManual {
   usageHint?: string;
 }
 
+/**
+ * THE definition of "an npm-global service this CLI can act on", returning the
+ * trimmed payload or null.
+ *
+ * Lives here rather than in the installer because three unrelated callers need
+ * it — the Commander dispatcher, the installer, and installed-detection — and
+ * every time it has existed in only one of them the others have drifted:
+ * the dispatcher once gated on truthiness while the installer trimmed (a
+ * whitespace package reached a generic failure), and detection once probed npm
+ * with the raw, untrimmed key (so a padded `" @acme/svc "` installed as
+ * `@acme/svc` and then reported itself not installed).
+ *
+ * Checked by TYPE, not truthiness: a non-string `package` is truthy and would
+ * otherwise reach the npm spec as `[object Object]@1.0.0`.
+ */
+export function resolveNpmGlobalService(
+  install: InstallSpec,
+): { package: string; version: string } | null {
+  if (install.kind !== 'service' || install.runtime !== 'npm-global') return null;
+  const n = install.npmGlobal;
+  if (typeof n?.package !== 'string' || typeof n.version !== 'string') return null;
+  const pkg = n.package.trim();
+  const version = n.version.trim();
+  if (!pkg || !version) return null;
+  return { package: pkg, version };
+}
+
 export interface IntegrationEntry {
   slug: string;
   name: string;

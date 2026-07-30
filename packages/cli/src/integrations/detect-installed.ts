@@ -28,7 +28,11 @@ import {
   type RegisteredMcpServer,
   type ServerKeyProbe,
 } from '../mcp-setup.js';
-import type { InstallMcp, IntegrationEntry } from './schema.js';
+import {
+  resolveNpmGlobalService,
+  type InstallMcp,
+  type IntegrationEntry,
+} from './schema.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -132,17 +136,26 @@ export function parseGlobalNpmList(stdout: string): Record<string, string> | nul
   }
 }
 
-/** The npm package an entry installs globally, if any. */
+/**
+ * The npm package an entry installs globally.
+ *
+ * `'unresolvable'` means the entry declares npm-global but carries no usable
+ * package metadata — the installer would refuse it, so detection must not
+ * report a definitive "not installed" as though it had looked. Detection has to
+ * use the SAME resolver the installer and dispatcher use: probing with the raw
+ * payload made a padded `" @acme/svc "` install as `@acme/svc` and then report
+ * itself not installed, because the lookup key kept the spaces.
+ */
 function globalNpmPackageFor(
   install: IntegrationEntry['install'],
-): { package: string; version: string } | null {
+): { package: string; version: string } | 'unresolvable' | null {
   if (install.kind === 'cli') {
     return { package: install.package, version: install.version };
   }
   // A service installed via npm-global lands in exactly the same place as a
   // cli install, so it is detectable the same way.
-  if (install.kind === 'service' && install.runtime === 'npm-global' && install.npmGlobal) {
-    return { package: install.npmGlobal.package, version: install.npmGlobal.version };
+  if (install.kind === 'service' && install.runtime === 'npm-global') {
+    return resolveNpmGlobalService(install) ?? 'unresolvable';
   }
   return null;
 }
@@ -155,7 +168,10 @@ export async function detectInstalled(
   entries: IntegrationEntry[],
   deps: DetectDeps = {},
 ): Promise<InstalledRow[]> {
-  const needsNpm = entries.some((e) => globalNpmPackageFor(e.install) !== null);
+  const needsNpm = entries.some((e) => {
+    const g = globalNpmPackageFor(e.install);
+    return g !== null && g !== 'unresolvable';
+  });
   const needsMcp = entries.some((e) => e.install.kind === 'mcp');
 
   const globals = needsNpm ? await (deps.listGlobalNpm ?? listGlobalNpmPackages)() : {};
@@ -186,6 +202,17 @@ export async function detectInstalled(
 
   return entries.map((e): InstalledRow => {
     const npmPkg = globalNpmPackageFor(e.install);
+    // Declares npm-global but carries no usable package/version. The installer
+    // refuses this entry, so probing npm with the raw payload and reporting
+    // 'not installed' would assert a check we never performed.
+    if (npmPkg === 'unresolvable') {
+      return {
+        slug: e.slug,
+        kind: e.install.kind,
+        state: 'unknown',
+        detail: 'declares npm-global but carries no usable package metadata',
+      };
+    }
     if (npmPkg) {
       // The probe failed, so we know nothing about this entry either way.
       // Reporting 'not installed' here would be a claim we cannot support.

@@ -18,7 +18,7 @@ import {
   type InstallRunner,
   type ProvenanceVerifier,
 } from './install-npm-global.js';
-import type { InstallService, IntegrationEntry } from './schema.js';
+import { resolveNpmGlobalService, type InstallService, type IntegrationEntry } from './schema.js';
 import type { ProvenanceCheckResult } from './verify-npm-provenance.js';
 
 export interface InstallServiceOptions {
@@ -28,6 +28,13 @@ export interface InstallServiceOptions {
   verifier?: ProvenanceVerifier;
   runner?: InstallRunner;
   logger?: (msg: string) => void;
+  /**
+   * The node the operator selected with `--api-url`. Rendered into the
+   * DKG_API_URL guidance: `installMcp` already honours this flag, so a service
+   * printing the hardcoded default would send an operator who passed
+   * `--api-url` to the wrong node while the same flag worked for mcp entries.
+   */
+  apiUrl?: string;
 }
 
 export interface InstallServiceResult {
@@ -43,33 +50,6 @@ type NpmGlobalService = InstallService & {
   runtime: 'npm-global';
   npmGlobal: NonNullable<InstallService['npmGlobal']>;
 };
-
-/**
- * THE definition of "an npm-global service this CLI can install", returning the
- * trimmed payload or null. Exported so the Commander dispatcher and this
- * installer share one predicate instead of two that agree by coincidence.
- *
- * They previously disagreed: the dispatcher gated on truthiness while this file
- * required non-empty strings after trimming, so a registry-valid
- * `{ package: '   ', version: '1.0.0' }` passed the dispatcher, threw in here,
- * and surfaced as a generic "Install failed" instead of the graceful
- * not-automatable message — the exact failure the dispatcher gate was added to
- * prevent, reachable through a gap between the two checks.
- *
- * Checked by TYPE, not truthiness: a non-string `package` is truthy and would
- * otherwise reach the npm spec as `[object Object]@1.0.0`.
- */
-export function resolveNpmGlobalService(
-  install: IntegrationEntry['install'],
-): { package: string; version: string } | null {
-  if (install.kind !== 'service' || install.runtime !== 'npm-global') return null;
-  const n = install.npmGlobal;
-  if (typeof n?.package !== 'string' || typeof n.version !== 'string') return null;
-  const pkg = n.package.trim();
-  const version = n.version.trim();
-  if (!pkg || !version) return null;
-  return { package: pkg, version };
-}
 
 function assertNpmGlobalService(
   spec: IntegrationEntry['install'],
@@ -110,7 +90,11 @@ function resolveBinary(npmGlobal: NpmGlobalService['npmGlobal']): string {
   return pkg.startsWith('@') && pkg.includes('/') ? pkg.slice(pkg.indexOf('/') + 1) : pkg;
 }
 
-function buildPostInstructions(entry: IntegrationEntry, binary: string): string[] {
+function buildPostInstructions(
+  entry: IntegrationEntry,
+  binary: string,
+  apiUrl: string | undefined,
+): string[] {
   const spec = entry.install as InstallService;
   const lines: string[] = [];
   lines.push(`This integration is a long-running service. Start it with:`);
@@ -124,7 +108,13 @@ function buildPostInstructions(entry: IntegrationEntry, binary: string): string[
       if (name === 'DKG_AUTH_TOKEN') {
         lines.push(`  ${name}  — pull from \`dkg auth show\` or ${join(dkgDir(), 'auth.token')}`);
       } else if (name === 'DKG_API_URL') {
-        lines.push(`  ${name}    — default http://127.0.0.1:9200`);
+        // Echo the node the operator actually selected. Printing the default
+        // when they passed --api-url points the service at the wrong node.
+        lines.push(
+          apiUrl
+            ? `  ${name}    — ${apiUrl}`
+            : `  ${name}    — default http://127.0.0.1:9200`,
+        );
       } else {
         lines.push(`  ${name}`);
       }
@@ -154,7 +144,7 @@ function buildPostInstructions(entry: IntegrationEntry, binary: string): string[
 export async function installService(
   options: InstallServiceOptions,
 ): Promise<InstallServiceResult> {
-  const { entry, dryRun, skipProvenance, verifier, runner = runCommand, logger } = options;
+  const { entry, dryRun, skipProvenance, verifier, runner = runCommand, logger, apiUrl } = options;
   assertNpmGlobalService(entry.install);
   // Use the RESOLVED values, not the raw payload: the resolver trims, and
   // reading around it would send `"@acme/svc "` to npm with the space intact,
@@ -178,6 +168,6 @@ export async function installService(
   return {
     ...result,
     binary,
-    postInstructions: buildPostInstructions(entry, binary),
+    postInstructions: buildPostInstructions(entry, binary, apiUrl),
   };
 }

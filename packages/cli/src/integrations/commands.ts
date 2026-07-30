@@ -19,9 +19,9 @@ import type { Command } from 'commander';
 import { detectInstalled } from './detect-installed.js';
 import { installCli } from './install-cli.js';
 import { installMcp } from './install-mcp.js';
-import { installService, resolveNpmGlobalService } from './install-service.js';
+import { installService } from './install-service.js';
 import { fetchAllEntries, fetchEntry, resolveRegistryConfig } from './registry-client.js';
-import type { IntegrationEntry, TrustTier } from './schema.js';
+import { resolveNpmGlobalService, type IntegrationEntry, type TrustTier } from './schema.js';
 
 /** Case-insensitive substring match across the fields a user would search by. */
 function matchesKeyword(e: IntegrationEntry, needle: string): boolean {

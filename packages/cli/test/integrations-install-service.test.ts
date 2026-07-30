@@ -198,6 +198,53 @@ describe('installService (npm-global)', () => {
     expect(text).toContain('8080');
   });
 
+  // `--api-url` is documented as "wire into integrations" and installMcp honours
+  // it. A service printing the hardcoded default would send an operator who
+  // passed the flag to the wrong node, with the same flag working for mcp.
+  it('echoes the selected --api-url in DKG_API_URL guidance', async () => {
+    const res = await installService({
+      entry: svcEntry(
+        { package: '@acme/svc', version: '1.0.0' },
+        { envRequired: ['DKG_API_URL'] },
+      ),
+      apiUrl: 'http://10.0.0.5:9200',
+      verifier: recordVerifier(okProv),
+      runner: recordRunner(0),
+      logger: () => {},
+    });
+    const text = res.postInstructions.join('\n');
+    expect(text).toContain('http://10.0.0.5:9200');
+    expect(text).not.toContain('default http://127.0.0.1:9200');
+  });
+
+  // Control: with no flag the default guidance is still printed, so the test
+  // above cannot pass by simply never rendering the default.
+  it('falls back to the default node when no --api-url is given', async () => {
+    const res = await installService({
+      entry: svcEntry(
+        { package: '@acme/svc', version: '1.0.0' },
+        { envRequired: ['DKG_API_URL'] },
+      ),
+      verifier: recordVerifier(okProv),
+      runner: recordRunner(0),
+      logger: () => {},
+    });
+    expect(res.postInstructions.join('\n')).toContain('default http://127.0.0.1:9200');
+  });
+
+  // Install trims, so detection must look up the trimmed key. Probing with the
+  // padded value made an installed package report itself missing.
+  it('installs the trimmed spec for a padded package', async () => {
+    const runner = recordRunner(0);
+    await installService({
+      entry: svcEntry({ package: ' @acme/svc ', version: '1.0.0 ' }),
+      verifier: recordVerifier(okProv),
+      runner,
+      logger: () => {},
+    });
+    expect(runner.calls).toEqual([['npm', ['install', '--global', '@acme/svc@1.0.0']]]);
+  });
+
   it('refuses runtimes it does not handle', async () => {
     const docker = {
       ...baseEntry,
@@ -238,6 +285,40 @@ describe('detectInstalled', () => {
       kind: 'service',
     });
     expect(rows.find((r) => r.slug === 'missing')).toMatchObject({ state: 'not installed' });
+  });
+
+  // Detection must use the same resolver the installer does. Probing with the
+  // raw padded key made an entry that installs as `@acme/svc` report itself
+  // not installed, because the lookup string kept its spaces.
+  it('detects a padded npm-global service by its trimmed package name', async () => {
+    const [row] = await detectInstalled(
+      [
+        entry('padded', {
+          kind: 'service',
+          runtime: 'npm-global',
+          npmGlobal: { package: ' @acme/svc ', version: '1.0.0' },
+        }),
+      ],
+      { listGlobalNpm: async () => ({ '@acme/svc': '1.0.0' }) },
+    );
+    expect(row!.state).toBe('installed');
+  });
+
+  // An entry the installer refuses is not something we can report on: claiming
+  // 'not installed' asserts an npm check that could never have matched.
+  it('reports an unresolvable npm-global service as unknown, not "not installed"', async () => {
+    const [row] = await detectInstalled(
+      [
+        entry('blank', {
+          kind: 'service',
+          runtime: 'npm-global',
+          npmGlobal: { package: '   ', version: '1.0.0' },
+        }),
+      ],
+      { listGlobalNpm: async () => ({}) },
+    );
+    expect(row!.state).toBe('unknown');
+    expect(row!.detail).toContain('no usable package metadata');
   });
 
   it('surfaces version drift against the registry pin', async () => {
