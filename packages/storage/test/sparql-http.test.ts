@@ -297,29 +297,33 @@ describe('SparqlHttpStore (test server)', () => {
     const seenSignals: AbortSignal[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       if (init?.signal instanceof AbortSignal) seenSignals.push(init.signal);
-      const accept = String((init?.headers as Record<string, string> | undefined)?.Accept ?? '');
-      if (accept.includes('n-quads')) {
-        return new Response('', { status: 200 });
-      }
-      return new Response(JSON.stringify({
-        head: { vars: [] },
-        results: { bindings: [] },
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/sparql-results+json' },
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+          once: true,
+        });
       });
     }) as typeof fetch;
     try {
       const signalController = new AbortController();
       const signalStore = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 30_000 });
 
-      await signalStore.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: signalController.signal });
-      await signalStore.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', { signal: signalController.signal });
+      const select = signalStore.query(
+        'SELECT ?s WHERE { ?s ?p ?o }',
+        { signal: signalController.signal },
+      );
+      const construct = signalStore.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+        { signal: signalController.signal },
+      );
+      const selectRejected = expect(select).rejects.toThrow('caller aborted');
+      const constructRejected = expect(construct).rejects.toThrow('caller aborted');
 
+      await waitForCondition(() => seenSignals.length === 2, 'both fetches should start');
       expect(seenSignals).toHaveLength(2);
       expect(seenSignals.every((signal) => !signal.aborted)).toBe(true);
       signalController.abort(new Error('caller aborted'));
       expect(seenSignals.every((signal) => signal.aborted)).toBe(true);
+      await Promise.all([selectRejected, constructRejected]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -399,7 +403,8 @@ describe('SparqlHttpStore (test server)', () => {
     });
 
     const pending = taggedStore.query(
-      'SELECT ?name WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> <http://schema.org/name> ?name } }',
+      `PREFIX schema: <http://schema.org/>
+       SELECT ?name WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> schema:name ?name } }`,
       { source: 'unit test/source' },
     );
     clock = 25;
@@ -416,6 +421,206 @@ describe('SparqlHttpStore (test server)', () => {
     expect(events[0].queryHash).toMatch(/^[a-f0-9]{16}$/);
     expect(events[0].queryBytes).toBeGreaterThan(0);
     expect(events[0]).not.toHaveProperty('sparql');
+  });
+
+  it('close aborts and drains queued/in-flight HTTP work before resolving', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    let cancellationSettled = false;
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      fetchStarted();
+      if (fetchCalls > 1) {
+        return new Response(JSON.stringify({
+          head: { vars: [] },
+          results: { bindings: [] },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          setTimeout(() => {
+            cancellationSettled = true;
+            reject(init.signal?.reason);
+          }, 10);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const closingStore = new SparqlHttpStore({
+        queryEndpoint: 'http://close.test/query',
+        timeout: 30_000,
+      });
+      const query = closingStore.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const rejected = expect(query).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      await closingStore.close();
+
+      expect(cancellationSettled).toBe(true);
+      await rejected;
+      await expect(
+        closingStore.query('SELECT ?s WHERE { ?s ?p ?o }'),
+      ).resolves.toMatchObject({ type: 'bindings' });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('close aborts scheduler-queued work before it reaches fetch', async () => {
+    const originalFetch = globalThis.fetch;
+    let firstFetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstFetchStarted = resolve;
+    });
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      firstFetchStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          setTimeout(() => reject(init.signal?.reason), 10);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://queued-close.test/query',
+        timeout: 30_000,
+      });
+      const active = store.query('SELECT ?s WHERE { ?s ?p ?o }', {
+        priority: 'background',
+        source: 'test.close.active',
+      });
+      const activeRejected = expect(active).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      const queued = store.query('SELECT ?o WHERE { ?s ?p ?o }', {
+        priority: 'background',
+        source: 'test.close.queued',
+      });
+      const queuedRejected = expect(queued).rejects.toThrow(/SparqlHttpStore closed/);
+      await Promise.resolve();
+
+      await store.close();
+
+      expect(fetchCalls).toBe(1);
+      await Promise.all([activeRejected, queuedRejected]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('close aborts and drains an in-flight update request', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    let cancellationSettled = false;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      fetchStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          setTimeout(() => {
+            cancellationSettled = true;
+            reject(init.signal?.reason);
+          }, 10);
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://write-close.test/query',
+        updateEndpoint: 'http://write-close.test/update',
+        timeout: 30_000,
+      });
+      const update = store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/p',
+        object: '"value"',
+        graph: 'http://ex.org/g',
+      }]);
+      const updateRejected = expect(update).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      await store.close();
+
+      expect(observedSignal?.aborted).toBe(true);
+      expect(cancellationSettled).toBe(true);
+      await updateRejected;
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('rejects work admitted during close and reopens only after the drain', async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    let settleCancellation!: () => void;
+    const cancellationGate = new Promise<void>((resolve) => {
+      settleCancellation = resolve;
+    });
+    let fetchCalls = 0;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      if (fetchCalls > 1) {
+        return new Response(JSON.stringify({
+          head: { vars: [] },
+          results: { bindings: [] },
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/sparql-results+json' },
+        });
+      }
+      fetchStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          void cancellationGate.then(() => reject(init.signal?.reason));
+        }, { once: true });
+      });
+    }) as typeof fetch;
+
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://closing-generation.test/query',
+        timeout: 30_000,
+      });
+      const active = store.query('SELECT ?s WHERE { ?s ?p ?o }');
+      const activeRejected = expect(active).rejects.toThrow(/SparqlHttpStore closed/);
+      await started;
+
+      const closing = store.close();
+      await expect(
+        store.query('SELECT ?during WHERE { ?during ?p ?o }'),
+      ).rejects.toThrow(/SparqlHttpStore closed/);
+      expect(fetchCalls).toBe(1);
+
+      settleCancellation();
+      await closing;
+      await activeRejected;
+
+      await expect(
+        store.query('SELECT ?after WHERE { ?after ?p ?o }'),
+      ).resolves.toMatchObject({ type: 'bindings' });
+      expect(fetchCalls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('honors slow-query sample rate zero', async () => {
