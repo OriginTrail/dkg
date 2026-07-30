@@ -98,6 +98,8 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from './dkg-agent-constants.js';
+export { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from './dkg-agent-constants.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -141,7 +143,6 @@ export const KEEP_ROOT_COPY_PREDICATE = `${DKG_NS}keepRootCopyOnLabel`;
  */
 export const SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE = `${DKG_NS}snapshotMerkleRoot`;
 export const SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE = `${DKG_NS}snapshotContentDigest`;
-export const FINALIZED_SWM_CLEANUP_ROOT_PREDICATE = `${DKG_NS}finalizedSwmCleanupRoot`;
 
 /**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to

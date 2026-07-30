@@ -41,12 +41,14 @@ import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from '../src/finalization-handler.js';
 
 const CG = 'ws00-materializer-real-store';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const UAL = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/9';
+const FINALIZED_ROOT = `"0x${'11'.repeat(32)}"`;
 const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
 
 class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
@@ -199,7 +201,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
   });
 
   describe('replaceHeadMetadata', () => {
-    it('deletes the head and every referenced operation, sparing unrelated subjects', async () => {
+    it('replaces the head and every referenced operation, sparing unrelated subjects', async () => {
       const store = new OxigraphStore();
       await store.insert([...v1.meta]);
       await store.insert([...v2.meta]);
@@ -214,9 +216,11 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
 
       await materializer.replaceHeadMetadata(CG, descriptorFor(v2));
 
-      expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`)).toEqual([]);
+      expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`))
+        .toEqual([`"2"^^<${XSD_INTEGER}>`]);
       expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`)).toEqual([]);
-      expect(await distinctObjects(store, WS_META, v2.operationSubject, `${DKG}shareOperationId`)).toEqual([]);
+      expect(await distinctObjects(store, WS_META, v2.operationSubject, `${DKG}shareOperationId`))
+        .toEqual([`"${v2.operationId}"`]);
       expect(await distinctObjects(store, WS_META, unrelated.subject, `${DKG}shareOperationId`)).toEqual(['"unrelated"']);
     });
 
@@ -237,9 +241,89 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
 
       await materializer.replaceHeadMetadata(CG, descriptorFor(v1));
 
-      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`)).toEqual([]);
-      expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`)).toEqual([]);
+      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+        .toEqual([`"${v1.operationId}"`]);
+      expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+        .toEqual([`"${v1.operationId}"`]);
       expect(await distinctObjects(store, WS_META, foreignOp, `${DKG}shareOperationId`)).toEqual(['"foreign-op"']);
+    });
+
+    it('preserves the local finalized-cleanup token when synchronized metadata is the exact same lifecycle', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        ...v1.meta,
+        {
+          subject: v1.headSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+      ]);
+      const { materializer } = materializerFor(store);
+
+      await materializer.withKaWriteLock(CG, undefined, UAL, () =>
+        materializer.replaceHeadMetadata(CG, descriptorFor(v1)));
+
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.headSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([FINALIZED_ROOT]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([FINALIZED_ROOT]);
+    });
+
+    it('drops the old finalized-cleanup token when synchronized metadata is a newer lifecycle', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        ...v1.meta,
+        {
+          subject: v1.headSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+      ]);
+      const { materializer } = materializerFor(store);
+
+      await materializer.withKaWriteLock(CG, undefined, UAL, () =>
+        materializer.replaceHeadMetadata(CG, descriptorFor(v2)));
+
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v2.headSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v2.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
     });
   });
 

@@ -296,6 +296,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializationFailures = 0;
       let materializedQuads = 0;
       const materializedKeys = new Set<string>();
+      const replacedGraphScopedMetaKeys = new Set<string>();
+      const quadKey = (quad: Quad): string =>
+        `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
         if (!descriptors?.length || !snapshotMaterializer || !publicSnapshotStore) return;
@@ -327,6 +330,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
                 ) {
+                  for (const quad of descriptor.metadataQuads) {
+                    replacedGraphScopedMetaKeys.add(quadKey(quad));
+                  }
                   materializedKeys.add(graphKey);
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
                     + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
@@ -338,15 +344,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // digest is an OLDER version of the same size and must be
                 // replaced, not skipped.
                 if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
-                  if (storedHead.needsRepair) {
+                  if (storedHead.version === null || storedHead.needsRepair) {
                     // Content is already this descriptor's, but the head
-                    // subject still carries union-insert residue (several
-                    // version/operation rows) — e.g. a prior round replaced
-                    // the graph and then failed before finishing the metadata
-                    // swap. Collapse the head now; the fresh verified meta for
-                    // this descriptor is re-inserted after the snapshot phase,
-                    // exactly like the replace path below.
+                    // is absent or still carries union-insert residue (several
+                    // version/operation rows) — e.g. a prior round replaced the
+                    // graph and then failed before finishing the metadata swap.
+                    // Install the verified head while the writer lock is held.
                     await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                  }
+                  // Never append graph-scoped metadata again after releasing
+                  // this lock. For a clean head it is redundant; for a newer
+                  // local lifecycle it would recreate stale union residue.
+                  for (const quad of descriptor.metadataQuads) {
+                    replacedGraphScopedMetaKeys.add(quadKey(quad));
                   }
                   materializedKeys.add(graphKey);
                   return;
@@ -361,11 +371,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // Graph first, THEN the head swap — a crash between the two
                 // leaves content newer than the head, which the next round
                 // repairs (digest matches → head collapsed above). The swap
-                // deletes the old head + its operations so the append-style
-                // `storeInsert(processed.verifiedMeta)` below lands on a clean
-                // subject instead of stacking a second version onto it
-                // (LIMIT-1 head readers would otherwise see an arbitrary mix).
+                // deletes the old head + its operations, installs the verified
+                // replacement under this same writer lock, and excludes those
+                // rows from the append-style metadata insert below. Otherwise
+                // a live write could land between the swap and the append and
+                // leave an arbitrary multi-version head.
                 await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                for (const quad of descriptor.metadataQuads) {
+                  replacedGraphScopedMetaKeys.add(quadKey(quad));
+                }
                 materializedKeys.add(graphKey);
                 materializedGraphs += 1;
                 materializedQuads += asset.quads.length;
@@ -460,8 +474,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += validWsQuads.length;
         summary.insertedDataTriples += validWsQuads.length;
       }
+      const remainingVerifiedMeta = processed.verifiedMeta.filter(
+        (quad) => !replacedGraphScopedMetaKeys.has(quadKey(quad)),
+      );
+      if (remainingVerifiedMeta.length > 0) {
+        await storeInsert(remainingVerifiedMeta);
+      }
       if (processed.verifiedMeta.length > 0) {
-        await storeInsert(processed.verifiedMeta);
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }

@@ -97,7 +97,10 @@ export interface RecoverContextGraphSwmDeps {
     roots: readonly { readonly entity: string }[],
     metaGraphs: readonly string[],
   ) => Promise<void>;
-  /** Replace the active head/operation rows for each exact graph asset. */
+  /**
+   * Replace and insert the active head/operation rows for each exact graph
+   * asset while holding the production per-KA writer lock.
+   */
   readonly replaceMetaForGraphAssets?: (
     assets: readonly GraphScopedSwmRecoveryDescriptor[],
   ) => Promise<void>;
@@ -343,8 +346,9 @@ export async function recoverContextGraphSwm(
       // A crash between the two therefore retries idempotently; it can never
       // advertise a head whose graph was only partially transferred.
       await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
-      await deps.replaceMetaForGraphAssets?.([descriptor]);
-      if (verifiedAssetMeta.length > 0) {
+      if (deps.replaceMetaForGraphAssets) {
+        await deps.replaceMetaForGraphAssets([descriptor]);
+      } else if (verifiedAssetMeta.length > 0) {
         await deps.store.insert([...verifiedAssetMeta]);
       }
       incrementallyReadyGraphs.add(graphKey);
@@ -487,8 +491,14 @@ export async function recoverContextGraphSwm(
   if (graphScopedDescriptors.length > 0) {
     await deps.replaceMetaForGraphAssets?.(graphScopedDescriptors);
   }
-  if (processed.verifiedMeta.length > 0) {
-    await deps.store.insert([...processed.verifiedMeta]);
+  const replacedGraphScopedMetaKeys = deps.replaceMetaForGraphAssets
+    ? new Set(graphScopedDescriptors.flatMap((descriptor) => descriptor.metadataQuads).map(quadKey))
+    : new Set<string>();
+  const remainingVerifiedMeta = processed.verifiedMeta.filter(
+    (quad) => !replacedGraphScopedMetaKeys.has(quadKey(quad)),
+  );
+  if (remainingVerifiedMeta.length > 0) {
+    await deps.store.insert([...remainingVerifiedMeta]);
   }
 
   // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with

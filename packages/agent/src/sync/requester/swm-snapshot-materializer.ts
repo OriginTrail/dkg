@@ -15,12 +15,15 @@
  */
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
+  resolveKnowledgeAssetWorkspaceHead,
+  sameKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
+import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from '../../dkg-agent-constants.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -91,18 +94,164 @@ export interface SharedMemorySnapshotMaterializer {
    */
   replaceGraph(graphUri: string, quads: Quad[]): Promise<void>;
   /**
-   * Delete the KA's head rows and every share-operation subject its head
-   * references (including the descriptor's own, which the caller re-inserts
-   * from fresh verified metadata). This is the catch-up lane's counterpart of
-   * gossip's delete-then-insert (`storeKnowledgeAssetWorkspaceHead`) and the
-   * private recovery lane's `replaceMetaForGraphAssets`: without it the
-   * append-style meta insert stacks old and new head rows on one subject and
-   * the durable current head becomes ambiguous.
+   * Replace the KA's head rows and every share-operation subject its head
+   * references from fresh verified metadata. This is the catch-up lane's
+   * counterpart of gossip's delete-then-insert
+   * (`storeKnowledgeAssetWorkspaceHead`) and the private recovery lane's
+   * `replaceMetaForGraphAssets`: without it the append-style meta insert stacks
+   * old and new head rows on one subject and the durable current head becomes
+   * ambiguous.
    */
   replaceHeadMetadata(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<void>;
+}
+
+/**
+ * Replace one graph-scoped SWM lifecycle without losing a local deferred
+ * finalization token for the exact same lifecycle.
+ *
+ * Finalization markers are deliberately local-only and responders filter them
+ * from synchronized metadata. A blind head/operation replacement therefore
+ * erased the only durable evidence that the retained SWM graph was eligible
+ * for idle cleanup. Preserve both marker rows only when the complete local
+ * workspace head still equals the verified incoming descriptor; any mismatch
+ * means a newer or otherwise different lifecycle and fails closed by dropping
+ * the old markers.
+ *
+ * The verified replacement metadata and any retained cleanup markers are
+ * inserted in the same store call after the old lifecycle is removed. Callers
+ * MUST hold the canonical per-KA SWM writer lock across this entire operation.
+ */
+export async function replaceGraphScopedSwmHeadMetadata(params: {
+  store: TripleStore;
+  contextGraphId: string;
+  descriptor: GraphScopedSwmRecoveryDescriptor;
+  sourcePrefix: string;
+}): Promise<void> {
+  const { store, contextGraphId, descriptor, sourcePrefix } = params;
+  const preservedMarkers = await readExactFinalizedCleanupMarkers({
+    store,
+    contextGraphId,
+    descriptor,
+    sourcePrefix,
+  });
+
+  // Collect every share operation the head currently references — via the
+  // BOUND head subject, then per-candidate bound-subject ASKs. The kaUal guard
+  // prevents a corrupt cross-KA reference from deleting another KA's metadata.
+  const shareIds = await store.query(
+    `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+    + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
+    { priority: 'background', source: `${sourcePrefix}.findOperations` },
+  );
+  const operationSubjects = new Set<string>([descriptor.operationSubject]);
+  if (shareIds.type === 'bindings') {
+    for (const row of shareIds.bindings) {
+      const shareId = literalValue(row?.['op']);
+      if (!shareId) continue;
+      const candidate = `urn:dkg:share:${contextGraphId}:${shareId}`;
+      if (operationSubjects.has(candidate)) continue;
+      const ownedByThisKa = await store.query(
+        `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+        + `<${assertSafeIri(candidate)}> <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> } }`,
+        { priority: 'background', source: `${sourcePrefix}.checkOperation` },
+      );
+      if (ownedByThisKa.type === 'boolean' && ownedByThisKa.value) {
+        operationSubjects.add(candidate);
+      }
+    }
+  }
+
+  await store.deleteByPattern(
+    { graph: descriptor.metaGraph, subject: descriptor.headSubject },
+    { priority: 'background', source: `${sourcePrefix}.deleteHead` },
+  );
+  for (const operationSubject of operationSubjects) {
+    await store.deleteByPattern(
+      { graph: descriptor.metaGraph, subject: operationSubject },
+      { priority: 'background', source: `${sourcePrefix}.deleteOperation` },
+    );
+  }
+  const replacementQuads = [
+    ...descriptor.metadataQuads,
+    ...preservedMarkers,
+  ];
+  if (replacementQuads.length > 0) {
+    await store.insert(replacementQuads, {
+      priority: 'background',
+      source: `${sourcePrefix}.insertReplacementMetadata`,
+    });
+  }
+}
+
+async function readExactFinalizedCleanupMarkers(params: {
+  store: TripleStore;
+  contextGraphId: string;
+  descriptor: GraphScopedSwmRecoveryDescriptor;
+  sourcePrefix: string;
+}): Promise<Quad[]> {
+  const { store, contextGraphId, descriptor, sourcePrefix } = params;
+  try {
+    const currentHead = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId,
+      kaUal: descriptor.kaUal,
+      subGraphName: descriptor.subGraphName,
+      queryOptions: {
+        priority: 'background',
+        source: `${sourcePrefix}.readFinalizedCleanupHead`,
+      },
+    });
+    if (!currentHead || !sameKnowledgeAssetWorkspaceHead(currentHead, {
+      kaUal: descriptor.kaUal,
+      assertionVersion: descriptor.assertionVersion,
+      assertionGraph: descriptor.assertionGraph,
+      publicQuadsDigest: descriptor.publicQuadsDigest,
+      publicTripleCount: descriptor.publicQuadsCount,
+      privateMerkleRoot: descriptor.privateMerkleRoot,
+      privateTripleCount: descriptor.privateTripleCount,
+      shareOperationId: descriptor.shareOperationId,
+      publisherPeerId: descriptor.publisherPeerId,
+      accessPolicy: descriptor.accessPolicy,
+      allowedPeers: [...descriptor.allowedPeers],
+    })) {
+      return [];
+    }
+  } catch {
+    // Corrupt or incomplete local metadata must never carry a destructive
+    // cleanup token into a verified replacement.
+    return [];
+  }
+
+  const markerResult = await store.query(
+    `CONSTRUCT { ?subject <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } WHERE { `
+    + `GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+    + `VALUES ?subject { <${assertSafeIri(descriptor.headSubject)}> `
+    + `<${assertSafeIri(descriptor.operationSubject)}> } `
+    + `?subject <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    {
+      priority: 'background',
+      source: `${sourcePrefix}.readFinalizedCleanupMarkers`,
+    },
+  );
+  if (markerResult.type !== 'quads') return [];
+  const markers = markerResult.quads.map((quad) => ({
+    ...quad,
+    graph: descriptor.metaGraph,
+  }));
+  const headMarkers = markers.filter((quad) => quad.subject === descriptor.headSubject);
+  const operationMarkers = markers.filter((quad) => quad.subject === descriptor.operationSubject);
+  if (
+    headMarkers.length !== 1
+    || operationMarkers.length !== 1
+    || headMarkers[0]!.object !== operationMarkers[0]!.object
+  ) {
+    return [];
+  }
+  return [headMarkers[0]!, operationMarkers[0]!];
 }
 
 /**
@@ -193,43 +342,13 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     replaceHeadMetadata: async (contextGraphId, descriptor) => {
-      // Collect every share operation the head currently references — via the
-      // BOUND head subject, then per-candidate bound-subject ASKs, so no query
-      // scans the meta bucket. The kaUal guard mirrors the recovery lane's
-      // `replaceMetaForGraphAssets` join: a head row pointing at another KA's
-      // operation must not delete that KA's metadata.
-      const shareIds = await deps.store.query(
-        `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-        + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.findOperations' },
-      );
-      const operationSubjects = new Set<string>([descriptor.operationSubject]);
-      if (shareIds.type === 'bindings') {
-        for (const row of shareIds.bindings) {
-          const shareId = literalValue(row?.['op']);
-          if (!shareId) continue;
-          const candidate = `urn:dkg:share:${contextGraphId}:${shareId}`;
-          if (operationSubjects.has(candidate)) continue;
-          const ownedByThisKa = await deps.store.query(
-            `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-            + `<${assertSafeIri(candidate)}> <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> } }`,
-            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkOperation' },
-          );
-          if (ownedByThisKa.type === 'boolean' && ownedByThisKa.value) {
-            operationSubjects.add(candidate);
-          }
-        }
-      }
-      await deps.store.deleteByPattern(
-        { graph: descriptor.metaGraph, subject: descriptor.headSubject },
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
-      );
-      for (const operationSubject of operationSubjects) {
-        await deps.store.deleteByPattern(
-          { graph: descriptor.metaGraph, subject: operationSubject },
-          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
-        );
-      }
+      await replaceGraphScopedSwmHeadMetadata({
+        store: deps.store,
+        contextGraphId,
+        descriptor,
+        sourcePrefix: 'agent.sharedMemorySync.snapshotMaterializer',
+      });
+      deps.invalidateListContextGraphsCache();
     },
   };
 }

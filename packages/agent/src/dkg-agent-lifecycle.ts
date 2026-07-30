@@ -138,6 +138,8 @@ import {
   TripleStoreAsyncPromoteQueue,
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
+  swmKaWriteLockKey,
+  withKeyedLocks,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
@@ -264,7 +266,10 @@ import {
 } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
-import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
+import {
+  createSharedMemorySnapshotMaterializer,
+  replaceGraphScopedSwmHeadMetadata,
+} from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -886,6 +891,7 @@ type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0
 
 interface RecoverContextGraphSwmFromPeerDependencies {
   store: TripleStore;
+  writeLocks: Map<string, Promise<void>>;
   listSubGraphs: (contextGraphId: string) => ReturnType<DKGAgent['listSubGraphs']>;
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
@@ -5211,6 +5217,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const recoverPrivateContextGraph = (contextGraphId: string) => runRecoverContextGraphSwmFromPeer(
       {
         store: this.store,
+        writeLocks: this.writeLocks,
         listSubGraphs: (id) => this.listSubGraphs(id),
         createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
           remainingContextGraphs: remaining,
@@ -5415,7 +5422,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       }
 
-      return runOrderedContextGraphSyncs({
+      const summary = await runOrderedContextGraphSyncs({
         work,
         priorities: this.config.syncContextGraphPriorities,
         emptyResult: emptySharedMemorySyncResult,
@@ -5440,6 +5447,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
         ),
       });
+      if (
+        work.length > 0
+        && summary.failedPhases === 0
+        && typeof this.cleanupExpiredSharedMemory === 'function'
+      ) {
+        // A completed catch-up is the first reliable low-pressure boundary
+        // after a large synchronized write. Drain finalized duplicates here,
+        // before reporting the job complete, in small background-priority
+        // batches that stop as soon as normal work appears. The periodic
+        // maintenance timer remains the restart/failure backstop.
+        await this.cleanupExpiredSharedMemory({
+          finalizedOnly: true,
+          contextGraphIds: work.map((item) => item.contextGraphId),
+          finalizedCleanupBudget: 64,
+        });
+      }
+      return summary;
     };
 
     return runSyncSingleFlight(this, singleFlightKey, runSync);
@@ -5470,6 +5494,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       () => runRecoverContextGraphSwmFromPeer(
         {
           store: this.store,
+          writeLocks: this.writeLocks,
           listSubGraphs: (id) => this.listSubGraphs(id),
           createContextGraphSyncDeadline: (remaining) => createContextGraphSyncDeadline({
             remainingContextGraphs: remaining,
@@ -7559,21 +7584,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * Remove expired shared memory operations and their data.
-   * Queries SWM meta for operations with publishedAt older than the TTL,
-   * deletes the corresponding triples from shared memory and SWM meta,
-   * and removes the root entities from workspaceOwnedEntities.
+   * Remove expired shared-memory operations and, at safe low-pressure
+   * boundaries, exact finalized SWM lifecycles retained for deferred cleanup.
+   * For stale operations it deletes the corresponding triples from shared
+   * memory and SWM meta, and removes the root entities from
+   * workspaceOwnedEntities.
    */
-  async cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
+  async cleanupExpiredSharedMemory(this: DKGAgent, options?: {
+    finalizedOnly?: boolean;
+    contextGraphIds?: readonly string[];
+    finalizedCleanupBudget?: number;
+  }): Promise<number> {
     const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     const ctx = createOperationContext('share');
-    const cutoff = ttl > 0 ? new Date(Date.now() - ttl).toISOString() : undefined;
+    const cutoff = !options?.finalizedOnly && ttl > 0
+      ? new Date(Date.now() - ttl).toISOString()
+      : undefined;
     let totalDeleted = 0;
-    let finalizedCleanupBudget = 4;
+    let finalizedCleanupBudget = Math.max(
+      0,
+      Math.floor(options?.finalizedCleanupBudget ?? 4),
+    );
 
     try {
       const graphManager = new GraphManager(this.store);
-      const contextGraphs = await graphManager.listContextGraphs();
+      const requestedContextGraphs = options?.contextGraphIds
+        ? new Set(options.contextGraphIds)
+        : undefined;
+      const contextGraphs = (await graphManager.listContextGraphs())
+        .filter((contextGraphId) => !requestedContextGraphs || requestedContextGraphs.has(contextGraphId));
 
       for (const pid of contextGraphs) {
         let graphDeleted = 0;
@@ -7591,13 +7630,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
           if (finalizedCleanupBudget > 0) {
             try {
-              const cleaned = await this.getOrCreateFinalizationHandler()
-                .cleanupFinalizedGraphScopedSwmWhenIdle({
-                  contextGraphId: pid,
-                  swmMetaGraph: wsMetaGraph,
-                  maxCandidates: finalizedCleanupBudget,
-                });
-              finalizedCleanupBudget -= cleaned;
+              while (finalizedCleanupBudget > 0) {
+                const batchSize = Math.min(4, finalizedCleanupBudget);
+                const cleaned = await this.getOrCreateFinalizationHandler()
+                  .cleanupFinalizedGraphScopedSwmWhenIdle({
+                    contextGraphId: pid,
+                    swmMetaGraph: wsMetaGraph,
+                    maxCandidates: batchSize,
+                  });
+                finalizedCleanupBudget -= cleaned;
+                if (cleaned < batchSize) break;
+                // Yield between bounded batches so queued foreground work can
+                // arrive and trip the handler's pressure gate.
+                await new Promise<void>((resolve) => setImmediate(resolve));
+              }
             } catch (error) {
               this.log.warn(
                 ctx,
@@ -7899,39 +7945,16 @@ async function runRecoverContextGraphSwmFromPeer(
     },
     replaceMetaForGraphAssets: async (assets) => {
       for (const asset of assets) {
-        const linkedOperations = await dependencies.store.query(
-          `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-            `<${assertSafeIri(asset.headSubject)}> <http://dkg.io/ontology/shareOperationId> ?shareId . ` +
-            `?op <http://dkg.io/ontology/shareOperationId> ?shareId ; ` +
-            `<http://dkg.io/ontology/kaUal> <${assertSafeIri(asset.kaUal)}> . } }`,
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForGraphAssets.findOperations',
-          },
+        await withKeyedLocks(
+          dependencies.writeLocks,
+          [swmKaWriteLockKey(contextGraphId, asset.subGraphName, asset.kaUal)],
+          () => replaceGraphScopedSwmHeadMetadata({
+            store: dependencies.store,
+            contextGraphId,
+            descriptor: asset,
+            sourcePrefix: 'agent.swmRecovery.replaceMetaForGraphAssets',
+          }),
         );
-        const operationSubjects = new Set<string>([asset.operationSubject]);
-        if (linkedOperations.type === 'bindings') {
-          for (const row of linkedOperations.bindings) {
-            const operation = row['op'];
-            if (operation) operationSubjects.add(operation);
-          }
-        }
-        await dependencies.store.deleteByPattern(
-          { graph: asset.metaGraph, subject: asset.headSubject },
-          {
-            priority: 'background',
-            source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead',
-          },
-        );
-        for (const operationSubject of operationSubjects) {
-          await dependencies.store.deleteByPattern(
-            { graph: asset.metaGraph, subject: operationSubject },
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation',
-            },
-          );
-        }
       }
     },
     ensureContextGraph: async (cgId) => {

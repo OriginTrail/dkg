@@ -16,8 +16,8 @@
  *   4. an already-materialized asset is left alone
  *   5. a failed replace keeps the phase incomplete and WITHHOLDS the meta
  *      insert, so a marker can never certify a graph that was not written
- *   6. after a replace, the stale head metadata is swapped out BEFORE the
- *      fresh verified meta is appended (graph → head swap → meta ordering)
+ *   6. after a graph replace, stale head metadata is replaced with the fresh
+ *      verified rows inside the same per-KA lock (graph → locked metadata swap)
  *   7. a KA under a REGISTERED subgraph is materialized too — dropping the
  *      subgraph admission pass-through must fail these tests
  *   8. a node with NO cached snapshot fetches it over the network
@@ -200,6 +200,8 @@ function harness(overrides: HarnessOverrides = {}) {
         replaceHeadMetadata: async (contextGraphId, descriptor) => {
           events.push('head-swapped');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+          inserted.push([...descriptor.metadataQuads]);
+          events.push('meta-replaced');
         },
       },
       publicSnapshotStore: snapshotStore,
@@ -229,18 +231,16 @@ describe('public SWM snapshot materialization', () => {
     expect(h.inserted.some((batch) => batch.some((q) => q.graph === WS_META))).toBe(true);
   });
 
-  it('swaps the stale head metadata after the replace and BEFORE the meta append', async () => {
-    // The meta insert below is append/union-style: without the head swap the
-    // old and new version rows stack on one subject and LIMIT-1 readers
-    // (`resolveKnowledgeAssetWorkspaceHead`) can return either — the stale
-    // head bug. Ordering matters both ways: graph before swap (a crash leaves
-    // repairable content, never a head without content), swap before append
-    // (the fresh rows land on a clean subject).
+  it('replaces stale head metadata inside the locked swap after replacing the graph', async () => {
+    // The verified graph-scoped metadata must land in the same locked step as
+    // the delete. Appending it later would let a live write slip between the
+    // two operations and recreate a multi-version head.
     const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => false });
     await h.run();
     expect(h.events.indexOf('replaced')).toBeGreaterThan(-1);
     expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
-    expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
+    expect(h.events.indexOf('meta-replaced')).toBeGreaterThan(h.events.indexOf('head-swapped'));
+    expect(h.events).not.toContain('meta-inserted');
     expect(h.headSwaps).toEqual([{ contextGraphId: CG, headSubject: `${UAL}#dkg-swm-head` }]);
   });
 
@@ -285,6 +285,7 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.indexOf('version-read')).toBeGreaterThan(h.events.indexOf('gossip-committed'));
     expect(h.events).not.toContain('replaced');
     expect(h.events).not.toContain('head-swapped');
+    expect(h.inserted.every((batch) => batch.every((q) => q.graph !== WS_META))).toBe(true);
     expect(summary.failedPhases).toBe(0);
   });
 
@@ -316,7 +317,8 @@ describe('public SWM snapshot materialization', () => {
     const summary = await h.run();
     expect(h.events).not.toContain('replaced');
     expect(h.events).toContain('head-swapped');
-    expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
+    expect(h.events.indexOf('meta-replaced')).toBeGreaterThan(h.events.indexOf('head-swapped'));
+    expect(h.events).not.toContain('meta-inserted');
     expect(summary.failedPhases).toBe(0);
   });
 
