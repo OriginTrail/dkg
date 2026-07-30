@@ -136,6 +136,7 @@ select.input {
    `.badge-warn` below. */
 .badge-success { background: rgba(34,197,94,.12); color: var(--text-success); }
 .badge-error   { background: rgba(239,68,68,.12);  color: var(--text-danger); }
+.badge-cancelled { background: rgba(148,163,184,.14); color: var(--text-muted); }
 /* Warning semantics resolve to the theme-aware `--text-warning` token
    (#fbbf24 dark / #92400e light) on `--amber-dim`, matching
    `.v10-modal-warning` and the EmptyState `warning` tone so the whole

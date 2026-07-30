@@ -4,34 +4,37 @@
  * Kept here instead of in an HTTP adapter so every scheduled operation in one
  * lifecycle generation observes the same close boundary.
  */
+export interface AbortSignalScope {
+  readonly signal: AbortSignal | undefined;
+  dispose(): void;
+}
+
+const NOOP_DISPOSE = () => {};
+
 export function composeAbortSignals(
   primary: AbortSignal | undefined,
   secondary: AbortSignal | undefined,
-): AbortSignal | undefined {
-  if (!primary) return secondary;
-  if (!secondary) return primary;
-  const AnyImpl = (AbortSignal as unknown as {
-    any?: (signals: AbortSignal[]) => AbortSignal;
-  }).any;
-  if (AnyImpl) return AnyImpl([primary, secondary]);
+): AbortSignalScope {
+  if (!primary) return { signal: secondary, dispose: NOOP_DISPOSE };
+  if (!secondary) return { signal: primary, dispose: NOOP_DISPOSE };
 
   const combined = new AbortController();
-  let settled = false;
-  const cleanup = () => {
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
     primary.removeEventListener('abort', forwardPrimary);
     secondary.removeEventListener('abort', forwardSecondary);
   };
   const forwardPrimary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
+    if (disposed || combined.signal.aborted) return;
     combined.abort(primary.reason);
+    dispose();
   };
   const forwardSecondary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
+    if (disposed || combined.signal.aborted) return;
     combined.abort(secondary.reason);
+    dispose();
   };
 
   if (primary.aborted) combined.abort(primary.reason);
@@ -40,7 +43,7 @@ export function composeAbortSignals(
     primary.addEventListener('abort', forwardPrimary, { once: true });
     secondary.addEventListener('abort', forwardSecondary, { once: true });
   }
-  return combined.signal;
+  return { signal: combined.signal, dispose };
 }
 
 interface StoreWorkGeneration {
@@ -82,11 +85,18 @@ export class AbortableStoreWorkLifecycle {
       );
     }
 
-    const signal = composeAbortSignals(callerSignal, generation.controller.signal);
-    const task = start(signal);
+    const signalScope = composeAbortSignals(callerSignal, generation.controller.signal);
+    let task: Promise<T>;
+    try {
+      task = start(signalScope.signal);
+    } catch (error) {
+      signalScope.dispose();
+      throw error;
+    }
     generation.inFlight.add(task);
     void task.finally(() => {
       generation.inFlight.delete(task);
+      signalScope.dispose();
     }).catch(() => undefined);
     return task;
   }

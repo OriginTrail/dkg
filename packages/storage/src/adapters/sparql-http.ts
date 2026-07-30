@@ -223,7 +223,12 @@ export class SparqlHttpStore implements TripleStore {
     return this.writeGen.getWriteGen(graphPrefix);
   }
 
-  private async postQuery(sparql: string, accept: string, options?: SparqlHttpQueryOptions): Promise<Response> {
+  private async postQuery<T>(
+    sparql: string,
+    accept: string,
+    options: SparqlHttpQueryOptions | undefined,
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -236,14 +241,19 @@ export class SparqlHttpStore implements TripleStore {
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
-    const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
+    const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
+    const signal = signalScope.signal ?? timeoutSignal;
     try {
-      return await fetch(this.queryEndpoint, {
+      const response = await fetch(this.queryEndpoint, {
         method: 'POST',
         headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
         body: sparql,
         signal,
       });
+      // Keep the composed caller/deadline signal linked until the response body
+      // has settled. A fetch promise may resolve as soon as headers arrive,
+      // while JSON/N-Quads parsing is still holding the scheduler admission.
+      return await consume(response);
     } catch (error) {
       if (signal.aborted) {
         getMetrics().storeCancellationCompletedTotal.add(1, {
@@ -252,6 +262,8 @@ export class SparqlHttpStore implements TripleStore {
         });
       }
       throw error;
+    } finally {
+      signalScope.dispose();
     }
   }
 
@@ -265,7 +277,8 @@ export class SparqlHttpStore implements TripleStore {
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
-      const signal = composeAbortSignals(lifecycleSignal, timeoutSignal) ?? timeoutSignal;
+      const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
+      const signal = signalScope.signal ?? timeoutSignal;
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
@@ -290,6 +303,8 @@ export class SparqlHttpStore implements TripleStore {
           });
         }
         throw error;
+      } finally {
+        signalScope.dispose();
       }
     });
   }
@@ -531,43 +546,46 @@ export class SparqlHttpStore implements TripleStore {
       const upper = trimmed.toUpperCase();
       const isAsk = upper.startsWith('ASK');
       const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
-      const operation = inferQueryOperation(trimmed);
 
       try {
         if (isConstruct) {
           return await this.queryConstruct(trimmed, effectiveOptions);
         }
 
-        const res = await this.postQuery(
+        return await this.postQuery(
           trimmed,
           'application/sparql-results+json',
           effectiveOptions,
+          async (res) => {
+            if (!res.ok) {
+              const text = await (effectiveOptions.maxResponseBytes === undefined
+                ? res.text()
+                : readResponseTextBounded(res, effectiveOptions.maxResponseBytes)
+              ).catch(() => '');
+              throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
+            }
+
+            const json = effectiveOptions.maxResponseBytes === undefined
+              ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
+              : JSON.parse(
+                  await readResponseTextBounded(res, effectiveOptions.maxResponseBytes),
+                ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
+
+            if (isAsk || 'boolean' in json) {
+              return {
+                type: 'boolean',
+                value: (json as W3CAskResponse).boolean,
+              } satisfies AskResult;
+            }
+
+            const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
+            return { type: 'bindings', bindings } satisfies SelectResult;
+          },
         );
-        if (!res.ok) {
-          const text = await (effectiveOptions.maxResponseBytes === undefined
-            ? res.text()
-            : readResponseTextBounded(res, effectiveOptions.maxResponseBytes)
-          ).catch(() => '');
-          throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
-        }
-
-        const json = effectiveOptions.maxResponseBytes === undefined
-          ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
-          : JSON.parse(
-              await readResponseTextBounded(res, effectiveOptions.maxResponseBytes),
-            ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
-
-        if (isAsk || 'boolean' in json) {
-          return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
-        }
-
-        const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-        return { type: 'bindings', bindings } satisfies SelectResult;
       } finally {
         this.maybeEmitSlowQuery({
           sparql: trimmed,
           source: options?.source,
-          operation,
           startedAt,
         });
       }
@@ -575,19 +593,25 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
-    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', options);
-    if (!res.ok) {
-      const text = await (options?.maxResponseBytes === undefined
-        ? res.text()
-        : readResponseTextBounded(res, options.maxResponseBytes)
-      ).catch(() => '');
-      throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-    const text = options?.maxResponseBytes === undefined
-      ? await res.text()
-      : await readResponseTextBounded(res, options.maxResponseBytes);
-    const quads = parseNQuadsText(text);
-    return { type: 'quads', quads };
+    return this.postQuery(
+      sparql,
+      'application/n-quads, text/n-quads',
+      options,
+      async (res) => {
+        if (!res.ok) {
+          const text = await (options?.maxResponseBytes === undefined
+            ? res.text()
+            : readResponseTextBounded(res, options.maxResponseBytes)
+          ).catch(() => '');
+          throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
+        }
+        const text = options?.maxResponseBytes === undefined
+          ? await res.text()
+          : await readResponseTextBounded(res, options.maxResponseBytes);
+        const quads = parseNQuadsText(text);
+        return { type: 'quads', quads };
+      },
+    );
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -691,7 +715,6 @@ export class SparqlHttpStore implements TripleStore {
   private maybeEmitSlowQuery(input: {
     sparql: string;
     source?: string;
-    operation: SparqlHttpSlowQueryEvent['operation'];
     startedAt: number;
   }): void {
     if (this.slowQueryThresholdMs <= 0 || this.slowQuerySampleRate <= 0) return;
@@ -701,7 +724,9 @@ export class SparqlHttpStore implements TripleStore {
 
     const event: SparqlHttpSlowQueryEvent = {
       source: normalizeQuerySource(input.source),
-      operation: input.operation,
+      // Classification scans the complete query. Keep it behind the same
+      // threshold/sample gates as hashing so normal reads pay no telemetry cost.
+      operation: inferQueryOperation(input.sparql),
       elapsedMs,
       thresholdMs: this.slowQueryThresholdMs,
       endpoint: sanitizeEndpointForTelemetry(this.queryEndpoint),

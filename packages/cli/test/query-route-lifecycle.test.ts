@@ -1,15 +1,22 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
+  configureApiQueryPriority,
   createApiQueryRequestLifecycle,
+  handleQueryRoutes,
   resolveApiQueryPriority,
   respondIfApiQueryStoreBusy,
 } from '../src/daemon/routes/query.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
 
 class RequestStub extends EventEmitter {
   aborted = false;
+  method = 'POST';
+  __dkgPrebufferedBody = Buffer.from(JSON.stringify({
+    sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+  }));
 }
 
 class ResponseStub extends EventEmitter {
@@ -34,24 +41,65 @@ class ResponseStub extends EventEmitter {
   }
 }
 
+function queryRouteContext(
+  req: RequestStub,
+  res: ResponseStub,
+  agent: Record<string, unknown>,
+  tracker: Record<string, unknown>,
+): RequestContext {
+  return {
+    req,
+    res,
+    agent,
+    tracker,
+    validTokens: new Set<string>(),
+    url: new URL('http://127.0.0.1/api/query'),
+    path: '/api/query',
+    requestToken: undefined,
+    requestAgentAddress: '',
+  } as unknown as RequestContext;
+}
+
 describe('/api/query request lifecycle', () => {
   const originalPriority = process.env.DKG_API_QUERY_PRIORITY;
 
   afterEach(() => {
     if (originalPriority === undefined) delete process.env.DKG_API_QUERY_PRIORITY;
     else process.env.DKG_API_QUERY_PRIORITY = originalPriority;
+    configureApiQueryPriority(originalPriority, {
+      info: () => {},
+      warn: () => {},
+    });
   });
 
-  it('defaults API reads to background and allows a reversible normal-lane override', () => {
+  it('resolves the lane once, logs it, and warns when an incident override is invalid', () => {
     expect(resolveApiQueryPriority(undefined)).toBe('background');
     expect(resolveApiQueryPriority('background')).toBe('background');
     expect(resolveApiQueryPriority('normal')).toBe('normal');
     expect(resolveApiQueryPriority(' NORMAL ')).toBe('normal');
     expect(resolveApiQueryPriority('ack')).toBe('background');
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+    expect(configureApiQueryPriority('normal', logger)).toBe('normal');
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('priority: normal'));
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    expect(configureApiQueryPriority('noraml', logger)).toBe('background');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid DKG_API_QUERY_PRIORITY="noraml"'),
+    );
+    expect(logger.info).toHaveBeenLastCalledWith(expect.stringContaining('priority: background'));
   });
 
   it('forwards the exact lane/source and aborts the signal on request disconnect', () => {
     process.env.DKG_API_QUERY_PRIORITY = 'normal';
+    configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
+      info: () => {},
+      warn: () => {},
+    });
     const req = new RequestStub();
     const res = new ResponseStub();
     const lifecycle = createApiQueryRequestLifecycle(
@@ -103,6 +151,134 @@ describe('/api/query request lifecycle', () => {
       res as unknown as ServerResponse,
       new Error('parse failed'),
     )).toBe(false);
+    expect(respondIfApiQueryStoreBusy(
+      res as unknown as ServerResponse,
+      {
+        code: 'STORE_SCHEDULER_BUSY',
+        reason: 'queue_full',
+        priority: 'background',
+      },
+    )).toBe(false);
     expect(res.writableEnded).toBe(false);
+  });
+
+  it('passes the lifecycle admission options through the actual route handoff', async () => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    let receivedOptions: Record<string, unknown> | undefined;
+    const agent = {
+      query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+        receivedOptions = options;
+        return { type: 'bindings', bindings: [] };
+      }),
+    };
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(agent.query).toHaveBeenCalledTimes(1);
+    expect(receivedOptions).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect((receivedOptions?.signal as AbortSignal).aborted).toBe(false);
+    expect(res.statusCode).toBe(200);
+    expect(tracker.complete).toHaveBeenCalledTimes(1);
+    expect(tracker.fail).not.toHaveBeenCalled();
+  });
+
+  it('aborts the route signal on disconnect and maps canonical shedding to 503', async () => {
+    const disconnectReq = new RequestStub();
+    const disconnectRes = new ResponseStub();
+    let receivedSignal: AbortSignal | undefined;
+    let queryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    const disconnectTracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const disconnectRoute = handleQueryRoutes(queryRouteContext(
+      disconnectReq,
+      disconnectRes,
+      {
+        query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+          receivedSignal = options.signal as AbortSignal;
+          queryStarted();
+          return new Promise((_resolve, reject) => {
+            receivedSignal?.addEventListener(
+              'abort',
+              () => reject(receivedSignal?.reason),
+              { once: true },
+            );
+          });
+        }),
+      },
+      disconnectTracker,
+    ));
+    await started;
+
+    disconnectReq.aborted = true;
+    disconnectReq.emit('aborted');
+    await disconnectRoute;
+
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(disconnectTracker.cancel).toHaveBeenCalledTimes(1);
+    expect(disconnectTracker.fail).not.toHaveBeenCalled();
+    expect(disconnectRes.writableEnded).toBe(true);
+
+    const busyReq = new RequestStub();
+    const busyRes = new ResponseStub();
+    let busyOptions: Record<string, unknown> | undefined;
+    const busyTracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+    await handleQueryRoutes(queryRouteContext(
+      busyReq,
+      busyRes,
+      {
+        query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+          busyOptions = options;
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'background',
+            'api.query',
+          );
+        }),
+      },
+      busyTracker,
+    ));
+
+    expect(busyOptions).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(busyOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(busyRes.statusCode).toBe(503);
+    expect(busyRes.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(busyRes.body)).toMatchObject({
+      code: 'STORE_SCHEDULER_BUSY',
+      retryable: true,
+    });
+    expect(busyTracker.cancel).toHaveBeenCalledTimes(1);
+    expect(busyTracker.fail).not.toHaveBeenCalled();
   });
 });
