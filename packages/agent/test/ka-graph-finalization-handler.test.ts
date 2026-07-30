@@ -2256,7 +2256,11 @@ describe('graph-scoped finalization handler', () => {
 
     const originalQuery = store.query.bind(store);
     let injectedBusyTimeout = false;
+    const cleanupPriorities: Array<string | undefined> = [];
     const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source?.startsWith('agent.finalization.graphScopedSwmCleanup')) {
+        cleanupPriorities.push(options.priority);
+      }
       if (
         !injectedBusyTimeout
         && options?.source === 'agent.finalization.graphScopedSwmCleanup.discover'
@@ -2265,7 +2269,7 @@ describe('graph-scoped finalization handler', () => {
         injectedBusyTimeout = true;
         throw new StoreSchedulerBusyError(
           'queue_wait_timeout',
-          'background',
+          'normal',
           options.source,
         );
       }
@@ -2279,6 +2283,8 @@ describe('graph-scoped finalization handler', () => {
       queueBehindActiveWork: true,
     })).resolves.toBe(1);
     expect(injectedBusyTimeout).toBe(true);
+    expect(cleanupPriorities.length).toBeGreaterThan(0);
+    expect(new Set(cleanupPriorities)).toEqual(new Set(['normal']));
     expect(await store.countQuads(swmGraph)).toBe(0);
     querySpy.mockRestore();
   });

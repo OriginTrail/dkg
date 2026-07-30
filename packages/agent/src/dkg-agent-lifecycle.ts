@@ -6042,12 +6042,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (includeSharedMemory && typeof this.cleanupExpiredSharedMemory === 'function') {
       // Every selected peer has settled, so this is the first single,
       // deterministic cleanup boundary for the whole catch-up job. The
-      // cleanup's store operations remain background-priority and its
-      // per-KA lock/exact VM+SWM+marker re-checks preserve a concurrent newer
-      // SWM lifecycle. Queue behind active store work instead of sampling
-      // pressure and abandoning the drain: the store scheduler keeps
-      // foreground/ACK priority and guarantees background progress. The
-      // periodic timer remains the restart/failure backstop.
+      // cleanup's per-KA lock/exact VM+SWM+marker re-checks preserve a
+      // concurrent newer SWM lifecycle. Queue this bounded deterministic drain
+      // in the normal maintenance lane: ACK/health reservations remain
+      // protected, but a continuously deep background sync queue cannot make
+      // every cleanup attempt expire before admission. The periodic timer
+      // remains idle-gated/background and is the restart/failure backstop.
       await this.cleanupExpiredSharedMemory({
         finalizedOnly: true,
         contextGraphIds: [contextGraphId],

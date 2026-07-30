@@ -1640,8 +1640,13 @@ export class FinalizationHandler {
       return 0;
     }
     const limit = Math.min(16, Math.max(1, Math.floor(input.maxCandidates ?? 4)));
-    const background: QueryOptions = {
-      priority: 'background',
+    // A deterministic post-catch-up drain is part of completing the lifecycle
+    // job, not opportunistic maintenance. Give it the normal lane so a
+    // continuously deep background sync queue cannot make every retry expire
+    // before admission. ACK and health work retain their reserved slots, while
+    // periodic cleanup stays background-only and idle-gated.
+    const cleanupQueryOptions: QueryOptions = {
+      priority: input.queueBehindActiveWork ? 'normal' : 'background',
       source: 'agent.finalization.graphScopedSwmCleanup.discover',
     };
     const busyRetryDeadline = input.queueBehindActiveWork
@@ -1682,7 +1687,7 @@ export class FinalizationHandler {
           OPTIONAL { ?operation <${DKG_NS}subGraphName> ?subGraphName }
         }
       } ORDER BY ?head LIMIT ${limit}`,
-      background,
+      cleanupQueryOptions,
     ));
     if (result.type !== 'bindings') return 0;
 
@@ -1730,7 +1735,7 @@ export class FinalizationHandler {
           contextGraphId: input.contextGraphId,
           kaUal: scope.ual,
           subGraphName,
-          queryOptions: background,
+          queryOptions: cleanupQueryOptions,
         }));
       } catch (error) {
         if (error instanceof StoreSchedulerBusyError) {
@@ -1761,6 +1766,7 @@ export class FinalizationHandler {
         expectedMerkleRoot,
         privateMerkleRoot,
         subGraphName,
+        queryPriority: cleanupQueryOptions.priority,
         ctx: createOperationContext('system'),
       }));
       if (outcome === 'cleared' || outcome === 'absent') cleared += 1;
@@ -1776,6 +1782,7 @@ export class FinalizationHandler {
     expectedMerkleRoot: Uint8Array;
     privateMerkleRoot?: Uint8Array;
     subGraphName?: string;
+    queryPriority?: QueryOptions['priority'];
     ctx: OperationContext;
   }): Promise<'cleared' | 'absent' | 'preserved'> {
     if (!this.writeLocks) return 'preserved';
@@ -1786,13 +1793,14 @@ export class FinalizationHandler {
       expectedMerkleRoot,
       privateMerkleRoot,
       subGraphName,
+      queryPriority,
       ctx,
     } = input;
     const lockKey = swmKaWriteLockKey(contextGraphId, subGraphName, scope.ual);
     const outcome = await withKeyedLocks(this.writeLocks, [lockKey], async () => {
       const graphManager = new GraphManager(this.store);
-      const background: QueryOptions = {
-        priority: 'background',
+      const cleanupQueryOptions: QueryOptions = {
+        priority: queryPriority ?? 'background',
         source: 'agent.finalization.graphScopedSwmCleanup',
       };
       let currentHead: KnowledgeAssetWorkspaceHead | undefined;
@@ -1803,7 +1811,7 @@ export class FinalizationHandler {
           contextGraphId,
           kaUal: scope.ual,
           subGraphName,
-          queryOptions: background,
+          queryOptions: cleanupQueryOptions,
         });
       } catch (error) {
         if (!(error instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw error;
@@ -1832,7 +1840,7 @@ export class FinalizationHandler {
         `ASK { GRAPH <${assertSafeIri(metaGraph)}> { `
           + `<${assertSafeIri(headSubject)}> <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> `
           + `${cleanupRootObject} } }`,
-        background,
+        cleanupQueryOptions,
       );
       if (marker.type !== 'boolean' || !marker.value) return 'preserved' as const;
 
@@ -1845,7 +1853,7 @@ export class FinalizationHandler {
         expectedMerkleRoot,
         expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
         subGraphName,
-        queryOptions: background,
+        queryOptions: cleanupQueryOptions,
       });
       if (vmVerification.status !== 'verified') {
         this.log.warn(
@@ -1865,7 +1873,7 @@ export class FinalizationHandler {
         expectedMerkleRoot,
         expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
         subGraphName,
-        queryOptions: background,
+        queryOptions: cleanupQueryOptions,
       });
       if (
         swmVerification.status !== 'verified'
@@ -1886,7 +1894,7 @@ export class FinalizationHandler {
         metaGraph,
         headSubject,
         [],
-        background,
+        cleanupQueryOptions,
       );
       if (!replaced) {
         throw Object.assign(
