@@ -189,6 +189,7 @@ describe('/api/status finalization recovery health', () => {
       stateCounts: { RECEIVED: 1 },
       liveEntries: 1,
       livePayloadBytes: 4,
+      dueEntries: 1,
     };
 
     const response = await requestStatusWithAgent({
@@ -215,6 +216,7 @@ describe('/api/status finalization recovery health', () => {
       degradedReason: 'finalization inbox health read failed',
       stateCounts: {},
       livePayloadBytes: 0,
+      dueEntries: 0,
     });
   });
 });

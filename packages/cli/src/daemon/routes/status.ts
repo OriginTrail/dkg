@@ -696,6 +696,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       degradedReason: reason,
       stateCounts: {},
       livePayloadBytes: 0,
+      dueEntries: 0,
     });
     let finalizationRecovery: Awaited<
       ReturnType<DKGAgent['getFinalizationRecoveryHealth']>
