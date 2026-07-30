@@ -15,13 +15,20 @@
  */
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetWorkspaceHead,
   sameKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  tryReplaceGraphAndSubjectAtomically,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from '../../dkg-agent-constants.js';
 
@@ -87,6 +94,20 @@ export interface SharedMemorySnapshotMaterializer {
    * of equal size apart and would skip a verified newer snapshot.
    */
   isGraphAssetMaterialized(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
+  /**
+   * Refuse to resurrect an assertion that is already exactly confirmed in VM.
+   * When the active SWM head still names this descriptor, remove its exact
+   * duplicate graph and head atomically. A newer/different SWM head is
+   * preserved, but the stale finalized descriptor is still rejected.
+   *
+   * Returns true when the incoming descriptor is already exactly finalized,
+   * whether the local duplicate was removed, already absent, or preserved
+   * because the active SWM lifecycle differs.
+   */
+  discardFinalizedGraphAsset(
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean>;
   /**
    * Atomic whole-graph replace. Replace, not insert: a KA graph is
    * all-or-nothing and digest-verified; union-insert risks partial or
@@ -205,19 +226,10 @@ async function readExactFinalizedCleanupMarkers(params: {
         source: `${sourcePrefix}.readFinalizedCleanupHead`,
       },
     });
-    if (!currentHead || !sameKnowledgeAssetWorkspaceHead(currentHead, {
-      kaUal: descriptor.kaUal,
-      assertionVersion: descriptor.assertionVersion,
-      assertionGraph: descriptor.assertionGraph,
-      publicQuadsDigest: descriptor.publicQuadsDigest,
-      publicTripleCount: descriptor.publicQuadsCount,
-      privateMerkleRoot: descriptor.privateMerkleRoot,
-      privateTripleCount: descriptor.privateTripleCount,
-      shareOperationId: descriptor.shareOperationId,
-      publisherPeerId: descriptor.publisherPeerId,
-      accessPolicy: descriptor.accessPolicy,
-      allowedPeers: [...descriptor.allowedPeers],
-    })) {
+    if (!currentHead || !sameKnowledgeAssetWorkspaceHead(
+      currentHead,
+      workspaceHeadFromDescriptor(descriptor),
+    )) {
       return [];
     }
   } catch {
@@ -252,6 +264,85 @@ async function readExactFinalizedCleanupMarkers(params: {
     return [];
   }
   return [headMarkers[0]!, operationMarkers[0]!];
+}
+
+function workspaceHeadFromDescriptor(
+  descriptor: GraphScopedSwmRecoveryDescriptor,
+) {
+  return {
+    kaUal: descriptor.kaUal,
+    assertionVersion: descriptor.assertionVersion,
+    assertionGraph: descriptor.assertionGraph,
+    publicQuadsDigest: descriptor.publicQuadsDigest,
+    publicTripleCount: descriptor.publicQuadsCount,
+    privateMerkleRoot: descriptor.privateMerkleRoot,
+    privateTripleCount: descriptor.privateTripleCount,
+    shareOperationId: descriptor.shareOperationId,
+    publisherPeerId: descriptor.publisherPeerId,
+    accessPolicy: descriptor.accessPolicy,
+    allowedPeers: [...descriptor.allowedPeers],
+  };
+}
+
+function sameBytes(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+function descriptorPrivateRoot(
+  descriptor: GraphScopedSwmRecoveryDescriptor,
+): Uint8Array | undefined {
+  const value = descriptor.privateMerkleRoot?.replace(/^0x/i, '');
+  if (value === undefined) return undefined;
+  if (!/^[0-9a-fA-F]{64}$/.test(value)) return new Uint8Array(0);
+  return Uint8Array.from(value.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
+}
+
+async function isExactConfirmedVmAsset(params: {
+  store: TripleStore;
+  contextGraphId: string;
+  descriptor: GraphScopedSwmRecoveryDescriptor;
+}): Promise<boolean> {
+  const { store, contextGraphId, descriptor } = params;
+  const confirmed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+    contextGraphId,
+    ual: descriptor.kaUal,
+  });
+  if (confirmed.state !== 'confirmed') return false;
+  const { envelope } = confirmed;
+  const expectedPrivateRoot = descriptorPrivateRoot(descriptor);
+  if (
+    envelope.assertionVersion !== descriptor.assertionVersion
+    || envelope.publicTripleCount !== descriptor.publicQuadsCount
+    || envelope.privateTripleCount !== descriptor.privateTripleCount
+    || envelope.subGraphName !== descriptor.subGraphName
+    || !sameBytes(envelope.privateMerkleRoot, expectedPrivateRoot)
+  ) {
+    return false;
+  }
+
+  const vmResult = await store.query(
+    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(envelope.assertionGraph)}> { ?s ?p ?o } }`,
+    {
+      priority: 'background',
+      source: 'agent.sharedMemorySync.snapshotMaterializer.readConfirmedVmGraph',
+    },
+  );
+  if (vmResult.type !== 'quads') return false;
+  const vmQuads = vmResult.quads.map((quad) => ({ ...quad, graph: '' }));
+  if (
+    vmQuads.length !== descriptor.publicQuadsCount
+    || workspacePublicQuadsDigest(vmQuads) !== descriptor.publicQuadsDigest
+  ) {
+    return false;
+  }
+  return sameBytes(
+    computeFlatKCRootV10(
+      vmQuads,
+      envelope.privateMerkleRoot ? [envelope.privateMerkleRoot] : [],
+    ),
+    envelope.merkleRoot,
+  );
 }
 
 /**
@@ -325,6 +416,81 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
       return workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+    },
+
+    discardFinalizedGraphAsset: async (contextGraphId, descriptor) => {
+      if (!await isExactConfirmedVmAsset({
+        store: deps.store,
+        contextGraphId,
+        descriptor,
+      })) {
+        return false;
+      }
+
+      // The caller owns the canonical per-KA writer lock. Re-read the active
+      // head inside it so a newer SWM assertion can never be removed by a
+      // delayed finalized snapshot.
+      let currentHead;
+      try {
+        currentHead = await resolveKnowledgeAssetWorkspaceHead({
+          store: deps.store,
+          graphManager: new GraphManager(deps.store),
+          contextGraphId,
+          kaUal: descriptor.kaUal,
+          subGraphName: descriptor.subGraphName,
+          queryOptions: {
+            priority: 'background',
+            source: 'agent.sharedMemorySync.snapshotMaterializer.readFinalizedSwmHead',
+          },
+        });
+      } catch {
+        // Exact VM still makes the incoming descriptor stale. Preserve corrupt
+        // local SWM state for explicit recovery, but never import another copy.
+        return true;
+      }
+      if (
+        !currentHead
+        || !sameKnowledgeAssetWorkspaceHead(
+          currentHead,
+          workspaceHeadFromDescriptor(descriptor),
+        )
+      ) {
+        return true;
+      }
+
+      const swmResult = await deps.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
+        {
+          priority: 'background',
+          source: 'agent.sharedMemorySync.snapshotMaterializer.readFinalizedSwmGraph',
+        },
+      );
+      if (swmResult.type !== 'quads') return true;
+      const swmQuads = swmResult.quads.map((quad) => ({ ...quad, graph: '' }));
+      const swmIsAbsent = swmQuads.length === 0;
+      const swmIsExact = swmQuads.length === descriptor.publicQuadsCount
+        && workspacePublicQuadsDigest(swmQuads) === descriptor.publicQuadsDigest;
+      if (!swmIsAbsent && !swmIsExact) return true;
+
+      const replaced = await tryReplaceGraphAndSubjectAtomically(
+        deps.store,
+        descriptor.assertionGraph,
+        [],
+        descriptor.metaGraph,
+        descriptor.headSubject,
+        [],
+        {
+          priority: 'background',
+          source: 'agent.sharedMemorySync.snapshotMaterializer.discardFinalizedSwm',
+        },
+      );
+      if (!replaced) {
+        throw new Error(
+          'finalized SWM anti-resurrection requires atomic graph-and-head replacement support',
+        );
+      }
+      deps.invalidateListContextGraphsCache();
+      return true;
     },
 
     replaceGraph: async (graphUri, quads) => {

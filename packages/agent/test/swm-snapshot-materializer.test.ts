@@ -31,6 +31,8 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
   generateKnowledgeAssetShareMetadata,
   resolveKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
@@ -110,6 +112,38 @@ function descriptorFor(fixture: typeof v1) {
   });
   expect(descriptors).toHaveLength(1);
   return descriptors[0]!;
+}
+
+function confirmedVmFor(fixture: typeof v1) {
+  const scope = createGraphKnowledgeAssetScope(UAL, fixture.version);
+  const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
+  const merkleRoot = computeFlatKCRootV10(fixture.payload, []);
+  const agentAddress = BigInt('0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  const batchId = (agentAddress << 96n) | 9n;
+  const meta = generateGraphKnowledgeAssetMetadata({
+    contextGraphId: CG,
+    ual: UAL,
+    merkleRoot,
+    publisherPeerId: 'peer-source',
+    accessPolicy: 'public',
+    allowedPeers: [],
+    timestamp: new Date(0),
+    assertionVersion: fixture.version,
+    authorAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    publicTripleCount: fixture.payload.length,
+    privateTripleCount: 0,
+    assertionGraph,
+  }, {
+    status: 'confirmed',
+    confirmation: {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId,
+        materializedVersion: { blockNumber: 123, txIndex: 0 },
+      },
+    },
+  });
+  return { assertionGraph, merkleRoot, meta };
 }
 
 function materializerFor(store: TripleStore) {
@@ -327,6 +361,71 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     });
   });
 
+  it('atomically discards an exact SWM duplicate already confirmed in VM', async () => {
+    const store = new OxigraphStore();
+    const vm = confirmedVmFor(v1);
+    await store.insert([
+      ...v1.meta,
+      ...inGraph(v1.payload, v1.assertionGraph),
+      ...inGraph(v1.payload, vm.assertionGraph),
+      ...vm.meta,
+    ]);
+    const { materializer } = materializerFor(store);
+    const descriptor = descriptorFor(v1);
+
+    const finalized = await materializer.withKaWriteLock(CG, undefined, UAL, () =>
+      materializer.discardFinalizedGraphAsset(CG, descriptor));
+
+    expect(finalized).toBe(true);
+    expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(false);
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual([]);
+    // Immutable operation metadata remains available for receipt/reorg
+    // recovery; only the active SWM graph and head are drained.
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+  });
+
+  it('rejects a finalized inbound descriptor without deleting a newer SWM lifecycle', async () => {
+    const store = new OxigraphStore();
+    const vm = confirmedVmFor(v1);
+    await store.insert([
+      ...v2.meta,
+      ...inGraph(v2.payload, v2.assertionGraph),
+      ...inGraph(v1.payload, vm.assertionGraph),
+      ...vm.meta,
+    ]);
+    const { materializer } = materializerFor(store);
+
+    const finalized = await materializer.withKaWriteLock(CG, undefined, UAL, () =>
+      materializer.discardFinalizedGraphAsset(CG, descriptorFor(v1)));
+
+    expect(finalized).toBe(true);
+    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v2))).toBe(true);
+    expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v2"']);
+  });
+
+  it('does not treat confirmed metadata as proof when the VM graph content differs', async () => {
+    const store = new OxigraphStore();
+    const vm = confirmedVmFor(v1);
+    await store.insert([
+      ...v1.meta,
+      ...inGraph(v1.payload, v1.assertionGraph),
+      ...inGraph(v2.payload, vm.assertionGraph),
+      ...vm.meta,
+    ]);
+    const { materializer } = materializerFor(store);
+
+    const finalized = await materializer.withKaWriteLock(CG, undefined, UAL, () =>
+      materializer.discardFinalizedGraphAsset(CG, descriptorFor(v1)));
+
+    expect(finalized).toBe(false);
+    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+  });
+
   it('replaceGraph writes atomically and invalidates the list cache', async () => {
     const store = new OxigraphStore();
     const { materializer, invalidations } = materializerFor(store);
@@ -445,6 +544,35 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const again = await h.run();
       expect(again.failedPhases).toBe(0);
       expect(h.replaceCalls()).toBe(1);
+    });
+
+    it('does not restore an exact finalized assertion after cleanup or a late peer sync', async () => {
+      const store = new OxigraphStore();
+      const vm = confirmedVmFor(v1);
+      await store.insert([
+        ...v1.meta,
+        ...inGraph(v1.payload, v1.assertionGraph),
+        ...inGraph(v1.payload, vm.assertionGraph),
+        ...vm.meta,
+      ]);
+      const h = realHarness(store, v1);
+
+      const first = await h.run();
+      expect(first.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+        .toEqual([]);
+
+      // A second identical peer snapshot is still refused: confirmed VM is a
+      // durable anti-resurrection proof, not a one-shot cleanup marker.
+      const again = await h.run();
+      expect(again.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+        .toEqual([]);
     });
   });
 });
