@@ -47,6 +47,7 @@
 * [Host-Mode Manual Subscribe](use-dkg/host-mode-manual-subscribe.md)
 * [Updates & Rollback](use-dkg/updates-and-rollback.md)
 * [Migrate to npm](use-dkg/migrate-to-npm.md)
+* [Backpressure Observability](use-dkg/backpressure-observability.md)
 * [Troubleshooting](use-dkg/troubleshooting.md)
 
 ## Agent Context

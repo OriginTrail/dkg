@@ -1,4 +1,10 @@
-import { getMetrics } from '@origintrail-official/dkg-core';
+import {
+  backpressureRegistry,
+  getMetrics,
+  ObservableScheduler,
+  type SchedulerPressureThresholds,
+  type SchedulerPressureTicket,
+} from '@origintrail-official/dkg-core';
 import type { SyncPriorityClass, SyncSchedulerLane } from './policy.js';
 
 export type PriorityAdmissionRelease = () => void;
@@ -44,6 +50,14 @@ export interface PriorityAdmissionQueueHooks<Payload> {
   canRun: (entry: PriorityAdmissionEntry<Payload>) => boolean;
   onStart: (entry: PriorityAdmissionEntry<Payload>) => PriorityAdmissionRelease;
   onDepthChange?: (depth: number) => void;
+  observability?: {
+    scheduler: string;
+    operation: (entry: PriorityAdmissionEntry<Payload>) => string;
+    inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
+    thresholds?: SchedulerPressureThresholds;
+    now?: () => number;
+    register?: boolean;
+  };
 }
 
 export interface PriorityAdmissionAcquireOptions<Payload> extends PriorityAdmissionScheduling {
@@ -85,12 +99,22 @@ function abortError(reason: unknown): Error {
  * Shared priority/FIFO admission queue. Scheduler decision metrics are events:
  * an aged start emits both `started` and `aged` intentionally.
  */
-export class PriorityAdmissionQueue<Payload> {
+export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly queue: InternalEntry<Payload>[] = [];
   private readonly handoffReservations = new Map<number, HandoffReservation>();
+  private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
+  private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
   private nextSequence = 0;
 
-  constructor(private readonly hooks: PriorityAdmissionQueueHooks<Payload>) {}
+  constructor(hooks: PriorityAdmissionQueueHooks<Payload>) {
+    super({
+      scheduler: hooks.observability?.scheduler ?? 'priority-admission',
+      thresholds: hooks.observability?.thresholds,
+      now: hooks.observability?.now,
+    });
+    this.hooks = hooks;
+    if (hooks.observability?.register) backpressureRegistry.register(this);
+  }
 
   get length(): number {
     return this.queue.length;
@@ -141,6 +165,12 @@ export class PriorityAdmissionQueue<Payload> {
       now,
       agingThresholdMs: options.agingThresholdMs,
     };
+    if (this.hooks.observability) {
+      this.updatePressureCapacity({
+        queueLimit: options.queueLimit,
+        inflightLimit: this.hooks.observability.inflightLimit?.(base) ?? null,
+      });
+    }
 
     const reservedGlobal = this.handoffReservations.size;
     const reservedOwner = this.countReservedOwner(ownerKey);
@@ -162,6 +192,7 @@ export class PriorityAdmissionQueue<Payload> {
       && !reservationOwnerFull
     ) {
       this.recordDecision(base, 'started');
+      this.observePressureEnqueue(base);
       const admission: PriorityAdmission<Payload> = {
         status: 'running',
         queuedBefore,
@@ -187,9 +218,14 @@ export class PriorityAdmissionQueue<Payload> {
         .sort((a, b) => a.priority - b.priority || b.sequence - a.sequence)[0];
       if (!victim) {
         this.recordDecision(base, 'rejected');
+        this.observePressureReject(
+          base,
+          globalFull ? 'global_queue_full' : 'owner_queue_full',
+        );
         throw options.createBusyError(globalFull ? 'global_queue_full' : 'owner_queue_full');
       }
       if (victim) {
+        this.observePressureReject(victim, 'displaced');
         this.remove(victim);
         this.recordDecision(victim, 'displaced');
         this.rejectOnce(victim, options.createDisplacedError(victim));
@@ -215,6 +251,7 @@ export class PriorityAdmissionQueue<Payload> {
       if (options.timeoutMs !== undefined) {
         internal.timer = setTimeout(() => {
           if (!this.remove(internal)) return;
+          this.observePressureReject(internal, 'queue_wait_timeout');
           this.rejectOnce(
             internal,
             options.createTimeoutError?.() ?? options.createBusyError('global_queue_full'),
@@ -223,9 +260,11 @@ export class PriorityAdmissionQueue<Payload> {
       }
       internal.onAbort = () => {
         if (!this.remove(internal)) return;
+        this.observePressureCancel(internal, 'aborted');
         this.recordDecision(internal, 'aborted');
         this.rejectOnce(internal, abortError(options.signal?.reason));
       };
+      this.observePressureEnqueue(internal);
       this.queue.push(internal);
       this.depthChanged();
       if (options.signal) {
@@ -292,6 +331,7 @@ export class PriorityAdmissionQueue<Payload> {
         ownerQueueLimit: options.ownerQueueLimit,
       });
     }
+    this.observePressureStart(entry);
     const release = this.hooks.onStart(entry);
     let released = false;
     return () => {
@@ -299,6 +339,7 @@ export class PriorityAdmissionQueue<Payload> {
       released = true;
       this.handoffReservations.delete(entry.sequence);
       release();
+      this.observePressureFinish(entry);
       this.pump();
     };
   }
@@ -356,5 +397,47 @@ export class PriorityAdmissionQueue<Payload> {
       ...this.metricAttributes(entry),
       outcome,
     });
+  }
+
+  private pressureWork(entry: PriorityAdmissionEntry<Payload>) {
+    return {
+      lane: entry.lane,
+      operation: this.hooks.observability?.operation(entry) ?? entry.lane,
+    };
+  }
+
+  private observePressureEnqueue(entry: PriorityAdmissionEntry<Payload>): void {
+    if (!this.hooks.observability) return;
+    this.pressureTickets.set(entry, this.pressureEnqueue(this.pressureWork(entry)));
+  }
+
+  private observePressureStart(entry: PriorityAdmissionEntry<Payload>): void {
+    const ticket = this.pressureTickets.get(entry);
+    if (ticket) this.pressureStart(ticket);
+  }
+
+  private observePressureReject(entry: PriorityAdmissionEntry<Payload>, reason: string): void {
+    if (!this.hooks.observability) return;
+    const ticket = this.pressureTickets.get(entry);
+    if (ticket) {
+      this.pressureRejectQueued(ticket, reason);
+      this.pressureTickets.delete(entry);
+      return;
+    }
+    this.pressureReject(this.pressureWork(entry), reason);
+  }
+
+  private observePressureCancel(entry: PriorityAdmissionEntry<Payload>, reason: string): void {
+    const ticket = this.pressureTickets.get(entry);
+    if (!ticket) return;
+    this.pressureCancelQueued(ticket, reason);
+    this.pressureTickets.delete(entry);
+  }
+
+  private observePressureFinish(entry: PriorityAdmissionEntry<Payload>): void {
+    const ticket = this.pressureTickets.get(entry);
+    if (!ticket) return;
+    this.pressureFinish(ticket, 'released');
+    this.pressureTickets.delete(entry);
   }
 }

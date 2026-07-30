@@ -183,6 +183,24 @@ export interface DkgMetrics {
   storeSchedulerQueueWaitMs: Histogram;
   /** active admitted operations by priority and operation */
   storeSchedulerActive: UpDownCounter;
+  /** current queued work; scheduler and lane are bounded static labels */
+  backpressureQueueDepth: Gauge;
+  /** configured queue capacity; scheduler and lane are bounded static labels */
+  backpressureQueueLimit: Gauge;
+  /** current admitted work; scheduler and lane are bounded static labels */
+  backpressureInflight: Gauge;
+  /** configured concurrent-work capacity; scheduler and lane are bounded static labels */
+  backpressureInflightLimit: Gauge;
+  /** age of the oldest queued item; scheduler and lane are bounded static labels */
+  backpressureOldestQueuedAgeMs: Gauge;
+  /** age of the oldest admitted item; scheduler and lane are bounded static labels */
+  backpressureOldestActiveAgeMs: Gauge;
+  /** scheduler, lane, event, and optional reason are bounded labels */
+  backpressureEventsTotal: Counter;
+  /** queue wait by bounded scheduler and lane */
+  backpressureQueueWaitMs: Histogram;
+  /** admitted-work duration by bounded scheduler, lane, and outcome */
+  backpressureActiveDurationMs: Histogram;
   /** scope={finalization|reconcile} */
   storeScanSingleFlightJoinsTotal: Counter;
   /** active unique scans by scope */
@@ -306,6 +324,39 @@ function buildMetrics(): DkgMetrics {
     }),
     storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {
       description: 'Currently admitted external-store operations by lane and static caller',
+    }),
+    backpressureQueueDepth: meter.createGauge('dkg.backpressure.queue_depth', {
+      description: 'Current scheduler queue depth by bounded scheduler and lane',
+    }),
+    backpressureQueueLimit: meter.createGauge('dkg.backpressure.queue_limit', {
+      description: 'Configured scheduler queue capacity by bounded scheduler and lane',
+    }),
+    backpressureInflight: meter.createGauge('dkg.backpressure.inflight', {
+      description: 'Current admitted scheduler work by bounded scheduler and lane',
+    }),
+    backpressureInflightLimit: meter.createGauge('dkg.backpressure.inflight_limit', {
+      description: 'Configured scheduler concurrent-work capacity by bounded scheduler and lane',
+    }),
+    backpressureOldestQueuedAgeMs: meter.createGauge('dkg.backpressure.oldest_queued_age_ms', {
+      unit: 'ms',
+      description: 'Current age of the oldest queued scheduler item',
+    }),
+    backpressureOldestActiveAgeMs: meter.createGauge('dkg.backpressure.oldest_active_age_ms', {
+      unit: 'ms',
+      description: 'Current age of the oldest admitted scheduler item',
+    }),
+    backpressureEventsTotal: meter.createCounter('dkg.backpressure.events_total', {
+      description: 'Scheduler lifecycle events and admission rejections',
+    }),
+    backpressureQueueWaitMs: meter.createHistogram('dkg.backpressure.queue_wait_ms', {
+      unit: 'ms',
+      description: 'Scheduler queue wait by bounded scheduler and lane',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    backpressureActiveDurationMs: meter.createHistogram('dkg.backpressure.active_duration_ms', {
+      unit: 'ms',
+      description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
     storeScanSingleFlightJoinsTotal: meter.createCounter('dkg.store.scan_singleflight_joins_total', {
       description: 'Equivalent expensive scans joined to an already running promise',

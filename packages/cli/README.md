@@ -401,6 +401,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
+- `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 
 > The V9 `GET /api/apps` endpoint (and the `/apps/*` iframe host) was retired in
@@ -408,6 +409,11 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 > `410 Gone` on those paths. See [Extending the Node](#extending-the-node) below.
 
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
+
+`GET /api/diagnostics/backpressure` specifically requires the node-level admin
+token; agent-scoped tokens cannot inspect node-wide scheduler work. See the
+[backpressure observability operator guide](../../docs/use-dkg/backpressure-observability.md)
+for state definitions, log behavior, metrics, and response safety boundaries.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
 
