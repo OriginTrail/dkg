@@ -2,9 +2,9 @@ name: EVM Integration Tests
 
 on:
   push:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
   pull_request:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   workflow_dispatch:
