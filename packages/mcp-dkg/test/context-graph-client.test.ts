@@ -48,4 +48,14 @@ describe('DkgClient context-graph registration', () => {
     })).rejects.toThrow(/positive decimal integer/);
     expect(calls).toHaveLength(0);
   });
+
+  it('records a completed local install through the daemon without identity data', async () => {
+    const { client, calls } = makeClient();
+    await client.recordProjectInstall('did:dkg:context-graph:project/alpha');
+
+    expect(calls[0].url).toContain(
+      '/api/context-graph/project%2Falpha/manifest/install-receipt',
+    );
+    expect(calls[0].body).toEqual({});
+  });
 });

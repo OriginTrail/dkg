@@ -729,6 +729,23 @@ export interface DkgConfig {
       /** Enable local Node UI SQLite metric snapshots. Default true. */
       collectionEnabled?: boolean;
     };
+    /**
+     * Opt-in project adoption receipts. The node sends only a SHA-256-derived
+     * pseudonym of its Peer ID; the raw Peer ID, wallet, workspace path, and
+     * daemon token are never included. Requires both `telemetry.enabled=true`
+     * and `adoption.enabled=true` plus an explicit endpoint.
+     */
+    adoption?: {
+      enabled?: boolean;
+      /** HTTPS endpoint accepting idempotent receipt POSTs; HTTP is loopback-only. */
+      endpoint?: string;
+      /** Optional Bearer credential for the receipt endpoint. */
+      token?: string;
+      /** Per-attempt request deadline. Default 3000ms, capped at 30000ms. */
+      timeoutMs?: number;
+      /** Total delivery attempts. Default 3, capped at 5. */
+      maxAttempts?: number;
+    };
   };
   /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
   sharedMemoryTtlMs?: number;

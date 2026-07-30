@@ -146,6 +146,10 @@ import {
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import {
+  AdoptionTelemetryReporter,
+  resolveAdoptionTelemetryConfig,
+} from '../adoption-telemetry.js';
+import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
@@ -2674,6 +2678,20 @@ export async function runDaemonInner(
   const networkKey = network?.networkName?.toLowerCase().includes("testnet")
     ? "testnet"
     : "mainnet";
+  const adoptionTelemetryConfig = resolveAdoptionTelemetryConfig(config.telemetry);
+  if (adoptionTelemetryConfig.warning) {
+    log(`Telemetry(adoption): ${adoptionTelemetryConfig.warning}; disabled`);
+  }
+  const adoptionTelemetry = new AdoptionTelemetryReporter({
+    config: adoptionTelemetryConfig,
+    peerId: agent.peerId,
+    nodeVersion,
+    network: network?.networkName ?? networkKey,
+    log: (message) => log(`Telemetry(adoption): ${message}`),
+  });
+  if (adoptionTelemetry.enabled) {
+    log('Telemetry: adoption receipts enabled');
+  }
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
   let logPusher: LogPushWorker | null = null;
   let otlpExporter: OtlpLogWorker | null = null;
@@ -3110,6 +3128,12 @@ export async function runDaemonInner(
 
   agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
     try {
+      adoptionTelemetry.enqueue({
+        type: 'context_graph_synced',
+        contextGraphId: data.contextGraphId,
+        dataSynced: data.dataSynced,
+        sharedMemorySynced: data.sharedMemorySynced,
+      });
       sseBroadcast("project_synced", {
         contextGraphId: data.contextGraphId,
         dataSynced: data.dataSynced,
@@ -3646,6 +3670,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        adoptionTelemetry,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3749,6 +3774,7 @@ export async function runDaemonInner(
         rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
+        await adoptionTelemetry.shutdown();
         // Stops log exporters AND flushes + shuts down the OTel SDK.
         await stopTelemetry();
         natStatusWatcherStop?.();

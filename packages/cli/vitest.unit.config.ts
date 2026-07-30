@@ -83,6 +83,9 @@ export default defineConfig({
           'test/metrics-queries.test.ts',
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
+          // Opt-in install/sync adoption receipts. Pure config + mocked HTTP.
+          'test/adoption-telemetry.test.ts',
+          'test/adoption-telemetry-route.test.ts',
           'test/rpc-usage-log.test.ts',
           'test/dashboard-log-volume-pruner.test.ts',
           // RFC 120 / plan PR 1 + 2 — Blazegraph support. Pure logic

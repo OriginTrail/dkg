@@ -944,6 +944,23 @@ export class DkgClient {
   }
 
   /**
+   * Best-effort notification that this client successfully materialised a
+   * project manifest. The daemon applies the operator's opt-in telemetry policy
+   * and derives the pseudonymous node identity; callers send no identity data.
+   */
+  async recordProjectInstall(contextGraphId: string): Promise<{
+    ok: boolean;
+    adoptionTracking: 'queued' | 'disabled';
+  }> {
+    const id = normalizeContextGraphId(contextGraphId);
+    return this.request(
+      'POST',
+      `/api/context-graph/${encodeURIComponent(id)}/manifest/install-receipt`,
+      {},
+    );
+  }
+
+  /**
    * OT-RFC-38 / LU-6 Phase B path 4 — operator-driven host-mode
    * subscribe. Asks the connected daemon (must be a core with
    * `swmHostMode` enabled) to start hosting the curated CG's opaque
