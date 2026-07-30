@@ -156,8 +156,12 @@ export async function installService(
 ): Promise<InstallServiceResult> {
   const { entry, dryRun, skipProvenance, verifier, runner = runCommand, logger } = options;
   assertNpmGlobalService(entry.install);
-  const { package: pkg, version } = entry.install.npmGlobal;
-  const binary = resolveBinary(entry.install.npmGlobal);
+  // Use the RESOLVED values, not the raw payload: the resolver trims, and
+  // reading around it would send `"@acme/svc "` to npm with the space intact,
+  // making the trim decorative at the one place it has to hold. The assertion
+  // above guarantees this is non-null.
+  const { package: pkg, version } = resolveNpmGlobalService(entry.install)!;
+  const binary = resolveBinary({ ...entry.install.npmGlobal, package: pkg });
 
   const result = await installNpmGlobalPackage({
     entry,
