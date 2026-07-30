@@ -1654,6 +1654,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
+          writeLocks: this.writeLocks,
+          publicSnapshotStore: this.publicSnapshotStore,
           runtime: this.finalizationRuntime,
         },
       );

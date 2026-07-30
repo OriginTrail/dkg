@@ -24,6 +24,8 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import {
@@ -355,7 +357,21 @@ describe('graph-scoped finalization handler', () => {
     }), CG, '12D3KooWPublisher');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({
+      assertionVersion: VERSION,
+      shareOperationId: SHARE_ID,
+    });
+    await expect(store.query(
+      `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> {
+        ?operation <http://dkg.io/ontology/shareOperationId> ${JSON.stringify(SHARE_ID)} .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
     const stale = await store.query(
       `ASK { GRAPH <${vmGraph}> { <urn:stale:must-be-replaced> ?p ?o } }`,
     );
@@ -944,7 +960,7 @@ describe('graph-scoped finalization handler', () => {
     store.replaceGraphAndSubject = replaceGraphAndSubject;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
     await expect(store.query(
       `ASK { GRAPH <${metaGraph}> { <${UAL}> <http://dkg.io/ontology/transactionHash> "${message.txHash}" } }`,
     )).resolves.toMatchObject({ type: 'boolean', value: true });
@@ -2053,6 +2069,69 @@ describe('graph-scoped finalization handler', () => {
     expect(currentHead?.assertionVersion).toBe('2');
   });
 
+  it('serializes finalized SWM cleanup with the shared per-KA writer lock', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const writeLocks = new Map<string, Promise<void>>();
+    const lockingHandler = new FinalizationHandler(store, legacyFinalizationChain(), {
+      writeLocks,
+    });
+    let releaseWriterLock!: () => void;
+    let markWriterLockAcquired!: () => void;
+    const writerLockAcquired = new Promise<void>((resolve) => {
+      markWriterLockAcquired = resolve;
+    });
+    const holdWriterLock = new Promise<void>((resolve) => {
+      releaseWriterLock = resolve;
+    });
+    const blocker = withKeyedLocks(
+      writeLocks,
+      [swmKaWriteLockKey(CG, undefined, UAL)],
+      async () => {
+        markWriterLockAcquired();
+        await holdWriterLock;
+      },
+    );
+    await writerLockAcquired;
+
+    let markVmCommitted!: () => void;
+    const vmCommitted = new Promise<void>((resolve) => {
+      markVmCommitted = resolve;
+    });
+    const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+    if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+    store.replaceGraphAndSubject = async (
+      graphUri,
+      quads,
+      metadataGraph,
+      subject,
+      metadata,
+      options,
+    ) => {
+      await replaceGraphAndSubject(
+        graphUri,
+        quads,
+        metadataGraph,
+        subject,
+        metadata,
+        options,
+      );
+      if (graphUri === vmGraph) markVmCommitted();
+    };
+
+    const finalization = lockingHandler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    );
+    await vmCommitted;
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    releaseWriterLock();
+    await blocker;
+    await finalization;
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
   it('rejects mixed graph-scope and legacy-root finalization envelopes', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(
@@ -2090,7 +2169,7 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
-  it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
+  it('verifies chain binding and exact private VM metadata before cleaning an exact SWM copy', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -2135,7 +2214,7 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
     expect(bindingVerified).toBe(true);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
   it('recognizes only exact confirmed Verifiable Memory metadata after the workspace head is lost', async () => {
@@ -2416,7 +2495,7 @@ describe('graph-scoped finalization handler', () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
 
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
     const materializedVersionPredicate = 'http://dkg.io/ontology/materializedVersion';
@@ -2533,9 +2612,10 @@ describe('graph-scoped finalization handler', () => {
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     const staged = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
     );
     if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.insert(staged.quads.map((quad) => ({ ...quad, graph: swmGraph })));
     await storeKnowledgeAssetOperationPublicQuads({
       store,
       graphManager,
@@ -2647,9 +2727,10 @@ describe('graph-scoped finalization handler', () => {
     await store.deleteByPattern({ graph: metaGraph, subject: UAL });
 
     const staged = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
     );
     if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.insert(staged.quads.map((quad) => ({ ...quad, graph: swmGraph })));
     await storeKnowledgeAssetOperationPublicQuads({
       store,
       graphManager,

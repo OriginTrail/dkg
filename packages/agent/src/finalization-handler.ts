@@ -45,11 +45,15 @@ import {
   compareMaterializedVersion, readMaterializedVersion,
   shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad,
   withMaterializationLock,
+  withKeyedLocks,
+  swmKaWriteLockKey,
   KnowledgeAssetWorkspaceHeadCorruptError,
+  resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
+  type WorkspacePublicSnapshotStore,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -289,6 +293,8 @@ export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
   resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
+  writeLocks?: Map<string, Promise<void>>;
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
@@ -358,6 +364,8 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
+  private readonly writeLocks: Map<string, Promise<void>>;
+  private readonly publicSnapshotStore: WorkspacePublicSnapshotStore | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
@@ -416,6 +424,8 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
+    this.writeLocks = options.writeLocks ?? new Map<string, Promise<void>>();
+    this.publicSnapshotStore = options.publicSnapshotStore;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -1074,6 +1084,18 @@ export class FinalizationHandler {
         expectedPublicQuadsDigest: head.publicQuadsDigest,
         subGraphName,
       });
+      if (layerVerification.status !== 'verified') {
+        const snapshotVerification = await this.verifyImmutableGraphScopedSnapshot({
+          contextGraphId,
+          scope,
+          head,
+          privateMerkleRoot,
+          expectedMerkleRoot: msg.kcMerkleRoot,
+          subGraphName,
+          ctx,
+        });
+        if (snapshotVerification) layerVerification = snapshotVerification;
+      }
       if (layerVerification.status === 'count-mismatch') {
         this.log.warn(
           ctx,
@@ -1168,6 +1190,16 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
+        await this.clearFinalizedGraphScopedSwm({
+          contextGraphId,
+          scope,
+          expectedHead: head,
+          expectedMerkleRoot: msg.kcMerkleRoot,
+          privateMerkleRoot,
+          subGraphName,
+          source: 'finalization',
+          ctx,
+        });
         this.markProcessed(dedupeKey);
         this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
         return 'already-confirmed';
@@ -1198,6 +1230,18 @@ export class FinalizationHandler {
       this.markProcessed(dedupeKey);
       this.log.info(ctx, `Finalization: newer graph-scoped assertion already materialized for ${scope.ual}`);
       return 'already-confirmed';
+    }
+    if (outcome === 'applied') {
+      await this.clearFinalizedGraphScopedSwm({
+        contextGraphId,
+        scope,
+        expectedHead: head,
+        expectedMerkleRoot: msg.kcMerkleRoot,
+        privateMerkleRoot,
+        subGraphName,
+        source: 'finalization',
+        ctx,
+      });
     }
 
     this.markProcessed(dedupeKey);
@@ -1328,6 +1372,202 @@ export class FinalizationHandler {
       return { status: 'head-mismatch', graphUri };
     }
     return { status: 'verified', graphUri, quads, merkleRoot };
+  }
+
+  /**
+   * Rebuild a finalized source from its immutable operation snapshot when the
+   * active SWM graph has already been drained. This keeps durable receipt/reorg
+   * recovery independent from retaining a second live copy of the payload.
+   */
+  private async verifyImmutableGraphScopedSnapshot(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    head: KnowledgeAssetWorkspaceHead;
+    privateMerkleRoot?: Uint8Array;
+    expectedMerkleRoot: Uint8Array;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<Extract<ExactGraphScopedLayerVerification, { status: 'verified' }> | undefined> {
+    let quads: Quad[];
+    try {
+      const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+        store: this.store,
+        graphManager: new GraphManager(this.store),
+        contextGraphId: input.contextGraphId,
+        shareOperationId: input.head.shareOperationId,
+        kaUal: input.scope.ual,
+        assertionVersion: input.scope.assertionVersion,
+        subGraphName: input.subGraphName,
+        publicSnapshotStore: this.publicSnapshotStore,
+      });
+      quads = snapshot.quads.map((quad) => ({ ...quad, graph: '' }));
+    } catch (error) {
+      if (error instanceof StoreSchedulerBusyError) throw error;
+      this.log.warn(
+        input.ctx,
+        `Finalization: immutable graph-scoped snapshot is unavailable for ${input.scope.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+    if (
+      quads.length !== input.head.publicTripleCount
+      || workspacePublicQuadsDigest(quads) !== input.head.publicQuadsDigest
+    ) {
+      this.log.warn(
+        input.ctx,
+        `Finalization: immutable graph-scoped snapshot does not match the durable head for `
+          + input.scope.ual,
+      );
+      return undefined;
+    }
+    const merkleRoot = computeFlatKCRoot(
+      quads,
+      input.privateMerkleRoot ? [input.privateMerkleRoot] : [],
+    );
+    if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
+      this.log.warn(
+        input.ctx,
+        `Finalization: immutable graph-scoped snapshot does not match the chain root for `
+          + input.scope.ual,
+      );
+      return undefined;
+    }
+    return {
+      status: 'verified',
+      graphUri: input.head.assertionGraph,
+      quads,
+      merkleRoot,
+    };
+  }
+
+  /**
+   * Drain only the SWM assertion that was just proven and materialized.
+   *
+   * Source verification happens before the chain receipt is resolved, so the
+   * per-KA graph may have advanced by the time VM commits. Re-enter the exact
+   * lock used by every local, gossip, and catch-up SWM writer, re-read the
+   * durable head, and verify the graph again before deleting the payload.
+   * Keep the head and operation metadata: receipt recovery, reorg handling,
+   * and late publisher-policy upgrades still need that durable history.
+   */
+  private async clearFinalizedGraphScopedSwm(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    expectedHead: KnowledgeAssetWorkspaceHead;
+    expectedMerkleRoot: Uint8Array;
+    privateMerkleRoot?: Uint8Array;
+    subGraphName?: string;
+    source: 'finalization' | 'chain-reconcile';
+    ctx: OperationContext;
+  }): Promise<'cleared' | 'absent' | 'preserved'> {
+    const {
+      contextGraphId,
+      scope,
+      expectedHead,
+      expectedMerkleRoot,
+      privateMerkleRoot,
+      subGraphName,
+      source,
+      ctx,
+    } = input;
+    const lockKey = swmKaWriteLockKey(contextGraphId, subGraphName, scope.ual);
+    const outcome = await withKeyedLocks(this.writeLocks, [lockKey], async () => {
+      const graphManager = new GraphManager(this.store);
+      let currentHead: KnowledgeAssetWorkspaceHead | undefined;
+      try {
+        currentHead = await resolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager,
+          contextGraphId,
+          kaUal: scope.ual,
+          subGraphName,
+        });
+      } catch (error) {
+        if (!(error instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw error;
+        this.log.warn(
+          ctx,
+          `Finalization: preserving graph-scoped SWM for ${scope.ual}; `
+            + `the current workspace head is corrupt: ${error.message}`,
+        );
+        return 'preserved' as const;
+      }
+      if (!currentHead) return 'absent' as const;
+
+      const sameAllowedPeers = [...currentHead.allowedPeers].sort().join('\0')
+        === [...expectedHead.allowedPeers].sort().join('\0');
+      const sameHead = currentHead.kaUal === expectedHead.kaUal
+        && currentHead.assertionVersion === expectedHead.assertionVersion
+        && currentHead.assertionGraph === expectedHead.assertionGraph
+        && currentHead.publicQuadsDigest === expectedHead.publicQuadsDigest
+        && currentHead.publicTripleCount === expectedHead.publicTripleCount
+        && (currentHead.privateMerkleRoot?.toLowerCase() ?? undefined)
+          === (expectedHead.privateMerkleRoot?.toLowerCase() ?? undefined)
+        && currentHead.privateTripleCount === expectedHead.privateTripleCount
+        && currentHead.shareOperationId === expectedHead.shareOperationId
+        && currentHead.publisherPeerId === expectedHead.publisherPeerId
+        && currentHead.accessPolicy === expectedHead.accessPolicy
+        && sameAllowedPeers;
+      if (!sameHead) {
+        this.log.info(
+          ctx,
+          `Finalization: preserving newer graph-scoped SWM lifecycle for ${scope.ual}`,
+        );
+        return 'preserved' as const;
+      }
+
+      const verification = await this.verifyExactGraphScopedLayer({
+        contextGraphId,
+        scope,
+        layer: MemoryLayer.SharedWorkingMemory,
+        publicTripleCount: expectedHead.publicTripleCount,
+        privateMerkleRoot,
+        expectedMerkleRoot,
+        expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
+        subGraphName,
+      });
+      if (verification.status === 'count-mismatch' && verification.actualCount === 0) {
+        return 'absent' as const;
+      }
+      if (verification.status !== 'verified') {
+        this.log.warn(
+          ctx,
+          `Finalization: preserving graph-scoped SWM for ${scope.ual}; `
+            + `the current assertion no longer matches the finalized source (${verification.status})`,
+        );
+        return 'preserved' as const;
+      }
+
+      const replaced = await tryReplaceGraphAtomically(
+        this.store,
+        verification.graphUri,
+        [],
+        { source: 'agent.finalization.graphScopedSwmCleanup' },
+      );
+      if (!replaced) {
+        throw Object.assign(
+          new Error('Graph-scoped SWM finalization cleanup requires atomic graph replacement support'),
+          { code: 'SWM_ATOMIC_CLEANUP_UNSUPPORTED' },
+        );
+      }
+      return 'cleared' as const;
+    });
+
+    if (outcome === 'cleared') {
+      this.eventBus?.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
+        contextGraphId,
+        layers: ['swm'],
+        subGraphName,
+        operation: 'shared_working_memory_finalized',
+        source,
+        counts: { triples: expectedHead.publicTripleCount },
+      });
+      this.log.info(
+        ctx,
+        `Finalization: cleared finalized graph-scoped SWM assertion ${scope.ual}`,
+      );
+    }
+    return outcome;
   }
 
   /** Recognize exact confirmed VM state from surviving immutable metadata. */
@@ -1532,6 +1772,25 @@ export class FinalizationHandler {
       this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${ual}`);
       return 'no-swm';
     }
+    const clearMatchedWorkspaceHead = async (): Promise<void> => {
+      if (
+        !workspaceHead
+        || preserveNewerWorkspaceLifecycle
+        || workspaceHead.assertionVersion !== scope.assertionVersion
+      ) {
+        return;
+      }
+      await this.clearFinalizedGraphScopedSwm({
+        contextGraphId,
+        scope,
+        expectedHead: workspaceHead,
+        expectedMerkleRoot: merkleRoot,
+        privateMerkleRoot,
+        subGraphName,
+        source: 'chain-reconcile',
+        ctx,
+      });
+    };
     const vmVerification = await this.verifyExactGraphScopedLayer({
       contextGraphId,
       scope,
@@ -1568,6 +1827,7 @@ export class FinalizationHandler {
           scope,
           materializedVersion,
         });
+        await clearMatchedWorkspaceHead();
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
@@ -1636,11 +1896,12 @@ export class FinalizationHandler {
         );
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
+      await clearMatchedWorkspaceHead();
       this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
       return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
 
-    const swmVerification = await this.verifyExactGraphScopedLayer({
+    let swmVerification = await this.verifyExactGraphScopedLayer({
       contextGraphId,
       scope,
       layer: MemoryLayer.SharedWorkingMemory,
@@ -1652,6 +1913,23 @@ export class FinalizationHandler {
         : workspaceHead?.publicQuadsDigest,
       subGraphName,
     });
+    if (
+      swmVerification.status !== 'verified'
+      && trustedAssertionEvidence
+      && workspaceHead
+      && workspaceHead.assertionVersion === scope.assertionVersion
+    ) {
+      const snapshotVerification = await this.verifyImmutableGraphScopedSnapshot({
+        contextGraphId,
+        scope,
+        head: workspaceHead,
+        privateMerkleRoot,
+        expectedMerkleRoot: merkleRoot,
+        subGraphName,
+        ctx,
+      });
+      if (snapshotVerification) swmVerification = snapshotVerification;
+    }
     if (swmVerification.status === 'count-mismatch') {
       this.log.info(
         ctx,
@@ -1715,6 +1993,7 @@ export class FinalizationHandler {
       );
       return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
+    await clearMatchedWorkspaceHead();
     this.log.info(
       ctx,
       `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,
