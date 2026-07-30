@@ -815,6 +815,9 @@ describe('integration commands (Commander layer, real wire)', () => {
       kind: 'service',
       runtime: 'npm-global',
       npmGlobal: { package: '@acme/svc', version: '2.0.0' },
+      // Declared so the DKG_API_URL guidance renders — that line is where an
+      // ignored --api-url becomes visible to an operator.
+      envRequired: ['DKG_API_URL'],
     },
     trustTier: 'verified',
   } as unknown as IntegrationEntry;
@@ -1037,6 +1040,38 @@ describe('integration commands (Commander layer, real wire)', () => {
     // test exists to catch.
     expect(r.exits).toEqual([2]);
     expect(r.err).not.toContain('Install failed');
+  });
+
+  // Regression guard for a fix that was previously verified only BELOW this
+  // boundary. `installService` accepted and rendered `apiUrl` correctly, and its
+  // unit test passed — while the command never passed the flag through, so the
+  // real CLI still printed the default node. Only a test that drives the actual
+  // command can catch a missing property on the call.
+  it('`install --api-url` reaches the service post-install guidance', async () => {
+    const r = await runInstall([
+      'integration',
+      'install',
+      'svc-ok',
+      '--dry-run',
+      '--api-url',
+      'http://10.0.0.5:9200',
+    ]);
+    expect(r.exits).toEqual([]);
+    expect(r.out).toContain('http://10.0.0.5:9200');
+    expect(r.out).not.toContain('default http://127.0.0.1:9200');
+  });
+
+  // Control: without the flag the guidance still renders, showing the effective
+  // node — so the test above cannot pass by never printing the DKG_API_URL line.
+  // Commander gives --api-url a default, so opts.apiUrl is always populated and
+  // the command path always echoes the URL actually in effect; the literal
+  // "default …" wording only appears for direct installService callers that
+  // pass no apiUrl at all.
+  it('`install --dry-run` shows the effective node when no --api-url is given', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-ok', '--dry-run']);
+    expect(r.out).toContain('DKG_API_URL');
+    expect(r.out).toContain('http://127.0.0.1:9200');
+    expect(r.out).not.toContain('10.0.0.5');
   });
 
   // The gap between the two gates: registry-valid, whitespace package. It must

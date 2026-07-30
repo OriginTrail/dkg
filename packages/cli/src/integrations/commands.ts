@@ -329,6 +329,10 @@ export function registerIntegrationCommands(program: Command): void {
               entry,
               dryRun: opts.dryRun,
               skipProvenance: opts.verifyProvenance === false,
+              // installMcp already honours --api-url; omitting it here made the
+              // same documented flag work for one install kind and silently do
+              // nothing for another.
+              apiUrl: opts.apiUrl,
             });
             if (opts.dryRun) {
               console.log('');
@@ -336,7 +340,11 @@ export function registerIntegrationCommands(program: Command): void {
               console.log(`Note: provenance is only checked on a real install (skipped in dry-run).`);
             } else {
               console.log('');
-              console.log(`Installed ${entry.install.npmGlobal?.package}@${entry.install.npmGlobal?.version}.`);
+              // Report what was actually installed — the resolver's trimmed
+              // values — rather than the raw payload the npm spec was not built
+              // from.
+              const installed = resolveNpmGlobalService(entry.install);
+              console.log(`Installed ${installed?.package}@${installed?.version}.`);
             }
             if (result.postInstructions.length > 0) {
               console.log('');
