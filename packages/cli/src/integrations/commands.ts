@@ -19,7 +19,7 @@ import type { Command } from 'commander';
 import { detectInstalled } from './detect-installed.js';
 import { installCli } from './install-cli.js';
 import { installMcp } from './install-mcp.js';
-import { installService } from './install-service.js';
+import { installService, resolveNpmGlobalService } from './install-service.js';
 import { fetchAllEntries, fetchEntry, resolveRegistryConfig } from './registry-client.js';
 import type { IntegrationEntry, TrustTier } from './schema.js';
 
@@ -312,8 +312,11 @@ export function registerIntegrationCommands(program: Command): void {
             // threw and surfaced as a generic "install failed" — a worse
             // experience than the docker/binary case, which exits cleanly with
             // a pointer to the integration's own docs. Same treatment here.
-            const npm = entry.install.npmGlobal;
-            if (!npm?.package || !npm?.version) {
+            // Shares resolveNpmGlobalService with the installer so the two
+            // layers cannot disagree about what "installable" means. They did:
+            // this gate used truthiness while the installer trimmed, so a
+            // whitespace-only package slipped through to a generic failure.
+            if (resolveNpmGlobalService(entry.install) === null) {
               console.error(
                 `This entry declares runtime "npm-global" but carries no npmGlobal.package/version, ` +
                   `so the CLI cannot install it automatically.\n` +

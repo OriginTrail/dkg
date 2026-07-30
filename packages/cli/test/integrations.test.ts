@@ -828,6 +828,21 @@ describe('integration commands (Commander layer, real wire)', () => {
     trustTier: 'verified',
   } as unknown as IntegrationEntry;
 
+  // Registry-valid, but the package is whitespace. The dispatcher used to gate
+  // on truthiness while the installer trimmed, so this passed the gate, threw
+  // inside installService, and surfaced as a generic "Install failed".
+  const svcBlankPkg = {
+    ...baseEntry,
+    slug: 'svc-blank',
+    name: 'Service Blank',
+    install: {
+      kind: 'service',
+      runtime: 'npm-global',
+      npmGlobal: { package: '   ', version: '1.0.0' },
+    },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
   // A runtime the CLI does not automate at all. Readable, and this branch is now
   // its public install behaviour.
   const svcBinary = {
@@ -853,7 +868,7 @@ describe('integration commands (Commander layer, real wire)', () => {
     process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
     process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
 
-    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta, svcBinary]) {
+    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta, svcBinary, svcBlankPkg]) {
       registryRoutes.set(`/raw/${e.slug}.json`, { status: 200, body: JSON.stringify(e) });
     }
     // Only the manual entries are indexed: `installed` runs detectInstalled over
@@ -1021,6 +1036,16 @@ describe('integration commands (Commander layer, real wire)', () => {
     // the graceful message and then the generic failure — the regression this
     // test exists to catch.
     expect(r.exits).toEqual([2]);
+    expect(r.err).not.toContain('Install failed');
+  });
+
+  // The gap between the two gates: registry-valid, whitespace package. It must
+  // take the same graceful path as missing metadata, not fall through to the
+  // generic failure because one layer checked truthiness and the other trimmed.
+  it('`install` treats a whitespace-only package as not automatable, not a hard failure', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-blank']);
+    expect(r.exits).toEqual([2]);
+    expect(r.err).toContain('no npmGlobal.package/version');
     expect(r.err).not.toContain('Install failed');
   });
 

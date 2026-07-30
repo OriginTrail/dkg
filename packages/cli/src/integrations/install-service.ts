@@ -44,6 +44,33 @@ type NpmGlobalService = InstallService & {
   npmGlobal: NonNullable<InstallService['npmGlobal']>;
 };
 
+/**
+ * THE definition of "an npm-global service this CLI can install", returning the
+ * trimmed payload or null. Exported so the Commander dispatcher and this
+ * installer share one predicate instead of two that agree by coincidence.
+ *
+ * They previously disagreed: the dispatcher gated on truthiness while this file
+ * required non-empty strings after trimming, so a registry-valid
+ * `{ package: '   ', version: '1.0.0' }` passed the dispatcher, threw in here,
+ * and surfaced as a generic "Install failed" instead of the graceful
+ * not-automatable message — the exact failure the dispatcher gate was added to
+ * prevent, reachable through a gap between the two checks.
+ *
+ * Checked by TYPE, not truthiness: a non-string `package` is truthy and would
+ * otherwise reach the npm spec as `[object Object]@1.0.0`.
+ */
+export function resolveNpmGlobalService(
+  install: IntegrationEntry['install'],
+): { package: string; version: string } | null {
+  if (install.kind !== 'service' || install.runtime !== 'npm-global') return null;
+  const n = install.npmGlobal;
+  if (typeof n?.package !== 'string' || typeof n.version !== 'string') return null;
+  const pkg = n.package.trim();
+  const version = n.version.trim();
+  if (!pkg || !version) return null;
+  return { package: pkg, version };
+}
+
 function assertNpmGlobalService(
   spec: IntegrationEntry['install'],
 ): asserts spec is NpmGlobalService {
@@ -56,16 +83,7 @@ function assertNpmGlobalService(
         `docker and binary runtimes are not yet automated.`,
     );
   }
-  // The schema requires package + version; `binary` is optional and defaults to
-  // the package name (see resolveBinary). Checked by TYPE, not truthiness: a
-  // non-string `package` is truthy and would reach the npm spec as
-  // `[object Object]@1.0.0` instead of being rejected as malformed.
-  if (
-    typeof spec.npmGlobal?.package !== 'string' ||
-    typeof spec.npmGlobal.version !== 'string' ||
-    !spec.npmGlobal.package.trim() ||
-    !spec.npmGlobal.version.trim()
-  ) {
+  if (resolveNpmGlobalService(spec) === null) {
     throw new Error(
       `Registry entry declares runtime "npm-global" but no npmGlobal.package/version. ` +
         `Report this to the integration maintainer.`,
