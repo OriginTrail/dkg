@@ -886,9 +886,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private async discoverGraphsByPrefix(
     prefix: string,
-    reads: StoreReadLane,
+    reads: QueryStoreReadContext | StoreReadLane,
   ): Promise<string[]> {
-    const allGraphs = await reads.listGraphsByPrefix(prefix);
+    // GraphSetIndexStore coalesces refreshes by priority. Never let that shared
+    // upstream flight capture one HTTP caller's disconnect signal; race the
+    // individual caller locally while priority/source stay on the shared lane.
+    const sharedReads = 'shared' in reads ? reads.shared : reads;
+    const callerSignal = 'shared' in reads ? reads.signal : undefined;
+    const allGraphs = await raceAgainstCallerAbort(
+      sharedReads.listGraphsByPrefix(prefix),
+      callerSignal,
+    );
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );

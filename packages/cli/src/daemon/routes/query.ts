@@ -107,6 +107,15 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
+import {
+  getApiQueryPriority,
+  type ApiQueryPriority,
+} from '../api-query-priority.js';
+export {
+  configureApiQueryPriority,
+  resolveApiQueryPriority,
+} from '../api-query-priority.js';
+export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
@@ -333,8 +342,6 @@ const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
 const API_QUERY_CALLER_DISCONNECTED = 'API_QUERY_CALLER_DISCONNECTED';
 
-export type ApiQueryPriority = 'normal' | 'background';
-
 export interface ApiQueryRequestLifecycle {
   readonly signal: AbortSignal;
   readonly priority: ApiQueryPriority;
@@ -349,13 +356,6 @@ class ApiQueryCallerDisconnectedError extends Error {
     super('API query caller disconnected');
     this.name = 'ApiQueryCallerDisconnectedError';
   }
-}
-
-/** Resolve the reversible API-read lane, defaulting to the protective setting. */
-export function resolveApiQueryPriority(
-  raw = process.env.DKG_API_QUERY_PRIORITY,
-): ApiQueryPriority {
-  return raw?.trim().toLowerCase() === 'normal' ? 'normal' : 'background';
 }
 
 /**
@@ -379,7 +379,7 @@ export function createApiQueryRequestLifecycle(
 
   return {
     signal: controller.signal,
-    priority: resolveApiQueryPriority(),
+    priority: getApiQueryPriority(),
     source: 'api.query',
     dispose() {
       req.removeListener('aborted', abortDisconnectedQuery);
@@ -704,10 +704,17 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     } catch (err: any) {
       if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
         tracker.cancel(ctx, err);
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (respondIfApiQueryStoreBusy(res, err)) {
+        // Admission shedding means the operation never reached the store. Keep
+        // it visible with the scheduler reason, but do not count it as an
+        // execution failure in dashboard health rates.
+        tracker.cancel(ctx, err);
         return;
       }
       tracker.fail(ctx, err);
-      if (respondIfApiQueryStoreBusy(res, err)) return;
       const msg = err?.message ?? "";
       if (
         msg.startsWith("SPARQL rejected:") ||

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
 import {
+  GraphSetIndexStore,
   OxigraphStore,
   type Quad,
   type QueryOptions as StoreQueryOptions,
@@ -118,18 +119,19 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings[0]['name']).toBe('"ImageBot"');
   });
 
-  it('propagates cancellation, priority, and source to every unshared store read', async () => {
+  it('keeps caller cancellation on execution reads but out of shareable graph discovery', async () => {
     class OptionsRecordingStore extends OxigraphStore {
-      readOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      queryOptions: Array<Parameters<OxigraphStore['query']>[1]> = [];
+      discoveryOptions: StoreQueryOptions[] = [];
       async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
-        this.readOptions.push(options);
+        this.queryOptions.push(options);
         return super.query(sparql, options);
       }
       async listGraphsByPrefix(
         prefix: string,
         options?: StoreQueryOptions,
       ) {
-        this.readOptions.push(options);
+        this.discoveryOptions.push(options ?? {});
         return (await super.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
       }
     }
@@ -152,13 +154,19 @@ describe('DKGQueryEngine', () => {
       },
     );
 
-    expect(recordingStore.readOptions.length).toBeGreaterThanOrEqual(4);
-    for (const options of recordingStore.readOptions) {
+    expect(recordingStore.queryOptions).not.toHaveLength(0);
+    expect(recordingStore.queryOptions).toContainEqual(expect.objectContaining({
+      signal: controller.signal,
+      priority: 'background',
+      source: 'api.query',
+    }));
+    expect(recordingStore.discoveryOptions).not.toHaveLength(0);
+    for (const options of recordingStore.discoveryOptions) {
       expect(options).toMatchObject({
-        signal: controller.signal,
         priority: 'background',
         source: 'api.query',
       });
+      expect(options.signal).toBeUndefined();
     }
   });
 
@@ -228,6 +236,77 @@ describe('DKGQueryEngine', () => {
       source: 'api.query',
     });
     expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
+    expect(secondController.signal.aborted).toBe(false);
+  });
+
+  it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let refreshStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+
+    class AbortAwareGraphListStore extends OxigraphStore {
+      readonly listGraphOptions: StoreQueryOptions[] = [];
+      private held = false;
+
+      override async listGraphs(options?: StoreQueryOptions): Promise<string[]> {
+        this.listGraphOptions.push(options ?? {});
+        if (!this.held) {
+          this.held = true;
+          refreshStarted();
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => reject(options?.signal?.reason);
+            options?.signal?.addEventListener('abort', onAbort, { once: true });
+            void refreshGate.then(() => {
+              options?.signal?.removeEventListener('abort', onAbort);
+              resolve();
+            }, reject);
+          });
+        }
+        return super.listGraphs(options);
+      }
+    }
+
+    const inner = new AbortAwareGraphListStore();
+    await inner.insert([
+      q('urn:indexed:s', 'http://schema.org/name', '"Indexed"', GRAPH),
+    ]);
+    const indexedEngine = new DKGQueryEngine(new GraphSetIndexStore(inner));
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const common = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeSharedMemory: true,
+      priority: 'background' as const,
+      source: 'api.query',
+    };
+
+    const first = indexedEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { ...common, signal: firstController.signal },
+    );
+    const firstRejected = expect(first).rejects.toThrow('first caller disconnected');
+    await started;
+    const second = indexedEngine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { ...common, signal: secondController.signal },
+    );
+
+    firstController.abort(new Error('first caller disconnected'));
+    await firstRejected;
+    releaseRefresh();
+
+    await expect(second).resolves.toBeDefined();
+    expect(inner.listGraphOptions).toHaveLength(1);
+    expect(inner.listGraphOptions[0]).toMatchObject({
+      priority: 'background',
+      source: 'api.query',
+    });
+    expect(inner.listGraphOptions[0].signal).toBeUndefined();
     expect(secondController.signal.aborted).toBe(false);
   });
 
@@ -1689,6 +1768,44 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings).toEqual([{ sourceGraph: vm, name: '"allowed"' }]);
     const executed = recordingStore.queries.at(-1) ?? '';
     expect(executed.match(/VALUES\s+\?sourceGraph/gi)).toHaveLength(2);
+  });
+
+  it('rejects a default-graph pattern even when authorized VALUES makes graph injection redundant', async () => {
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/guard-order-default`;
+    await store.insert([
+      q('urn:guard:default', 'http://schema.org/name', '"guard"', vm),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?sourceGraph ?name ?description WHERE {
+        VALUES ?sourceGraph { <${vm}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+        ?s <http://schema.org/description> ?description
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
+  });
+
+  it('rejects nested GRAPH use even when authorized VALUES makes graph injection redundant', async () => {
+    const vm = `${GRAPH}/_verifiable_memory/0xagent/guard-order-optional`;
+    await store.insert([
+      q('urn:guard:optional', 'http://schema.org/name', '"guard"', vm),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?sourceGraph ?name ?description WHERE {
+        VALUES ?sourceGraph { <${vm}> }
+        GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name }
+        OPTIONAL {
+          GRAPH ?sourceGraph { ?s <http://schema.org/description> ?description }
+        }
+      }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    )).rejects.toThrow(
+      /Scoped query violation: GRAPH variables must appear at the top level/i,
+    );
   });
 
   it('rejects mixed GRAPH-variable and default-graph triple patterns', async () => {

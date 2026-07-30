@@ -297,29 +297,33 @@ describe('SparqlHttpStore (test server)', () => {
     const seenSignals: AbortSignal[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       if (init?.signal instanceof AbortSignal) seenSignals.push(init.signal);
-      const accept = String((init?.headers as Record<string, string> | undefined)?.Accept ?? '');
-      if (accept.includes('n-quads')) {
-        return new Response('', { status: 200 });
-      }
-      return new Response(JSON.stringify({
-        head: { vars: [] },
-        results: { bindings: [] },
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/sparql-results+json' },
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+          once: true,
+        });
       });
     }) as typeof fetch;
     try {
       const signalController = new AbortController();
       const signalStore = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 30_000 });
 
-      await signalStore.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: signalController.signal });
-      await signalStore.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', { signal: signalController.signal });
+      const select = signalStore.query(
+        'SELECT ?s WHERE { ?s ?p ?o }',
+        { signal: signalController.signal },
+      );
+      const construct = signalStore.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+        { signal: signalController.signal },
+      );
+      const selectRejected = expect(select).rejects.toThrow('caller aborted');
+      const constructRejected = expect(construct).rejects.toThrow('caller aborted');
 
+      await waitForCondition(() => seenSignals.length === 2, 'both fetches should start');
       expect(seenSignals).toHaveLength(2);
       expect(seenSignals.every((signal) => !signal.aborted)).toBe(true);
       signalController.abort(new Error('caller aborted'));
       expect(seenSignals.every((signal) => signal.aborted)).toBe(true);
+      await Promise.all([selectRejected, constructRejected]);
     } finally {
       globalThis.fetch = originalFetch;
     }

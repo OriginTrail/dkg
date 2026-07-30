@@ -403,6 +403,7 @@ import {
 } from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
+import { configureApiQueryPriority } from './api-query-priority.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import {
@@ -1170,6 +1171,11 @@ export async function runDaemonInner(
     if (foreground) origStdoutWrite(line + "\n");
     appendFile(logFile, line + "\n").catch(() => {});
   }
+
+  configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
+    info: log,
+    warn: log,
+  });
 
   if (startupLogRotation?.rotated) {
     log(

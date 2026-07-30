@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
+  configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
   resolveApiQueryPriority,
@@ -65,18 +66,40 @@ describe('/api/query request lifecycle', () => {
   afterEach(() => {
     if (originalPriority === undefined) delete process.env.DKG_API_QUERY_PRIORITY;
     else process.env.DKG_API_QUERY_PRIORITY = originalPriority;
+    configureApiQueryPriority(originalPriority, {
+      info: () => {},
+      warn: () => {},
+    });
   });
 
-  it('defaults API reads to background and allows a reversible normal-lane override', () => {
+  it('resolves the lane once, logs it, and warns when an incident override is invalid', () => {
     expect(resolveApiQueryPriority(undefined)).toBe('background');
     expect(resolveApiQueryPriority('background')).toBe('background');
     expect(resolveApiQueryPriority('normal')).toBe('normal');
     expect(resolveApiQueryPriority(' NORMAL ')).toBe('normal');
     expect(resolveApiQueryPriority('ack')).toBe('background');
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+    };
+    expect(configureApiQueryPriority('normal', logger)).toBe('normal');
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('priority: normal'));
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    expect(configureApiQueryPriority('noraml', logger)).toBe('background');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid DKG_API_QUERY_PRIORITY="noraml"'),
+    );
+    expect(logger.info).toHaveBeenLastCalledWith(expect.stringContaining('priority: background'));
   });
 
   it('forwards the exact lane/source and aborts the signal on request disconnect', () => {
     process.env.DKG_API_QUERY_PRIORITY = 'normal';
+    configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
+      info: () => {},
+      warn: () => {},
+    });
     const req = new RequestStub();
     const res = new ResponseStub();
     const lifecycle = createApiQueryRequestLifecycle(
@@ -215,7 +238,7 @@ describe('/api/query request lifecycle', () => {
     expect(receivedSignal?.aborted).toBe(true);
     expect(disconnectTracker.cancel).toHaveBeenCalledTimes(1);
     expect(disconnectTracker.fail).not.toHaveBeenCalled();
-    expect(disconnectRes.writableEnded).toBe(false);
+    expect(disconnectRes.writableEnded).toBe(true);
 
     const busyReq = new RequestStub();
     const busyRes = new ResponseStub();
@@ -255,6 +278,7 @@ describe('/api/query request lifecycle', () => {
       code: 'STORE_SCHEDULER_BUSY',
       retryable: true,
     });
-    expect(busyTracker.fail).toHaveBeenCalledTimes(1);
+    expect(busyTracker.cancel).toHaveBeenCalledTimes(1);
+    expect(busyTracker.fail).not.toHaveBeenCalled();
   });
 });
