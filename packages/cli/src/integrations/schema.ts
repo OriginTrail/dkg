@@ -28,7 +28,11 @@ export interface InstallCli {
 export interface InstallMcp {
   kind: 'mcp';
   command: string;
-  args: string[];
+  // Optional per the registry schema, and genuinely optional here: a server
+  // launched by a binary already on PATH needs none, so installMcp normalises
+  // a missing value to `args: []` rather than refusing the entry. Judging
+  // whether a given command needs arguments is the entry author's call.
+  args?: string[];
   // Env var NAMES the MCP server expects. Per the registry schema,
   // DKG_AUTH_TOKEN and DKG_API_URL are auto-filled by the installer when
   // listed here; other names are rendered as placeholders the user must
@@ -41,19 +45,41 @@ export interface InstallMcp {
 
 export interface InstallService {
   kind: 'service';
-  runtime: 'docker' | 'npm-global';
+  runtime: 'docker' | 'npm-global' | 'binary';
+  // Mirrors the registry schema's installService.docker exactly: it requires
+  // image + version and forbids anything beyond digest/composeUrl
+  // (additionalProperties: false), so no valid entry can carry more than this.
+  // `version` was missing here while the runtime guard validates it — a type
+  // that disagrees with its own validator is worse than either alone, because a
+  // future docker installer would be told the field exists by one and not the
+  // other. `ports` and `env` were invented, had no readers, and could never
+  // appear in a registry entry.
   docker?: {
     image: string;
+    version: string;
     digest?: string;
-    ports?: Array<{ container: number; host?: number }>;
-    env?: Record<string, string>;
+    composeUrl?: string;
   };
   npmGlobal?: {
     package: string;
     version: string;
-    binary: string;
-    env?: Record<string, string>;
+    // Optional in the registry schema (only package + version are required),
+    // and genuinely optional here: an entry whose binary name matches its
+    // package name omits it. `resolveBinary` in install-service.ts is the
+    // single normalization point that falls back to the package name — the
+    // type must not claim a guarantee the registry does not make.
+    binary?: string;
   };
+  // Named `binary` to match the registry schema exactly. A maintainer
+  // implementing runtime: 'binary' reads entry.install.binary.url from a real
+  // entry, so the type must not invent a different name for it.
+  binary?: {
+    url: string;
+    checksumSha256?: string;
+  };
+  // Present in the registry schema; surfaced in post-install guidance.
+  envRequired?: string[];
+  portsOpened?: number[];
   usageHint?: string;
 }
 
@@ -68,8 +94,39 @@ export interface InstallAgentPlugin {
 
 export interface InstallManual {
   kind: 'manual';
-  steps: string[];
+  // The registry schema requires docsUrl and allows only oneLiner beyond it
+  // (additionalProperties: false). `manual` means the installer links out to
+  // the integration's own docs rather than automating anything.
+  docsUrl: string;
+  oneLiner?: string;
   usageHint?: string;
+}
+
+/**
+ * THE definition of "an npm-global service this CLI can act on", returning the
+ * trimmed payload or null.
+ *
+ * Lives here rather than in the installer because three unrelated callers need
+ * it — the Commander dispatcher, the installer, and installed-detection — and
+ * every time it has existed in only one of them the others have drifted:
+ * the dispatcher once gated on truthiness while the installer trimmed (a
+ * whitespace package reached a generic failure), and detection once probed npm
+ * with the raw, untrimmed key (so a padded `" @acme/svc "` installed as
+ * `@acme/svc` and then reported itself not installed).
+ *
+ * Checked by TYPE, not truthiness: a non-string `package` is truthy and would
+ * otherwise reach the npm spec as `[object Object]@1.0.0`.
+ */
+export function resolveNpmGlobalService(
+  install: InstallSpec,
+): { package: string; version: string } | null {
+  if (install.kind !== 'service' || install.runtime !== 'npm-global') return null;
+  const n = install.npmGlobal;
+  if (typeof n?.package !== 'string' || typeof n.version !== 'string') return null;
+  const pkg = n.package.trim();
+  const version = n.version.trim();
+  if (!pkg || !version) return null;
+  return { package: pkg, version };
 }
 
 export interface IntegrationEntry {
@@ -167,6 +224,16 @@ function isStringArray(v: unknown): boolean {
   return Array.isArray(v) && v.every((x) => typeof x === 'string');
 }
 
+// INVARIANT: this must never be STRICTER than the registry's published JSON
+// Schema (https://origintrail.io/schemas/integration/v0.1.0.json, $defs.install*).
+// It may be more lenient — unknown fields and unknown enum values must ride
+// through so an older CLI can still read a newer registry — but every entry the
+// registry can merge has to parse here, or `dkg integration` and the dashboard
+// sidebar silently drop it as "unreadable". Three divergences did exactly that:
+// `manual` required a `steps` field the schema forbids, `mcp` required the
+// schema-optional `args`, and `service` rejected the schema's `binary` runtime.
+// Requirements that make an entry *installable* (rather than readable) belong in
+// the installers, not here — see installMcp's args check.
 function isValidInstallSpec(v: unknown): boolean {
   if (!isPlainObject(v)) return false;
   const kind = v.kind;
@@ -180,14 +247,49 @@ function isValidInstallSpec(v: unknown): boolean {
         (v.usageHint === undefined || typeof v.usageHint === 'string')
       );
     case 'mcp':
+      // `args` is optional per the schema. An entry without it is readable but
+      // not installable; installMcp refuses it rather than emitting a config
+      // with no launch arguments.
       return (
         typeof v.command === 'string' &&
-        isStringArray(v.args) &&
+        (v.args === undefined || isStringArray(v.args)) &&
         (v.envRequired === undefined || isStringArray(v.envRequired)) &&
         (v.supportedClients === undefined || isStringArray(v.supportedClients))
       );
-    case 'service':
-      return v.runtime === 'docker' || v.runtime === 'npm-global';
+    case 'service': {
+      if (v.runtime !== 'docker' && v.runtime !== 'npm-global' && v.runtime !== 'binary') {
+        return false;
+      }
+      // Every payload object is OPTIONAL per the schema, so a bare
+      // { kind, runtime } stays readable. But when one IS present the schema
+      // marks its own fields required, and these now drive a global npm
+      // install — so validating them here is schema-CONSISTENT, not stricter.
+      // Without it `npmGlobal: { package: { name: 'x' }, version: '1' }` parses
+      // and the installer builds `[object Object]@1`.
+      if (v.npmGlobal !== undefined) {
+        if (!isPlainObject(v.npmGlobal)) return false;
+        const n = v.npmGlobal;
+        if (typeof n.package !== 'string' || typeof n.version !== 'string') return false;
+        if (n.binary !== undefined && typeof n.binary !== 'string') return false;
+      }
+      if (v.docker !== undefined) {
+        if (!isPlainObject(v.docker)) return false;
+        const d = v.docker;
+        if (typeof d.image !== 'string' || typeof d.version !== 'string') return false;
+      }
+      if (v.binary !== undefined) {
+        if (!isPlainObject(v.binary)) return false;
+        if (typeof (v.binary as Record<string, unknown>).url !== 'string') return false;
+      }
+      if (v.envRequired !== undefined && !isStringArray(v.envRequired)) return false;
+      if (
+        v.portsOpened !== undefined &&
+        (!Array.isArray(v.portsOpened) || !v.portsOpened.every((p) => typeof p === 'number'))
+      ) {
+        return false;
+      }
+      return true;
+    }
     case 'agent-plugin':
       return (
         typeof v.framework === 'string' &&
@@ -195,7 +297,12 @@ function isValidInstallSpec(v: unknown): boolean {
         typeof v.version === 'string'
       );
     case 'manual':
-      return isStringArray(v.steps);
+      // The schema requires docsUrl and forbids anything else beyond oneLiner;
+      // `manual` means "the installer links out to your docs" (CONTRIBUTING §2).
+      return (
+        typeof v.docsUrl === 'string' &&
+        (v.oneLiner === undefined || typeof v.oneLiner === 'string')
+      );
     default:
       return false;
   }

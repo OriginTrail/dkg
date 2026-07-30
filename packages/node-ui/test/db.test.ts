@@ -554,6 +554,47 @@ describe('DashboardDB — operation stats', () => {
     expect(summary.totalTracCost).toBeCloseTo(0.5);
   });
 
+  it('keeps cancelled operations visible without depressing health success rates', () => {
+    db.insertOperation({
+      operation_id: 'st-cancelled',
+      operation_name: 'query',
+      started_at: Date.now(),
+    });
+    db.cancelOperation({
+      operation_id: 'st-cancelled',
+      duration_ms: 25,
+      error_message: 'API query caller disconnected',
+    });
+
+    const { summary, timeSeries } = db.getOperationStats({
+      periodMs: 86_400_000,
+      bucketMs: 1_000_000_000_000,
+    });
+    expect(summary.totalCount).toBe(11);
+    expect(summary.successCount).toBe(8);
+    expect(summary.errorCount).toBe(2);
+    expect(summary.successRate).toBeCloseTo(0.8);
+    expect(timeSeries).toHaveLength(1);
+    expect(timeSeries[0].count).toBe(11);
+    expect(timeSeries[0].successRate).toBeCloseTo(0.8);
+
+    const perType = db.getPerTypeTimeSeries({
+      periodMs: 86_400_000,
+      bucketMs: 1_000_000_000_000,
+    });
+    expect(perType.series.query[0].count).toBe(4);
+    expect(perType.series.query[0].successRate).toBeCloseTo(1 / 3);
+
+    const queryRate = db.getSuccessRatesByType(86_400_000)
+      .find((row) => row.type === 'query');
+    expect(queryRate).toMatchObject({
+      total: 4,
+      success: 1,
+      error: 2,
+    });
+    expect(queryRate!.rate).toBeCloseTo(1 / 3);
+  });
+
   it('filters stats by operation name', () => {
     const { summary } = db.getOperationStats({ name: 'publish', periodMs: 86_400_000, bucketMs: 3_600_000 });
     expect(summary.totalCount).toBe(7);
