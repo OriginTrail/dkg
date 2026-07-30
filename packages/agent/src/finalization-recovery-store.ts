@@ -80,11 +80,15 @@ export interface FinalizationRecoveryHealth {
   degradedReason?: string;
   stateCounts: Partial<Record<FinalizationRecoveryState, number>>;
   livePayloadBytes: number;
+  dueEntries: number;
+  oldestDueAgeMs?: number;
   oldestPendingAgeMs?: number;
 }
 
 export interface FinalizationRecoveryStore {
   readonly closed: boolean;
+  /** Reloads one entry after waiting on an in-process serialization boundary. */
+  get(key: string): Promise<FinalizationRecoveryEntry | undefined>;
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
   recordTrustedPublisher(
     key: string,

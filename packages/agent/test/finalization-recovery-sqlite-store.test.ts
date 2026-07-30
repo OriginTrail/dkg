@@ -173,6 +173,47 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
+  it('never narrows a persisted retry deadline and reports due backlog health', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      let now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      await store.receive(received());
+      await expect(store.health()).resolves.toMatchObject({
+        dueEntries: 1,
+        oldestDueAgeMs: 0,
+      });
+
+      await store.recordAttempt('entry-1', 0, 'long backoff', 10_000);
+      expect(await store.get('entry-1')).toMatchObject({
+        nextAttemptAt: 11_000,
+      });
+      await expect(store.health()).resolves.toMatchObject({ dueEntries: 0 });
+
+      now = 1_500;
+      await store.recordAttempt('entry-1', 0, 'duplicate without delay');
+      await store.recordAttempt('entry-1', 0, 'shorter backoff', 100);
+      expect(await store.get('entry-1')).toMatchObject({
+        nextAttemptAt: 11_000,
+      });
+
+      await store.recordAttempt('entry-1', 0, 'longer backoff', 20_000);
+      expect(await store.get('entry-1')).toMatchObject({
+        nextAttemptAt: 21_500,
+      });
+      now = 21_500;
+      await expect(store.health()).resolves.toMatchObject({
+        dueEntries: 1,
+        oldestDueAgeMs: 20_500,
+      });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('durably transitions RECEIVED to VERIFIED to SETTLED across reopen', async () => {
     const directory = await temporaryDirectory();
     try {

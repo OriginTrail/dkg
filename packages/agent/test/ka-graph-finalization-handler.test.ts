@@ -1299,6 +1299,7 @@ describe('graph-scoped finalization handler', () => {
       inbox = await openSqliteFinalizationRecoveryStore(directory);
       const failingVerifiedStore: FinalizationRecoveryStore = {
         get closed() { return inbox!.closed; },
+        get: inbox.get.bind(inbox),
         receive: inbox.receive.bind(inbox),
         recordTrustedPublisher: inbox.recordTrustedPublisher.bind(inbox),
         recordSettledPublisherUpgrade:
@@ -1372,6 +1373,7 @@ describe('graph-scoped finalization handler', () => {
       } as ChainAdapter;
       const rejectedStore: FinalizationRecoveryStore = {
         closed: false,
+        get: async () => undefined,
         receive: async () => {
           if (failureMode === 'write-failure') throw new Error('disk full');
           return { status: 'capacity' };
@@ -1401,6 +1403,7 @@ describe('graph-scoped finalization handler', () => {
           closed: false,
           stateCounts: {},
           livePayloadBytes: 0,
+          dueEntries: 0,
         }),
         close: async () => {},
       };

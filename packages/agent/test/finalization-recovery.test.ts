@@ -205,6 +205,232 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('rejects an exhausted VERIFIED poison entry and frees live capacity', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-exhausted-'));
+    try {
+      let now = 1_000;
+      let applyCalls = 0;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        now: () => now,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            applyCalls += 1;
+            throw new StoreSchedulerBusyError(
+              'queue_wait_timeout',
+              'normal',
+              'finalization-recovery-worker',
+            );
+          },
+          replayVerified: async () => {
+            throw new StoreSchedulerBusyError(
+              'queue_wait_timeout',
+              'normal',
+              'finalization-recovery-worker',
+            );
+          },
+        },
+        { liveRetryLimit: 2 },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await recovery.processDueBatch(16);
+      let [entry] = await store.list();
+      expect(entry).toMatchObject({ state: 'VERIFIED', attemptCount: 1 });
+      now = entry!.nextAttemptAt!;
+      await recovery.processDueBatch(16);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({ state: 'VERIFIED', attemptCount: 2 });
+      now = entry!.nextAttemptAt!;
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'REJECTED',
+        attemptCount: 2,
+        lastError: 'autonomous retry limit exhausted after 2 attempts',
+      }]);
+      await expect(recovery.processLive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      })).resolves.toBe(true);
+      expect(applyCalls).toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'REJECTED',
+        attemptCount: 2,
+      }]);
+      await expect(store.receive({
+        key: 'replacement',
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        ual: UAL,
+        txHash: `0x${'ef'.repeat(32)}`,
+        assertionVersion: '1',
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+        batchId: PACKED_KA_ID.toString(),
+        rawMessage: encodeFinalizationMessage(message({
+          txHash: `0x${'ef'.repeat(32)}`,
+        })),
+      })).resolves.toMatchObject({ status: 'inserted' });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes live and autonomous materialization for the same inbox key', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-entry-lock-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      let releaseApply: (() => void) | undefined;
+      const applyGate = new Promise<void>((resolve) => {
+        releaseApply = resolve;
+      });
+      let applyCalls = 0;
+      let concurrentApplies = 0;
+      let maximumConcurrentApplies = 0;
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            applyCalls += 1;
+            concurrentApplies += 1;
+            maximumConcurrentApplies = Math.max(
+              maximumConcurrentApplies,
+              concurrentApplies,
+            );
+            await applyGate;
+            concurrentApplies -= 1;
+            return 'applied' as const;
+          },
+        },
+      );
+      const input = {
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      };
+      await recovery.receive(input);
+
+      const live = recovery.processLive(input);
+      const worker = recovery.processDueBatch(16);
+      await vi.waitFor(() => expect(applyCalls).toBe(1));
+      releaseApply?.();
+      await Promise.all([live, worker]);
+
+      expect(maximumConcurrentApplies).toBe(1);
+      expect(applyCalls).toBe(1);
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let duplicate live gossip erase a live-entry retry deadline', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-live-backoff-'));
+    try {
+      let now = 1_000;
+      let receiptCalls = 0;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => {
+            receiptCalls += 1;
+            return { status: 'pending' };
+          },
+        }),
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      const input = {
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      };
+
+      await recovery.receive(input);
+      await recovery.processDueBatch(16);
+      const [deferred] = await store.list();
+      expect(deferred).toMatchObject({
+        state: 'RECEIVED',
+        attemptCount: 1,
+        nextAttemptAt: 2_000,
+      });
+      await recovery.processLive(input);
+      expect(receiptCalls).toBe(2);
+      expect(await store.list()).toMatchObject([{
+        attemptCount: 2,
+        nextAttemptAt: 2_000,
+      }]);
+
+      now = 2_000;
+      await recovery.processDueBatch(16);
+      expect(receiptCalls).toBe(3);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('lets chain reconciliation recover an entry before its worker deadline', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-reconcile-deadline-'));
+    try {
+      let now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const chain = recoveryChain();
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      const entry = await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      await store.recordAttempt(entry!.key, entry!.generation, 'worker busy', 60_000);
+
+      await expect(recovery.replayMatching({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('returns a typed parsed envelope for a valid singleton finalization', () => {
     expect(parseGraphScopedFinalization(message(), CONTEXT_GRAPH)).toMatchObject({
       ok: true,
@@ -347,7 +573,10 @@ describe('graph-scoped finalization recovery admission', () => {
         chainAdapter: new MockChainAdapter(),
       });
       const preStartHandler = agent.getOrCreateFinalizationHandler();
+      const startWorker = vi.spyOn(preStartHandler, 'startRecoveryWorker');
+      const stopWorker = vi.spyOn(preStartHandler, 'stopRecoveryWorker');
       await agent.start();
+      expect(startWorker).toHaveBeenCalledTimes(1);
       expect(agent.getOrCreateFinalizationHandler()).toBe(preStartHandler);
       const originalQuery = agent.store.query.bind(agent.store);
       agent.store.query = async () => {
@@ -371,6 +600,7 @@ describe('graph-scoped finalization recovery admission', () => {
         stateCounts: { RECEIVED: 1 },
       });
       await agent.stop();
+      expect(stopWorker).toHaveBeenCalled();
       expect(agent.getOrCreateFinalizationHandler()).toBe(preStartHandler);
       expect(await agent.getFinalizationRecoveryHealth()).toMatchObject({
         available: false,
@@ -738,11 +968,11 @@ describe('graph-scoped finalization recovery admission', () => {
         ...replay,
         merkleRoot: `0x${'ff'.repeat(32)}`,
       });
-      await vi.waitFor(() => expect(replayReceiptCalls).toBe(2));
       releaseReceipts();
 
       await expect(Promise.all([currentRootReplay, newerRootReplay]))
         .resolves.toEqual(['recovered', 'none']);
+      expect(replayReceiptCalls).toBe(2);
     } finally {
       releaseReceipts();
       await store?.close().catch(() => {});

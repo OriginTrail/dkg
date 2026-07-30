@@ -6,6 +6,7 @@ import type {
 } from '@origintrail-official/dkg-chain';
 import {
   decodeFinalizationMessage,
+  getMetrics,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -155,6 +156,15 @@ const SETTLED_RECEIPT_RETRY_MAX_MS = 60_000;
 const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
+/**
+ * At the maximum retry delay this preserves approximately seven days of
+ * autonomous recovery before a poison entry becomes an audited terminal row.
+ */
+export const FINALIZATION_RECOVERY_LIVE_RETRY_LIMIT = 7 * 24 * 60;
+
+export interface FinalizationRecoveryOptions {
+  liveRetryLimit?: number;
+}
 
 function deferredRetryDelayMs(attemptCount: number): number {
   const exponent = Math.min(30, Math.max(0, attemptCount));
@@ -186,14 +196,17 @@ export class FinalizationRecovery<
     string,
     Promise<FinalizationRecoveryReplayOutcome>
   >();
+  private readonly entryLockTails = new Map<string, Promise<void>>();
   private readonly store: FinalizationRecoveryStore | undefined;
   private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
+  private readonly liveRetryLimit: number;
 
   constructor(
     store: FinalizationRecoveryStore | FinalizationRecoveryStoreSource | undefined,
     private readonly chain: ChainAdapter | undefined,
     private readonly log: FinalizationRecoveryLog,
     private readonly materializer: FinalizationRecoveryMaterializer<Prepared>,
+    options: FinalizationRecoveryOptions = {},
   ) {
     if (store && 'getRecoveryStore' in store) {
       this.storeSource = store;
@@ -202,6 +215,10 @@ export class FinalizationRecovery<
       this.store = store;
       this.storeSource = undefined;
     }
+    this.liveRetryLimit = Math.max(
+      1,
+      Math.trunc(options.liveRetryLimit ?? FINALIZATION_RECOVERY_LIVE_RETRY_LIMIT),
+    );
   }
 
   private getStore(): FinalizationRecoveryStore | undefined {
@@ -261,39 +278,57 @@ export class FinalizationRecovery<
       || this.chain.chainId === 'none'
       || !this.chain.resolveCanonicalFinalizationReceipt
     ) return false;
-    let entry = await this.receive(input);
-    // A configured inbox fails closed: capacity, conflict, corruption, and
-    // write failures leave Oxigraph untouched.
-    if (!entry) return true;
-    if (entry.state === 'SETTLED') {
-      entry = await this.revalidateSettled(input, entry);
+    const key = finalizationRecoveryEntryKey({
+      chainId: this.chain.chainId,
+      contextGraphId: input.contextGraphId,
+      ual: input.candidate.scope.ual,
+      txHash: input.candidate.msg.txHash,
+    });
+    return this.withEntryLock(key, async () => {
+      let entry = await this.receive(input);
+      // A configured inbox fails closed: capacity, conflict, corruption, and
+      // write failures leave Oxigraph untouched.
       if (!entry) return true;
-    }
-
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const outcome = await this.materialize(input, { kind: 'recovery', entry });
-        if (outcome === 'deferred') {
-          await this.recordDeferred(entry, 'finalization processing deferred');
-        } else {
-          await this.settleEntry(entry, outcome);
-        }
-        return true;
-      } catch (error) {
-        if (!this.materializer.isRetryableError(error)) throw error;
-        if (attempt === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          continue;
-        }
-        this.log.warn(
-          `Finalization recovery materialization remained busy for ${entry.ual}; `
-            + 'keeping inbox entry',
-        );
-        await this.recordDeferred(entry, 'store scheduler remained busy');
-        return true;
+      if (entry.state === 'SETTLED') {
+        entry = await this.revalidateSettled(input, entry);
+        if (!entry) return true;
       }
-    }
-    return true;
+      // Terminal rows remain audited and inert until retention removes them.
+      // In particular, duplicate gossip must not revive an entry that exhausted
+      // the autonomous retry budget.
+      if (!this.isLiveEntry(entry)) return true;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const outcome = await this.materialize(input, { kind: 'recovery', entry });
+          if (outcome === 'deferred') {
+            await this.recordDeferred(
+              entry,
+              'finalization processing deferred',
+            );
+          } else {
+            await this.settleEntry(entry, outcome);
+          }
+          return true;
+        } catch (error) {
+          if (!this.materializer.isRetryableError(error)) throw error;
+          if (attempt === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            continue;
+          }
+          this.log.warn(
+            `Finalization recovery materialization remained busy for ${entry.ual}; `
+              + 'keeping inbox entry',
+          );
+          await this.recordDeferred(
+            entry,
+            'store scheduler remained busy',
+          );
+          return true;
+        }
+      }
+      return true;
+    });
   }
 
   /**
@@ -315,16 +350,57 @@ export class FinalizationRecovery<
       return 0;
     }
     for (const entry of entries) {
-      await this.replayDueEntry(entry);
+      const outcome = await this.replayDueEntry(entry);
+      getMetrics().finalizationRecoveryAttemptsTotal?.add(1, { outcome });
     }
+    await this.recordDueMetrics(store);
     return entries.length;
   }
 
+  private async recordDueMetrics(store: FinalizationRecoveryStore): Promise<void> {
+    try {
+      const health = await store.health();
+      const metrics = getMetrics();
+      metrics.finalizationRecoveryDueEntries?.record(health.dueEntries);
+      metrics.finalizationRecoveryOldestDueAgeMs?.record(health.oldestDueAgeMs ?? 0);
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery metrics snapshot failed: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   async replayDueEntry(
-    entry: FinalizationRecoveryEntry,
+    snapshot: FinalizationRecoveryEntry,
+  ): Promise<FinalizationRecoveryReplayOutcome> {
+    return this.withEntryLock(
+      snapshot.key,
+      () => this.replayDueEntryLocked(snapshot),
+    );
+  }
+
+  private async replayDueEntryLocked(
+    snapshot: FinalizationRecoveryEntry,
   ): Promise<FinalizationRecoveryReplayOutcome> {
     const store = this.getStore();
-    if (!store || !store.isAttemptDue(entry)) return 'retry-pending';
+    if (!store) return 'none';
+    const entry = await store.get(snapshot.key);
+    if (!entry) return 'none';
+    if (!store.isAttemptDue(entry)) return 'retry-pending';
+    if (
+      this.isLiveEntry(entry)
+      && entry.attemptCount >= this.liveRetryLimit
+    ) {
+      const reason = `autonomous retry limit exhausted after ${entry.attemptCount} attempts`;
+      const rejected = await this.transition(entry, 'REJECTED', reason);
+      if (rejected) {
+        this.log.warn(
+          `Finalization recovery rejected exhausted inbox entry for ${entry.ual}: ${reason}`,
+        );
+      }
+      return 'invalidated';
+    }
     if (
       !this.chain
       || this.chain.chainId === 'none'
@@ -355,14 +431,23 @@ export class FinalizationRecovery<
         );
         return 'retry-pending';
       }
-      const outcome = await this.replayMatching({
+      const replayInput: FinalizationRecoveryReplayInput = {
         chainId: entry.chainId,
         contextGraphId: entry.contextGraphId,
         onChainCgId: BigInt(boundContextGraphId).toString(),
         ual: entry.ual,
         merkleRoot: entry.merkleRoot,
         kaId: entry.kaId,
-      }, { persistDeferredBackoff: true });
+      };
+      const matches = await this.matchingEntries(replayInput);
+      const matchingEntry = matches.find((candidate) => candidate.key === entry.key);
+      const outcome = matchingEntry
+        ? await this.replayEntry(
+            matchingEntry,
+            replayInput,
+            deferredRetryDelayMs(matchingEntry.attemptCount),
+          )
+        : 'none';
       if (outcome !== 'none') return outcome;
       await this.recordDeferred(
         entry,
@@ -381,6 +466,33 @@ export class FinalizationRecovery<
         deferredRetryDelayMs(entry.attemptCount),
       );
       return 'retry-pending';
+    }
+  }
+
+  private isLiveEntry(entry: FinalizationRecoveryEntry): boolean {
+    return entry.state === 'RECEIVED'
+      || entry.state === 'VERIFIED'
+      || entry.state === 'REORGED';
+  }
+
+  private async withEntryLock<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.entryLockTails.get(key) ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.entryLockTails.set(key, current);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release?.();
+      if (this.entryLockTails.get(key) === current) {
+        this.entryLockTails.delete(key);
+      }
     }
   }
 
@@ -1170,14 +1282,20 @@ export class FinalizationRecovery<
     for (const entry of entries) {
       const replayKey = this.replaySingleFlightKey(entry, input);
       const existing = this.replaySingleFlights.get(replayKey);
-      const replay = existing ?? this.replayEntry(
-        entry,
-        input,
-        replayKey,
-        options.persistDeferredBackoff
-          ? deferredRetryDelayMs(entry.attemptCount)
-          : undefined,
-      );
+      const replay = existing ?? this.withEntryLock(
+        entry.key,
+        () => this.replayEntry(
+          entry,
+          input,
+          options.persistDeferredBackoff
+            ? deferredRetryDelayMs(entry.attemptCount)
+            : undefined,
+        ),
+      ).finally(() => {
+        if (this.replaySingleFlights.get(replayKey) === replay) {
+          this.replaySingleFlights.delete(replayKey);
+        }
+      });
       if (!existing) this.replaySingleFlights.set(replayKey, replay);
       const entryOutcome = await replay;
       if (entryOutcome === 'recovered') outcome = 'recovered';
@@ -1214,6 +1332,7 @@ export class FinalizationRecovery<
         degradedReason: 'not-configured',
         stateCounts: {},
         livePayloadBytes: 0,
+        dueEntries: 0,
       };
     }
     return store.health();
@@ -1460,140 +1579,141 @@ export class FinalizationRecovery<
     return this.settleEntry(reorged, outcome);
   }
 
-  private replayEntry(
-    entry: FinalizationRecoveryEntry,
+  private async replayEntry(
+    snapshot: FinalizationRecoveryEntry,
     input: FinalizationRecoveryReplayInput,
-    replayKey: string,
     deferredRetryDelay?: number,
   ): Promise<FinalizationRecoveryReplayOutcome> {
-    const replay = (async () => {
-      try {
-        if (
-          entry.state !== 'SETTLED'
-          && !this.getStore()?.isAttemptDue(entry)
-        ) return 'none' as const;
-        const candidate = this.decodeEntry(entry);
-        if (!candidate) return 'none' as const;
-        if (entry.state === 'SETTLED') {
-          return this.replaySettled(
-            entry,
-            candidate,
-            input,
-            deferredRetryDelay,
-          );
-        }
-
-        let outcome: FinalizationRecoveryApplyOutcome;
-        if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
-          const evidence = entry.verifiedEvidence;
-          const evidenceMatchesEnvelope = entry.generation > 0
-            ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
-                evidence,
-                candidate,
-                entry,
-              )
-            : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
-                evidence,
-                candidate,
-                entry,
-              );
-          if (!evidenceMatchesEnvelope) {
-            this.log.warn(
-              `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
-            );
-            await this.rejectEntry(entry, 'verified evidence does not match immutable envelope');
-            return 'none' as const;
-          }
-          const receiptStatus = await this.verifyPersistedReceipt(
-            candidate,
-            evidence,
-            entry.generation > 0,
-          );
-          if (receiptStatus !== 'confirmed') {
-            if (receiptStatus === 'reorged') {
-              await this.markReorged(
-                entry,
-                'persisted receipt disagrees with canonical chain truth',
-              );
-            } else if (receiptStatus === 'rejected') {
-              await this.rejectEntry(
-                entry,
-                'persisted transaction failed or contains no finalization event',
-              );
-            } else if (receiptStatus === 'unsupported') {
-              await this.markUnsupported(entry);
-            } else {
-              await this.recordDeferred(
-                entry,
-                `persisted receipt is ${receiptStatus}`,
-                deferredRetryDelay,
-              );
-            }
-            this.log.info(
-              `Finalization recovery receipt is ${receiptStatus} for ${entry.ual}`,
-            );
-            return deferredRetryDelay !== undefined
-              && (receiptStatus === 'pending' || receiptStatus === 'not-found')
-              ? 'retry-pending' as const
-              : 'none' as const;
-          }
-          const replayOutcome = await this.materializer.replayVerified({
-            replay: input,
-            entry,
-            candidate,
-            evidence,
-          });
-          outcome = replayOutcome === 'promoted'
-            ? 'applied'
-            : replayOutcome === 'already-confirmed' || replayOutcome === 'stale-target'
-              ? 'already-confirmed'
-              : 'deferred';
-        } else {
-          const recoverySourcePeerId = entry.trustedPublisherPeerId ?? entry.sourcePeerId;
-          outcome = await this.materialize(
-            {
-              rawMessage: entry.rawMessage,
-              contextGraphId: entry.contextGraphId,
-              ...(recoverySourcePeerId ? { sourcePeerId: recoverySourcePeerId } : {}),
-              candidate,
-            },
-            { kind: 'recovery', entry },
-          );
-        }
-
-        if (outcome === 'deferred') {
-          await this.recordDeferred(
-            entry,
-            'replay processing deferred',
-            deferredRetryDelay,
-          );
-          return deferredRetryDelay === undefined
-            ? 'none' as const
-            : 'retry-pending' as const;
-        }
-        const settled = await this.settleEntry(entry, outcome);
-        return settled ? 'recovered' as const : 'none' as const;
-      } catch (error) {
-        if (!this.materializer.isRetryableError(error)) throw error;
-        this.log.info(
-          `Finalization recovery materialization remains busy for ${entry.ual}; `
-            + 'keeping inbox entry',
+    const store = this.getStore();
+    if (!store) return 'none';
+    const entry = await store.get(snapshot.key);
+    if (!entry || (!this.isLiveEntry(entry) && entry.state !== 'SETTLED')) {
+      return 'none';
+    }
+    try {
+      // Only autonomous replay observes its persisted deadline. Chain
+      // reconciliation remains an immediate, authoritative recovery trigger.
+      if (
+        deferredRetryDelay !== undefined
+        && entry.state !== 'SETTLED'
+        && !store.isAttemptDue(entry)
+      ) return 'retry-pending' as const;
+      const candidate = this.decodeEntry(entry);
+      if (!candidate) return 'none' as const;
+      if (entry.state === 'SETTLED') {
+        return this.replaySettled(
+          entry,
+          candidate,
+          input,
+          deferredRetryDelay,
         );
+      }
+
+      let outcome: FinalizationRecoveryApplyOutcome;
+      if (entry.state === 'VERIFIED' && entry.verifiedEvidence) {
+        const evidence = entry.verifiedEvidence;
+        const evidenceMatchesEnvelope = entry.generation > 0
+          ? VerifiedGraphScopedFinalizationEvidenceCodec.matchesImmutableEnvelope(
+              evidence,
+              candidate,
+              entry,
+            )
+          : VerifiedGraphScopedFinalizationEvidenceCodec.matchesEnvelope(
+              evidence,
+              candidate,
+              entry,
+            );
+        if (!evidenceMatchesEnvelope) {
+          this.log.warn(
+            `Finalization recovery evidence does not match its envelope for ${entry.ual}`,
+          );
+          await this.rejectEntry(entry, 'verified evidence does not match immutable envelope');
+          return 'none' as const;
+        }
+        const receiptStatus = await this.verifyPersistedReceipt(
+          candidate,
+          evidence,
+          entry.generation > 0,
+        );
+        if (receiptStatus !== 'confirmed') {
+          if (receiptStatus === 'reorged') {
+            await this.markReorged(
+              entry,
+              'persisted receipt disagrees with canonical chain truth',
+            );
+          } else if (receiptStatus === 'rejected') {
+            await this.rejectEntry(
+              entry,
+              'persisted transaction failed or contains no finalization event',
+            );
+          } else if (receiptStatus === 'unsupported') {
+            await this.markUnsupported(entry);
+          } else {
+            await this.recordDeferred(
+              entry,
+              `persisted receipt is ${receiptStatus}`,
+              deferredRetryDelay,
+            );
+          }
+          this.log.info(
+            `Finalization recovery receipt is ${receiptStatus} for ${entry.ual}`,
+          );
+          return deferredRetryDelay !== undefined
+            && (receiptStatus === 'pending' || receiptStatus === 'not-found')
+            ? 'retry-pending' as const
+            : 'none' as const;
+        }
+        const replayOutcome = await this.materializer.replayVerified({
+          replay: input,
+          entry,
+          candidate,
+          evidence,
+        });
+        outcome = replayOutcome === 'promoted'
+          ? 'applied'
+          : replayOutcome === 'already-confirmed' || replayOutcome === 'stale-target'
+            ? 'already-confirmed'
+            : 'deferred';
+      } else {
+        const recoverySourcePeerId = entry.trustedPublisherPeerId ?? entry.sourcePeerId;
+        outcome = await this.materialize(
+          {
+            rawMessage: entry.rawMessage,
+            contextGraphId: entry.contextGraphId,
+            ...(recoverySourcePeerId ? { sourcePeerId: recoverySourcePeerId } : {}),
+            candidate,
+          },
+          { kind: 'recovery', entry },
+        );
+      }
+
+      if (outcome === 'deferred') {
         await this.recordDeferred(
           entry,
-          'replay store scheduler remained busy',
+          'replay processing deferred',
           deferredRetryDelay,
         );
         return deferredRetryDelay === undefined
           ? 'none' as const
           : 'retry-pending' as const;
       }
-    })().finally(() => {
-      if (this.replaySingleFlights.get(replayKey) === replay) {
-        this.replaySingleFlights.delete(replayKey);
-      }
-    });
-    return replay;
+      const settled = await this.settleEntry(entry, outcome);
+      return settled ? 'recovered' as const : 'none' as const;
+    } catch (error) {
+      if (!this.materializer.isRetryableError(error)) throw error;
+      this.log.info(
+        `Finalization recovery materialization remains busy for ${entry.ual}; `
+          + 'keeping inbox entry',
+      );
+      await this.recordDeferred(
+        entry,
+        'replay store scheduler remained busy',
+        deferredRetryDelay,
+      );
+      return deferredRetryDelay === undefined
+        ? 'none' as const
+        : 'retry-pending' as const;
+    }
   }
 
   private decodeEntry(

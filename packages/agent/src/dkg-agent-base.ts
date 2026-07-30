@@ -1680,6 +1680,7 @@ export class DKGAgentBase {
         degradedReason: 'not-configured',
         stateCounts: {},
         livePayloadBytes: 0,
+        dueEntries: 0,
       };
     }
     const health = await store.health();
