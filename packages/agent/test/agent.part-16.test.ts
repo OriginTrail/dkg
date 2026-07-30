@@ -203,7 +203,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             finalizedOnly: true,
             contextGraphIds: ['runtime-contextGraph'],
             finalizedCleanupBudget: 64,
-            allowDuringBackgroundPressure: true,
+            queueBehindActiveWork: true,
           },
         ]]);
         expect(lifecycleOrder).toEqual(['durable', 'shared-memory', 'cleanup']);

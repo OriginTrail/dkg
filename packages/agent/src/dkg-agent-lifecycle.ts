@@ -6044,14 +6044,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // deterministic cleanup boundary for the whole catch-up job. The
       // cleanup's store operations remain background-priority and its
       // per-KA lock/exact VM+SWM+marker re-checks preserve a concurrent newer
-      // SWM lifecycle. Background sync traffic must not starve this drain:
-      // only foreground/ACK pressure defers it, with the periodic timer as the
-      // restart/failure backstop.
+      // SWM lifecycle. Queue behind active store work instead of sampling
+      // pressure and abandoning the drain: the store scheduler keeps
+      // foreground/ACK priority and guarantees background progress. The
+      // periodic timer remains the restart/failure backstop.
       await this.cleanupExpiredSharedMemory({
         finalizedOnly: true,
         contextGraphIds: [contextGraphId],
         finalizedCleanupBudget: 64,
-        allowDuringBackgroundPressure: true,
+        queueBehindActiveWork: true,
       });
     }
 
@@ -7593,7 +7594,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     finalizedOnly?: boolean;
     contextGraphIds?: readonly string[];
     finalizedCleanupBudget?: number;
-    allowDuringBackgroundPressure?: boolean;
+    queueBehindActiveWork?: boolean;
   }): Promise<number> {
     const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     const ctx = createOperationContext('share');
@@ -7637,12 +7638,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     contextGraphId: pid,
                     swmMetaGraph: wsMetaGraph,
                     maxCandidates: batchSize,
-                    allowDuringBackgroundPressure: options?.allowDuringBackgroundPressure,
+                    queueBehindActiveWork: options?.queueBehindActiveWork,
                   });
                 finalizedCleanupBudget -= cleaned;
                 if (cleaned < batchSize) break;
                 // Yield between bounded batches so queued foreground work can
-                // arrive and trip the handler's pressure gate.
+                // be admitted ahead of the next background-priority batch.
                 await new Promise<void>((resolve) => setImmediate(resolve));
               }
             } catch (error) {

@@ -2220,20 +2220,20 @@ describe('graph-scoped finalization handler', () => {
     });
   });
 
-  it('does not starve finalized cleanup behind unrelated background sync pressure', async () => {
+  it('queues explicit post-catchup cleanup behind active store work', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     Object.defineProperty(store, 'getPressureSnapshot', {
       configurable: true,
       value: () => ({
-        ackInflight: 0,
-        healthInflight: 0,
-        normalInflight: 0,
+        ackInflight: 1,
+        healthInflight: 1,
+        normalInflight: 2,
         backgroundInflight: 2,
-        ackQueued: 0,
-        healthQueued: 0,
-        normalQueued: 0,
+        ackQueued: 3,
+        healthQueued: 2,
+        normalQueued: 4,
         backgroundQueued: 4,
         maxConcurrent: 4,
         ackReservedSlots: 1,
@@ -2245,7 +2245,7 @@ describe('graph-scoped finalization handler', () => {
       contextGraphId: CG,
       swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
       maxCandidates: 16,
-      allowDuringBackgroundPressure: true,
+      queueBehindActiveWork: true,
     })).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
