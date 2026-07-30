@@ -3114,15 +3114,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
     }
 
-    // Start periodic shared memory cleanup
-    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-    if (ttl > 0) {
+    // Start periodic SWM maintenance. TTL expiry may be disabled, but exact
+    // finalized graph-scoped copies still need bounded idle cleanup.
+    this.cleanupExpiredSharedMemory().catch(() => {});
+    this.swmCleanupTimer = setInterval(() => {
       this.cleanupExpiredSharedMemory().catch(() => {});
-      this.swmCleanupTimer = setInterval(() => {
-        this.cleanupExpiredSharedMemory().catch(() => {});
-      }, SWM_CLEANUP_INTERVAL_MS);
-      if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
-    }
+    }, SWM_CLEANUP_INTERVAL_MS);
+    if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
 
     // OT-RFC-38 LU-6: periodic reconciler that ensures the local
     // node is subscribed in host-mode to every locally-known
@@ -7549,18 +7547,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * and the next cleanup cycle without requiring a restart.
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
-    const oldTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     (this.config as any).sharedMemoryTtlMs = ttlMs;
 
-    if (oldTtl <= 0 && ttlMs > 0 && !this.swmCleanupTimer) {
+    if (!this.swmCleanupTimer) {
       this.cleanupExpiredSharedMemory().catch(() => {});
       this.swmCleanupTimer = setInterval(() => {
         this.cleanupExpiredSharedMemory().catch(() => {});
       }, SWM_CLEANUP_INTERVAL_MS);
       if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
-    } else if (ttlMs <= 0 && this.swmCleanupTimer) {
-      clearInterval(this.swmCleanupTimer);
-      this.swmCleanupTimer = null;
     }
   }
 
@@ -7572,11 +7566,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
     const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-    if (ttl <= 0) return 0;
-
     const ctx = createOperationContext('share');
-    const cutoff = new Date(Date.now() - ttl).toISOString();
+    const cutoff = ttl > 0 ? new Date(Date.now() - ttl).toISOString() : undefined;
     let totalDeleted = 0;
+    let finalizedCleanupBudget = 4;
 
     try {
       const graphManager = new GraphManager(this.store);
@@ -7596,6 +7589,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // Each meta graph describes exactly one SWM data bucket:
           // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
           const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
+          if (finalizedCleanupBudget > 0) {
+            try {
+              const cleaned = await this.getOrCreateFinalizationHandler()
+                .cleanupFinalizedGraphScopedSwmWhenIdle({
+                  contextGraphId: pid,
+                  swmMetaGraph: wsMetaGraph,
+                  maxCandidates: finalizedCleanupBudget,
+                });
+              finalizedCleanupBudget -= cleaned;
+            } catch (error) {
+              this.log.warn(
+                ctx,
+                `Deferred finalized-SWM cleanup failed for ${wsMetaGraph}: `
+                  + `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+          if (!cutoff) continue;
 
           const expiredOps = await this.store.query(
             `SELECT ?op WHERE {

@@ -639,7 +639,7 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   }, 120_000);
 
-  it('legacy cutoff-less sessions keep the unfiltered store-paged compatibility fallback', async () => {
+  it('legacy cutoff-less sessions keep TTL joins out of the store-paged compatibility fallback', async () => {
     const cgId = 'meta-ceiling-legacy';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const store = new OxigraphStore();
@@ -658,9 +658,10 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
         normalized.includes('ORDER BY ?g ?s ?p ?o') &&
         /OFFSET \d+/.test(normalized)
       ) {
-        // The legacy paged query must never carry the TTL join.
+        // The legacy paged query must never carry the TTL join. The only
+        // filters allowed here exclude finalized cleanup-marked lifecycles.
         expect(normalized).not.toContain('publishedAt');
-        expect(normalized).not.toContain('FILTER');
+        expect(normalized).toContain('finalizedSwmCleanupRoot');
         legacyPagedQueries += 1;
       }
       return originalQuery(sparql, options as never);

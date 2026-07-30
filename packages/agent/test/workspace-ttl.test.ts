@@ -89,14 +89,14 @@ describe('Workspace TTL', () => {
   }, 20000);
 });
 
-describe('setSharedMemoryTtlMs timer lifecycle', () => {
+describe('setSharedMemoryTtlMs maintenance timer lifecycle', () => {
   let node: DKGAgent;
 
   afterAll(async () => {
     try { await node?.stop(); } catch {}
   });
 
-  it('starts cleanup timer when TTL transitions from 0 to positive', async () => {
+  it('keeps finalized-SWM maintenance active when TTL expiry is disabled', async () => {
     node = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'TtlLifecycleNode',
@@ -108,16 +108,17 @@ describe('setSharedMemoryTtlMs timer lifecycle', () => {
     await node.start();
     await sleep(300);
 
-    // Timer should not be running (TTL=0)
-    expect((node as any).swmCleanupTimer).toBeNull();
+    // Finalized graph-scoped SWM cleanup remains active even when ordinary
+    // workspace TTL expiry is disabled.
+    expect((node as any).swmCleanupTimer).not.toBeNull();
 
     // Enable TTL at runtime
     node.setSharedMemoryTtlMs(60_000);
     expect((node as any).swmCleanupTimer).not.toBeNull();
 
-    // Disable again
+    // Disabling TTL expiry must not disable finalized-SWM maintenance.
     node.setSharedMemoryTtlMs(0);
-    expect((node as any).swmCleanupTimer).toBeNull();
+    expect((node as any).swmCleanupTimer).not.toBeNull();
   }, 10000);
 });
 

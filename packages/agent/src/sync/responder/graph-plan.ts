@@ -53,6 +53,7 @@ const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
 const DKG_KA_UAL = `${DKG}kaUal`;
 const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
 const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
+const DKG_FINALIZED_SWM_CLEANUP_ROOT = `${DKG}finalizedSwmCleanupRoot`;
 const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
@@ -2659,10 +2660,6 @@ function filterSwmMetaSnapshotRows(
   rows: readonly SyncRow[],
   cutoffIso: string | null,
 ): SyncRow[] {
-  if (cutoffIso == null) return [...rows].sort(compareRows);
-  const cutoffMs = Date.parse(cutoffIso);
-  if (!Number.isFinite(cutoffMs)) return [];
-
   const bySubject = new Map<string, SyncRow[]>();
   for (const row of rows) {
     const bucket = bySubject.get(row.s) ?? [];
@@ -2694,6 +2691,22 @@ function filterSwmMetaSnapshotRows(
     }
     return keys;
   };
+  const blockedSubjects = new Set<string>();
+  const blockedTupleKeys = new Set<string>();
+  for (const [subject] of bySubject) {
+    if (objects(subject, DKG_FINALIZED_SWM_CLEANUP_ROOT).length === 0) continue;
+    blockedSubjects.add(subject);
+    for (const key of tupleKeys(subject)) blockedTupleKeys.add(key);
+  }
+  for (const [subject] of bySubject) {
+    if (tupleKeys(subject).some((key) => blockedTupleKeys.has(key))) {
+      blockedSubjects.add(subject);
+    }
+  }
+  const syncableRows = rows.filter((row) => !blockedSubjects.has(row.s));
+  if (cutoffIso == null) return syncableRows.sort(compareRows);
+  const cutoffMs = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoffMs)) return [];
 
   const admitted = new Set<string>();
   const freshOperationKeys = new Set<string>();
@@ -2710,12 +2723,13 @@ function filterSwmMetaSnapshotRows(
     if (tupleKeys(subject).some((key) => freshOperationKeys.has(key))) admitted.add(subject);
   }
 
-  return rows.filter((row) => admitted.has(row.s)).sort(compareRows);
+  return syncableRows.filter((row) => admitted.has(row.s)).sort(compareRows);
 }
 
 /**
- * Legacy UNFILTERED store-paged compatibility path (cutoffIso == null sessions
- * only). The former TTL variant of this query — DISTINCT + a six-predicate
+ * Legacy TTL-unfiltered store-paged compatibility path (cutoffIso == null
+ * sessions only). Finalized cleanup-marked lifecycles are still excluded from
+ * synchronization. The former TTL variant of this query — DISTINCT + a six-predicate
  * UNION join + global `ORDER BY ?g ?s ?p ?o` re-evaluated with a growing
  * OFFSET per page over a mutable graph family — was the #1847 store-melter and
  * is deliberately DELETED, not gated: TTL-filtered sessions page from the
@@ -2734,12 +2748,22 @@ async function readSwmMetaRowsPage(
   const swmMetaValues = graphValues(swmMetaGraphs);
   if (!swmMetaValues) return [];
   // sparql-scan-allow: R2 -- ?g is bound by a finite VALUES list of pre-admitted SWM meta graph IRIs
-  // sparql-scan-allow: R3 -- pre-existing legacy (cutoff-less) compatibility lane, unchanged behavior; TTL sessions page from the session plan instead (#1847)
+  // sparql-scan-allow: R3 -- legacy cutoff-less compatibility lane with only finalized-lifecycle exclusion; TTL sessions page from the session plan instead (#1847)
   const res = await store.query(`
     SELECT DISTINCT ?g ?s ?p ?o WHERE {
       VALUES ?g { ${swmMetaValues} }
       GRAPH ?g {
         ?s ?p ?o .
+        FILTER NOT EXISTS { ?s <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot }
+        FILTER NOT EXISTS {
+          ?blockedHead <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
+            <${DKG_KA_UAL}> ?blockedUal ;
+            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
+            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
+          ?s <${DKG_KA_UAL}> ?blockedUal ;
+            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
+            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
+        }
       }
     }
     ORDER BY ?g ?s ?p ?o
@@ -2838,6 +2862,15 @@ async function readFreshSwmMetaSubjects(
     SELECT DISTINCT ?s WHERE {
       GRAPH <${assertSafeIri(graph)}> {
         ?s <${DKG_PUBLISHED_AT}> ?ts .
+        FILTER NOT EXISTS {
+          ?blockedHead <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
+            <${DKG_KA_UAL}> ?blockedUal ;
+            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
+            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
+          ?s <${DKG_KA_UAL}> ?blockedUal ;
+            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
+            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
+        }
         ${cutoffFilter}
       }
     }
@@ -2850,6 +2883,13 @@ async function readFreshSwmMetaSubjects(
            <${DKG_KA_UAL}> ?headUal ;
            <${DKG_ASSERTION_VERSION}> ?headVersion ;
            <${DKG_SHARE_OPERATION_ID}> ?shareId .
+        FILTER NOT EXISTS { ?s <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot }
+        FILTER NOT EXISTS {
+          ?blockedHead <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
+            <${DKG_KA_UAL}> ?headUal ;
+            <${DKG_ASSERTION_VERSION}> ?headVersion ;
+            <${DKG_SHARE_OPERATION_ID}> ?shareId .
+        }
         ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
            <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
            <${DKG_KA_UAL}> ?headUal ;

@@ -408,6 +408,82 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(out).not.toContain('urn:dkg:share:devnet-test:stale-rootless');
       await storeTtl.close();
     });
+
+    it.each([0, 5_000])(
+      'does not advertise finalized SWM marked for deferred cleanup (ttl=%s)',
+      async (sharedMemoryTtlMs) => {
+        const markedStore = new OxigraphStore();
+        const publishedAt = new Date(Date.now() - 1_000).toISOString();
+        const ual = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/9';
+        const opId = 'finalized-deferred-cleanup';
+        const op = `urn:dkg:share:${CG_ID}:${opId}`;
+        const head = `${ual}#dkg-swm-head`;
+        const tupleRows = (subject: string) => [
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}kaUal`, object: ual },
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}assertionVersion`, object: '"9"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}shareOperationId`, object: `"${opId}"` },
+        ];
+        await markedStore.insert([
+          { graph: ROOT_SWM_META, subject: op, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          ...tupleRows(op),
+          ...tupleRows(head),
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/9` },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+        ]);
+        const markedCap = captureHandler();
+        registerSyncHandler({
+          register: markedCap.register,
+          protocolSync: '/origintrail/dkg/sync/1.0.0',
+          syncDeniedResponse: 'sync-denied',
+          syncPageSize: 5000,
+          sharedMemoryTtlMs,
+          store: markedStore,
+          peerId: 'self-peer',
+          parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+          authorizeSyncRequest: async () => true,
+          logWarn: noopLog,
+          logDebug: noopLog,
+        });
+
+        const out = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+
+        expect(out).not.toContain(head);
+        expect(out).not.toContain(op);
+        expect(out).not.toContain('finalizedSwmCleanupRoot');
+
+        // After idle cleanup removes the active head, the immutable operation
+        // keeps the marker for recovery but must remain outside sync.
+        await markedStore.deleteByPattern({
+          graph: ROOT_SWM_META,
+          subject: head,
+        });
+        await markedStore.insert([{
+          graph: ROOT_SWM_META,
+          subject: op,
+          predicate: `${DKG_NS}finalizedSwmCleanupRoot`,
+          object: `"0x${'ab'.repeat(32)}"`,
+        }]);
+        const afterCleanup = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          syncSessionId: `finalized-cleanup-drained-${sharedMemoryTtlMs}`,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+        expect(afterCleanup).not.toContain(op);
+        expect(afterCleanup).not.toContain('finalizedSwmCleanupRoot');
+        await markedStore.close();
+      },
+    );
   });
 
   // Codex review on #885 — URI shape alone is NOT a sufficient CG

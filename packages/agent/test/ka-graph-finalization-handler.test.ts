@@ -26,8 +26,12 @@ import {
   storeKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
   withKeyedLocks,
+  workspaceOperationSubject,
 } from '@origintrail-official/dkg-publisher';
-import { FinalizationHandler } from '../src/finalization-handler.js';
+import {
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FinalizationHandler,
+} from '../src/finalization-handler.js';
 import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
@@ -171,12 +175,25 @@ describe('graph-scoped finalization handler', () => {
   let store: OxigraphStore;
   let graphManager: GraphManager;
   let handler: FinalizationHandler;
+  let writeLocks: Map<string, Promise<void>>;
 
   beforeEach(() => {
     store = new OxigraphStore();
     graphManager = new GraphManager(store);
-    handler = new FinalizationHandler(store, legacyFinalizationChain());
+    writeLocks = new Map<string, Promise<void>>();
+    handler = new FinalizationHandler(store, legacyFinalizationChain(), { writeLocks });
   });
+
+  async function drainFinalizedSwm(
+    target = handler,
+    subGraphName?: string,
+  ): Promise<number> {
+    return target.cleanupFinalizedGraphScopedSwmWhenIdle({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG, subGraphName),
+      maxCandidates: 16,
+    });
+  }
 
   async function stageGraph(durableAccess?: {
     accessPolicy: 'ownerOnly' | 'allowList';
@@ -357,16 +374,15 @@ describe('graph-scoped finalization handler', () => {
     }), CG, '12D3KooWPublisher');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
     await expect(resolveKnowledgeAssetWorkspaceHead({
       store,
       graphManager,
       contextGraphId: CG,
       kaUal: UAL,
-    })).resolves.toMatchObject({
-      assertionVersion: VERSION,
-      shareOperationId: SHARE_ID,
-    });
+    })).resolves.toBeUndefined();
     await expect(store.query(
       `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> {
         ?operation <http://dkg.io/ontology/shareOperationId> ${JSON.stringify(SHARE_ID)} .
@@ -960,6 +976,7 @@ describe('graph-scoped finalization handler', () => {
     store.replaceGraphAndSubject = replaceGraphAndSubject;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
     await expect(store.query(
       `ASK { GRAPH <${metaGraph}> { <${UAL}> <http://dkg.io/ontology/transactionHash> "${message.txHash}" } }`,
@@ -2129,6 +2146,108 @@ describe('graph-scoped finalization handler', () => {
     releaseWriterLock();
     await blocker;
     await finalization;
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm(lockingHandler)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  it('preserves finalized SWM when the handler has no shared writer lock', async () => {
+    const { message, swmGraph } = await stageGraph();
+    const uncoordinated = new FinalizationHandler(store, legacyFinalizationChain());
+
+    await uncoordinated.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    );
+
+    expect(await uncoordinated.cleanupFinalizedGraphScopedSwmWhenIdle({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    })).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
+  });
+
+  it('defers durable cleanup while the store is busy and resumes after restart when idle', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    let busy = true;
+    Object.defineProperty(store, 'getPressureSnapshot', {
+      configurable: true,
+      value: () => ({
+        ackInflight: 0,
+        healthInflight: 0,
+        normalInflight: busy ? 1 : 0,
+        backgroundInflight: 0,
+        ackQueued: 0,
+        healthQueued: 0,
+        normalQueued: 0,
+        backgroundQueued: 0,
+        maxConcurrent: 4,
+        ackReservedSlots: 1,
+      }),
+    });
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    busy = false;
+    const restarted = new FinalizationHandler(store, legacyFinalizationChain(), {
+      writeLocks,
+    });
+    expect(await drainFinalizedSwm(restarted)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toBeUndefined();
+    const immutableSnapshotBlockedFromSync = await store.query(
+      `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> { `
+        + `<${workspaceOperationSubject(CG, SHARE_ID)}> `
+        + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    );
+    expect(immutableSnapshotBlockedFromSync).toMatchObject({
+      type: 'boolean',
+      value: true,
+    });
+  });
+
+  it('repairs VM from the immutable operation snapshot after deferred SWM cleanup', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({
+      graph: graphManager.metaGraphUri(CG),
+      subject: UAL,
+    });
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
+    }, createOperationContext('system'))).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
@@ -2214,6 +2333,7 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
     expect(bindingVerified).toBe(true);
     expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
@@ -2495,6 +2615,7 @@ describe('graph-scoped finalization handler', () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
 
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
