@@ -210,7 +210,6 @@ describe('requester per-CG priority admission', () => {
     const admissions: string[] = [];
     const warnings: string[] = [];
     const contextGraphIds = ['first', 'second', 'third'];
-    let cleanupOptions: unknown;
     const agent = {
       config: { syncContextGraphPriorities: {} },
       store: {},
@@ -252,10 +251,6 @@ describe('requester per-CG priority admission', () => {
       },
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
-      cleanupExpiredSharedMemory: async (options: unknown) => {
-        cleanupOptions = options;
-        return 0;
-      },
       log: {
         info: noop,
         warn: (_ctx: unknown, message: string) => warnings.push(message),
@@ -280,11 +275,6 @@ describe('requester per-CG priority admission', () => {
     expect(summary.deferredBackpressure).toBe(1);
     expect(summary.failedPeers).toBe(0);
     expect(summary.backoffWorthyFailures).toBe(0);
-    expect(cleanupOptions).toEqual({
-      finalizedOnly: true,
-      contextGraphIds,
-      finalizedCleanupBudget: 64,
-    });
   });
 
   it('counts several failed Context Graphs from one remote as one failed peer', async () => {

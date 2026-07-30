@@ -1608,7 +1608,9 @@ export class FinalizationHandler {
 
   /**
    * Drain a bounded number of durable finalized-SWM markers only while the
-   * store scheduler reports no queued or in-flight work.
+   * store scheduler reports no queued or in-flight work. The deterministic
+   * post-catch-up boundary may explicitly tolerate unrelated background work;
+   * periodic maintenance remains fully idle-only.
    *
    * The marker survives restart, while replacing the SWM head for a newer
    * assertion removes it automatically. All maintenance queries run in the
@@ -1619,6 +1621,7 @@ export class FinalizationHandler {
     contextGraphId: string;
     swmMetaGraph: string;
     maxCandidates?: number;
+    allowDuringBackgroundPressure?: boolean;
   }): Promise<number> {
     if (!this.writeLocks) return 0;
     const pressure = this.store.getPressureSnapshot?.();
@@ -1626,11 +1629,11 @@ export class FinalizationHandler {
       pressure.ackInflight > 0
       || (pressure.healthInflight ?? 0) > 0
       || pressure.normalInflight > 0
-      || pressure.backgroundInflight > 0
+      || (!input.allowDuringBackgroundPressure && pressure.backgroundInflight > 0)
       || pressure.ackQueued > 0
       || (pressure.healthQueued ?? 0) > 0
       || pressure.normalQueued > 0
-      || pressure.backgroundQueued > 0
+      || (!input.allowDuringBackgroundPressure && pressure.backgroundQueued > 0)
     )) {
       return 0;
     }
@@ -1661,9 +1664,14 @@ export class FinalizationHandler {
     for (const row of result.bindings) {
       const currentPressure = this.store.getPressureSnapshot?.();
       if (currentPressure && (
-        currentPressure.ackQueued > 0
+        currentPressure.ackInflight > 0
+        || (currentPressure.healthInflight ?? 0) > 0
+        || currentPressure.normalInflight > 0
+        || (!input.allowDuringBackgroundPressure && currentPressure.backgroundInflight > 0)
+        || currentPressure.ackQueued > 0
         || (currentPressure.healthQueued ?? 0) > 0
         || currentPressure.normalQueued > 0
+        || (!input.allowDuringBackgroundPressure && currentPressure.backgroundQueued > 0)
       )) {
         break;
       }

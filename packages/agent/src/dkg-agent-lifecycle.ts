@@ -5447,22 +5447,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
         ),
       });
-      if (
-        work.length > 0
-        && summary.failedPhases === 0
-        && typeof this.cleanupExpiredSharedMemory === 'function'
-      ) {
-        // A completed catch-up is the first reliable low-pressure boundary
-        // after a large synchronized write. Drain finalized duplicates here,
-        // before reporting the job complete, in small background-priority
-        // batches that stop as soon as normal work appears. The periodic
-        // maintenance timer remains the restart/failure backstop.
-        await this.cleanupExpiredSharedMemory({
-          finalizedOnly: true,
-          contextGraphIds: work.map((item) => item.contextGraphId),
-          finalizedCleanupBudget: 64,
-        });
-      }
       return summary;
     };
 
@@ -6053,6 +6037,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         dataSynced: cleanDurableDataSynced,
         sharedMemorySynced: cleanSharedMemoryDataSynced,
         verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
+      });
+    }
+    if (includeSharedMemory && typeof this.cleanupExpiredSharedMemory === 'function') {
+      // Every selected peer has settled, so this is the first single,
+      // deterministic cleanup boundary for the whole catch-up job. The
+      // cleanup's store operations remain background-priority and its
+      // per-KA lock/exact VM+SWM+marker re-checks preserve a concurrent newer
+      // SWM lifecycle. Background sync traffic must not starve this drain:
+      // only foreground/ACK pressure defers it, with the periodic timer as the
+      // restart/failure backstop.
+      await this.cleanupExpiredSharedMemory({
+        finalizedOnly: true,
+        contextGraphIds: [contextGraphId],
+        finalizedCleanupBudget: 64,
+        allowDuringBackgroundPressure: true,
       });
     }
 
@@ -7594,6 +7593,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     finalizedOnly?: boolean;
     contextGraphIds?: readonly string[];
     finalizedCleanupBudget?: number;
+    allowDuringBackgroundPressure?: boolean;
   }): Promise<number> {
     const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     const ctx = createOperationContext('share');
@@ -7637,6 +7637,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     contextGraphId: pid,
                     swmMetaGraph: wsMetaGraph,
                     maxCandidates: batchSize,
+                    allowDuringBackgroundPressure: options?.allowDuringBackgroundPressure,
                   });
                 finalizedCleanupBudget -= cleaned;
                 if (cleaned < batchSize) break;

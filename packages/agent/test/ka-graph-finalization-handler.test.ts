@@ -2220,6 +2220,36 @@ describe('graph-scoped finalization handler', () => {
     });
   });
 
+  it('does not starve finalized cleanup behind unrelated background sync pressure', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    Object.defineProperty(store, 'getPressureSnapshot', {
+      configurable: true,
+      value: () => ({
+        ackInflight: 0,
+        healthInflight: 0,
+        normalInflight: 0,
+        backgroundInflight: 2,
+        ackQueued: 0,
+        healthQueued: 0,
+        normalQueued: 0,
+        backgroundQueued: 4,
+        maxConcurrent: 4,
+        ackReservedSlots: 1,
+      }),
+    });
+
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await handler.cleanupFinalizedGraphScopedSwmWhenIdle({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+      allowDuringBackgroundPressure: true,
+    })).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
   it('repairs VM from the immutable operation snapshot after deferred SWM cleanup', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);

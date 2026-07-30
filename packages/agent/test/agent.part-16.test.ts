@@ -125,40 +125,52 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         // `insertedTriples` count exposed by `syncFromPeer` / `syncSharedMemoryFromPeer`.
         // Replace those with recorders so we can assert both the call shape and
         // the reported totals without spinning up a remote peer.
-        const syncFromPeerDetailed = recorder(async () => ({
-          insertedTriples: 5,
-          fetchedMetaTriples: 0,
-          fetchedDataTriples: 0,
-          insertedMetaTriples: 0,
-          insertedDataTriples: 5,
-          bytesReceived: 0,
-          resumedPhases: 0,
-          timedOutPhases: 0,
-          completedPhases: 2,
-          checkpointAdvances: 0,
-          emptyResponses: 0,
-          metaOnlyResponses: 0,
-          dataRejectedMissingMeta: 0,
-          rejectedKcs: 0,
-          failedPeers: 0,
-        }));
+        const lifecycleOrder: string[] = [];
+        const syncFromPeerDetailed = recorder(async () => {
+          lifecycleOrder.push('durable');
+          return {
+            insertedTriples: 5,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 5,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 2,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+          };
+        });
         (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
-        const syncSharedMemoryFromPeerDetailed = recorder(async () => ({
-          insertedTriples: 2,
-          fetchedMetaTriples: 0,
-          fetchedDataTriples: 0,
-          insertedMetaTriples: 0,
-          insertedDataTriples: 2,
-          bytesReceived: 0,
-          resumedPhases: 0,
-          timedOutPhases: 0,
-          completedPhases: 2,
-          checkpointAdvances: 0,
-          emptyResponses: 0,
-          droppedDataTriples: 0,
-          failedPeers: 0,
-        }));
+        const syncSharedMemoryFromPeerDetailed = recorder(async () => {
+          lifecycleOrder.push('shared-memory');
+          return {
+            insertedTriples: 2,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 2,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 2,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            droppedDataTriples: 0,
+            failedPeers: 0,
+          };
+        });
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
+        const cleanupExpiredSharedMemory = recorder(async () => {
+          lifecycleOrder.push('cleanup');
+          return 0;
+        });
+        (agent as any).cleanupExpiredSharedMemory = cleanupExpiredSharedMemory;
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
@@ -186,6 +198,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
+        expect(cleanupExpiredSharedMemory.calls).toEqual([[
+          {
+            finalizedOnly: true,
+            contextGraphIds: ['runtime-contextGraph'],
+            finalizedCleanupBudget: 64,
+            allowDuringBackgroundPressure: true,
+          },
+        ]]);
+        expect(lifecycleOrder).toEqual(['durable', 'shared-memory', 'cleanup']);
         expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')).toMatchObject({
           synced: true,
           sharedMemorySynced: true,
