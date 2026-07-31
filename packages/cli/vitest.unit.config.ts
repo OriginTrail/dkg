@@ -30,6 +30,7 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
+          'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/query-route-lifecycle.test.ts',
           'test/status-command-store.test.ts',

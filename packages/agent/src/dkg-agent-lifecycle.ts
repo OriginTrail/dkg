@@ -2153,6 +2153,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
               const result = await this.store.query(
                 `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+                { source: 'agent.verifyProposal.batchMerkleRoot' },
               );
               if (result.type === 'bindings' && result.bindings.length > 0) {
                 const hex = (result.bindings[0] as Record<string, string>)['root'];
@@ -6296,17 +6297,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const metaGraph = contextGraphMetaGraphUri(contextGraphId);
         const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
         const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
-        const registrationResult = await this.store.query(`
-          SELECT ?predicate ?value WHERE {
-            GRAPH <${metaGraph}> {
-              <${contextGraphUri}> ?predicate ?value .
-              VALUES ?predicate {
-                <${onChainIdPredicate}>
-                <${onChainHashPredicate}>
+        const registrationResult = await this.store.query(
+          `
+            SELECT ?predicate ?value WHERE {
+              GRAPH <${metaGraph}> {
+                <${contextGraphUri}> ?predicate ?value .
+                VALUES ?predicate {
+                  <${onChainIdPredicate}>
+                  <${onChainHashPredicate}>
+                }
               }
             }
-          }
-        `);
+          `,
+          { source: 'agent.durableSync.registrationBinding' },
+        );
         let confirmedOnChainId: string | undefined;
         let confirmedOnChainHash: string | undefined;
         if (registrationResult.type === 'bindings') {
@@ -6876,6 +6880,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
         }
       } LIMIT 1`,
+      { source: 'agent.delegationRefresh.currentState' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return;
 
@@ -7364,6 +7369,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" .
         }
       }`,
+      { source: 'agent.contextGraph.confirmedMeta.unregisteredPlaceholder' },
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
@@ -7404,6 +7410,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           : undefined,
       ),
+      { source: 'agent.contextGraph.confirmedMeta.privateDefinition' },
     );
     if (
       authoritativeDefinitionResult.type === 'boolean' &&
@@ -7420,6 +7427,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // member delegation.
     const authoritativePublicDefinitionResult = await this.store.query(
       buildAuthoritativePublicMetaAskQuery(contextGraphId),
+      { source: 'agent.contextGraph.confirmedMeta.publicDefinition' },
     );
     if (
       authoritativePublicDefinitionResult.type === 'boolean' &&
@@ -7488,6 +7496,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
         }
       }`,
+      { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration' },
     );
     return ontologyResult.type === 'boolean' && ontologyResult.value === true;
   }
@@ -7613,6 +7622,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
             }
           }`,
+            { source: 'agent.swmCleanup.expiredOperations' },
           );
 
           if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) continue;
@@ -7628,6 +7638,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 <${opUri}> <http://dkg.io/ontology/rootEntity> ?re .
               }
             }`,
+              { source: 'agent.swmCleanup.operationRoots' },
             );
 
             const rootEntities: string[] = [];
@@ -7668,6 +7679,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 OPTIONAL { <${opUri}> <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
               }
             } LIMIT 1`,
+              { source: 'agent.swmCleanup.graphScopedMetadata' },
             );
             const v2Row = v2Meta.type === 'bindings' ? v2Meta.bindings[0] : undefined;
             const scopeVersion = v2Row?.['scopeVersion'] === undefined ? NaN : Number(stripLiteral(v2Row['scopeVersion']));
@@ -7687,6 +7699,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     OPTIONAL { <${headSubject}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
                   }
                 } LIMIT 1`,
+                  { source: 'agent.swmCleanup.currentHeadOwner' },
                 );
                 if (headOwned.type === 'bindings' && headOwned.bindings.length > 0) {
                   // Whole KA expired: drop the per-KA SWM assertion graph and
@@ -7967,17 +7980,20 @@ async function getSharedMemorySubGraphAdmission(
 
 async function isKnownContextGraphUri(store: TripleStore, contextGraphUri: string): Promise<boolean> {
   const metaGraph = `${contextGraphUri}/_meta`;
-  const result = await store.query(`
-    ASK {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        {
-          <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-        } UNION {
-          <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
+  const result = await store.query(
+    `
+      ASK {
+        GRAPH <${assertSafeIri(metaGraph)}> {
+          {
+            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+          } UNION {
+            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
+          }
         }
       }
-    }
-  `);
+    `,
+    { source: 'agent.subGraphClassification.knownContextGraph' },
+  );
   return result.type === 'boolean' && result.value;
 }
 /**

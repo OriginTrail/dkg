@@ -1294,14 +1294,17 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
 
-    const ontologyResult = await this.store.query(`
-      SELECT ?ctxGraph ?name WHERE {
-        GRAPH <${ontologyGraph}> {
-          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-          OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+    const ontologyResult = await this.store.query(
+      `
+        SELECT ?ctxGraph ?name WHERE {
+          GRAPH <${ontologyGraph}> {
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          }
         }
-      }
-    `);
+      `,
+      { source: 'agent.contextGraph.discovery.ontologyDefinitions' },
+    );
     if (ontologyResult.type === 'bindings') {
       collectEntries(ontologyResult.bindings as Record<string, string>[], 'ontology');
     }
@@ -1310,27 +1313,33 @@ export class DKGAgent extends DKGAgentBase {
     // persist a complete rdf:type/name definition. Read those binding-only
     // rows as catalogue entries so an edge restart remains useful while the
     // chain RPC is unavailable.
-    const onChainBindingResult = await this.store.query(`
-      SELECT ?ctxGraph ?name ?onChainId WHERE {
-        GRAPH <${ontologyGraph}> {
-          ?ctxGraph <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?onChainId .
-          OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+    const onChainBindingResult = await this.store.query(
+      `
+        SELECT ?ctxGraph ?name ?onChainId WHERE {
+          GRAPH <${ontologyGraph}> {
+            ?ctxGraph <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?onChainId .
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          }
         }
-      }
-    `);
+      `,
+      { source: 'agent.contextGraph.discovery.onChainBindings' },
+    );
     if (onChainBindingResult.type === 'bindings') {
       collectEntries(onChainBindingResult.bindings as Record<string, string>[], 'ontology');
     }
 
-    const metaResult = await this.store.query(`
-      SELECT ?ctxGraph ?name WHERE {
-        GRAPH ?metaGraph {
-          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-          OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
-          FILTER(STRENDS(STR(?metaGraph), "/_meta"))
+    const metaResult = await this.store.query(
+      `
+        SELECT ?ctxGraph ?name WHERE {
+          GRAPH ?metaGraph {
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+            FILTER(STRENDS(STR(?metaGraph), "/_meta"))
+          }
         }
-      }
-    `);
+      `,
+      { source: 'agent.contextGraph.discovery.metaDefinitions' },
+    );
     if (metaResult.type === 'bindings') {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
     }
@@ -1471,6 +1480,7 @@ export class DKGAgent extends DKGAgentBase {
       const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
       const result = await this.store.query(
         `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+        { source: 'agent.contextGraph.chainDiscovery.durableOnChainId' },
       );
       if (result.type !== 'bindings' || result.bindings.length === 0) return null;
       const value = result.bindings[0]?.['id'];
@@ -1869,6 +1879,7 @@ export class DKGAgent extends DKGAgentBase {
         ?network <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_NETWORK}> .
         ?network <${DKG_ONTOLOGY.DKG_GENESIS_VERSION}> ?v .
       }`,
+      { source: 'agent.genesis.existingNetwork' },
     );
     if (existingGenesis.type === 'bindings') {
       const existingSubjects = existingGenesis.bindings
@@ -2806,6 +2817,7 @@ export class DKGAgent extends DKGAgentBase {
                 OPTIONAL { <${candidateLifecycleUri}> <${DKG_NS}contentScopeVersion> ?contentScopeVersion }
               }
             } LIMIT 1`,
+            { source: 'agent.history.lifecycleState' },
           );
           if (entityResult.type === 'bindings' && entityResult.bindings.length > 0) {
             lifecycleUri = candidateLifecycleUri;
@@ -2867,6 +2879,7 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { ?event <${DKG_NS}rootEntity> ?rootEntity }
             }
           } ORDER BY ?timestamp`,
+          { source: 'agent.history.lifecycleEvents' },
         );
 
         // Member entities on the STABLE lifecycle subject (SUBSTRATE-1 stamp,
@@ -2877,6 +2890,7 @@ export class DKGAgent extends DKGAgentBase {
           `SELECT DISTINCT ?root WHERE {
             GRAPH <${metaGraph}> { <${lifecycleUri}> ${ENTITY_PRED_ALT} ?root }
           }`,
+          { source: 'agent.history.lifecycleRoots' },
         );
         if (subjectRootsResult.type === 'bindings') {
           for (const b of subjectRootsResult.bindings) {
@@ -2989,6 +3003,7 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { ?lifecycle <${PROV_NS}wasAttributedTo> ?author }
             }
           }`,
+          { source: 'agent.history.resolveByKaId' },
         );
         if (res.type !== 'bindings' || res.bindings.length === 0) return null;
 
