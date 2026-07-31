@@ -195,6 +195,12 @@ export interface DkgMetrics {
   storeCancellationCompletedTotal: Counter;
   /** scope and reason identify the bounded retry loop; attempt is capped */
   storeRetryAttemptsTotal: Counter;
+  /** current durable finalization entries whose retry gate is open */
+  finalizationRecoveryDueEntries: Gauge;
+  /** milliseconds since the oldest currently due finalization was received */
+  finalizationRecoveryOldestDueAgeMs: Gauge;
+  /** outcome={recovered|invalidated|retry-pending|none} */
+  finalizationRecoveryAttemptsTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -328,6 +334,21 @@ function buildMetrics(): DkgMetrics {
     storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
       description: 'Bounded expensive-work retry attempts',
     }),
+    finalizationRecoveryDueEntries: meter.createGauge(
+      'dkg.finalization_recovery.due_entries',
+      { description: 'Durable finalization inbox entries currently eligible for retry' },
+    ),
+    finalizationRecoveryOldestDueAgeMs: meter.createGauge(
+      'dkg.finalization_recovery.oldest_due_age_ms',
+      {
+        unit: 'ms',
+        description: 'Age of the oldest durable finalization inbox entry eligible for retry',
+      },
+    ),
+    finalizationRecoveryAttemptsTotal: meter.createCounter(
+      'dkg.finalization_recovery.attempts_total',
+      { description: 'Autonomous finalization replay attempts by bounded outcome' },
+    ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
     }),

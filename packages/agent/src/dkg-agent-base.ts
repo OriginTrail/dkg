@@ -1664,6 +1664,7 @@ export class DKGAgentBase {
 
   /** Drain and checkpoint the inbox before releasing the broader persistence lifetime. */
   protected async closeFinalizationRecoveryStore(): Promise<void> {
+    await this.finalizationHandler?.stopRecoveryWorker();
     const store = this.finalizationRuntime.detachRecoveryStore();
     await store?.close();
   }
@@ -1679,6 +1680,7 @@ export class DKGAgentBase {
         degradedReason: 'not-configured',
         stateCounts: {},
         livePayloadBytes: 0,
+        dueEntries: 0,
       };
     }
     const health = await store.health();
@@ -1692,7 +1694,9 @@ export class DKGAgentBase {
         && canonicalReceiptCapability === 'supported',
       canonicalReceiptCapability,
       ...(
-        canonicalReceiptCapability === 'unsupported' && health.available
+        canonicalReceiptCapability === 'unsupported'
+          && health.available
+          && health.degradedReason === undefined
           ? {
               degradedReason: 'canonical-finalization-receipt-unsupported',
             }

@@ -99,6 +99,7 @@ export default defineConfig({
       "test/finalization-handler-chain-truth.test.ts",
       "test/finalization-handler-defensive-cg-id.test.ts",
       "test/finalization-recovery.test.ts",
+      "test/finalization-recovery-worker.test.ts",
       "test/finalization-recovery-sqlite-store.test.ts",
       "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
