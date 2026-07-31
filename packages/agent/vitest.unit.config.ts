@@ -29,6 +29,7 @@ export default defineConfig({
       "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/query-source-labels.test.ts",
+      "test/query-source-coverage.test.ts",
       "test/context-graph-on-chain-id-source-labels.test.ts",
       "test/confirmed-meta-source-labels.test.ts",
       "test/sync-envelope-cursor.test.ts",
