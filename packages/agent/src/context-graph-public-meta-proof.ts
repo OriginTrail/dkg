@@ -41,6 +41,11 @@ const AUTHORITATIVE_PUBLIC_META_REQUIREMENTS: readonly PublicMetaRequirement[] =
   PUBLIC_ACCESS_POLICY_REQUIREMENT,
 ];
 
+export interface AuthoritativePublicMetaInspection {
+  missingQuads: Quad[];
+  conflictingAccessPolicy: boolean;
+}
+
 /**
  * Materialize the canonical root `_meta` facts required to prove that a
  * Context Graph is publicly readable.
@@ -82,21 +87,37 @@ export function hasAuthoritativePublicMetaDefinition(
   contextGraphId: string,
   quads: readonly Quad[],
 ): boolean {
+  const inspection = inspectAuthoritativePublicMeta(contextGraphId, quads);
+  return inspection.missingQuads.length === 0 && !inspection.conflictingAccessPolicy;
+}
+
+/**
+ * Inspect one root metadata snapshot against the canonical public-proof model.
+ * Writers and validators share this function so migration logic cannot drift
+ * into its own predicate-specific interpretation.
+ */
+export function inspectAuthoritativePublicMeta(
+  contextGraphId: string,
+  quads: readonly Quad[],
+): AuthoritativePublicMetaInspection {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-  const hasRequiredFacts = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS.every((requirement) => quads.some((quad) => (
+  const relevantQuads = quads.filter((quad) => (
     quad.graph === metaGraph
       && quad.subject === contextGraphUri
-      && quad.predicate === requirement.predicate
-      && matchesRequirementObject(quad.object, requirement.object)
-  )));
-  const hasConflictingPolicy = quads.some((quad) => (
-    quad.graph === metaGraph
-      && quad.subject === contextGraphUri
-      && quad.predicate === PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate
+  ));
+  const missingQuads = buildAuthoritativePublicMetaQuads(contextGraphId).filter((quad, index) => {
+    const requirement = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS[index];
+    return !relevantQuads.some((candidate) => (
+      candidate.predicate === requirement.predicate
+        && matchesRequirementObject(candidate.object, requirement.object)
+    ));
+  });
+  const conflictingAccessPolicy = relevantQuads.some((quad) => (
+    quad.predicate === PUBLIC_ACCESS_POLICY_REQUIREMENT.predicate
       && !matchesRequirementObject(quad.object, PUBLIC_ACCESS_POLICY_REQUIREMENT.object)
   ));
-  return hasRequiredFacts && !hasConflictingPolicy;
+  return { missingQuads, conflictingAccessPolicy };
 }
 
 function renderRequirement(

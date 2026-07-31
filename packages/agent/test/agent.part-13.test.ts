@@ -45,12 +45,12 @@ describe('Genesis Knowledge', () => {
         .resolves.toMatchObject({ onChainId: expect.any(String) });
 
       const bootstrapId = 'register-bootstrap-public';
-      const bootstrapUri = `did:dkg:context-graph:${bootstrapId}`;
-      const bootstrapMetaGraph = contextGraphMetaUri(bootstrapId);
-      const hasBootstrapPublicProof = async () => {
+      const hasPublicProof = async (contextGraphId: string) => {
+        const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+        const contextGraphMetaGraph = contextGraphMetaUri(contextGraphId);
         const result = await store.query(`ASK WHERE {
-          GRAPH <${bootstrapMetaGraph}> {
-            <${bootstrapUri}>
+          GRAPH <${contextGraphMetaGraph}> {
+            <${contextGraphUri}>
               <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
               <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "public" .
           }
@@ -58,10 +58,56 @@ describe('Genesis Knowledge', () => {
         return result.type === 'boolean' && result.value;
       };
       await agent.ensureContextGraphLocal({ id: bootstrapId, name: 'Bootstrap Public' });
-      expect(await hasBootstrapPublicProof()).toBe(false);
+      expect(await hasPublicProof(bootstrapId)).toBe(false);
       await expect(agent.registerContextGraph(bootstrapId, { callerAgentAddress: nonDefaultAddr }))
         .resolves.toMatchObject({ onChainId: expect.any(String) });
-      expect(await hasBootstrapPublicProof()).toBe(true);
+      expect(await hasPublicProof(bootstrapId)).toBe(true);
+
+      const privateBootstrapId = 'register-bootstrap-private';
+      await agent.ensureContextGraphLocal({
+        id: privateBootstrapId,
+        name: 'Bootstrap Private',
+        curated: true,
+      });
+      await expect(agent.registerContextGraph(privateBootstrapId, { callerAgentAddress: nonDefaultAddr }))
+        .resolves.toMatchObject({ onChainId: expect.any(String) });
+      expect(await hasPublicProof(privateBootstrapId)).toBe(false);
+
+      const conflictingBootstrapId = 'register-bootstrap-conflicting-policy';
+      const conflictingBootstrapUri = `did:dkg:context-graph:${conflictingBootstrapId}`;
+      const conflictingMetaGraph = contextGraphMetaUri(conflictingBootstrapId);
+      await agent.ensureContextGraphLocal({
+        id: conflictingBootstrapId,
+        name: 'Bootstrap Conflicting Policy',
+      });
+      await store.insert([{
+        subject: conflictingBootstrapUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: conflictingMetaGraph,
+      }]);
+      const chainCallsBeforeConflict = chain.createOnChainContextGraphCalls.length;
+      await expect(agent.registerContextGraph(conflictingBootstrapId, { callerAgentAddress: nonDefaultAddr }))
+        .rejects.toThrow(/conflicting or invalid access-policy declarations/);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(chainCallsBeforeConflict);
+      const authorityMutation = await store.query(`ASK WHERE {
+        {
+          GRAPH <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> {
+            <${conflictingBootstrapUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator .
+          }
+        }
+        UNION
+        {
+          GRAPH <${conflictingMetaGraph}> {
+            <${conflictingBootstrapUri}> ?authorityPredicate ?authority .
+            FILTER(?authorityPredicate IN (
+              <${DKG_ONTOLOGY.DKG_CREATOR}>,
+              <${DKG_ONTOLOGY.DKG_CURATOR}>
+            ))
+          }
+        }
+      }`);
+      expect(authorityMutation).toEqual({ type: 'boolean', value: false });
 
       await agent.createContextGraph({ id: 'register-legacy-peer-curator', name: 'Legacy Peer Curator' });
       const legacyMetaGraph = contextGraphMetaUri('register-legacy-peer-curator');

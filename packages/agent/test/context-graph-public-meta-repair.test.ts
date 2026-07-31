@@ -7,10 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { buildAuthoritativePublicMetaAskQuery } from '../src/context-graph-public-meta-proof.js';
-import { repairCreatorPublicMetaProjections } from '../src/context-graph-public-meta-repair.js';
-
-const CREATOR_PEER = '12D3KooWCreatorPublicMetaRepair111111111111111111111111';
-const FOREIGN_PEER = '12D3KooWForeignPublicMetaRepair111111111111111111111111';
+import { repairLocallyCreatedPublicMetaProjections } from '../src/context-graph-public-meta-repair.js';
 
 function publicOntologyDefinition(contextGraphId: string, creatorPeerId: string): Quad[] {
   const subject = contextGraphDataGraphUri(contextGraphId);
@@ -43,14 +40,19 @@ async function hasPublicProof(store: OxigraphStore, contextGraphId: string): Pro
   return result.type === 'boolean' && result.value;
 }
 
-describe('creator-owned public metadata projection repair', () => {
-  it('backfills the complete root proof for a creator-owned legacy public graph', async () => {
+describe('durably local-created public metadata repair', () => {
+  it('repairs only ids supplied by trusted local-creation provenance', async () => {
     const store = new OxigraphStore();
-    const contextGraphId = 'legacy-public-missing-meta-proof';
+    const trustedId = 'trusted-local-legacy-public';
+    const spoofedId = 'network-spoofed-local-creator';
+    const localPeerId = '12D3KooWLocalCreatorClaim111111111111111111111111111';
     try {
-      await store.insert(publicOntologyDefinition(contextGraphId, CREATOR_PEER));
+      await store.insert([
+        ...publicOntologyDefinition(trustedId, localPeerId),
+        ...publicOntologyDefinition(spoofedId, localPeerId),
+      ]);
 
-      const repaired = await repairCreatorPublicMetaProjections(store, CREATOR_PEER);
+      const repaired = await repairLocallyCreatedPublicMetaProjections(store, [trustedId]);
 
       expect(repaired).toEqual({
         candidates: 1,
@@ -58,18 +60,19 @@ describe('creator-owned public metadata projection repair', () => {
         insertedTriples: 2,
         conflictingGraphs: [],
       });
-      expect(await hasPublicProof(store, contextGraphId)).toBe(true);
+      expect(await hasPublicProof(store, trustedId)).toBe(true);
+      expect(await hasPublicProof(store, spoofedId)).toBe(false);
     } finally {
       await store.close();
     }
   });
 
-  it('repairs only the missing fact and is idempotent', async () => {
+  it('uses the canonical inspection model for partial, idempotent repair', async () => {
     const store = new OxigraphStore();
-    const contextGraphId = 'legacy-public-partial-meta-proof';
+    const contextGraphId = 'trusted-local-partial-public';
     try {
       await store.insert([
-        ...publicOntologyDefinition(contextGraphId, CREATOR_PEER),
+        ...publicOntologyDefinition(contextGraphId, '12D3KooWTrustedPartial'),
         {
           subject: contextGraphDataGraphUri(contextGraphId),
           predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
@@ -78,8 +81,8 @@ describe('creator-owned public metadata projection repair', () => {
         },
       ]);
 
-      const first = await repairCreatorPublicMetaProjections(store, CREATOR_PEER);
-      const second = await repairCreatorPublicMetaProjections(store, CREATOR_PEER);
+      const first = await repairLocallyCreatedPublicMetaProjections(store, [contextGraphId]);
+      const second = await repairLocallyCreatedPublicMetaProjections(store, [contextGraphId]);
 
       expect(first.repairedGraphs).toBe(1);
       expect(first.insertedTriples).toBe(1);
@@ -91,28 +94,12 @@ describe('creator-owned public metadata projection repair', () => {
     }
   });
 
-  it('does not make a foreign network-discovered graph authoritative locally', async () => {
+  it('fails closed on conflicting root policy even with trusted provenance', async () => {
     const store = new OxigraphStore();
-    const contextGraphId = 'foreign-public-missing-meta-proof';
-    try {
-      await store.insert(publicOntologyDefinition(contextGraphId, FOREIGN_PEER));
-
-      const repaired = await repairCreatorPublicMetaProjections(store, CREATOR_PEER);
-
-      expect(repaired.candidates).toBe(0);
-      expect(repaired.insertedTriples).toBe(0);
-      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it('fails closed when creator-owned root metadata has a conflicting policy', async () => {
-    const store = new OxigraphStore();
-    const contextGraphId = 'legacy-public-conflicting-meta-policy';
+    const contextGraphId = 'trusted-local-conflicting-policy';
     try {
       await store.insert([
-        ...publicOntologyDefinition(contextGraphId, CREATOR_PEER),
+        ...publicOntologyDefinition(contextGraphId, '12D3KooWTrustedConflict'),
         {
           subject: contextGraphDataGraphUri(contextGraphId),
           predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
@@ -121,43 +108,11 @@ describe('creator-owned public metadata projection repair', () => {
         },
       ]);
 
-      const repaired = await repairCreatorPublicMetaProjections(store, CREATOR_PEER);
+      const repaired = await repairLocallyCreatedPublicMetaProjections(store, [contextGraphId]);
 
       expect(repaired.repairedGraphs).toBe(0);
       expect(repaired.insertedTriples).toBe(0);
       expect(repaired.conflictingGraphs).toEqual([contextGraphId]);
-      expect(await hasPublicProof(store, contextGraphId)).toBe(false);
-    } finally {
-      await store.close();
-    }
-  });
-
-  it('fails closed when the ontology has conflicting creator or policy claims', async () => {
-    const store = new OxigraphStore();
-    const contextGraphId = 'legacy-public-conflicting-ontology';
-    const subject = contextGraphDataGraphUri(contextGraphId);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    try {
-      await store.insert([
-        ...publicOntologyDefinition(contextGraphId, CREATOR_PEER),
-        {
-          subject,
-          predicate: DKG_ONTOLOGY.DKG_CREATOR,
-          object: `did:dkg:agent:${FOREIGN_PEER}`,
-          graph: ontologyGraph,
-        },
-        {
-          subject,
-          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-          object: '"private"',
-          graph: ontologyGraph,
-        },
-      ]);
-
-      const repaired = await repairCreatorPublicMetaProjections(store, CREATOR_PEER);
-
-      expect(repaired.candidates).toBe(0);
-      expect(repaired.insertedTriples).toBe(0);
       expect(await hasPublicProof(store, contextGraphId)).toBe(false);
     } finally {
       await store.close();

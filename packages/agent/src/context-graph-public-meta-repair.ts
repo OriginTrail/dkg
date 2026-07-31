@@ -8,10 +8,7 @@ import {
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
-import { stripLiteral } from './dkg-agent-utils.js';
-
-const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+import { inspectAuthoritativePublicMeta } from './context-graph-public-meta-proof.js';
 
 export interface PublicMetaRepairResult {
   candidates: number;
@@ -21,99 +18,109 @@ export interface PublicMetaRepairResult {
 }
 
 /**
- * Backfill the canonical public proof for graphs created by this exact peer.
+ * Backfill canonical public root metadata for context graphs whose durable,
+ * local-only membership record proves they were created by this node.
  *
- * Older builds wrote public definitions only to ONTOLOGY even though the sync
- * admission contract requires `rdf:type` and `accessPolicy="public"` in the
- * root `_meta` graph. Only creator-owned ontology rows are eligible: a
- * subscriber must never promote a network-discovered definition into an
- * authoritative control snapshot. Existing non-public `_meta` policy is a
- * hard conflict and is left untouched.
+ * The caller must supply ids sourced from `contextGraphMembershipStore` rows
+ * marked `source="local-create"`; ONTOLOGY creator claims are deliberately
+ * irrelevant because network gossip can spoof them. Store inspection is
+ * batched into one portable SPARQL query rather than an N+1 query per graph.
  */
-export async function repairCreatorPublicMetaProjections(
+export async function repairLocallyCreatedPublicMetaProjections(
   store: TripleStore,
-  peerId: string,
+  locallyCreatedContextGraphIds: readonly string[],
 ): Promise<PublicMetaRepairResult> {
+  const trustedEntries = [...new Set(locallyCreatedContextGraphIds)]
+    .map((contextGraphId) => {
+      try {
+        return {
+          contextGraphId,
+          subject: assertSafeIri(contextGraphDataGraphUri(contextGraphId)),
+          metaGraph: assertSafeIri(contextGraphMetaGraphUri(contextGraphId)),
+        };
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+
+  if (trustedEntries.length === 0) {
+    return {
+      candidates: 0,
+      repairedGraphs: 0,
+      insertedTriples: 0,
+      conflictingGraphs: [],
+    };
+  }
+
   const ontologyGraph = assertSafeIri(
     contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
   );
-  const creatorDid = assertSafeIri(`did:dkg:agent:${peerId}`);
-  const candidatesResult = await store.query(`
-    SELECT DISTINCT ?contextGraph WHERE {
+  const values = trustedEntries
+    .map(({ subject, metaGraph }) => `(<${subject}> <${metaGraph}>)`)
+    .join('\n      ');
+  const result = await store.query(`
+    SELECT ?contextGraph ?metaGraph ?predicate ?object WHERE {
+      VALUES (?contextGraph ?metaGraph) {
+        ${values}
+      }
       GRAPH <${ontologyGraph}> {
         ?contextGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
-          <${DKG_ONTOLOGY.DKG_CREATOR}> <${creatorDid}> ;
-          <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?accessPolicy .
+          <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ontologyPolicy .
         FILTER(
-          isLiteral(?accessPolicy) &&
-          LCASE(REPLACE(STR(?accessPolicy), "^\\\\s+|\\\\s+$", "")) = "public"
+          isLiteral(?ontologyPolicy) &&
+          LCASE(REPLACE(STR(?ontologyPolicy), "^\\\\s+|\\\\s+$", "")) = "public"
         )
         FILTER NOT EXISTS {
-          ?contextGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?conflictingCreator .
-          FILTER(?conflictingCreator != <${creatorDid}>)
-        }
-        FILTER NOT EXISTS {
-          ?contextGraph <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?conflictingAccessPolicy .
+          ?contextGraph <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?conflictingOntologyPolicy .
           FILTER(
-            !isLiteral(?conflictingAccessPolicy) ||
-            LCASE(REPLACE(STR(?conflictingAccessPolicy), "^\\\\s+|\\\\s+$", "")) != "public"
+            !isLiteral(?conflictingOntologyPolicy) ||
+            LCASE(REPLACE(STR(?conflictingOntologyPolicy), "^\\\\s+|\\\\s+$", "")) != "public"
           )
         }
       }
-    }
-  `);
-  const candidateSubjects = candidatesResult.type === 'bindings'
-    ? [...new Set(candidatesResult.bindings
-        .map((row) => row['contextGraph'])
-        .filter((value): value is string => Boolean(value)))]
-    : [];
-
-  const inserts: Quad[] = [];
-  const conflictingGraphs: string[] = [];
-  let repairedGraphs = 0;
-
-  for (const subject of candidateSubjects) {
-    if (!subject.startsWith(CONTEXT_GRAPH_URI_PREFIX)) continue;
-    const contextGraphId = subject.slice(CONTEXT_GRAPH_URI_PREFIX.length);
-    if (!contextGraphId || contextGraphDataGraphUri(contextGraphId) !== subject) continue;
-    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
-    const existingResult = await store.query(`
-      SELECT ?predicate ?object WHERE {
-        GRAPH <${metaGraph}> {
-          <${assertSafeIri(subject)}> ?predicate ?object .
+      OPTIONAL {
+        GRAPH ?metaGraph {
+          ?contextGraph ?predicate ?object .
           FILTER(?predicate IN (
             <${DKG_ONTOLOGY.RDF_TYPE}>,
             <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}>
           ))
         }
       }
-    `);
-    const existing = existingResult.type === 'bindings'
-      ? existingResult.bindings
-      : [];
-    const policies = existing
-      .filter((row) => row['predicate'] === DKG_ONTOLOGY.DKG_ACCESS_POLICY)
-      .map((row) => row['object']);
-    const hasConflictingPolicy = policies.some((value) => (
-      !value?.startsWith('"') || stripLiteral(value).trim().toLowerCase() !== 'public'
-    ));
-    if (hasConflictingPolicy) {
-      conflictingGraphs.push(contextGraphId);
+    }
+  `);
+  const rows = result.type === 'bindings' ? result.bindings : [];
+  const trustedBySubject = new Map(trustedEntries.map((entry) => [entry.subject, entry]));
+  const existingBySubject = new Map<string, Quad[]>();
+  for (const row of rows) {
+    const subject = row['contextGraph'];
+    const entry = subject ? trustedBySubject.get(subject) : undefined;
+    if (!entry) continue;
+    const existing = existingBySubject.get(subject) ?? [];
+    if (row['predicate'] && row['object']) {
+      existing.push({
+        subject,
+        predicate: row['predicate'],
+        object: row['object'],
+        graph: entry.metaGraph,
+      });
+    }
+    existingBySubject.set(subject, existing);
+  }
+
+  const inserts: Quad[] = [];
+  const conflictingGraphs: string[] = [];
+  let repairedGraphs = 0;
+  for (const [subject, existing] of existingBySubject) {
+    const entry = trustedBySubject.get(subject)!;
+    const inspection = inspectAuthoritativePublicMeta(entry.contextGraphId, existing);
+    if (inspection.conflictingAccessPolicy) {
+      conflictingGraphs.push(entry.contextGraphId);
       continue;
     }
-
-    const hasType = existing.some((row) => (
-      row['predicate'] === DKG_ONTOLOGY.RDF_TYPE &&
-      row['object'] === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH
-    ));
-    const hasPublicPolicy = policies.some((value) => (
-      value?.startsWith('"') && stripLiteral(value).trim().toLowerCase() === 'public'
-    ));
-    const missing = buildAuthoritativePublicMetaQuads(contextGraphId).filter((quad) => (
-      quad.predicate === DKG_ONTOLOGY.RDF_TYPE ? !hasType : !hasPublicPolicy
-    ));
-    if (missing.length === 0) continue;
-    inserts.push(...missing);
+    if (inspection.missingQuads.length === 0) continue;
+    inserts.push(...inspection.missingQuads);
     repairedGraphs += 1;
   }
 
@@ -123,7 +130,7 @@ export async function repairCreatorPublicMetaProjections(
   }
 
   return {
-    candidates: candidateSubjects.length,
+    candidates: existingBySubject.size,
     repairedGraphs,
     insertedTriples: inserts.length,
     conflictingGraphs,
