@@ -60,4 +60,33 @@ describe('FinalizationRecoveryWorker', () => {
     expect(worker.running).toBe(false);
     expect(processDueBatch).toHaveBeenCalledOnce();
   });
+
+  it('logs a transient batch failure and continues polling', async () => {
+    vi.useFakeTimers();
+    const processDueBatch = vi.fn()
+      .mockRejectedValueOnce(new Error('busy'))
+      .mockResolvedValueOnce(0);
+    const warn = vi.fn();
+    const worker = new FinalizationRecoveryWorker(
+      processDueBatch,
+      { info: () => {}, warn },
+      { pollIntervalMs: 25 },
+    );
+    try {
+      worker.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(processDueBatch).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        'Finalization recovery worker batch failed: busy',
+      );
+      expect(worker.running).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(25);
+      expect(processDueBatch).toHaveBeenCalledTimes(2);
+    } finally {
+      await worker.stop();
+      vi.useRealTimers();
+    }
+  });
 });
