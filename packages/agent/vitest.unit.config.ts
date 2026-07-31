@@ -12,6 +12,16 @@ const SQLITE_EXEC_ARGV = [
   "--no-warnings=ExperimentalWarning",
 ];
 
+// agent.part-16 pins the deterministic post-catchup finalized-SWM drain, but
+// it uses the shared chain fixture. Start Hardhat when the full unit inventory
+// or that file is selected. Targeted pure-unit jobs (notably the RFC-64
+// Windows gate) keep their existing fast, chain-free path.
+const explicitTestFilters = process.argv.filter((arg) =>
+  /(?:^|[/\\])test[/\\]/.test(arg),
+);
+const needsAgentPart16Fixture = explicitTestFilters.length === 0
+  || explicitTestFilters.some((arg) => arg.includes("agent.part-16.test.ts"));
+
 export default defineConfig({
   test: {
     include: [
@@ -102,6 +112,8 @@ export default defineConfig({
       "test/finalization-recovery-sqlite-store.test.ts",
       "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
+      "test/agent.part-16.test.ts",
+      "test/sync-responder-swm-subgraphs.test.ts",
       "test/swm-slice-ka-bound.test.ts",
       "test/ka-lifecycle-asset-ual-timeout.test.ts",
       "test/storage-ack-lifecycle-identity.test.ts",
@@ -132,6 +144,10 @@ export default defineConfig({
       "test/replace-subject-agent-wrapper.test.ts",
     ],
     testTimeout: 60_000,
+    globalSetup: needsAgentPart16Fixture
+      ? ["../chain/test/hardhat-global-setup.ts"]
+      : undefined,
+    env: needsAgentPart16Fixture ? { HARDHAT_PORT: "9545" } : undefined,
     maxWorkers: 1,
     pool: "forks",
     execArgv: SQLITE_EXEC_ARGV,

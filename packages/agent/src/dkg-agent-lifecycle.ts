@@ -98,7 +98,7 @@ import {
   pickNetworkTunables,
   withRetry,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type StorePressureSnapshot, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -373,6 +373,20 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
+
+function hasActiveStorePressure(snapshot: StorePressureSnapshot | undefined): boolean {
+  if (!snapshot) return false;
+  return [
+    snapshot.ackInflight,
+    snapshot.healthInflight ?? 0,
+    snapshot.normalInflight,
+    snapshot.backgroundInflight,
+    snapshot.ackQueued,
+    snapshot.healthQueued ?? 0,
+    snapshot.normalQueued,
+    snapshot.backgroundQueued,
+  ].some((count) => count > 0);
+}
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -7602,6 +7616,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }): Promise<number> {
     const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     const ctx = createOperationContext('share');
+    // TTL-disabled nodes still need bounded finalized-SWM maintenance, but an
+    // ordinary periodic tick must not start graph discovery while foreground
+    // store work is active. Explicit callers that name CGs or deliberately
+    // queue behind active work retain deterministic cleanup semantics.
+    if (
+      ttl <= 0
+      && !options?.contextGraphIds
+      && !options?.queueBehindActiveWork
+      && hasActiveStorePressure(this.store.getPressureSnapshot?.())
+    ) {
+      return 0;
+    }
     const cutoff = !options?.finalizedOnly && ttl > 0
       ? new Date(Date.now() - ttl).toISOString()
       : undefined;

@@ -2086,6 +2086,49 @@ describe('graph-scoped finalization handler', () => {
     expect(currentHead?.assertionVersion).toBe('2');
   });
 
+  it('preserves finalized SWM when the committed VM graph disappears before cleanup', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+
+    // Simulate external VM loss only after finalization has persisted the
+    // cleanup marker. The drain must re-verify VM durability and fail closed.
+    await store.dropGraph(vmGraph);
+
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
+  });
+
+  it('preserves finalized SWM when its exact assertion changes before cleanup', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    // Keep the finalized rows but add one new row after the marker is written.
+    // Exact-digest re-verification must reject this three-row graph.
+    await store.insert([{
+      subject: 'urn:asset:post-finalization-change',
+      predicate: 'urn:predicate:value',
+      object: '"newer"',
+      graph: swmGraph,
+    }]);
+
+    expect(await store.countQuads(swmGraph)).toBe(3);
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(3);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
+  });
+
   it('serializes finalized SWM cleanup with the shared per-KA writer lock', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const writeLocks = new Map<string, Promise<void>>();
@@ -2283,7 +2326,7 @@ describe('graph-scoped finalization handler', () => {
     querySpy.mockRestore();
   });
 
-  it('retries an explicit post-catchup cleanup after a transient scheduler timeout', async () => {
+  it('retries the actual post-catchup discover query after a transient scheduler timeout', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -2297,6 +2340,7 @@ describe('graph-scoped finalization handler', () => {
       if (
         !injectedBusyTimeout
         && options?.source === 'agent.finalization.graphScopedSwmCleanup.discover'
+        && query.includes('SELECT DISTINCT ?head ?ual ?version ?root ?shareId ?subGraphName')
       ) {
         injectedBusyTimeout = true;
         throw new StoreSchedulerBusyError(

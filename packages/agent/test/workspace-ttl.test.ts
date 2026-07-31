@@ -2,12 +2,13 @@
  * Tests for workspace TTL / expiry: expired workspace operations are cleaned
  * up and not served to peers during sync.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -111,6 +112,37 @@ describe('setSharedMemoryTtlMs maintenance timer lifecycle', () => {
     // Finalized graph-scoped SWM cleanup remains active even when ordinary
     // workspace TTL expiry is disabled.
     expect((node as any).swmCleanupTimer).not.toBeNull();
+
+    const store = (node as unknown as { store: TripleStore }).store;
+    if (!store.listGraphsByPrefix) throw new Error('test store must expose graph-prefix discovery');
+    let busy = true;
+    const pressureSpy = vi.spyOn(store, 'getPressureSnapshot').mockImplementation(() => ({
+      ackInflight: 0,
+      healthInflight: 0,
+      normalInflight: busy ? 1 : 0,
+      backgroundInflight: 0,
+      ackQueued: 0,
+      healthQueued: 0,
+      normalQueued: 0,
+      backgroundQueued: 0,
+      maxConcurrent: 4,
+      ackReservedSlots: 1,
+    }));
+    const graphDiscoverySpy = vi.spyOn(store, 'listGraphsByPrefix');
+    const discoveryCallsBeforeBusyTick = graphDiscoverySpy.mock.calls.length;
+
+    // A TTL-disabled periodic-style call exits before graph discovery while
+    // foreground work is active.
+    expect(await node.cleanupExpiredSharedMemory()).toBe(0);
+    expect(graphDiscoverySpy).toHaveBeenCalledTimes(discoveryCallsBeforeBusyTick);
+
+    // Once the store becomes idle, the same TTL-disabled maintenance path
+    // resumes graph discovery for deferred finalized-SWM cleanup.
+    busy = false;
+    await node.cleanupExpiredSharedMemory();
+    expect(graphDiscoverySpy.mock.calls.length).toBeGreaterThan(discoveryCallsBeforeBusyTick);
+    pressureSpy.mockRestore();
+    graphDiscoverySpy.mockRestore();
 
     // Enable TTL at runtime
     node.setSharedMemoryTtlMs(60_000);

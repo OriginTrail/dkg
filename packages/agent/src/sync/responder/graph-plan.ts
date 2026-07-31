@@ -2695,7 +2695,7 @@ async function readBoundedSwmMetaSnapshot(
   return filterSwmMetaSnapshotRows(rows, null);
 }
 
-function filterSwmMetaSnapshotRows(
+export function filterSwmMetaSnapshotRows(
   rows: readonly SyncRow[],
   cutoffIso: string | null,
 ): SyncRow[] {
@@ -2709,6 +2709,7 @@ function filterSwmMetaSnapshotRows(
     (bySubject.get(subject) ?? [])
       .filter((row) => row.p === predicate)
       .map((row) => row.o);
+  const cutoffMs = cutoffIso == null ? Number.NaN : Date.parse(cutoffIso);
   const isFresh = (subject: string): boolean => objects(subject, DKG_PUBLISHED_AT)
     .some((value) => {
       const timestamp = Date.parse(stripLiteral(value));
@@ -2744,7 +2745,6 @@ function filterSwmMetaSnapshotRows(
   }
   const syncableRows = rows.filter((row) => !blockedSubjects.has(row.s));
   if (cutoffIso == null) return syncableRows.sort(compareRows);
-  const cutoffMs = Date.parse(cutoffIso);
   if (!Number.isFinite(cutoffMs)) return [];
 
   const admitted = new Set<string>();

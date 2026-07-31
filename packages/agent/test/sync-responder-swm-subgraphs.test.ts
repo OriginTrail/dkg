@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import {
+  filterSwmMetaSnapshotRows,
+  type SyncRow,
+} from '../src/sync/responder/graph-plan.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -62,6 +66,65 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const REMOTE_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 const noopLog = (_ctx: OperationContext, _msg: string) => {};
+
+describe('finalized SWM snapshot blocking', () => {
+  it('blocks a marked head and its operation sibling by their shared lifecycle tuple', () => {
+    const graph = 'did:dkg:context-graph:tuple-block/_shared_memory_meta';
+    const ual = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
+    const head = `${ual}#dkg-swm-head`;
+    const operation = 'urn:dkg:share:tuple-block:operation-1';
+    const unrelated = 'urn:dkg:share:tuple-block:unrelated';
+    const tupleRows = (subject: string): SyncRow[] => [
+      { g: graph, s: subject, p: `${DKG_NS}contentScopeVersion`, o: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      { g: graph, s: subject, p: `${DKG_NS}kaUal`, o: ual },
+      { g: graph, s: subject, p: `${DKG_NS}assertionVersion`, o: '"1"' },
+      { g: graph, s: subject, p: `${DKG_NS}shareOperationId`, o: '"operation-1"' },
+    ];
+    const rows: SyncRow[] = [
+      ...tupleRows(head),
+      { g: graph, s: head, p: `${DKG_NS}finalizedSwmCleanupRoot`, o: '"sha256:abc"' },
+      ...tupleRows(operation),
+      { g: graph, s: unrelated, p: RDF_TYPE, o: `${DKG_NS}WorkspaceOperation` },
+    ];
+
+    const filtered = filterSwmMetaSnapshotRows(rows, null);
+
+    expect(filtered.some((row) => row.s === head)).toBe(false);
+    expect(filtered.some((row) => row.s === operation)).toBe(false);
+    expect(filtered).toEqual([{
+      g: graph,
+      s: unrelated,
+      p: RDF_TYPE,
+      o: `${DKG_NS}WorkspaceOperation`,
+    }]);
+  });
+
+  it('applies a valid freshness cutoff without a declaration-order failure', () => {
+    const graph = 'did:dkg:context-graph:freshness/_shared_memory_meta';
+    const subject = 'urn:dkg:share:freshness:operation-1';
+    const rows: SyncRow[] = [{
+      g: graph,
+      s: subject,
+      p: RDF_TYPE,
+      o: `${DKG_NS}WorkspaceOperation`,
+    }, {
+      g: graph,
+      s: subject,
+      p: `${DKG_NS}publishedAt`,
+      o: '"2026-07-31T09:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+    }];
+
+    const filtered = filterSwmMetaSnapshotRows(
+      rows,
+      '2026-07-31T08:00:00.000Z',
+    );
+    expect(filtered).toHaveLength(2);
+    expect(new Set(filtered.map((row) => row.p))).toEqual(new Set([
+      RDF_TYPE,
+      `${DKG_NS}publishedAt`,
+    ]));
+  });
+});
 
 function captureHandler(): {
   register: (proto: string, h: (data: Uint8Array, peerId: string) => Promise<Uint8Array>) => void;
