@@ -1694,7 +1694,9 @@ export class DKGAgentBase {
         && canonicalReceiptCapability === 'supported',
       canonicalReceiptCapability,
       ...(
-        canonicalReceiptCapability === 'unsupported' && health.available
+        canonicalReceiptCapability === 'unsupported'
+          && health.available
+          && health.degradedReason === undefined
           ? {
               degradedReason: 'canonical-finalization-receipt-unsupported',
             }

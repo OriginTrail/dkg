@@ -205,7 +205,30 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
-  it('rejects an exhausted VERIFIED poison entry and frees live capacity', async () => {
+  it('refreshes due metrics even when the due-inbox read fails', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-metrics-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const health = vi.spyOn(store, 'health');
+      vi.spyOn(store, 'listDue').mockRejectedValueOnce(
+        new Error('sqlite due read unavailable'),
+      );
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(0);
+      expect(health).toHaveBeenCalledTimes(1);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a VERIFIED poison entry only after count and age budgets expire', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-exhausted-'));
     try {
       let now = 1_000;
@@ -236,7 +259,11 @@ describe('graph-scoped finalization recovery admission', () => {
             );
           },
         },
-        { liveRetryLimit: 2 },
+        {
+          liveRetryLimit: 2,
+          liveRetryWindowMs: 10_000,
+          now: () => now,
+        },
       );
       await recovery.receive({
         rawMessage: encodeFinalizationMessage(message()),
@@ -255,10 +282,15 @@ describe('graph-scoped finalization recovery admission', () => {
       now = entry!.nextAttemptAt!;
 
       await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({ state: 'VERIFIED', attemptCount: 3 });
+
+      now = entry!.createdAt + 10_000;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
       expect(await store.list()).toMatchObject([{
         state: 'REJECTED',
-        attemptCount: 2,
-        lastError: 'autonomous retry limit exhausted after 2 attempts',
+        attemptCount: 3,
+        lastError: 'autonomous retry budget exhausted after 3 attempts over 10000ms',
       }]);
       await expect(recovery.processLive({
         rawMessage: encodeFinalizationMessage(message()),
@@ -269,7 +301,7 @@ describe('graph-scoped finalization recovery admission', () => {
       expect(applyCalls).toBe(1);
       expect(await store.list()).toMatchObject([{
         state: 'REJECTED',
-        attemptCount: 2,
+        attemptCount: 3,
       }]);
       await expect(store.receive({
         key: 'replacement',
@@ -300,8 +332,18 @@ describe('graph-scoped finalization recovery admission', () => {
         releaseApply = resolve;
       });
       let applyCalls = 0;
-      let concurrentApplies = 0;
-      let maximumConcurrentApplies = 0;
+      let replayVerifiedCalls = 0;
+      let concurrentMaterializations = 0;
+      let maximumConcurrentMaterializations = 0;
+      const enterMaterializationSection = async (): Promise<void> => {
+        concurrentMaterializations += 1;
+        maximumConcurrentMaterializations = Math.max(
+          maximumConcurrentMaterializations,
+          concurrentMaterializations,
+        );
+        await applyGate;
+        concurrentMaterializations -= 1;
+      };
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
@@ -310,14 +352,13 @@ describe('graph-scoped finalization recovery admission', () => {
           ...recoveryMaterializer(),
           apply: async () => {
             applyCalls += 1;
-            concurrentApplies += 1;
-            maximumConcurrentApplies = Math.max(
-              maximumConcurrentApplies,
-              concurrentApplies,
-            );
-            await applyGate;
-            concurrentApplies -= 1;
+            await enterMaterializationSection();
             return 'applied' as const;
+          },
+          replayVerified: async () => {
+            replayVerifiedCalls += 1;
+            await enterMaterializationSection();
+            return 'promoted' as const;
           },
         },
       );
@@ -335,8 +376,9 @@ describe('graph-scoped finalization recovery admission', () => {
       releaseApply?.();
       await Promise.all([live, worker]);
 
-      expect(maximumConcurrentApplies).toBe(1);
+      expect(maximumConcurrentMaterializations).toBe(1);
       expect(applyCalls).toBe(1);
+      expect(replayVerifiedCalls).toBe(1);
       expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
       await store.close();
     } finally {
@@ -362,6 +404,11 @@ describe('graph-scoped finalization recovery admission', () => {
         }),
         { info: () => {}, warn: () => {} },
         recoveryMaterializer(),
+        {
+          liveRetryLimit: 1,
+          liveRetryWindowMs: 10_000,
+          now: () => now,
+        },
       );
       const input = {
         rawMessage: encodeFinalizationMessage(message()),
@@ -388,6 +435,10 @@ describe('graph-scoped finalization recovery admission', () => {
       now = 2_000;
       await recovery.processDueBatch(16);
       expect(receiptCalls).toBe(3);
+      expect(await store.list()).toMatchObject([{
+        state: 'RECEIVED',
+        attemptCount: 3,
+      }]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

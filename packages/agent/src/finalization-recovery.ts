@@ -157,13 +157,17 @@ const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
 /**
- * At the maximum retry delay this preserves approximately seven days of
- * autonomous recovery before a poison entry becomes an audited terminal row.
+ * At the maximum retry delay this is approximately seven days of autonomous
+ * worker attempts. The wall-clock window below must also elapse so duplicate
+ * gossip and reconciliation cannot burn the budget early.
  */
 export const FINALIZATION_RECOVERY_LIVE_RETRY_LIMIT = 7 * 24 * 60;
+export const FINALIZATION_RECOVERY_LIVE_RETRY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export interface FinalizationRecoveryOptions {
   liveRetryLimit?: number;
+  liveRetryWindowMs?: number;
+  now?: () => number;
 }
 
 function deferredRetryDelayMs(attemptCount: number): number {
@@ -200,6 +204,8 @@ export class FinalizationRecovery<
   private readonly store: FinalizationRecoveryStore | undefined;
   private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
   private readonly liveRetryLimit: number;
+  private readonly liveRetryWindowMs: number;
+  private readonly now: () => number;
 
   constructor(
     store: FinalizationRecoveryStore | FinalizationRecoveryStoreSource | undefined,
@@ -219,6 +225,13 @@ export class FinalizationRecovery<
       1,
       Math.trunc(options.liveRetryLimit ?? FINALIZATION_RECOVERY_LIVE_RETRY_LIMIT),
     );
+    this.liveRetryWindowMs = Math.max(
+      1,
+      Math.trunc(
+        options.liveRetryWindowMs ?? FINALIZATION_RECOVERY_LIVE_RETRY_WINDOW_MS,
+      ),
+    );
+    this.now = options.now ?? Date.now;
   }
 
   private getStore(): FinalizationRecoveryStore | undefined {
@@ -338,23 +351,27 @@ export class FinalizationRecovery<
    */
   async processDueBatch(limit: number): Promise<number> {
     const store = this.getStore();
-    if (!store || !this.chain || this.chain.chainId === 'none') return 0;
-    let entries: FinalizationRecoveryEntry[];
+    if (!store) return 0;
     try {
-      entries = await store.listDue(limit);
-    } catch (error) {
-      this.log.warn(
-        `Finalization recovery due-inbox read failed: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-      return 0;
+      if (!this.chain || this.chain.chainId === 'none') return 0;
+      let entries: FinalizationRecoveryEntry[];
+      try {
+        entries = await store.listDue(limit);
+      } catch (error) {
+        this.log.warn(
+          `Finalization recovery due-inbox read failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
+        return 0;
+      }
+      for (const entry of entries) {
+        const outcome = await this.replayDueEntry(entry);
+        getMetrics().finalizationRecoveryAttemptsTotal?.add(1, { outcome });
+      }
+      return entries.length;
+    } finally {
+      await this.recordDueMetrics(store);
     }
-    for (const entry of entries) {
-      const outcome = await this.replayDueEntry(entry);
-      getMetrics().finalizationRecoveryAttemptsTotal?.add(1, { outcome });
-    }
-    await this.recordDueMetrics(store);
-    return entries.length;
   }
 
   private async recordDueMetrics(store: FinalizationRecoveryStore): Promise<void> {
@@ -388,11 +405,14 @@ export class FinalizationRecovery<
     const entry = await store.get(snapshot.key);
     if (!entry) return 'none';
     if (!store.isAttemptDue(entry)) return 'retry-pending';
+    const liveRetryAgeMs = Math.max(0, this.now() - entry.createdAt);
     if (
       this.isLiveEntry(entry)
       && entry.attemptCount >= this.liveRetryLimit
+      && liveRetryAgeMs >= this.liveRetryWindowMs
     ) {
-      const reason = `autonomous retry limit exhausted after ${entry.attemptCount} attempts`;
+      const reason = 'autonomous retry budget exhausted after '
+        + `${entry.attemptCount} attempts over ${liveRetryAgeMs}ms`;
       const rejected = await this.transition(entry, 'REJECTED', reason);
       if (rejected) {
         this.log.warn(

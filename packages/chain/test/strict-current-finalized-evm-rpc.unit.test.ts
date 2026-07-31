@@ -247,6 +247,7 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
     // Distinct target probes run in parallel, so their server arrival order is
     // intentionally unspecified. The contract is that every target is checked
     // before the eth_call phase begins.
+    expect(server.calls.slice(2)).toHaveLength(2);
     expect(new Set(server.calls.slice(2).map(({ params }) => params[0])))
       .toEqual(new Set([TO, OTHER_TO]));
   });
