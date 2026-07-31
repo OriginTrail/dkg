@@ -146,11 +146,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   async list(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
     return this.withMutationLock(async () => {
       await this.ensureGraph();
-      return this.listUnlocked(filter);
+      return this.listUnlocked(filter, 'publisher.asyncPromote.list');
     });
   }
 
-  private async listUnlocked(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
+  private async listUnlocked(
+    filter: PromoteListFilter = {},
+    source = 'publisher.asyncPromote.list',
+  ): Promise<PromoteJob[]> {
     const filters: string[] = [];
     if (filter.state && filter.state.length > 0) {
       const literals = filter.state.map((s) => literal(s)).join(', ');
@@ -161,6 +164,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     }
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_STATE}> ?state ; <${PROMOTE_PAYLOAD}> ?payload . ${filters.join(' ')} } }`,
+      { source },
     );
     const sorted = expectBindings(result)
       .map((row) => parseJobPayload(row['payload']))
@@ -241,7 +245,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
       const now = this.now();
       await this.reconcileExpiredRunning(now);
-      const candidates = (await this.listUnlocked()).filter((j) => {
+      const candidates = (await this.listUnlocked(
+        {},
+        'publisher.asyncPromote.claimNext.candidates',
+      )).filter((j) => {
         if (j.state === 'queued') return true;
         if (j.state === 'failed_retrying' && (j.attempt.nextRetryAt ?? 0) <= now) return true;
         return false;
@@ -252,7 +259,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         claimableCandidates.push(candidate);
       }
 
-      const running = await this.listUnlocked({ state: ['running'] });
+      const running = await this.listUnlocked(
+        { state: ['running'] },
+        'publisher.asyncPromote.claimNext.running',
+      );
       const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
@@ -404,7 +414,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private async reconcileExpiredRunning(now: number): Promise<PromoteRecoverySummary> {
-    const running = await this.listUnlocked({ state: ['running'] });
+    const running = await this.listUnlocked(
+      { state: ['running'] },
+      'publisher.asyncPromote.recoverExpired',
+    );
 
     let reclaimed = 0;
     let abandoned = 0;
@@ -503,7 +516,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return this.withMutationLock(async () => {
       await this.ensureGraph();
       const stats = Object.fromEntries(PROMOTE_JOB_STATES.map((s) => [s, 0])) as PromoteStats;
-      for (const job of await this.listUnlocked()) stats[job.state] += 1;
+      for (const job of await this.listUnlocked(
+        {},
+        'publisher.asyncPromote.stats',
+      )) {
+        stats[job.state] += 1;
+      }
       return stats;
     });
   }
@@ -587,6 +605,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private async readJob(jobId: string): Promise<PromoteJob | null> {
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
+      { source: 'publisher.asyncPromote.readJob' },
     );
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
@@ -667,6 +686,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       const rows = expectBindings(
         await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
+          { source: 'publisher.asyncPromote.clearTerminalJob' },
         ),
       );
       const parsed = classifyJobPayload(rows[0]?.['payload']);
@@ -722,9 +742,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     const result = lookup.lookupQuery.kind === 'assertionWildcard'
       ? await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ${literal(lookup.request.contextGraphId)} ; <${PROMOTE_ASSERTION_NAME}> ${literal(lookup.request.assertionName)} ; <${PROMOTE_PAYLOAD}> ?payload . } }`,
+          { source: 'publisher.asyncPromote.findActiveConflict' },
         )
       : await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_UNIQUENESS_KEY}> ?key ; <${PROMOTE_PAYLOAD}> ?payload . FILTER (?key IN (${lookup.lookupQuery.keys.map((key) => literal(key)).join(', ')})) } }`,
+          { source: 'publisher.asyncPromote.findActiveConflict' },
         );
     const rows = expectBindings(result);
     for (const row of rows) {

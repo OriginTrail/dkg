@@ -2527,7 +2527,9 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => {
-      const graphUris = await agent.store.listGraphs();
+      const graphUris = await agent.store.listGraphs({
+        source: "daemon.metrics.graphInventory",
+      });
       const knownContextGraphIds = new Set<string>();
       const subscribedContextGraphs = agent.getSubscribedContextGraphs();
       const shadowContextGraphIds = new Set(
@@ -2546,7 +2548,9 @@ export async function runDaemonInner(
       }
       const declarationQuery = buildContextGraphDeclarationsSparql(graphUris, knownContextGraphIds);
       const declarationResult = declarationQuery
-        ? await agent.store.query(declarationQuery)
+        ? await agent.store.query(declarationQuery, {
+            source: "daemon.metrics.contextGraphDeclarations",
+          })
         : null;
       if (declarationResult?.type === "bindings") {
         for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
@@ -2569,7 +2573,9 @@ export async function runDaemonInner(
     // that are backed by local subscription/declaration state.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
-      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
+      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL, {
+        source: "daemon.metrics.totalTriples",
+      });
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
@@ -2585,6 +2591,7 @@ export async function runDaemonInner(
     getTotalKCs: async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }",
+        { source: "daemon.metrics.totalKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
@@ -2597,18 +2604,21 @@ export async function runDaemonInner(
             ?ka <http://dkg.io/ontology/rootEntity> ?re .
             FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
         } }`,
+        { source: "daemon.metrics.totalKAs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getConfirmedKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
+        { source: "daemon.metrics.confirmedKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTentativeKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
+        { source: "daemon.metrics.tentativeKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },

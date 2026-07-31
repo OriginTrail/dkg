@@ -329,6 +329,42 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(metaInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedMeta] });
   });
 
+  it('labels RS-heal reads by caller operation through the decorator stack', async () => {
+    const querySources: Array<string | undefined> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (
+            sparql: Parameters<TripleStore['query']>[0],
+            options?: Parameters<TripleStore['query']>[1],
+          ) => {
+            querySources.push(options?.source);
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: capturing,
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+    );
+
+    expect(new Set(querySources.filter((source) => source?.startsWith('agent.swm.rsHeal.'))))
+      .toEqual(new Set([
+        'agent.swm.rsHeal.findLegacyOnly',
+        'agent.swm.rsHeal.listLegacyOnly',
+        'agent.swm.rsHeal.readRoots',
+        'agent.swm.rsHeal.checkRootData',
+      ]));
+  });
+
   it('relocates a VM-graph-only one-shot strand through the full stack (read-both)', async () => {
     // The publisher's own one-shot publish() lands public data in the per-KA VM
     // graph, not legacy root data. The read-both heal must recover it through the

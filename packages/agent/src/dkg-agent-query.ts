@@ -773,6 +773,7 @@ export class QueryMethods extends DKGAgentBase {
           ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
         }
       }`,
+      { source: 'agent.query.privateGraphAccessPolicy' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return [];
 

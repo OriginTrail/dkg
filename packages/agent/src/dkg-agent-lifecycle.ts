@@ -7356,6 +7356,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" .
         }
       }`,
+      { source: 'agent.contextGraph.confirmedMeta.unregisteredPlaceholder' },
     );
     const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean' &&
       unregisteredPlaceholderResult.value === true;
@@ -7396,6 +7397,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           : undefined,
       ),
+      { source: 'agent.contextGraph.confirmedMeta.privateDefinition' },
     );
     if (
       authoritativeDefinitionResult.type === 'boolean' &&
@@ -7412,6 +7414,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // member delegation.
     const authoritativePublicDefinitionResult = await this.store.query(
       buildAuthoritativePublicMetaAskQuery(contextGraphId),
+      { source: 'agent.contextGraph.confirmedMeta.publicDefinition' },
     );
     if (
       authoritativePublicDefinitionResult.type === 'boolean' &&
@@ -7480,6 +7483,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
         }
       }`,
+      { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration' },
     );
     return ontologyResult.type === 'boolean' && ontologyResult.value === true;
   }

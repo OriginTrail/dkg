@@ -1015,7 +1015,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const inflight = (async () => {
       try {
         const graphManager = new GraphManager(this.store);
-        const knownCgs = (await graphManager.listContextGraphs()).sort();
+        const knownCgs = (
+          await graphManager.listContextGraphs({
+            source: 'agent.swmHostMode.listContextGraphs',
+          })
+        ).sort();
         if (knownCgs.length === 0) {
           this.hostModeReconcileCursor = 0;
           return;
@@ -2627,7 +2631,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!sub.subscribed || sub.onChainId) return null;
     let resolved: string | null = null;
     try {
-      resolved = await this.getContextGraphOnChainId(localCgId);
+      resolved = await this.getContextGraphOnChainId(localCgId, {
+        source: 'agent.vmReconcile.resolveOnChainId',
+      });
     } catch {
       return null;
     }
@@ -2982,6 +2988,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
            GRAPH <${legacyMeta}> { ?ual <${DKG}batchId> ?b }
            FILTER NOT EXISTS { GRAPH <${scopedMeta}> { ?ual <${DKG}batchId> ?b } }
          }`,
+        { source: 'agent.swm.rsHeal.findLegacyOnly' },
       );
       if (askGuard.type !== 'boolean' || !askGuard.value) return;
 
@@ -2991,6 +2998,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
            GRAPH <${legacyMeta}> { ?ual <${DKG}batchId> ?b }
            FILTER NOT EXISTS { GRAPH <${scopedMeta}> { ?ual <${DKG}batchId> ?b } }
          }`,
+        { source: 'agent.swm.rsHeal.listLegacyOnly' },
       );
       if (stranded.type !== 'bindings') return;
 
@@ -3043,6 +3051,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                    { <${ual}> <${DKG}rootEntity> ?root . }
                  }
                }`,
+              { source: 'agent.swm.rsHeal.readRoots' },
             );
             if (rootsRes.type !== 'bindings') return;
             const roots: string[] = [];
@@ -3076,6 +3085,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                      }
                    }
                  }`,
+                { source: 'agent.swm.rsHeal.checkRootData' },
               );
               if (present.type !== 'boolean' || !present.value) return;
             }
@@ -3246,12 +3256,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       for (const namespace of candidateNamespaces) {
         const metaGraph = assertSafeIri(namespace.metaGraph);
         const dataGraph = assertSafeIri(namespace.dataGraph);
-        const operationRows = await this.store.query(`SELECT ?op ?root ?ts WHERE {
-          GRAPH <${metaGraph}> {
-            ?op <http://dkg.io/ontology/rootEntity> ?root .
-            OPTIONAL { ?op <http://dkg.io/ontology/publishedAt> ?ts . }
-          }
-        } ORDER BY ?op ?root ?ts LIMIT ${maxRows + 1}`);
+        const operationRows = await this.store.query(
+          `SELECT ?op ?root ?ts WHERE {
+            GRAPH <${metaGraph}> {
+              ?op <http://dkg.io/ontology/rootEntity> ?root .
+              OPTIONAL { ?op <http://dkg.io/ontology/publishedAt> ?ts . }
+            }
+          } ORDER BY ?op ?root ?ts LIMIT ${maxRows + 1}`,
+          { source: 'agent.vmReconcile.swmFingerprint.operations' },
+        );
         if (operationRows.type !== 'bindings') return null;
         if (isTooLarge(operationRows.bindings)) return null;
         const operations = operationRows.bindings
@@ -3262,9 +3275,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ].join('\0'))
           .sort();
 
-        const dataRows = await this.store.query(`SELECT ?s ?p ?o WHERE {
-          GRAPH <${dataGraph}> { ?s ?p ?o . }
-        } ORDER BY ?s ?p ?o LIMIT ${maxRows + 1}`);
+        const dataRows = await this.store.query(
+          `SELECT ?s ?p ?o WHERE {
+            GRAPH <${dataGraph}> { ?s ?p ?o . }
+          } ORDER BY ?s ?p ?o LIMIT ${maxRows + 1}`,
+          { source: 'agent.vmReconcile.swmFingerprint.data' },
+        );
         if (dataRows.type !== 'bindings') return null;
         if (isTooLarge(dataRows.bindings)) return null;
         const dataTriples = dataRows.bindings
@@ -3275,9 +3291,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ].join('\0'))
           .sort();
 
-        const privateRootRows = await this.store.query(`SELECT ?privateEntity ?privateRoot WHERE {
-          GRAPH <${metaGraph}> { ?privateEntity <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot . }
-        } ORDER BY ?privateEntity ?privateRoot LIMIT ${maxRows + 1}`);
+        const privateRootRows = await this.store.query(
+          `SELECT ?privateEntity ?privateRoot WHERE {
+            GRAPH <${metaGraph}> {
+              ?privateEntity <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot .
+            }
+          } ORDER BY ?privateEntity ?privateRoot LIMIT ${maxRows + 1}`,
+          { source: 'agent.vmReconcile.swmFingerprint.privateRoots' },
+        );
         if (privateRootRows.type !== 'bindings') return null;
         if (isTooLarge(privateRootRows.bindings)) return null;
         const privateRoots = privateRootRows.bindings
