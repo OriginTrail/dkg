@@ -1762,6 +1762,10 @@ export class DKGAgent extends DKGAgentBase {
         );
       }
     }
+    // Stop admission and await the active finalization recovery batch while
+    // chain and graph-store dependencies are still alive. No new retry may
+    // begin after this boundary.
+    await this.finalizationHandler?.stopRecoveryWorker();
     // OT-RFC-64 Gate 1: unregister the public catalog protocols and drain the
     // receiver scheduler (awaiting in-flight durable stage writes) while the
     // router, node, and control-object store are all still live — before

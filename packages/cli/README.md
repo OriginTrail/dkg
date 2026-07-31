@@ -53,6 +53,17 @@ Operators can disable local dashboard snapshots independently from
 OpenTelemetry metric export; see the
 [Node UI metrics operator guide](../../docs/use-dkg/node-ui-metrics.md).
 
+## API query admission priority
+
+`POST /api/query` reads use the store scheduler's `background` lane by default
+so slow external reads cannot consume the capacity reserved for normal node
+work. Set `DKG_API_QUERY_PRIORITY=normal` before starting the daemon to restore
+the previous admission behavior during a canary rollback. Invalid non-empty
+values fail safe to `background` with a startup warning, and the daemon logs
+the effective lane once at boot. A background query that is shed before
+execution returns HTTP 503 with `Retry-After: 1` and
+`code: "STORE_SCHEDULER_BUSY"`.
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2

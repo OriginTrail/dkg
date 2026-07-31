@@ -21,11 +21,7 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 
-const STATUS_COLORS: Record<string, string> = {
-  success: '#22c55e',
-  error: '#ef4444',
-  in_progress: '#f59e0b',
-};
+const CANCELLED_COLOR = '#94a3b8';
 
 const PHASE_DESCRIPTIONS: Record<string, string> = {
   prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
@@ -892,7 +888,11 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       {/* Phase label pills */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 3, flexWrap: 'wrap' }}>
         {phases.map((p: any, i: number) => {
-          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+          const color = p.status === 'error'
+            ? '#ef4444'
+            : p.status === 'cancelled'
+              ? CANCELLED_COLOR
+              : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           return (
             <span key={`label-${p.phase}-${i}`} style={{
               fontSize: 9, fontWeight: 600, color, letterSpacing: '.02em',
@@ -911,7 +911,11 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       <div style={{ display: 'flex', height: 10, borderRadius: 3, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
         {phases.map((p: any, i: number) => {
           const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 3);
-          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+          const color = p.status === 'error'
+            ? '#ef4444'
+            : p.status === 'cancelled'
+              ? CANCELLED_COLOR
+              : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           const isHovered = hover === i;
           return (
             <div
@@ -954,6 +958,9 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               </span>
               {phases[hover].status === 'error' && (
                 <span style={{ color: 'var(--red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+              )}
+              {phases[hover].status === 'cancelled' && (
+                <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>CANCELLED</span>
               )}
             </div>
             {desc && (
@@ -1009,6 +1016,7 @@ function OperationsTab() {
           <option value="">All statuses</option>
           <option value="success">success</option>
           <option value="error">error</option>
+          <option value="cancelled">cancelled</option>
           <option value="in_progress">in_progress</option>
         </select>
         <input
@@ -1218,8 +1226,15 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
           const left = Math.max(0, ((phaseStart - opStart) / opDuration) * 100);
           const width = Math.max(1.5, (phaseDuration / opDuration) * 100);
           const isError = p.status === 'error';
+          const isCancelled = p.status === 'cancelled';
           const isInProgress = p.status === 'in_progress';
-          const color = isError ? '#ef4444' : isInProgress ? '#f59e0b' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+          const color = isError
+            ? '#ef4444'
+            : isCancelled
+              ? CANCELLED_COLOR
+              : isInProgress
+                ? '#f59e0b'
+                : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
 
           return (
             <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', height: 22, padding: '0 8px', position: 'relative' }}>
@@ -1227,7 +1242,13 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                 title={p.phase}>{p.phase}</div>
               <div style={{ flex: 1, position: 'relative', height: 12 }}>
                 <div
-                  title={`${p.phase}: ${formatDuration(phaseDuration)}${isError ? ' — FAILED: ' + (p.details ?? '') : ''}`}
+                  title={`${p.phase}: ${formatDuration(phaseDuration)}${
+                    isError
+                      ? ` — FAILED: ${p.details ?? ''}`
+                      : isCancelled
+                        ? ` — CANCELLED: ${p.details ?? ''}`
+                        : ''
+                  }`}
                   style={{
                     position: 'absolute', left: `${left}%`, width: `${Math.min(width, 100 - left)}%`,
                     height: '100%', borderRadius: 3, opacity: isInProgress ? 0.7 : 1, transition: 'width .3s ease',
@@ -1252,6 +1273,11 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         {phases.some((p: any) => p.status === 'error') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
             <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--red)', display: 'inline-block' }} /> Failed
+          </span>
+        )}
+        {phases.some((p: any) => p.status === 'cancelled') && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: CANCELLED_COLOR, display: 'inline-block' }} /> Cancelled
           </span>
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
@@ -1324,6 +1350,11 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+                const terminalColor = p.status === 'error'
+                  ? 'var(--red)'
+                  : p.status === 'cancelled'
+                    ? CANCELLED_COLOR
+                    : color;
                 const topLevel = p.phase.includes(':') ? p.phase.split(':')[0] : p.phase;
                 // Codex PR #241 iter-6: exact-match first, then fall back
                 // to the top-level phase. Same rationale as the bar-hover
@@ -1332,7 +1363,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 // to the umbrella `chain` entry.
                 const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
-                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? 'var(--red)' : color}` }}>
+                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${terminalColor}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
@@ -1343,8 +1374,8 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
-                    {p.status === 'error' && p.details && (
-                      <span style={{ fontSize: 10, color: 'var(--red)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
+                    {(p.status === 'error' || p.status === 'cancelled') && p.details && (
+                      <span style={{ fontSize: 10, color: terminalColor, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
                         {p.details}
                       </span>
                     )}
@@ -1648,8 +1679,15 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const cls = status === 'success' ? 'badge-success' : status === 'error' ? 'badge-error' : 'badge-warning';
+export function operationStatusBadgeClass(status: string): string {
+  if (status === 'success') return 'badge-success';
+  if (status === 'error') return 'badge-error';
+  if (status === 'cancelled') return 'badge-cancelled';
+  return 'badge-warn';
+}
+
+export function StatusBadge({ status }: { status: string }) {
+  const cls = operationStatusBadgeClass(status);
   return <span className={`badge ${cls}`}>{status}</span>;
 }
 

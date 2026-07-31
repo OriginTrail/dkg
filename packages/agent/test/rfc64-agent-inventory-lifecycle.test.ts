@@ -263,6 +263,28 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
   });
 
+  it('preserves capacity exhaustion when canonical receipt support is unavailable', async () => {
+    const agent = syntheticAgent();
+    agent.chain = { chainId: 'none' };
+    agent.finalizationRuntime.attachRecoveryStore({
+      health: async () => ({
+        available: true,
+        closed: false,
+        ready: false,
+        degradedReason: 'capacity-exhausted',
+        stateCounts: { RECEIVED: 64 },
+        livePayloadBytes: 1,
+        dueEntries: 64,
+      }),
+    } as any);
+
+    await expect(agent.getFinalizationRecoveryHealth()).resolves.toMatchObject({
+      ready: false,
+      canonicalReceiptCapability: 'unsupported',
+      degradedReason: 'capacity-exhausted',
+    });
+  });
+
   it('owns one persistent foundation and purges every stale candidate in bounded yielding batches', async () => {
     const dataDirectory = temporaryDataDirectory();
     await seedStaleCandidateLoads(dataDirectory, 17);

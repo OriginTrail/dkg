@@ -3303,6 +3303,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }, MESSAGE_OUTBOX_TICK_MS);
     if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
+    // The durable finalization inbox is an executable retry queue, not only a
+    // write-ahead journal. Its lifecycle is independent of chain-cursor
+    // progress so entries received after a watermark advance are still
+    // reconsidered. The worker batches SQLite reads but serializes graph work.
+    if (this.finalizationRuntime.getRecoveryStore()) {
+      this.getOrCreateFinalizationHandler().startRecoveryWorker();
+    }
+
     // Wire V10 Random Sampling prover. Edge nodes no-op. Core nodes with
     // transient identity/RPC startup failures retry in the background so
     // one flaky `getIdentityId()` call does not disable proving until the
