@@ -109,12 +109,12 @@ describe('setSharedMemoryTtlMs maintenance timer lifecycle', () => {
     await node.start();
     await sleep(300);
 
-    // Finalized graph-scoped SWM cleanup remains active even when ordinary
-    // workspace TTL expiry is disabled.
-    expect((node as any).swmCleanupTimer).not.toBeNull();
+    // Finalized graph-scoped SWM GC has its own timer; ordinary TTL expiry is
+    // genuinely disabled.
+    expect((node as any).swmCleanupTimer).toBeNull();
+    expect((node as any).finalizedSwmCleanupTimer).not.toBeNull();
 
     const store = (node as unknown as { store: TripleStore }).store;
-    if (!store.listGraphsByPrefix) throw new Error('test store must expose graph-prefix discovery');
     let busy = true;
     const pressureSpy = vi.spyOn(store, 'getPressureSnapshot').mockImplementation(() => ({
       ackInflight: 0,
@@ -128,19 +128,23 @@ describe('setSharedMemoryTtlMs maintenance timer lifecycle', () => {
       maxConcurrent: 4,
       ackReservedSlots: 1,
     }));
-    const graphDiscoverySpy = vi.spyOn(store, 'listGraphsByPrefix');
-    const discoveryCallsBeforeBusyTick = graphDiscoverySpy.mock.calls.length;
+    const graphDiscoverySpy = vi.spyOn(node, 'listContextGraphs');
 
     // A TTL-disabled periodic-style call exits before graph discovery while
     // foreground work is active.
-    expect(await node.cleanupExpiredSharedMemory()).toBe(0);
-    expect(graphDiscoverySpy).toHaveBeenCalledTimes(discoveryCallsBeforeBusyTick);
+    await expect(node.runFinalizedSwmCleanupSweep()).resolves.toMatchObject({
+      pressureSkipped: true,
+      deletedItems: 0,
+    });
+    expect(graphDiscoverySpy).not.toHaveBeenCalled();
 
     // Once the store becomes idle, the same TTL-disabled maintenance path
     // resumes graph discovery for deferred finalized-SWM cleanup.
     busy = false;
-    await node.cleanupExpiredSharedMemory();
-    expect(graphDiscoverySpy.mock.calls.length).toBeGreaterThan(discoveryCallsBeforeBusyTick);
+    await expect(node.runFinalizedSwmCleanupSweep()).resolves.toMatchObject({
+      pressureSkipped: false,
+    });
+    expect(graphDiscoverySpy).toHaveBeenCalledTimes(1);
     pressureSpy.mockRestore();
     graphDiscoverySpy.mockRestore();
 
@@ -150,7 +154,8 @@ describe('setSharedMemoryTtlMs maintenance timer lifecycle', () => {
 
     // Disabling TTL expiry must not disable finalized-SWM maintenance.
     node.setSharedMemoryTtlMs(0);
-    expect((node as any).swmCleanupTimer).not.toBeNull();
+    expect((node as any).swmCleanupTimer).toBeNull();
+    expect((node as any).finalizedSwmCleanupTimer).not.toBeNull();
   }, 10000);
 });
 

@@ -338,6 +338,11 @@ import {
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import {
+  FinalizedSwmCleanupWorker,
+  type FinalizedSwmCleanupStats,
+  type FinalizedSwmCleanupSweepResult,
+} from './finalized-swm-cleanup-worker.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
@@ -3134,13 +3139,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
     }
 
-    // Start periodic SWM maintenance. TTL expiry may be disabled, but exact
-    // finalized graph-scoped copies still need bounded idle cleanup.
-    this.cleanupExpiredSharedMemory().catch(() => {});
-    this.swmCleanupTimer = setInterval(() => {
+    // TTL expiry and finalized-SWM GC are deliberately independent. The GC
+    // worker is pressure-gated and never joined by foreground sync/finalize.
+    if ((this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS) > 0) {
       this.cleanupExpiredSharedMemory().catch(() => {});
+      this.swmCleanupTimer = setInterval(() => {
+        this.cleanupExpiredSharedMemory().catch(() => {});
+      }, SWM_CLEANUP_INTERVAL_MS);
+      this.swmCleanupTimer.unref?.();
+    }
+    this.wakeFinalizedSwmCleanup();
+    this.finalizedSwmCleanupTimer = setInterval(() => {
+      this.wakeFinalizedSwmCleanup();
     }, SWM_CLEANUP_INTERVAL_MS);
-    if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
+    this.finalizedSwmCleanupTimer.unref?.();
 
     // OT-RFC-38 LU-6: periodic reconciler that ensures the local
     // node is subscribed in host-mode to every locally-known
@@ -6057,21 +6069,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
       });
     }
-    if (includeSharedMemory && typeof this.cleanupExpiredSharedMemory === 'function') {
-      // Every selected peer has settled, so this is the first single,
-      // deterministic cleanup boundary for the whole catch-up job. The
-      // cleanup's per-KA lock/exact VM+SWM+marker re-checks preserve a
-      // concurrent newer SWM lifecycle. Queue this bounded deterministic drain
-      // in the normal maintenance lane: ACK/health reservations remain
-      // protected, but a continuously deep background sync queue cannot make
-      // every cleanup attempt expire before admission. The periodic timer
-      // remains idle-gated/background and is the restart/failure backstop.
-      await this.cleanupExpiredSharedMemory({
-        finalizedOnly: true,
-        contextGraphIds: [contextGraphId],
-        finalizedCleanupBudget: 64,
-        queueBehindActiveWork: true,
-      });
+    if (includeSharedMemory) {
+      // Catch-up may nudge eventual cleanup but never waits for discovery,
+      // payload verification or deletion to complete.
+      this.wakeFinalizedSwmCleanup();
     }
 
     return {
@@ -7592,7 +7593,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
     (this.config as any).sharedMemoryTtlMs = ttlMs;
 
-    if (!this.swmCleanupTimer) {
+    if (ttlMs <= 0 && this.swmCleanupTimer) {
+      clearInterval(this.swmCleanupTimer);
+      this.swmCleanupTimer = null;
+    } else if (ttlMs > 0 && !this.swmCleanupTimer) {
       this.cleanupExpiredSharedMemory().catch(() => {});
       this.swmCleanupTimer = setInterval(() => {
         this.cleanupExpiredSharedMemory().catch(() => {});
@@ -7601,51 +7605,145 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
-  /**
-   * Remove expired shared-memory operations and, at safe low-pressure
-   * boundaries, exact finalized SWM lifecycles retained for deferred cleanup.
-   * For stale operations it deletes the corresponding triples from shared
-   * memory and SWM meta, and removes the root entities from
-   * workspaceOwnedEntities.
-   */
-  async cleanupExpiredSharedMemory(this: DKGAgent, options?: {
-    finalizedOnly?: boolean;
-    contextGraphIds?: readonly string[];
-    finalizedCleanupBudget?: number;
-    queueBehindActiveWork?: boolean;
-  }): Promise<number> {
-    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-    const ctx = createOperationContext('share');
-    // TTL-disabled nodes still need bounded finalized-SWM maintenance, but an
-    // ordinary periodic tick must not start graph discovery while foreground
-    // store work is active. Explicit callers that name CGs or deliberately
-    // queue behind active work retain deterministic cleanup semantics.
-    if (
-      ttl <= 0
-      && !options?.contextGraphIds
-      && !options?.queueBehindActiveWork
-      && hasActiveStorePressure(this.store.getPressureSnapshot?.())
-    ) {
-      return 0;
+  getOrCreateFinalizedSwmCleanupWorker(this: DKGAgent): FinalizedSwmCleanupWorker {
+    if (!this.finalizedSwmCleanupWorker) {
+      this.finalizedSwmCleanupWorker = new FinalizedSwmCleanupWorker({
+        sweep: () => this.runFinalizedSwmCleanupSweep(),
+        retryDelayMs: 5_000,
+        onError: (error) => {
+          this.log.warn(
+            createOperationContext('system'),
+            `Finalized SWM cleanup worker failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
     }
-    const cutoff = !options?.finalizedOnly && ttl > 0
-      ? new Date(Date.now() - ttl).toISOString()
-      : undefined;
+    return this.finalizedSwmCleanupWorker;
+  }
+
+  /** Nudge independent finalized-SWM GC without joining its store work. */
+  wakeFinalizedSwmCleanup(this: DKGAgent): void {
+    this.getOrCreateFinalizedSwmCleanupWorker().wake();
+  }
+
+  getFinalizedSwmCleanupStats(this: DKGAgent): FinalizedSwmCleanupStats {
+    return this.getOrCreateFinalizedSwmCleanupWorker().snapshot();
+  }
+
+  /**
+   * One small idle-only GC slice. Pressure is checked before every discovery
+   * boundary and between candidates; foreground ACK, health and normal work
+   * always wins.
+   */
+  async runFinalizedSwmCleanupSweep(this: DKGAgent): Promise<FinalizedSwmCleanupSweepResult> {
+    const prior = this.finalizedSwmCleanupWorker?.snapshot();
+    const priorOldest = prior?.oldestMarkerAgeMs == null
+      ? null
+      : Date.now() - prior.oldestMarkerAgeMs;
+    const pressureResult = (): FinalizedSwmCleanupSweepResult => ({
+      backlogDepth: prior?.backlogDepth ?? 0,
+      oldestMarkerAt: priorOldest,
+      deletedItems: 0,
+      pressureSkipped: true,
+    });
+    const budgetResult = (
+      backlogDepth: number,
+      oldestMarkerAt: number | null,
+      deletedItems: number,
+    ): FinalizedSwmCleanupSweepResult => ({
+      backlogDepth: Math.max(backlogDepth, prior?.backlogDepth ?? 0),
+      oldestMarkerAt: oldestMarkerAt ?? priorOldest,
+      deletedItems,
+      pressureSkipped: false,
+      budgetExhausted: true,
+    });
+    const underPressure = () => hasActiveStorePressure(this.store.getPressureSnapshot?.());
+    if (underPressure()) return pressureResult();
+
+    const deadline = Date.now() + 10_000;
+    const deadlineSignal = AbortSignal.timeout(10_000);
+    let remaining = 4;
+    let deletedItems = 0;
+    let backlogDepth = 0;
+    let oldestMarkerAt: number | null = null;
+    // Do not even enumerate CGs while the store is busy.
+    if (underPressure()) return pressureResult();
+    const contextGraphs = (await this.listContextGraphs()).map((row) => row.id);
+    for (const contextGraphId of contextGraphs) {
+      if (underPressure()) return { ...pressureResult(), deletedItems };
+      if (Date.now() >= deadline) {
+        return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
+      }
+      // Per-CG SWM meta discovery is also forbidden under pressure.
+      const metaGraphs = await listSharedMemoryMetaGraphs(this.store, contextGraphId);
+      for (const swmMetaGraph of metaGraphs) {
+        if (underPressure()) return { ...pressureResult(), deletedItems };
+        if (Date.now() >= deadline) {
+          return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
+        }
+        if (remaining > 0) {
+          let cleaned: number;
+          try {
+            cleaned = await this.getOrCreateFinalizationHandler()
+              .cleanupFinalizedGraphScopedSwmWhenIdle({
+                contextGraphId,
+                swmMetaGraph,
+                maxCandidates: 1,
+                signal: deadlineSignal,
+              });
+          } catch (error) {
+            if (deadlineSignal.aborted) {
+              return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
+            }
+            throw error;
+          }
+          deletedItems += cleaned;
+          remaining -= 1;
+        }
+        if (underPressure()) return { ...pressureResult(), deletedItems };
+        if (Date.now() >= deadline) {
+          return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
+        }
+        let backlog: { depth: number; oldestMarkerAt: number | null };
+        try {
+          backlog = await this.getOrCreateFinalizationHandler()
+            .inspectFinalizedGraphScopedSwmCleanupBacklog({
+              swmMetaGraph,
+              signal: deadlineSignal,
+            });
+        } catch (error) {
+          if (deadlineSignal.aborted) {
+            return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
+          }
+          throw error;
+        }
+        backlogDepth += backlog.depth;
+        if (
+          backlog.oldestMarkerAt !== null
+          && (oldestMarkerAt === null || backlog.oldestMarkerAt < oldestMarkerAt)
+        ) {
+          oldestMarkerAt = backlog.oldestMarkerAt;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+    return { backlogDepth, oldestMarkerAt, deletedItems, pressureSkipped: false };
+  }
+
+  /**
+   * Remove expired shared-memory operations. Finalized-SWM lifecycle GC is
+   * owned exclusively by FinalizedSwmCleanupWorker above.
+   */
+  async cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
+    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
+    if (ttl <= 0) return 0;
+    const ctx = createOperationContext('share');
+    const cutoff = new Date(Date.now() - ttl).toISOString();
     let totalDeleted = 0;
-    let finalizedCleanupBudget = Math.max(
-      0,
-      Math.floor(options?.finalizedCleanupBudget ?? 4),
-    );
 
     try {
       const graphManager = new GraphManager(this.store);
-      // A deterministic caller already knows the exact CG IDs. Do not route
-      // those IDs through GraphManager.listContextGraphs(): that storage-level
-      // helper intentionally omits owner/name public IDs because it only
-      // recognizes legacy flat graph IDs.
-      const contextGraphs = options?.contextGraphIds
-        ? [...new Set(options.contextGraphIds)]
-        : await graphManager.listContextGraphs();
+      const contextGraphs = await graphManager.listContextGraphs();
 
       for (const pid of contextGraphs) {
         let graphDeleted = 0;
@@ -7661,33 +7759,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // Each meta graph describes exactly one SWM data bucket:
           // `…/_shared_memory_meta` ↔ `…/_shared_memory` (root or per-subgraph).
           const wsGraph = wsMetaGraph.slice(0, -'_meta'.length);
-          if (finalizedCleanupBudget > 0) {
-            try {
-              while (finalizedCleanupBudget > 0) {
-                const batchSize = Math.min(4, finalizedCleanupBudget);
-                const cleaned = await this.getOrCreateFinalizationHandler()
-                  .cleanupFinalizedGraphScopedSwmWhenIdle({
-                    contextGraphId: pid,
-                    swmMetaGraph: wsMetaGraph,
-                    maxCandidates: batchSize,
-                    queueBehindActiveWork: options?.queueBehindActiveWork,
-                  });
-                finalizedCleanupBudget -= cleaned;
-                if (cleaned < batchSize) break;
-                // Yield between bounded batches so queued foreground work can
-                // be admitted ahead of the next background-priority batch.
-                await new Promise<void>((resolve) => setImmediate(resolve));
-              }
-            } catch (error) {
-              this.log.warn(
-                ctx,
-                `Deferred finalized-SWM cleanup failed for ${wsMetaGraph}: `
-                  + `${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
-          }
-          if (!cutoff) continue;
-
           const expiredOps = await this.store.query(
             `SELECT ?op WHERE {
             GRAPH <${wsMetaGraph}> {

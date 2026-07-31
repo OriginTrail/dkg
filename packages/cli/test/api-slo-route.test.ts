@@ -278,6 +278,45 @@ describe('/api/slo wire format (rc.9 PR-A / Codex PR #570 R10)', () => {
     expect((body as { swm: Record<string, unknown> }).swm.shareAckQuorum).toBeUndefined();
   });
 
+  it('finalizedCleanup — exposes deferred GC backlog, pressure and progress', async () => {
+    const agent: FakeAgent = {
+      getMessengerSloStats: () => ({}),
+      getSwmGossipStats: () => ({
+        publishFailures: {},
+        publishFailuresOverflow: 0,
+        publishFailuresTruncated: false,
+      }),
+      getSwmHandlerStats: () => ({
+        redundantApplies: {},
+        redundantAppliesLowerBound: false,
+        redundantAppliesOverflow: 0,
+        redundantAppliesTruncated: false,
+      }),
+      getFinalizedSwmCleanupStats: () => ({
+        backlogDepth: 12,
+        oldestMarkerAgeMs: 45_000,
+        pressureSkips: 7,
+        deletedItems: 31,
+        runs: 9,
+        lastRunAt: '2026-07-31T10:00:00.000Z',
+        lastError: null,
+      }),
+    };
+    ({ server, port } = await startSloServer(agent));
+
+    const { status, body } = await get(port, '/api/slo');
+    expect(status).toBe(200);
+    expect((body as { swm: Record<string, unknown> }).swm.finalizedCleanup).toEqual({
+      backlogDepth: 12,
+      oldestMarkerAgeMs: 45_000,
+      pressureSkips: 7,
+      deletedItems: 31,
+      runs: 9,
+      lastRunAt: '2026-07-31T10:00:00.000Z',
+      lastError: null,
+    });
+  });
+
   /**
    * rc.9 PR-D (codex follow-up from PR-G #G1): agents that ship
    * the `retryable` outcome bucket (transient receiver-side

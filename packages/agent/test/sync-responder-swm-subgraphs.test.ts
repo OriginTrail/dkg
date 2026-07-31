@@ -1,10 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
-import {
-  filterSwmMetaSnapshotRows,
-  type SyncRow,
-} from '../src/sync/responder/graph-plan.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -66,65 +62,6 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const REMOTE_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 const noopLog = (_ctx: OperationContext, _msg: string) => {};
-
-describe('finalized SWM snapshot blocking', () => {
-  it('blocks a marked head and its operation sibling by their shared lifecycle tuple', () => {
-    const graph = 'did:dkg:context-graph:tuple-block/_shared_memory_meta';
-    const ual = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
-    const head = `${ual}#dkg-swm-head`;
-    const operation = 'urn:dkg:share:tuple-block:operation-1';
-    const unrelated = 'urn:dkg:share:tuple-block:unrelated';
-    const tupleRows = (subject: string): SyncRow[] => [
-      { g: graph, s: subject, p: `${DKG_NS}contentScopeVersion`, o: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
-      { g: graph, s: subject, p: `${DKG_NS}kaUal`, o: ual },
-      { g: graph, s: subject, p: `${DKG_NS}assertionVersion`, o: '"1"' },
-      { g: graph, s: subject, p: `${DKG_NS}shareOperationId`, o: '"operation-1"' },
-    ];
-    const rows: SyncRow[] = [
-      ...tupleRows(head),
-      { g: graph, s: head, p: `${DKG_NS}finalizedSwmCleanupRoot`, o: '"sha256:abc"' },
-      ...tupleRows(operation),
-      { g: graph, s: unrelated, p: RDF_TYPE, o: `${DKG_NS}WorkspaceOperation` },
-    ];
-
-    const filtered = filterSwmMetaSnapshotRows(rows, null);
-
-    expect(filtered.some((row) => row.s === head)).toBe(false);
-    expect(filtered.some((row) => row.s === operation)).toBe(false);
-    expect(filtered).toEqual([{
-      g: graph,
-      s: unrelated,
-      p: RDF_TYPE,
-      o: `${DKG_NS}WorkspaceOperation`,
-    }]);
-  });
-
-  it('applies a valid freshness cutoff without a declaration-order failure', () => {
-    const graph = 'did:dkg:context-graph:freshness/_shared_memory_meta';
-    const subject = 'urn:dkg:share:freshness:operation-1';
-    const rows: SyncRow[] = [{
-      g: graph,
-      s: subject,
-      p: RDF_TYPE,
-      o: `${DKG_NS}WorkspaceOperation`,
-    }, {
-      g: graph,
-      s: subject,
-      p: `${DKG_NS}publishedAt`,
-      o: '"2026-07-31T09:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
-    }];
-
-    const filtered = filterSwmMetaSnapshotRows(
-      rows,
-      '2026-07-31T08:00:00.000Z',
-    );
-    expect(filtered).toHaveLength(2);
-    expect(new Set(filtered.map((row) => row.p))).toEqual(new Set([
-      RDF_TYPE,
-      `${DKG_NS}publishedAt`,
-    ]));
-  });
-});
 
 function captureHandler(): {
   register: (proto: string, h: (data: Uint8Array, peerId: string) => Promise<Uint8Array>) => void;
@@ -473,16 +410,17 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
     });
 
     it.each([0, 5_000])(
-      'does not advertise finalized SWM marked for deferred cleanup (ttl=%s)',
+      'keeps pending SWM syncable but never advertises local GC metadata (ttl=%s)',
       async (sharedMemoryTtlMs) => {
         const markedStore = new OxigraphStore();
         const publishedAt = new Date(Date.now() - 1_000).toISOString();
         const ual = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/9';
         const opId = 'finalized-deferred-cleanup';
         const op = `urn:dkg:share:${CG_ID}:${opId}`;
+        const cleanupTask = 'urn:dkg:finalized-swm-cleanup:responder-test';
         const head = `${ual}#dkg-swm-head`;
         const assertionGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/9`;
-        const markedEntity = 'urn:swm:finalized:must-not-sync';
+        const markedEntity = 'urn:swm:finalized:still-syncable';
         const unmarkedGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ac/10`;
         const unmarkedRoot = 'urn:swm:unmarked:must-sync';
         const unmarkedOp = `urn:dkg:share:${CG_ID}:unmarked-data`;
@@ -495,10 +433,15 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
         await markedStore.insert([
           { graph: ROOT_SWM_META, subject: op, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
           { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}rootEntity`, object: markedEntity },
           ...tupleRows(op),
           ...tupleRows(head),
+          ...tupleRows(cleanupTask),
           { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
-          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: RDF_TYPE, object: `${DKG_NS}FinalizedSwmCleanupTask` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
           { graph: assertionGraph, subject: markedEntity, predicate: 'http://schema.org/name', object: '"finalized-copy"' },
           { graph: unmarkedGraph, subject: unmarkedRoot, predicate: 'http://schema.org/name', object: '"live-copy"' },
           { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
@@ -528,8 +471,9 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           phase: 'meta',
         });
 
-        expect(out).not.toContain(head);
-        expect(out).not.toContain(op);
+        expect(out).toContain(head);
+        expect(out).toContain(op);
+        expect(out).not.toContain(cleanupTask);
         expect(out).not.toContain('finalizedSwmCleanupRoot');
 
         const dataOut = await markedCap.invoke({
@@ -540,23 +484,21 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           includeSharedMemory: true,
           phase: 'data',
         });
-        expect(dataOut).not.toContain(markedEntity);
-        expect(dataOut).not.toContain('"finalized-copy"');
+        expect(dataOut).toContain(markedEntity);
+        expect(dataOut).toContain('"finalized-copy"');
         expect(dataOut).toContain(unmarkedRoot);
         expect(dataOut).toContain('"live-copy"');
 
-        // After idle cleanup removes the active head, the immutable operation
-        // keeps the marker for recovery but must remain outside sync.
+        // After idle cleanup removes the active head/task, immutable operation
+        // history remains syncable with only its local tombstone stripped.
         await markedStore.deleteByPattern({
           graph: ROOT_SWM_META,
           subject: head,
         });
-        await markedStore.insert([{
+        await markedStore.deleteByPattern({
           graph: ROOT_SWM_META,
-          subject: op,
-          predicate: `${DKG_NS}finalizedSwmCleanupRoot`,
-          object: `"0x${'ab'.repeat(32)}"`,
-        }]);
+          subject: cleanupTask,
+        });
         const afterCleanup = await markedCap.invoke({
           contextGraphId: CG_ID,
           syncSessionId: `finalized-cleanup-drained-${sharedMemoryTtlMs}`,
@@ -565,7 +507,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           includeSharedMemory: true,
           phase: 'meta',
         });
-        expect(afterCleanup).not.toContain(op);
+        expect(afterCleanup).toContain(op);
         expect(afterCleanup).not.toContain('finalizedSwmCleanupRoot');
         await markedStore.close();
       },

@@ -15,22 +15,20 @@
  */
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
-  computeFlatKCRootV10,
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
-  resolveKnowledgeAssetWorkspaceHead,
-  sameKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import {
-  GraphManager,
-  tryReplaceGraphAndSubjectAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
-import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from '../../dkg-agent-constants.js';
+import {
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+} from '../../dkg-agent-constants.js';
+import { buildFinalizedSwmCleanupTaskQuads } from '../../finalized-swm-cleanup-marker.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -95,19 +93,14 @@ export interface SharedMemorySnapshotMaterializer {
    */
   isGraphAssetMaterialized(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
-   * Refuse to resurrect an assertion that is already exactly confirmed in VM.
-   * When the active SWM head still names this descriptor, remove its exact
-   * duplicate graph and head atomically. A newer/different SWM head is
-   * preserved, but the stale finalized descriptor is still rejected.
-   *
-   * Returns true when the incoming descriptor is already exactly finalized,
-   * whether the local duplicate was removed, already absent, or preserved
-   * because the active SWM lifecycle differs.
+   * Re-arm a constant-size GC task when this exact operation carries a local
+   * finalization tombstone. This is marker bookkeeping only: no graph scan,
+   * VM verification, deletion, or GC wait occurs on the ingest path.
    */
-  discardFinalizedGraphAsset(
+  ensureFinalizedCleanupTask(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<boolean>;
+  ): Promise<void>;
   /**
    * Atomic whole-graph replace. Replace, not insert: a KA graph is
    * all-or-nothing and digest-verified; union-insert risks partial or
@@ -130,18 +123,17 @@ export interface SharedMemorySnapshotMaterializer {
 }
 
 /**
- * Replace one graph-scoped SWM lifecycle without losing a local deferred
- * finalization token for the exact same lifecycle.
+ * Replace one graph-scoped SWM lifecycle without losing its immutable local
+ * finalization tombstone.
  *
  * Finalization markers are deliberately local-only and responders filter them
  * from synchronized metadata. A blind head/operation replacement therefore
- * erased the only durable evidence that the retained SWM graph was eligible
- * for idle cleanup. Preserve both marker rows only when the complete local
- * workspace head still equals the verified incoming descriptor; any mismatch
- * means a newer or otherwise different lifecycle and fails closed by dropping
- * the old markers.
+ * erased the metadata-only lifecycle record needed to re-arm background GC.
+ * Preserve the operation tombstone only for the exact incoming operation
+ * subject. The independent GC task is stored on its own subject and is not
+ * touched by this replacement.
  *
- * The verified replacement metadata and any retained cleanup markers are
+ * The verified replacement metadata and any retained operation tombstone are
  * inserted in the same store call after the old lifecycle is removed. Callers
  * MUST hold the canonical per-KA SWM writer lock across this entire operation.
  */
@@ -159,7 +151,7 @@ export async function replaceGraphScopedSwmHeadMetadata(params: {
     sourcePrefix,
     insertReplacementMetadata,
   } = params;
-  const preservedMarkers = await readExactFinalizedCleanupMarkers({
+  const preserved = await readExactFinalizedOperationTombstone({
     store,
     contextGraphId,
     descriptor,
@@ -204,149 +196,76 @@ export async function replaceGraphScopedSwmHeadMetadata(params: {
   }
   const replacementQuads = [
     ...descriptor.metadataQuads,
-    ...preservedMarkers,
+    ...preserved.tombstone,
   ];
   if (replacementQuads.length > 0) {
     await insertReplacementMetadata(replacementQuads);
   }
 }
 
-async function readExactFinalizedCleanupMarkers(params: {
+async function readExactFinalizedOperationTombstone(params: {
   store: TripleStore;
   contextGraphId: string;
   descriptor: GraphScopedSwmRecoveryDescriptor;
   sourcePrefix: string;
-}): Promise<Quad[]> {
-  const { store, contextGraphId, descriptor, sourcePrefix } = params;
-  try {
-    const currentHead = await resolveKnowledgeAssetWorkspaceHead({
-      store,
-      graphManager: new GraphManager(store),
-      contextGraphId,
-      kaUal: descriptor.kaUal,
-      subGraphName: descriptor.subGraphName,
-      queryOptions: {
-        priority: 'background',
-        source: `${sourcePrefix}.readFinalizedCleanupHead`,
-      },
-    });
-    if (!currentHead || !sameKnowledgeAssetWorkspaceHead(
-      currentHead,
-      workspaceHeadFromDescriptor(descriptor),
-    )) {
-      return [];
-    }
-  } catch {
-    // Corrupt or incomplete local metadata must never carry a destructive
-    // cleanup token into a verified replacement.
-    return [];
-  }
-
+}): Promise<{ tombstone: Quad[]; cleanupTask: Quad[] }> {
+  const { store, descriptor, sourcePrefix } = params;
   const markerResult = await store.query(
-    `CONSTRUCT { ?subject <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } WHERE { `
+    `CONSTRUCT { <${assertSafeIri(descriptor.operationSubject)}> `
+    + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root . `
+    + `<${assertSafeIri(descriptor.operationSubject)}> `
+    + `<${FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE}> ?markedAt } WHERE { `
     + `GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-    + `VALUES ?subject { <${assertSafeIri(descriptor.headSubject)}> `
-    + `<${assertSafeIri(descriptor.operationSubject)}> } `
-    + `?subject <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    + `<${assertSafeIri(descriptor.operationSubject)}> `
+    + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root . `
+    + `OPTIONAL { <${assertSafeIri(descriptor.operationSubject)}> `
+    + `<${FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE}> ?markedAt } } }`,
     {
       priority: 'background',
-      source: `${sourcePrefix}.readFinalizedCleanupMarkers`,
+      source: `${sourcePrefix}.readFinalizedOperationTombstone`,
     },
   );
-  if (markerResult.type !== 'quads') return [];
+  if (markerResult.type !== 'quads') return { tombstone: [], cleanupTask: [] };
   const markers = markerResult.quads.map((quad) => ({
     ...quad,
     graph: descriptor.metaGraph,
   }));
-  const headMarkers = markers.filter((quad) => quad.subject === descriptor.headSubject);
-  const operationMarkers = markers.filter((quad) => quad.subject === descriptor.operationSubject);
-  if (
-    headMarkers.length !== 1
-    || operationMarkers.length !== 1
-    || headMarkers[0]!.object !== operationMarkers[0]!.object
-  ) {
-    return [];
+  const roots = markers.filter((quad) =>
+    quad.subject === descriptor.operationSubject
+    && quad.predicate === FINALIZED_SWM_CLEANUP_ROOT_PREDICATE);
+  const markedAtRows = markers.filter((quad) =>
+    quad.subject === descriptor.operationSubject
+    && quad.predicate === FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE);
+  if (roots.length !== 1) {
+    return { tombstone: [], cleanupTask: [] };
   }
-  return [headMarkers[0]!, operationMarkers[0]!];
-}
-
-function workspaceHeadFromDescriptor(
-  descriptor: GraphScopedSwmRecoveryDescriptor,
-) {
+  const rootHex = literalValue(roots[0]!.object);
+  if (!rootHex || !/^0x[0-9a-fA-F]{64}$/.test(rootHex)) {
+    return { tombstone: [], cleanupTask: [] };
+  }
+  // Repeated finalization evidence can append several timestamp values to the
+  // immutable operation subject. Keep the earliest valid value for backlog
+  // age and normalize the replacement back to one row.
+  const earliestMarkedAt = markedAtRows
+    .map((quad) => ({ quad, value: literalValue(quad.object) }))
+    .filter((entry): entry is { quad: Quad; value: string } =>
+      entry.value !== undefined && Number.isFinite(Date.parse(entry.value)))
+    .sort((a, b) => Date.parse(a.value) - Date.parse(b.value))[0];
+  const markedAtIso = earliestMarkedAt?.value ?? new Date().toISOString();
   return {
-    kaUal: descriptor.kaUal,
-    assertionVersion: descriptor.assertionVersion,
-    assertionGraph: descriptor.assertionGraph,
-    publicQuadsDigest: descriptor.publicQuadsDigest,
-    publicTripleCount: descriptor.publicQuadsCount,
-    privateMerkleRoot: descriptor.privateMerkleRoot,
-    privateTripleCount: descriptor.privateTripleCount,
-    shareOperationId: descriptor.shareOperationId,
-    publisherPeerId: descriptor.publisherPeerId,
-    accessPolicy: descriptor.accessPolicy,
-    allowedPeers: [...descriptor.allowedPeers],
+    tombstone: [roots[0]!, ...(earliestMarkedAt ? [earliestMarkedAt.quad] : [])],
+    cleanupTask: buildFinalizedSwmCleanupTaskQuads({
+      contextGraphId: params.contextGraphId,
+      subGraphName: descriptor.subGraphName,
+      head: {
+        ...descriptor,
+        publicTripleCount: descriptor.publicQuadsCount,
+      },
+      expectedMerkleRootHex: rootHex,
+      metaGraph: descriptor.metaGraph,
+      markedAtIso,
+    }),
   };
-}
-
-function sameBytes(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
-  if (left === undefined || right === undefined) return left === right;
-  return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-function descriptorPrivateRoot(
-  descriptor: GraphScopedSwmRecoveryDescriptor,
-): Uint8Array | undefined {
-  const value = descriptor.privateMerkleRoot?.replace(/^0x/i, '');
-  if (value === undefined) return undefined;
-  if (!/^[0-9a-fA-F]{64}$/.test(value)) return new Uint8Array(0);
-  return Uint8Array.from(value.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
-}
-
-async function isExactConfirmedVmAsset(params: {
-  store: TripleStore;
-  contextGraphId: string;
-  descriptor: GraphScopedSwmRecoveryDescriptor;
-}): Promise<boolean> {
-  const { store, contextGraphId, descriptor } = params;
-  const confirmed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
-    contextGraphId,
-    ual: descriptor.kaUal,
-  });
-  if (confirmed.state !== 'confirmed') return false;
-  const { envelope } = confirmed;
-  const expectedPrivateRoot = descriptorPrivateRoot(descriptor);
-  if (
-    envelope.assertionVersion !== descriptor.assertionVersion
-    || envelope.publicTripleCount !== descriptor.publicQuadsCount
-    || envelope.privateTripleCount !== descriptor.privateTripleCount
-    || envelope.subGraphName !== descriptor.subGraphName
-    || !sameBytes(envelope.privateMerkleRoot, expectedPrivateRoot)
-  ) {
-    return false;
-  }
-
-  const vmResult = await store.query(
-    `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(envelope.assertionGraph)}> { ?s ?p ?o } }`,
-    {
-      priority: 'background',
-      source: 'agent.sharedMemorySync.snapshotMaterializer.readConfirmedVmGraph',
-    },
-  );
-  if (vmResult.type !== 'quads') return false;
-  const vmQuads = vmResult.quads.map((quad) => ({ ...quad, graph: '' }));
-  if (
-    vmQuads.length !== descriptor.publicQuadsCount
-    || workspacePublicQuadsDigest(vmQuads) !== descriptor.publicQuadsDigest
-  ) {
-    return false;
-  }
-  return sameBytes(
-    computeFlatKCRootV10(
-      vmQuads,
-      envelope.privateMerkleRoot ? [envelope.privateMerkleRoot] : [],
-    ),
-    envelope.merkleRoot,
-  );
 }
 
 /**
@@ -428,79 +347,17 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       return workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
     },
 
-    discardFinalizedGraphAsset: async (contextGraphId, descriptor) => {
-      if (!await isExactConfirmedVmAsset({
+    ensureFinalizedCleanupTask: async (contextGraphId, descriptor) => {
+      const preserved = await readExactFinalizedOperationTombstone({
         store: deps.store,
         contextGraphId,
         descriptor,
-      })) {
-        return false;
+        sourcePrefix: 'agent.sharedMemorySync.snapshotMaterializer',
+      });
+      if (preserved.cleanupTask.length > 0) {
+        await deps.insertReplacementMetadata(preserved.cleanupTask);
+        deps.invalidateListContextGraphsCache();
       }
-
-      // The caller owns the canonical per-KA writer lock. Re-read the active
-      // head inside it so a newer SWM assertion can never be removed by a
-      // delayed finalized snapshot.
-      let currentHead;
-      try {
-        currentHead = await resolveKnowledgeAssetWorkspaceHead({
-          store: deps.store,
-          graphManager: new GraphManager(deps.store),
-          contextGraphId,
-          kaUal: descriptor.kaUal,
-          subGraphName: descriptor.subGraphName,
-          queryOptions: {
-            priority: 'background',
-            source: 'agent.sharedMemorySync.snapshotMaterializer.readFinalizedSwmHead',
-          },
-        });
-      } catch {
-        // Exact VM still makes the incoming descriptor stale. Preserve corrupt
-        // local SWM state for explicit recovery, but never import another copy.
-        return true;
-      }
-      if (
-        !currentHead
-        || !sameKnowledgeAssetWorkspaceHead(
-          currentHead,
-          workspaceHeadFromDescriptor(descriptor),
-        )
-      ) {
-        return true;
-      }
-
-      const swmResult = await deps.store.query(
-        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
-        {
-          priority: 'background',
-          source: 'agent.sharedMemorySync.snapshotMaterializer.readFinalizedSwmGraph',
-        },
-      );
-      if (swmResult.type !== 'quads') return true;
-      const swmQuads = swmResult.quads.map((quad) => ({ ...quad, graph: '' }));
-      const swmIsAbsent = swmQuads.length === 0;
-      const swmIsExact = swmQuads.length === descriptor.publicQuadsCount
-        && workspacePublicQuadsDigest(swmQuads) === descriptor.publicQuadsDigest;
-      if (!swmIsAbsent && !swmIsExact) return true;
-
-      const replaced = await tryReplaceGraphAndSubjectAtomically(
-        deps.store,
-        descriptor.assertionGraph,
-        [],
-        descriptor.metaGraph,
-        descriptor.headSubject,
-        [],
-        {
-          priority: 'background',
-          source: 'agent.sharedMemorySync.snapshotMaterializer.discardFinalizedSwm',
-        },
-      );
-      if (!replaced) {
-        throw new Error(
-          'finalized SWM anti-resurrection requires atomic graph-and-head replacement support',
-        );
-      }
-      deps.invalidateListContextGraphsCache();
-      return true;
     },
 
     replaceGraph: async (graphUri, quads) => {

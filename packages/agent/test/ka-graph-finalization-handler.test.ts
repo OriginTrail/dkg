@@ -27,9 +27,11 @@ import {
   swmKaWriteLockKey,
   withKeyedLocks,
   workspaceOperationSubject,
+  workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import {
   FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
   FinalizationHandler,
 } from '../src/finalization-handler.js';
 import {
@@ -43,6 +45,8 @@ import {
   type ChainReconcilerDeps,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
+import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -202,6 +206,7 @@ describe('graph-scoped finalization handler', () => {
     message: FinalizationMessageMsg;
     swmGraph: string;
     vmGraph: string;
+    publicQuads: Quad[];
   }> {
     const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
     const swmGraph = knowledgeAssetLayerGraphUri(
@@ -265,6 +270,7 @@ describe('graph-scoped finalization handler', () => {
     return {
       swmGraph,
       vmGraph,
+      publicQuads,
       message: {
         ual: scope.ual,
         contextGraphId: CG,
@@ -427,6 +433,66 @@ describe('graph-scoped finalization handler', () => {
       `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('eventually removes a late repeated snapshot after the node becomes idle again', async () => {
+    const { message, swmGraph, vmGraph, publicQuads } = await stageGraph();
+    const metaGraph = graphManager.sharedMemoryMetaUri(CG);
+    const beforeFinalization = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+    );
+    expect(beforeFinalization.type).toBe('quads');
+    if (beforeFinalization.type !== 'quads') throw new Error('expected SWM metadata');
+    const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: beforeFinalization.quads.map((quad) => ({ ...quad, graph: metaGraph })),
+    });
+    expect(descriptor).toBeDefined();
+    if (!descriptor) throw new Error('expected graph-scoped SWM descriptor');
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+
+    // A delayed/repeated snapshot lands normally. Ingest only re-arms the
+    // constant-size durable task; it never scans VM or deletes SWM.
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks,
+      invalidateListContextGraphsCache: () => {},
+      insertReplacementMetadata: (quads) => store.insert([...quads]),
+    });
+    await materializer.withKaWriteLock(CG, undefined, UAL, async () => {
+      await materializer.ensureFinalizedCleanupTask(CG, descriptor);
+      await materializer.replaceGraph(swmGraph, publicQuads);
+      await materializer.replaceHeadMetadata(CG, descriptor);
+    });
+    expect(await store.countQuads(swmGraph)).toBe(publicQuads.length);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+
+    // Once idle, only the dedicated GC performs the expensive verification
+    // and exact conditional delete. VM remains byte-for-byte intact.
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+    expect(await drainFinalizedSwm()).toBe(0);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { ?task `
+        + `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> `
+        + `<${FINALIZED_SWM_CLEANUP_TASK_TYPE}> } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${workspaceOperationSubject(CG, SHARE_ID)}> `
+        + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    const finalVm = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+    );
+    expect(finalVm.type).toBe('quads');
+    if (finalVm.type !== 'quads') throw new Error('expected VM content');
+    expect(workspacePublicQuadsDigest(finalVm.quads.map((quad) => ({ ...quad, graph: '' }))))
+      .toBe(workspacePublicQuadsDigest(publicQuads.map((quad) => ({ ...quad, graph: '' }))));
   });
 
   it('accepts adapter batch metadata when the singleton KA range matches the UAL', async () => {
@@ -2252,18 +2318,18 @@ describe('graph-scoped finalization handler', () => {
       contextGraphId: CG,
       kaUal: UAL,
     })).resolves.toBeUndefined();
-    const immutableSnapshotBlockedFromSync = await store.query(
+    const immutableFinalizationTombstone = await store.query(
       `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> { `
         + `<${workspaceOperationSubject(CG, SHARE_ID)}> `
         + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
     );
-    expect(immutableSnapshotBlockedFromSync).toMatchObject({
+    expect(immutableFinalizationTombstone).toMatchObject({
       type: 'boolean',
       value: true,
     });
   });
 
-  it('queues explicit post-catchup cleanup behind active store work', async () => {
+  it('never bypasses active store pressure for finalized cleanup', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -2283,17 +2349,14 @@ describe('graph-scoped finalization handler', () => {
       }),
     });
 
+    const querySpy = vi.spyOn(store, 'query');
     expect(await drainFinalizedSwm()).toBe(0);
-    expect(await handler.cleanupFinalizedGraphScopedSwmWhenIdle({
-      contextGraphId: CG,
-      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
-      maxCandidates: 16,
-      queueBehindActiveWork: true,
-    })).toBe(1);
-    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(querySpy).not.toHaveBeenCalled();
+    querySpy.mockRestore();
   });
 
-  it('discovers the WorkspaceOperation for bounded subgraph cleanup', async () => {
+  it('discovers the independent cleanup task for bounded subgraph cleanup', async () => {
     const subGraphName = 'named-cleanup';
     const { message, swmGraph } = await stageGraph(undefined, subGraphName);
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
@@ -2313,7 +2376,7 @@ describe('graph-scoped finalization handler', () => {
       maxCandidates: 1,
     })).resolves.toBe(1);
     expect(discoverQueries.some((query) => query.includes(
-      '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation>',
+      '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/FinalizedSwmCleanupTask>',
     ))).toBe(true);
     expect(await store.countQuads(swmGraph)).toBe(0);
     await expect(resolveKnowledgeAssetWorkspaceHead({
@@ -2326,7 +2389,7 @@ describe('graph-scoped finalization handler', () => {
     querySpy.mockRestore();
   });
 
-  it('retries the actual post-catchup discover query after a transient scheduler timeout', async () => {
+  it('keeps cleanup background-only and leaves retry to the worker after scheduler pressure', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -2340,12 +2403,12 @@ describe('graph-scoped finalization handler', () => {
       if (
         !injectedBusyTimeout
         && options?.source === 'agent.finalization.graphScopedSwmCleanup.discover'
-        && query.includes('SELECT DISTINCT ?head ?ual ?version ?root ?shareId ?subGraphName')
+        && query.includes('SELECT DISTINCT ?task ?ual ?version ?root ?shareId')
       ) {
         injectedBusyTimeout = true;
         throw new StoreSchedulerBusyError(
           'queue_wait_timeout',
-          'normal',
+          'background',
           options.source,
         );
       }
@@ -2356,12 +2419,11 @@ describe('graph-scoped finalization handler', () => {
       contextGraphId: CG,
       swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
       maxCandidates: 16,
-      queueBehindActiveWork: true,
-    })).resolves.toBe(1);
+    })).rejects.toBeInstanceOf(StoreSchedulerBusyError);
     expect(injectedBusyTimeout).toBe(true);
     expect(cleanupPriorities.length).toBeGreaterThan(0);
-    expect(new Set(cleanupPriorities)).toEqual(new Set(['normal']));
-    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(new Set(cleanupPriorities)).toEqual(new Set(['background']));
+    expect(await store.countQuads(swmGraph)).toBe(2);
     querySpy.mockRestore();
   });
 

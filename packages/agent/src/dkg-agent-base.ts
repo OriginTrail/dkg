@@ -159,6 +159,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import type { FinalizedSwmCleanupWorker } from './finalized-swm-cleanup-worker.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -964,6 +965,8 @@ export class DKGAgentBase {
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  protected finalizedSwmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  protected finalizedSwmCleanupWorker?: FinalizedSwmCleanupWorker;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */

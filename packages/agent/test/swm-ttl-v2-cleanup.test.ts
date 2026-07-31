@@ -240,26 +240,36 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
   it('honors an explicit public owner/name context graph during finalized cleanup', async () => {
     const cg = '0x1111111111111111111111111111111111111111/public-finalized-cleanup';
     const cleanupFinalizedGraphScopedSwmWhenIdle = vi.fn().mockResolvedValue(0);
+    const inspectFinalizedGraphScopedSwmCleanupBacklog = vi.fn().mockResolvedValue({
+      depth: 0,
+      oldestMarkerAt: null,
+    });
     const handlerSpy = vi
       .spyOn(node as unknown as { getOrCreateFinalizationHandler: () => unknown }, 'getOrCreateFinalizationHandler')
-      .mockReturnValue({ cleanupFinalizedGraphScopedSwmWhenIdle });
+      .mockReturnValue({
+        cleanupFinalizedGraphScopedSwmWhenIdle,
+        inspectFinalizedGraphScopedSwmCleanupBacklog,
+      });
+    const listSpy = vi.spyOn(node, 'listContextGraphs').mockResolvedValue([{
+      id: cg,
+      uri: `did:dkg:context-graph:${cg}`,
+      name: 'public-finalized-cleanup',
+      isSystem: false,
+      subscribed: true,
+      synced: true,
+    }]);
 
     try {
-      await node.cleanupExpiredSharedMemory({
-        finalizedOnly: true,
-        contextGraphIds: [cg],
-        finalizedCleanupBudget: 4,
-        queueBehindActiveWork: true,
-      });
+      await node.runFinalizedSwmCleanupSweep();
     } finally {
       handlerSpy.mockRestore();
+      listSpy.mockRestore();
     }
 
-    expect(cleanupFinalizedGraphScopedSwmWhenIdle).toHaveBeenCalledWith({
+    expect(cleanupFinalizedGraphScopedSwmWhenIdle).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId: cg,
       swmMetaGraph: contextGraphSharedMemoryMetaUri(cg),
-      maxCandidates: 4,
-      queueBehindActiveWork: true,
-    });
+      maxCandidates: 1,
+    }));
   });
 });

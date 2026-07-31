@@ -28,6 +28,7 @@ import {
   type GraphWriteGenSource,
   type QueryOptions,
   type SharedMemoryResultBudget,
+  type StorePressureSnapshot,
   type SwmKaGraphBound,
   type TripleStore,
   type Quad,
@@ -62,8 +63,19 @@ import {
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 const PROV_NS = 'http://www.w3.org/ns/prov#';
-const FINALIZED_SWM_CLEANUP_BUSY_RETRY_BUDGET_MS = 120_000;
-const FINALIZED_SWM_CLEANUP_BUSY_RETRY_DELAY_MS = 250;
+function hasActiveStorePressure(snapshot: StorePressureSnapshot | undefined): boolean {
+  if (!snapshot) return false;
+  return [
+    snapshot.ackInflight,
+    snapshot.healthInflight ?? 0,
+    snapshot.normalInflight,
+    snapshot.backgroundInflight,
+    snapshot.ackQueued,
+    snapshot.healthQueued ?? 0,
+    snapshot.normalQueued,
+    snapshot.backgroundQueued,
+  ].some((count) => count > 0);
+}
 
 // Slow-query / canary tags for the finalization SWM slice (#1549). A healthy fleet
 // sees `.fallbackUnbounded` at ~0 relative to `.bounded`; a spike means the bound is
@@ -100,8 +112,22 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
-import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from './dkg-agent-constants.js';
-export { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from './dkg-agent-constants.js';
+import {
+  FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+} from './dkg-agent-constants.js';
+export {
+  FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+} from './dkg-agent-constants.js';
+import {
+  buildFinalizedSwmCleanupTaskQuads,
+  finalizedSwmCleanupHeadFingerprint,
+} from './finalized-swm-cleanup-marker.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -303,6 +329,7 @@ export interface FinalizationHandlerOptions {
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
   writeLocks?: Map<string, Promise<void>>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  wakeFinalizedSwmCleanup?: () => void;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
@@ -374,6 +401,7 @@ export class FinalizationHandler {
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly writeLocks: Map<string, Promise<void>> | undefined;
   private readonly publicSnapshotStore: WorkspacePublicSnapshotStore | undefined;
+  private readonly wakeFinalizedSwmCleanup: (() => void) | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
@@ -434,6 +462,7 @@ export class FinalizationHandler {
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
     this.writeLocks = options.writeLocks;
     this.publicSnapshotStore = options.publicSnapshotStore;
+    this.wakeFinalizedSwmCleanup = options.wakeFinalizedSwmCleanup;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -1523,14 +1552,15 @@ export class FinalizationHandler {
   }
 
   /**
-   * Mark one exact, already-materialized SWM head for deferred cleanup.
+   * Persist one constant-size cleanup task plus an immutable operation
+   * tombstone. This is the ONLY finalized-SWM work performed in the foreground:
+   * no payload read, graph hash, cleanup discovery, or deletion is awaited.
    *
-   * The finalization path performs only this constant-size metadata write.
-   * Payload verification and deletion wait for the periodic maintenance lane,
-   * where store pressure is idle. A newer writer replaces the complete head
-   * subject under this same lock, which also removes the active-head marker.
-   * The immutable operation keeps the same marker until normal TTL retention
-   * removes it, so the finalized recovery snapshot cannot be re-advertised.
+   * The task subject is independent from the mutable workspace head, so a late
+   * snapshot replacement cannot erase the worker's durable backlog entry. The
+   * operation tombstone survives task retirement so a late snapshot can re-arm
+   * the independent task before it materializes. Ingest still performs no
+   * discovery, graph verification, or deletion.
    */
   private async markFinalizedGraphScopedSwmForCleanup(input: {
     contextGraphId: string;
@@ -1540,178 +1570,152 @@ export class FinalizationHandler {
     subGraphName?: string;
     ctx: OperationContext;
   }): Promise<'marked' | 'preserved'> {
-    if (!this.writeLocks) {
-      this.log.debug(
-        input.ctx,
-        `Finalization: preserving graph-scoped SWM for ${input.scope.ual}; `
-          + 'no shared SWM writer lock was provided',
-      );
-      return 'preserved';
-    }
-    const lockKey = swmKaWriteLockKey(
+    const graphManager = new GraphManager(this.store);
+    const metaGraph = graphManager.sharedMemoryMetaUri(
       input.contextGraphId,
       input.subGraphName,
-      input.scope.ual,
     );
-    return withKeyedLocks(this.writeLocks, [lockKey], async () => {
-      const graphManager = new GraphManager(this.store);
-      let currentHead: KnowledgeAssetWorkspaceHead | undefined;
-      try {
-        currentHead = await resolveKnowledgeAssetWorkspaceHead({
-          store: this.store,
-          graphManager,
-          contextGraphId: input.contextGraphId,
-          kaUal: input.scope.ual,
-          subGraphName: input.subGraphName,
-        });
-      } catch (error) {
-        if (!(error instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw error;
-        this.log.warn(
-          input.ctx,
-          `Finalization: preserving graph-scoped SWM for ${input.scope.ual}; `
-            + `the current workspace head is corrupt: ${error.message}`,
-        );
-        return 'preserved' as const;
-      }
-      if (!currentHead || !sameKnowledgeAssetWorkspaceHead(currentHead, input.expectedHead)) {
-        this.log.info(
-          input.ctx,
-          `Finalization: preserving newer graph-scoped SWM lifecycle for ${input.scope.ual}`,
-        );
-        return 'preserved' as const;
-      }
-      const metaGraph = graphManager.sharedMemoryMetaUri(
-        input.contextGraphId,
-        input.subGraphName,
+    const operationSubject = workspaceOperationSubject(
+      input.contextGraphId,
+      input.expectedHead.shareOperationId,
+    );
+    const cleanupRootHex = ethers.hexlify(input.expectedMerkleRoot).toLowerCase();
+    const cleanupRoot = JSON.stringify(cleanupRootHex);
+    const markedAtIso = new Date().toISOString();
+    const markedAt = `"${markedAtIso}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
+    await this.store.insert([
+      ...buildFinalizedSwmCleanupTaskQuads({
+        contextGraphId: input.contextGraphId,
+        subGraphName: input.subGraphName,
+        head: input.expectedHead,
+        expectedMerkleRootHex: cleanupRootHex,
+        metaGraph,
+        markedAtIso,
+      }),
+      {
+        subject: operationSubject,
+        predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+        object: cleanupRoot,
+        graph: metaGraph,
+      },
+      {
+        subject: operationSubject,
+        predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+        object: markedAt,
+        graph: metaGraph,
+      },
+    ]);
+    this.wakeFinalizedSwmCleanup?.();
+    return 'marked';
+  }
+
+  /** Read operator backlog gauges without loading any payload graph. */
+  async inspectFinalizedGraphScopedSwmCleanupBacklog(input: {
+    swmMetaGraph: string;
+    signal?: AbortSignal;
+  }): Promise<{ depth: number; oldestMarkerAt: number | null }> {
+    if (hasActiveStorePressure(this.store.getPressureSnapshot?.())) {
+      throw new StoreSchedulerBusyError(
+        'queue_full',
+        'background',
+        'agent.finalization.graphScopedSwmCleanup.backlog',
       );
-      const cleanupRoot = JSON.stringify(
-        ethers.hexlify(input.expectedMerkleRoot).toLowerCase(),
-      );
-      await this.store.insert([
-        {
-          subject: workspaceKnowledgeAssetHeadSubject(input.scope.ual),
-          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
-          object: cleanupRoot,
-          graph: metaGraph,
-        },
-        {
-          subject: workspaceOperationSubject(
-            input.contextGraphId,
-            input.expectedHead.shareOperationId,
-          ),
-          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
-          object: cleanupRoot,
-          graph: metaGraph,
-        },
-      ]);
-      return 'marked' as const;
-    });
+    }
+    const result = await this.store.query(
+      `SELECT (COUNT(DISTINCT ?task) AS ?count) (MIN(?markedAt) AS ?oldest) WHERE {
+        GRAPH <${assertSafeIri(input.swmMetaGraph)}> {
+          ?task <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${FINALIZED_SWM_CLEANUP_TASK_TYPE}> ;
+            <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root .
+          OPTIONAL { ?task <${FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE}> ?markedAt }
+        }
+      }`,
+      {
+        priority: 'background',
+        source: 'agent.finalization.graphScopedSwmCleanup.backlog',
+        signal: input.signal,
+      },
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return { depth: 0, oldestMarkerAt: null };
+    }
+    const depth = Number.parseInt(stripOptionalLiteral(result.bindings[0]?.['count']) ?? '0', 10);
+    const oldestValue = stripOptionalLiteral(result.bindings[0]?.['oldest']);
+    const oldestMarkerAt = oldestValue ? Date.parse(oldestValue) : Number.NaN;
+    return {
+      depth: Number.isSafeInteger(depth) && depth > 0 ? depth : 0,
+      oldestMarkerAt: Number.isFinite(oldestMarkerAt) ? oldestMarkerAt : null,
+    };
   }
 
   /**
    * Drain a bounded number of durable finalized-SWM markers only while the
-   * store scheduler reports no queued or in-flight work. The deterministic
-   * post-catch-up boundary may explicitly queue cleanup behind active work;
-   * periodic maintenance remains fully idle-only.
+   * store scheduler reports no queued or in-flight work.
    *
-   * The marker survives restart, while replacing the SWM head for a newer
-   * assertion removes it automatically. All maintenance queries run in the
-   * background lane and the destructive step re-enters the canonical per-KA
-   * writer lock before checking the head, VM, SWM, and marker again.
+   * The marker survives restart. A newer head causes the worker to retire the
+   * obsolete task without touching that newer lifecycle. All maintenance
+   * queries run in the background lane and the destructive step re-enters the
+   * canonical per-KA writer lock only for the final head/task re-read and
+   * conditional delete.
    */
   async cleanupFinalizedGraphScopedSwmWhenIdle(input: {
     contextGraphId: string;
     swmMetaGraph: string;
     maxCandidates?: number;
-    queueBehindActiveWork?: boolean;
+    signal?: AbortSignal;
   }): Promise<number> {
     if (!this.writeLocks) return 0;
     const pressure = this.store.getPressureSnapshot?.();
-    if (!input.queueBehindActiveWork && pressure && (
-      pressure.ackInflight > 0
-      || (pressure.healthInflight ?? 0) > 0
-      || pressure.normalInflight > 0
-      || pressure.backgroundInflight > 0
-      || pressure.ackQueued > 0
-      || (pressure.healthQueued ?? 0) > 0
-      || pressure.normalQueued > 0
-      || pressure.backgroundQueued > 0
-    )) {
+    if (hasActiveStorePressure(pressure)) {
       return 0;
     }
     const limit = Math.min(16, Math.max(1, Math.floor(input.maxCandidates ?? 4)));
-    // A deterministic post-catch-up drain is part of completing the lifecycle
-    // job, not opportunistic maintenance. Give it the normal lane so a
-    // continuously deep background sync queue cannot make every retry expire
-    // before admission. ACK and health work retain their reserved slots, while
-    // periodic cleanup stays background-only and idle-gated.
     const cleanupQueryOptions: QueryOptions = {
-      priority: input.queueBehindActiveWork ? 'normal' : 'background',
+      priority: 'background',
       source: 'agent.finalization.graphScopedSwmCleanup.discover',
+      signal: input.signal,
     };
-    const busyRetryDeadline = input.queueBehindActiveWork
-      ? Date.now() + FINALIZED_SWM_CLEANUP_BUSY_RETRY_BUDGET_MS
-      : 0;
-    const runStoreOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
-      for (;;) {
-        try {
-          return await operation();
-        } catch (error) {
-          if (
-            !(error instanceof StoreSchedulerBusyError)
-            || !input.queueBehindActiveWork
-            || Date.now() >= busyRetryDeadline
-          ) {
-            throw error;
-          }
-          await new Promise<void>((resolve) => {
-            setTimeout(resolve, Math.min(
-              FINALIZED_SWM_CLEANUP_BUSY_RETRY_DELAY_MS,
-              Math.max(1, busyRetryDeadline - Date.now()),
-            ));
-          });
-        }
-      }
-    };
-    const result = await runStoreOperation(() => this.store.query(
-      `SELECT DISTINCT ?head ?ual ?version ?root ?shareId ?subGraphName WHERE {
+    const result = await this.store.query(
+      `SELECT DISTINCT ?task ?ual ?version ?root ?shareId ?assertionGraph ?headFingerprint ?subGraphName WHERE {
         GRAPH <${assertSafeIri(input.swmMetaGraph)}> {
-          ?head <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root ;
+          ?task <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${FINALIZED_SWM_CLEANUP_TASK_TYPE}> ;
+            <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root ;
+            <${FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE}> ?headFingerprint ;
             <${DKG_NS}kaUal> ?ual ;
             <${DKG_NS}assertionVersion> ?version ;
             <${DKG_NS}shareOperationId> ?shareId ;
             <${DKG_NS}assertionGraph> ?assertionGraph .
-          ?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> ;
-            <${DKG_NS}shareOperationId> ?shareId ;
-            <${DKG_NS}kaUal> ?ual ;
-            <${DKG_NS}assertionVersion> ?version .
-          OPTIONAL { ?operation <${DKG_NS}subGraphName> ?subGraphName }
+          OPTIONAL { ?task <${DKG_NS}subGraphName> ?subGraphName }
         }
-      } ORDER BY ?head LIMIT ${limit}`,
+      } ORDER BY ?task LIMIT ${limit}`,
       cleanupQueryOptions,
-    ));
+    );
     if (result.type !== 'bindings') return 0;
 
     let cleared = 0;
     for (const row of result.bindings) {
       const currentPressure = this.store.getPressureSnapshot?.();
-      if (!input.queueBehindActiveWork && currentPressure && (
-        currentPressure.ackInflight > 0
-        || (currentPressure.healthInflight ?? 0) > 0
-        || currentPressure.normalInflight > 0
-        || currentPressure.backgroundInflight > 0
-        || currentPressure.ackQueued > 0
-        || (currentPressure.healthQueued ?? 0) > 0
-        || currentPressure.normalQueued > 0
-        || currentPressure.backgroundQueued > 0
-      )) {
+      if (hasActiveStorePressure(currentPressure)) {
         break;
       }
       const ual = row['ual'];
+      const taskSubject = row['task'];
       const rawVersion = stripOptionalLiteral(row['version']);
       const rawRoot = stripOptionalLiteral(row['root']);
+      const assertionGraph = row['assertionGraph'];
+      const expectedHeadFingerprint = stripOptionalLiteral(row['headFingerprint']);
+      const shareOperationId = stripOptionalLiteral(row['shareId']);
       const subGraphName = stripOptionalLiteral(row['subGraphName']);
-      if (!ual || !rawVersion || !/^\d+$/.test(rawVersion) || !rawRoot) continue;
+      if (
+        !taskSubject
+        || !taskSubject.startsWith('urn:dkg:finalized-swm-cleanup:')
+        || !ual
+        || !rawVersion
+        || !/^\d+$/.test(rawVersion)
+        || !rawRoot
+        || !assertionGraph
+        || !expectedHeadFingerprint
+        || !shareOperationId
+      ) continue;
       let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
       let expectedMerkleRoot: Uint8Array;
       try {
@@ -1723,33 +1727,54 @@ export class FinalizationHandler {
       if (
         scope.ual !== ual
         || expectedMerkleRoot.length !== 32
-        || workspaceKnowledgeAssetHeadSubject(ual) !== row['head']
       ) {
         continue;
       }
       const graphManager = new GraphManager(this.store);
       let expectedHead: KnowledgeAssetWorkspaceHead | undefined;
       try {
-        expectedHead = await runStoreOperation(() => resolveKnowledgeAssetWorkspaceHead({
+        expectedHead = await resolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager,
           contextGraphId: input.contextGraphId,
           kaUal: scope.ual,
           subGraphName,
           queryOptions: cleanupQueryOptions,
-        }));
+        });
       } catch (error) {
         if (error instanceof StoreSchedulerBusyError) {
-          if (input.queueBehindActiveWork) throw error;
           break;
         }
         continue;
       }
+      if (!expectedHead) {
+        await this.retireStaleFinalizedSwmCleanupTask({
+          contextGraphId: input.contextGraphId,
+          swmMetaGraph: input.swmMetaGraph,
+          taskSubject,
+          scope,
+          assertionGraph,
+          shareOperationId,
+          subGraphName,
+          queryOptions: cleanupQueryOptions,
+        });
+        continue;
+      }
       if (
-        !expectedHead
-        || expectedHead.assertionVersion !== scope.assertionVersion
-        || expectedHead.shareOperationId !== stripOptionalLiteral(row['shareId'])
+        expectedHead.assertionVersion !== scope.assertionVersion
+        || expectedHead.shareOperationId !== shareOperationId
+        || expectedHead.assertionGraph !== assertionGraph
       ) {
+        await this.retireStaleFinalizedSwmCleanupTask({
+          contextGraphId: input.contextGraphId,
+          swmMetaGraph: input.swmMetaGraph,
+          taskSubject,
+          scope,
+          assertionGraph,
+          shareOperationId,
+          subGraphName,
+          queryOptions: cleanupQueryOptions,
+        });
         continue;
       }
       let privateMerkleRoot: Uint8Array | undefined;
@@ -1760,25 +1785,98 @@ export class FinalizationHandler {
       } catch {
         continue;
       }
-      const outcome = await runStoreOperation(() => this.clearMarkedFinalizedGraphScopedSwm({
+      const outcome = await this.clearMarkedFinalizedGraphScopedSwm({
         contextGraphId: input.contextGraphId,
         scope,
+        taskSubject,
+        expectedHeadFingerprint,
         expectedHead,
         expectedMerkleRoot,
         privateMerkleRoot,
         subGraphName,
         queryPriority: cleanupQueryOptions.priority,
         ctx: createOperationContext('system'),
-      }));
-      if (outcome === 'cleared' || outcome === 'absent') cleared += 1;
+      });
+      if (outcome === 'cleared') cleared += 1;
     }
     return cleared;
+  }
+
+  /**
+   * Retire an obsolete task under the same per-KA writer lock used by SWM
+   * materialization. This is the short lock-held re-read/conditional-delete
+   * step: no VM graph read, digest, or Merkle work occurs here.
+   */
+  private async retireStaleFinalizedSwmCleanupTask(input: {
+    contextGraphId: string;
+    swmMetaGraph: string;
+    taskSubject: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    assertionGraph: string;
+    shareOperationId: string;
+    subGraphName?: string;
+    queryOptions: QueryOptions;
+  }): Promise<void> {
+    if (!this.writeLocks) return;
+    const lockKey = swmKaWriteLockKey(
+      input.contextGraphId,
+      input.subGraphName,
+      input.scope.ual,
+    );
+    await withKeyedLocks(this.writeLocks, [lockKey], async () => {
+      let currentHead: KnowledgeAssetWorkspaceHead | undefined;
+      try {
+        currentHead = await resolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: new GraphManager(this.store),
+          contextGraphId: input.contextGraphId,
+          kaUal: input.scope.ual,
+          subGraphName: input.subGraphName,
+          queryOptions: input.queryOptions,
+        });
+      } catch (error) {
+        if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) return;
+        throw error;
+      }
+      if (
+        currentHead
+        && currentHead.assertionVersion === input.scope.assertionVersion
+        && currentHead.shareOperationId === input.shareOperationId
+        && currentHead.assertionGraph === input.assertionGraph
+      ) {
+        return;
+      }
+      if (!currentHead) {
+        // An interrupted snapshot metadata replacement can leave payload plus
+        // task without a head. Preserve the task until the retry restores its
+        // metadata; retire only when both mutable pieces are absent.
+        const payloadPresent = await this.store.query(
+          `ASK { GRAPH <${assertSafeIri(input.assertionGraph)}> { ?s ?p ?o } }`,
+          {
+            ...input.queryOptions,
+            source: 'agent.finalization.graphScopedSwmCleanup.checkHeadlessPayload',
+          },
+        );
+        if (payloadPresent.type !== 'boolean' || payloadPresent.value) return;
+      }
+      await this.store.deleteByPattern(
+        { graph: input.swmMetaGraph, subject: input.taskSubject },
+        {
+          ...input.queryOptions,
+          source: currentHead
+            ? 'agent.finalization.graphScopedSwmCleanup.retireSupersededTask'
+            : 'agent.finalization.graphScopedSwmCleanup.retireAbsentTask',
+        },
+      );
+    });
   }
 
   /** Atomically remove only the still-marked, still-exact active SWM lifecycle. */
   private async clearMarkedFinalizedGraphScopedSwm(input: {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    taskSubject: string;
+    expectedHeadFingerprint: string;
     expectedHead: KnowledgeAssetWorkspaceHead;
     expectedMerkleRoot: Uint8Array;
     privateMerkleRoot?: Uint8Array;
@@ -1790,6 +1888,8 @@ export class FinalizationHandler {
     const {
       contextGraphId,
       scope,
+      taskSubject,
+      expectedHeadFingerprint,
       expectedHead,
       expectedMerkleRoot,
       privateMerkleRoot,
@@ -1797,13 +1897,89 @@ export class FinalizationHandler {
       queryPriority,
       ctx,
     } = input;
+    const graphManager = new GraphManager(this.store);
+    const metaGraph = graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const headSubject = workspaceKnowledgeAssetHeadSubject(scope.ual);
+    const cleanupRootObject = JSON.stringify(
+      ethers.hexlify(expectedMerkleRoot).toLowerCase(),
+    );
+    const cleanupQueryOptions: QueryOptions = {
+      priority: queryPriority ?? 'background',
+      source: 'agent.finalization.graphScopedSwmCleanup',
+    };
+    if (finalizedSwmCleanupHeadFingerprint(expectedHead) !== expectedHeadFingerprint) {
+      this.log.warn(ctx, `Finalization cleanup: preserving ${scope.ual}; cleanup task fingerprint differs`);
+      return 'preserved';
+    }
+
+    // Expensive graph reads and hashing happen before the writer lock. The
+    // write-generation snapshot proves that no local writer changed any graph
+    // in this CG between verification and the final lock-held commit.
+    const writePrefix = `${contextGraphDataUri(contextGraphId)}/`;
+    const preflightWriteGen = this.graphWriteGen?.getWriteGen(writePrefix);
+    if (queryPriority !== 'normal' && hasActiveStorePressure(this.store.getPressureSnapshot?.())) {
+      return 'preserved';
+    }
+    const vmVerification = await this.verifyExactGraphScopedLayer({
+      contextGraphId,
+      scope,
+      layer: MemoryLayer.VerifiableMemory,
+      publicTripleCount: expectedHead.publicTripleCount,
+      privateMerkleRoot,
+      expectedMerkleRoot,
+      expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
+      subGraphName,
+      queryOptions: cleanupQueryOptions,
+    });
+    if (vmVerification.status !== 'verified') {
+      this.log.warn(
+        ctx,
+        `Finalization cleanup: preserving graph-scoped SWM for ${scope.ual}; `
+          + `VM no longer matches the cleanup token (${vmVerification.status})`,
+      );
+      return 'preserved';
+    }
+    if (queryPriority !== 'normal' && hasActiveStorePressure(this.store.getPressureSnapshot?.())) {
+      return 'preserved';
+    }
+    const swmVerification = await this.verifyExactGraphScopedLayer({
+      contextGraphId,
+      scope,
+      layer: MemoryLayer.SharedWorkingMemory,
+      publicTripleCount: expectedHead.publicTripleCount,
+      privateMerkleRoot,
+      expectedMerkleRoot,
+      expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
+      subGraphName,
+      queryOptions: cleanupQueryOptions,
+    });
+    if (
+      swmVerification.status !== 'verified'
+      && !(swmVerification.status === 'count-mismatch' && swmVerification.actualCount === 0)
+    ) {
+      this.log.warn(
+        ctx,
+        `Finalization cleanup: preserving graph-scoped SWM for ${scope.ual}; `
+          + `the current assertion no longer matches the finalized source (${swmVerification.status})`,
+      );
+      return 'preserved';
+    }
+    const verifiedWriteGen = this.graphWriteGen?.getWriteGen(writePrefix);
+    if (
+      preflightWriteGen !== undefined
+      && verifiedWriteGen !== preflightWriteGen
+    ) {
+      return 'preserved';
+    }
+
     const lockKey = swmKaWriteLockKey(contextGraphId, subGraphName, scope.ual);
     const outcome = await withKeyedLocks(this.writeLocks, [lockKey], async () => {
-      const graphManager = new GraphManager(this.store);
-      const cleanupQueryOptions: QueryOptions = {
-        priority: queryPriority ?? 'background',
-        source: 'agent.finalization.graphScopedSwmCleanup',
-      };
+      if (
+        verifiedWriteGen !== undefined
+        && this.graphWriteGen?.getWriteGen(writePrefix) !== verifiedWriteGen
+      ) {
+        return 'preserved' as const;
+      }
       let currentHead: KnowledgeAssetWorkspaceHead | undefined;
       try {
         currentHead = await resolveKnowledgeAssetWorkspaceHead({
@@ -1823,70 +1999,34 @@ export class FinalizationHandler {
         );
         return 'preserved' as const;
       }
-      if (!currentHead) return 'absent' as const;
-      if (!sameKnowledgeAssetWorkspaceHead(currentHead, expectedHead)) {
+      if (!currentHead) {
+        if (swmVerification.status === 'count-mismatch' && swmVerification.actualCount === 0) {
+          await this.store.deleteByPattern(
+            { graph: metaGraph, subject: taskSubject },
+            { ...cleanupQueryOptions, source: 'agent.finalization.graphScopedSwmCleanup.retireAbsentTask' },
+          );
+          return 'absent' as const;
+        }
+        return 'preserved' as const;
+      }
+      if (
+        !sameKnowledgeAssetWorkspaceHead(currentHead, expectedHead)
+        || finalizedSwmCleanupHeadFingerprint(currentHead) !== expectedHeadFingerprint
+      ) {
         this.log.info(
           ctx,
           `Finalization: preserving newer graph-scoped SWM lifecycle for ${scope.ual}`,
         );
         return 'preserved' as const;
       }
-
-      const metaGraph = graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-      const headSubject = workspaceKnowledgeAssetHeadSubject(scope.ual);
-      const cleanupRootObject = JSON.stringify(
-        ethers.hexlify(expectedMerkleRoot).toLowerCase(),
-      );
       const marker = await this.store.query(
         `ASK { GRAPH <${assertSafeIri(metaGraph)}> { `
-          + `<${assertSafeIri(headSubject)}> <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> `
-          + `${cleanupRootObject} } }`,
+          + `<${assertSafeIri(taskSubject)}> <${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> `
+          + `${cleanupRootObject} ; <${FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE}> `
+          + `${JSON.stringify(expectedHeadFingerprint)} } }`,
         cleanupQueryOptions,
       );
       if (marker.type !== 'boolean' || !marker.value) return 'preserved' as const;
-
-      const vmVerification = await this.verifyExactGraphScopedLayer({
-        contextGraphId,
-        scope,
-        layer: MemoryLayer.VerifiableMemory,
-        publicTripleCount: expectedHead.publicTripleCount,
-        privateMerkleRoot,
-        expectedMerkleRoot,
-        expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
-        subGraphName,
-        queryOptions: cleanupQueryOptions,
-      });
-      if (vmVerification.status !== 'verified') {
-        this.log.warn(
-          ctx,
-          `Finalization cleanup: preserving graph-scoped SWM for ${scope.ual}; `
-            + `VM no longer matches the cleanup token (${vmVerification.status})`,
-        );
-        return 'preserved' as const;
-      }
-
-      const swmVerification = await this.verifyExactGraphScopedLayer({
-        contextGraphId,
-        scope,
-        layer: MemoryLayer.SharedWorkingMemory,
-        publicTripleCount: expectedHead.publicTripleCount,
-        privateMerkleRoot,
-        expectedMerkleRoot,
-        expectedPublicQuadsDigest: expectedHead.publicQuadsDigest,
-        subGraphName,
-        queryOptions: cleanupQueryOptions,
-      });
-      if (
-        swmVerification.status !== 'verified'
-        && !(swmVerification.status === 'count-mismatch' && swmVerification.actualCount === 0)
-      ) {
-        this.log.warn(
-          ctx,
-          `Finalization: preserving graph-scoped SWM for ${scope.ual}; `
-            + `the current assertion no longer matches the finalized source (${swmVerification.status})`,
-        );
-        return 'preserved' as const;
-      }
 
       const replaced = await tryReplaceGraphAndSubjectAtomically(
         this.store,
@@ -1903,10 +2043,16 @@ export class FinalizationHandler {
           { code: 'SWM_ATOMIC_CLEANUP_UNSUPPORTED' },
         );
       }
+      // Delete the independent task last. A crash after the data/head commit
+      // leaves only a harmless retry; deleting the task first could lose work.
+      await this.store.deleteByPattern(
+        { graph: metaGraph, subject: taskSubject },
+        { ...cleanupQueryOptions, source: 'agent.finalization.graphScopedSwmCleanup.retireTask' },
+      );
       return swmVerification.status === 'verified' ? 'cleared' as const : 'absent' as const;
     });
 
-    if (outcome === 'cleared' || outcome === 'absent') {
+    if (outcome === 'cleared') {
       this.eventBus?.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
         contextGraphId,
         layers: ['swm'],

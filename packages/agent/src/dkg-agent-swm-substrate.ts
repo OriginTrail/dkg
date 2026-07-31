@@ -1656,6 +1656,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           },
           writeLocks: this.writeLocks,
           publicSnapshotStore: this.publicSnapshotStore,
+          wakeFinalizedSwmCleanup: () => this.wakeFinalizedSwmCleanup(),
           runtime: this.finalizationRuntime,
         },
       );

@@ -117,7 +117,6 @@ function fixture(subGraphName?: string) {
 interface HarnessOverrides {
   storedHead?: () => StoredWorkspaceHeadState;
   contentPresent?: () => boolean;
-  finalized?: () => boolean;
   replaceImpl?: (graphUri: string, quads: Quad[]) => Promise<void>;
   onLockRequested?: () => void;
   lockMap?: Map<string, Promise<void>>;
@@ -185,13 +184,12 @@ function harness(overrides: HarnessOverrides = {}) {
           overrides.onLockRequested?.();
           return withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
         },
+        ensureFinalizedCleanupTask: async () => {
+          events.push('cleanup-task-ensured');
+        },
         isGraphAssetMaterialized: async () => {
           events.push('content-checked');
           return overrides.contentPresent?.() ?? false;
-        },
-        discardFinalizedGraphAsset: async () => {
-          events.push('finalized-checked');
-          return overrides.finalized?.() ?? false;
         },
         readStoredHead: async () => {
           events.push('version-read');
@@ -313,23 +311,19 @@ describe('public SWM snapshot materialization', () => {
     expect(summary.failedPhases).toBe(0);
   });
 
-  it('does not resurrect a snapshot that is already exactly finalized in VM', async () => {
-    // This is the late-sync race from the live blackbox run: cleanup drains
-    // SWM, then an already in-flight peer snapshot arrives. Exact VM proof
-    // makes that descriptor terminal, so neither data nor head metadata may
-    // be restored.
+  it('does not perform finalized cleanup while materializing a late snapshot', async () => {
+    // Eventual convergence deliberately permits a temporary SWM copy. The
+    // snapshot path performs its normal write only; the real store-backed
+    // metadata replacement re-arms the durable task for the independent GC.
     const h = harness({
-      finalized: () => true,
       storedHead: () => ({ version: '1', needsRepair: false }),
       contentPresent: () => false,
     });
     const summary = await h.run();
-    expect(h.events).toContain('finalized-checked');
-    expect(h.events).not.toContain('version-read');
-    expect(h.events).not.toContain('content-checked');
-    expect(h.events).not.toContain('replaced');
-    expect(h.events).not.toContain('head-swapped');
-    expect(h.inserted.every((batch) => batch.every((q) => q.graph !== WS_META))).toBe(true);
+    expect(h.events).toContain('version-read');
+    expect(h.events).toContain('content-checked');
+    expect(h.events).toContain('replaced');
+    expect(h.events).toContain('head-swapped');
     expect(summary.failedPhases).toBe(0);
   });
 

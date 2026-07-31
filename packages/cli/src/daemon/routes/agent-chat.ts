@@ -1174,6 +1174,15 @@ export function buildSloPayload(agent: {
     deadlineExpired: number;
     pending: number;
   };
+  getFinalizedSwmCleanupStats?: () => {
+    backlogDepth: number;
+    oldestMarkerAgeMs: number | null;
+    pressureSkips: number;
+    deletedItems: number;
+    runs: number;
+    lastRunAt: string | null;
+    lastError: string | null;
+  };
 }): {
   protocols: Record<string, unknown>;
   gossip: {
@@ -1220,11 +1229,21 @@ export function buildSloPayload(agent: {
       deadlineExpired: number;
       pending: number;
     };
+    finalizedCleanup?: {
+      backlogDepth: number;
+      oldestMarkerAgeMs: number | null;
+      pressureSkips: number;
+      deletedItems: number;
+      runs: number;
+      lastRunAt: string | null;
+      lastError: string | null;
+    };
   };
 } {
   const swmHandler = agent.getSwmHandlerStats();
   const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
   const shareAckQuorum = agent.getSwmAckQuorumStats?.();
+  const finalizedCleanup = agent.getFinalizedSwmCleanupStats?.();
   return {
     protocols: agent.getMessengerSloStats(),
     gossip: agent.getSwmGossipStats(),
@@ -1232,6 +1251,7 @@ export function buildSloPayload(agent: {
       ...swmHandler,
       ...(substrateFanout !== undefined ? { substrateFanout } : {}),
       ...(shareAckQuorum !== undefined ? { shareAckQuorum } : {}),
+      ...(finalizedCleanup !== undefined ? { finalizedCleanup } : {}),
     },
   };
 }

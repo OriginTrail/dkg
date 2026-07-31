@@ -166,11 +166,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           };
         });
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
-        const cleanupExpiredSharedMemory = recorder(async () => {
-          lifecycleOrder.push('cleanup');
-          return 0;
+        const wakeFinalizedSwmCleanup = recorder(() => {
+          lifecycleOrder.push('cleanup-wake');
         });
-        (agent as any).cleanupExpiredSharedMemory = cleanupExpiredSharedMemory;
+        (agent as any).wakeFinalizedSwmCleanup = wakeFinalizedSwmCleanup;
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
@@ -198,15 +197,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
-        expect(cleanupExpiredSharedMemory.calls).toEqual([[
-          {
-            finalizedOnly: true,
-            contextGraphIds: ['runtime-contextGraph'],
-            finalizedCleanupBudget: 64,
-            queueBehindActiveWork: true,
-          },
-        ]]);
-        expect(lifecycleOrder).toEqual(['durable', 'shared-memory', 'cleanup']);
+        expect(wakeFinalizedSwmCleanup.calls).toEqual([[]]);
+        expect(lifecycleOrder).toEqual(['durable', 'shared-memory', 'cleanup-wake']);
         expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')).toMatchObject({
           synced: true,
           sharedMemorySynced: true,

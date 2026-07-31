@@ -31,8 +31,6 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
-  computeFlatKCRootV10,
-  generateGraphKnowledgeAssetMetadata,
   generateKnowledgeAssetShareMetadata,
   resolveKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
@@ -43,7 +41,11 @@ import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { FINALIZED_SWM_CLEANUP_ROOT_PREDICATE } from '../src/finalization-handler.js';
+import {
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+} from '../src/finalization-handler.js';
 
 const CG = 'ws00-materializer-real-store';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
@@ -114,38 +116,6 @@ function descriptorFor(fixture: typeof v1) {
   return descriptors[0]!;
 }
 
-function confirmedVmFor(fixture: typeof v1) {
-  const scope = createGraphKnowledgeAssetScope(UAL, fixture.version);
-  const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
-  const merkleRoot = computeFlatKCRootV10(fixture.payload, []);
-  const agentAddress = BigInt('0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
-  const batchId = (agentAddress << 96n) | 9n;
-  const meta = generateGraphKnowledgeAssetMetadata({
-    contextGraphId: CG,
-    ual: UAL,
-    merkleRoot,
-    publisherPeerId: 'peer-source',
-    accessPolicy: 'public',
-    allowedPeers: [],
-    timestamp: new Date(0),
-    assertionVersion: fixture.version,
-    authorAddress: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-    publicTripleCount: fixture.payload.length,
-    privateTripleCount: 0,
-    assertionGraph,
-  }, {
-    status: 'confirmed',
-    confirmation: {
-      kind: 'finalized-materialization',
-      provenance: {
-        batchId,
-        materializedVersion: { blockNumber: 123, txIndex: 0 },
-      },
-    },
-  });
-  return { assertionGraph, merkleRoot, meta };
-}
-
 function materializerFor(store: TripleStore) {
   let invalidations = 0;
   const materializer = createSharedMemorySnapshotMaterializer({
@@ -167,6 +137,19 @@ async function distinctObjects(store: TripleStore, graph: string, subject: strin
   );
   if (result.type !== 'bindings') throw new Error(`unexpected ${result.type}`);
   return result.bindings.map((row) => String(row['o'])).sort();
+}
+
+async function distinctSubjects(
+  store: TripleStore,
+  graph: string,
+  predicate: string,
+  object: string,
+): Promise<string[]> {
+  const result = await store.query(
+    `SELECT DISTINCT ?s WHERE { GRAPH <${graph}> { ?s <${predicate}> <${object}> } }`,
+  );
+  if (result.type !== 'bindings') throw new Error(`unexpected ${result.type}`);
+  return result.bindings.map((row) => String(row['s'])).sort();
 }
 
 describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', () => {
@@ -283,38 +266,69 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(await distinctObjects(store, WS_META, foreignOp, `${DKG}shareOperationId`)).toEqual(['"foreign-op"']);
     });
 
-    it('preserves the local finalized-cleanup token when synchronized metadata is the exact same lifecycle', async () => {
+    it('preserves the operation tombstone and re-arms GC for the exact lifecycle', async () => {
       const store = new OxigraphStore();
       await store.insert([
         ...v1.meta,
-        {
-          subject: v1.headSubject,
-          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
-          object: FINALIZED_ROOT,
-          graph: WS_META,
-        },
         {
           subject: v1.operationSubject,
           predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
           object: FINALIZED_ROOT,
           graph: WS_META,
         },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+          object: '"2026-07-31T10:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          graph: WS_META,
+        },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+          object: '"2026-07-31T11:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          graph: WS_META,
+        },
       ]);
       const { materializer } = materializerFor(store);
 
-      await materializer.withKaWriteLock(CG, undefined, UAL, () =>
-        materializer.replaceHeadMetadata(CG, descriptorFor(v1)));
+      await materializer.withKaWriteLock(CG, undefined, UAL, async () => {
+        const descriptor = descriptorFor(v1);
+        await materializer.ensureFinalizedCleanupTask(CG, descriptor);
+        await materializer.replaceHeadMetadata(CG, descriptor);
+      });
 
       expect(await distinctObjects(
         store,
         WS_META,
         v1.headSubject,
         FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
       )).toEqual([FINALIZED_ROOT]);
       expect(await distinctObjects(
         store,
         WS_META,
         v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+      )).toEqual([
+        '"2026-07-31T10:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+      ]);
+      const tasks = await distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      );
+      expect(tasks).toHaveLength(1);
+      expect(await distinctObjects(store, WS_META, tasks[0]!, `${DKG}kaUal`)).toEqual([UAL]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        tasks[0]!,
         FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
       )).toEqual([FINALIZED_ROOT]);
     });
@@ -360,71 +374,6 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
       )).toEqual([]);
     });
-  });
-
-  it('atomically discards an exact SWM duplicate already confirmed in VM', async () => {
-    const store = new OxigraphStore();
-    const vm = confirmedVmFor(v1);
-    await store.insert([
-      ...v1.meta,
-      ...inGraph(v1.payload, v1.assertionGraph),
-      ...inGraph(v1.payload, vm.assertionGraph),
-      ...vm.meta,
-    ]);
-    const { materializer } = materializerFor(store);
-    const descriptor = descriptorFor(v1);
-
-    const finalized = await materializer.withKaWriteLock(CG, undefined, UAL, () =>
-      materializer.discardFinalizedGraphAsset(CG, descriptor));
-
-    expect(finalized).toBe(true);
-    expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(false);
-    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual([]);
-    // Immutable operation metadata remains available for receipt/reorg
-    // recovery; only the active SWM graph and head are drained.
-    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-v1"']);
-  });
-
-  it('rejects a finalized inbound descriptor without deleting a newer SWM lifecycle', async () => {
-    const store = new OxigraphStore();
-    const vm = confirmedVmFor(v1);
-    await store.insert([
-      ...v2.meta,
-      ...inGraph(v2.payload, v2.assertionGraph),
-      ...inGraph(v1.payload, vm.assertionGraph),
-      ...vm.meta,
-    ]);
-    const { materializer } = materializerFor(store);
-
-    const finalized = await materializer.withKaWriteLock(CG, undefined, UAL, () =>
-      materializer.discardFinalizedGraphAsset(CG, descriptorFor(v1)));
-
-    expect(finalized).toBe(true);
-    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v2))).toBe(true);
-    expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-v2"']);
-  });
-
-  it('does not treat confirmed metadata as proof when the VM graph content differs', async () => {
-    const store = new OxigraphStore();
-    const vm = confirmedVmFor(v1);
-    await store.insert([
-      ...v1.meta,
-      ...inGraph(v1.payload, v1.assertionGraph),
-      ...inGraph(v2.payload, vm.assertionGraph),
-      ...vm.meta,
-    ]);
-    const { materializer } = materializerFor(store);
-
-    const finalized = await materializer.withKaWriteLock(CG, undefined, UAL, () =>
-      materializer.discardFinalizedGraphAsset(CG, descriptorFor(v1)));
-
-    expect(finalized).toBe(false);
-    expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
-    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-      .toEqual(['"op-v1"']);
   });
 
   it('replaceGraph writes atomically and invalidates the list cache', async () => {
@@ -547,33 +496,42 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(h.replaceCalls()).toBe(1);
     });
 
-    it('does not restore an exact finalized assertion after cleanup or a late peer sync', async () => {
+    it('lets a late snapshot restore temporarily and re-arms the independent GC task', async () => {
       const store = new OxigraphStore();
-      const vm = confirmedVmFor(v1);
       await store.insert([
         ...v1.meta,
-        ...inGraph(v1.payload, v1.assertionGraph),
-        ...inGraph(v1.payload, vm.assertionGraph),
-        ...vm.meta,
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
       ]);
       const h = realHarness(store, v1);
 
       const first = await h.run();
       expect(first.failedPhases).toBe(0);
-      expect(h.replaceCalls()).toBe(0);
+      expect(h.replaceCalls()).toBe(1);
       const { materializer } = materializerFor(store);
-      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
-      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-        .toEqual([]);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+      expect(await distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      )).toHaveLength(1);
 
-      // A second identical peer snapshot is still refused: confirmed VM is a
-      // durable anti-resurrection proof, not a one-shot cleanup marker.
+      // A repeated snapshot is a no-op because content now matches; it does not
+      // create duplicate tasks or add any cleanup work to the sync path.
       const again = await h.run();
       expect(again.failedPhases).toBe(0);
-      expect(h.replaceCalls()).toBe(0);
-      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
-      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
-        .toEqual([]);
+      expect(h.replaceCalls()).toBe(1);
+      expect(await distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      )).toHaveLength(1);
     });
   });
 });

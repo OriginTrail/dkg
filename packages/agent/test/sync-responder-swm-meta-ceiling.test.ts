@@ -657,7 +657,7 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
       ...graphScopedHeadQuads(cgId, metaGraph, markedUal, 'marked', iso),
       {
         graph: metaGraph,
-        subject: markedHead,
+        subject: markedOp,
         predicate: `${DKG_NS}finalizedSwmCleanupRoot`,
         object: `"0x${'ab'.repeat(32)}"`,
       },
@@ -674,8 +674,8 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
         normalized.includes('ORDER BY ?g ?s ?p ?o') &&
         /OFFSET \d+/.test(normalized)
       ) {
-        // The legacy paged query must never carry the TTL join. The only
-        // filters allowed here exclude finalized cleanup-marked lifecycles.
+        // The legacy paged query must never carry the TTL join. Its only extra
+        // filters strip local GC metadata, not the active SWM lifecycle.
         expect(normalized).not.toContain('publishedAt');
         expect(normalized).toContain('finalizedSwmCleanupRoot');
         legacyPagedQueries += 1;
@@ -696,9 +696,10 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
       4,
     );
     const joined = [...lines].join('\n');
-    expect(lines.size).toBe(26);
-    expect(joined).not.toContain(markedHead);
-    expect(joined).not.toContain(markedOp);
+    expect(lines.size).toBe(37);
+    expect(joined).toContain(markedHead);
+    expect(joined).toContain(markedOp);
+    expect(joined).not.toContain('finalizedSwmCleanupRoot');
     expect(joined).toContain(unmarkedHead);
     expect(joined).toContain(unmarkedOp);
     expect(legacyPagedQueries).toBeGreaterThan(0);

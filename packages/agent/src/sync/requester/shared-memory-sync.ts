@@ -317,22 +317,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // re-checks below stop the other failure the lock alone cannot:
                 // replacing newer content with an older verified snapshot.
                 //
-                // (0) Finalized anti-resurrection. The deferred cleanup may
-                // have drained this exact assertion while another peer's SWM
-                // sync was still in flight. VM is the authoritative proof:
-                // once this descriptor is exactly confirmed there, never
-                // restore it to SWM. The materializer also removes an exact
-                // active duplicate atomically, while preserving a newer or
-                // otherwise different SWM lifecycle.
-                if (await snapshotMaterializer.discardFinalizedGraphAsset(pid, descriptor)) {
-                  for (const quad of descriptor.metadataQuads) {
-                    replacedGraphScopedMetaKeys.add(quadKey(quad));
-                  }
-                  materializedKeys.add(graphKey);
-                  logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} is already `
-                    + 'exactly confirmed in VM; refusing SWM restoration');
-                  return;
-                }
+                // Re-arm only constant-size durable maintenance metadata when
+                // an earlier finalized cleanup left an operation tombstone.
+                // The independent GC owns all discovery, graph verification
+                // and deletion; sync neither performs nor awaits that work.
+                await snapshotMaterializer.ensureFinalizedCleanupTask(pid, descriptor);
                 //
                 // (a) Version ordering. A stored head newer than the descriptor
                 // means gossip advanced this KA past our snapshot; replacing

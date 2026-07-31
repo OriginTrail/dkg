@@ -54,6 +54,17 @@ const DKG_KA_UAL = `${DKG}kaUal`;
 const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
 const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
 const DKG_FINALIZED_SWM_CLEANUP_ROOT = `${DKG}finalizedSwmCleanupRoot`;
+const DKG_FINALIZED_SWM_CLEANUP_MARKED_AT = `${DKG}finalizedSwmCleanupMarkedAt`;
+const DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT = `${DKG}finalizedSwmCleanupHeadFingerprint`;
+const DKG_FINALIZED_SWM_CLEANUP_TASK = `${DKG}FinalizedSwmCleanupTask`;
+const localFinalizedSwmCleanupRowFilter = (subject: string, predicate: string): string => `
+  FILTER(${predicate} NOT IN (
+    <${DKG_FINALIZED_SWM_CLEANUP_ROOT}>,
+    <${DKG_FINALIZED_SWM_CLEANUP_MARKED_AT}>,
+    <${DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT}>
+  ))
+  FILTER NOT EXISTS { ${subject} <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_FINALIZED_SWM_CLEANUP_TASK}> }
+`;
 const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
@@ -919,14 +930,6 @@ export async function readSwmDataPage(params: {
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
-  const swmMetaGraphs = dataGraphs
-    .map((graph) => `${graph}_meta`)
-    .filter((graph) => graphSet.has(graph));
-  const finalizedAssertionGraphs = readFinalizedSwmAssertionGraphs(
-    params.store,
-    swmMetaGraphs,
-    params.signal,
-  );
   const candidateGraphsFor = (graph: string) => params.graphList
     .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
     .sort(compareCodePoint);
@@ -941,10 +944,7 @@ export async function readSwmDataPage(params: {
     : undefined;
 
   if (!params.cutoffIso) {
-    const blockedGraphs = await finalizedAssertionGraphs;
-    const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor))
-      .filter((graph) => !blockedGraphs.has(graph))
-      .sort(compareCodePoint);
+    const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor)).sort(compareCodePoint);
     return readPagedRowsAcrossGraphs(
       params.store,
       candidateGraphs,
@@ -958,13 +958,12 @@ export async function readSwmDataPage(params: {
   }
 
   const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) => {
-    const loadPlan = async () => buildFreshSwmDataGraphPlan(
+    const loadPlan = () => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
       params.cutoffIso!,
-      await finalizedAssertionGraphs,
       signal,
     );
     const plan = params.freshGraphPlanMemo && params.rowListCacheKey
@@ -992,33 +991,6 @@ export async function readSwmDataPage(params: {
     params.limit,
     params.signal,
   );
-}
-
-/**
- * Read the assertion graphs whose active graph-scoped SWM lifecycle has been
- * finalized and durably marked for deferred cleanup. The marker itself is
- * filtered from the meta phase; this companion filter keeps the corresponding
- * payload graph out of both the cutoff-less exact plan and TTL data plans.
- */
-async function readFinalizedSwmAssertionGraphs(
-  store: TripleStore,
-  swmMetaGraphs: readonly string[],
-  signal?: AbortSignal,
-): Promise<Set<string>> {
-  const values = graphValues(swmMetaGraphs);
-  if (!values) return new Set();
-  // sparql-scan-allow: R2 -- ?metaGraph is bound by the finite admitted SWM meta graph family
-  const result = await store.query(`
-    SELECT DISTINCT ?assertionGraph WHERE {
-      VALUES ?metaGraph { ${values} }
-      GRAPH ?metaGraph {
-        ?marked <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
-          <${DKG_ASSERTION_GRAPH}> ?assertionGraph .
-      }
-    }
-  `, syncResponderStoreOptions(signal, 'sync.responder.readFinalizedSwmAssertionGraphs'));
-  if (result.type !== 'bindings') return new Set();
-  return new Set(result.bindings.map((row) => row['assertionGraph']).filter(Boolean));
 }
 
 export async function readDurableMetaPage(params: {
@@ -2695,7 +2667,7 @@ async function readBoundedSwmMetaSnapshot(
   return filterSwmMetaSnapshotRows(rows, null);
 }
 
-export function filterSwmMetaSnapshotRows(
+function filterSwmMetaSnapshotRows(
   rows: readonly SyncRow[],
   cutoffIso: string | null,
 ): SyncRow[] {
@@ -2731,19 +2703,22 @@ export function filterSwmMetaSnapshotRows(
     }
     return keys;
   };
-  const blockedSubjects = new Set<string>();
-  const blockedTupleKeys = new Set<string>();
+  // Finalized-SWM markers/tasks are local maintenance state. Strip only those
+  // rows; the active SWM lifecycle and its payload remain syncable until the
+  // independent idle GC safely removes them.
+  const cleanupTaskSubjects = new Set<string>();
   for (const [subject] of bySubject) {
-    if (objects(subject, DKG_FINALIZED_SWM_CLEANUP_ROOT).length === 0) continue;
-    blockedSubjects.add(subject);
-    for (const key of tupleKeys(subject)) blockedTupleKeys.add(key);
-  }
-  for (const [subject] of bySubject) {
-    if (tupleKeys(subject).some((key) => blockedTupleKeys.has(key))) {
-      blockedSubjects.add(subject);
+    if (objects(subject, DKG_ONTOLOGY.RDF_TYPE).includes(DKG_FINALIZED_SWM_CLEANUP_TASK)) {
+      cleanupTaskSubjects.add(subject);
     }
   }
-  const syncableRows = rows.filter((row) => !blockedSubjects.has(row.s));
+  const localCleanupPredicates = new Set([
+    DKG_FINALIZED_SWM_CLEANUP_ROOT,
+    DKG_FINALIZED_SWM_CLEANUP_MARKED_AT,
+    DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT,
+  ]);
+  const syncableRows = rows.filter((row) =>
+    !cleanupTaskSubjects.has(row.s) && !localCleanupPredicates.has(row.p));
   if (cutoffIso == null) return syncableRows.sort(compareRows);
   if (!Number.isFinite(cutoffMs)) return [];
 
@@ -2767,8 +2742,9 @@ export function filterSwmMetaSnapshotRows(
 
 /**
  * Legacy TTL-unfiltered store-paged compatibility path (cutoffIso == null
- * sessions only). Finalized cleanup-marked lifecycles are still excluded from
- * synchronization. The former TTL variant of this query — DISTINCT + a six-predicate
+ * sessions only). Local finalized-cleanup metadata is filtered while the SWM
+ * lifecycle itself remains syncable until idle GC removes it. The former TTL
+ * variant of this query — DISTINCT + a six-predicate
  * UNION join + global `ORDER BY ?g ?s ?p ?o` re-evaluated with a growing
  * OFFSET per page over a mutable graph family — was the #1847 store-melter and
  * is deliberately DELETED, not gated: TTL-filtered sessions page from the
@@ -2787,22 +2763,13 @@ async function readSwmMetaRowsPage(
   const swmMetaValues = graphValues(swmMetaGraphs);
   if (!swmMetaValues) return [];
   // sparql-scan-allow: R2 -- ?g is bound by a finite VALUES list of pre-admitted SWM meta graph IRIs
-  // sparql-scan-allow: R3 -- legacy cutoff-less compatibility lane with only finalized-lifecycle exclusion; TTL sessions page from the session plan instead (#1847)
+  // sparql-scan-allow: R3 -- legacy cutoff-less compatibility lane; TTL sessions page from the session plan instead (#1847)
   const res = await store.query(`
     SELECT DISTINCT ?g ?s ?p ?o WHERE {
       VALUES ?g { ${swmMetaValues} }
       GRAPH ?g {
         ?s ?p ?o .
-        FILTER NOT EXISTS { ?s <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot }
-        FILTER NOT EXISTS {
-          ?blockedHead <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
-            <${DKG_KA_UAL}> ?blockedUal ;
-            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
-            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
-          ?s <${DKG_KA_UAL}> ?blockedUal ;
-            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
-            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
-        }
+        ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
       }
     }
     ORDER BY ?g ?s ?p ?o
@@ -2901,15 +2868,7 @@ async function readFreshSwmMetaSubjects(
     SELECT DISTINCT ?s WHERE {
       GRAPH <${assertSafeIri(graph)}> {
         ?s <${DKG_PUBLISHED_AT}> ?ts .
-        FILTER NOT EXISTS {
-          ?blockedHead <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
-            <${DKG_KA_UAL}> ?blockedUal ;
-            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
-            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
-          ?s <${DKG_KA_UAL}> ?blockedUal ;
-            <${DKG_ASSERTION_VERSION}> ?blockedVersion ;
-            <${DKG_SHARE_OPERATION_ID}> ?blockedShareId .
-        }
+        FILTER NOT EXISTS { ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_FINALIZED_SWM_CLEANUP_TASK}> }
         ${cutoffFilter}
       }
     }
@@ -2922,13 +2881,7 @@ async function readFreshSwmMetaSubjects(
            <${DKG_KA_UAL}> ?headUal ;
            <${DKG_ASSERTION_VERSION}> ?headVersion ;
            <${DKG_SHARE_OPERATION_ID}> ?shareId .
-        FILTER NOT EXISTS { ?s <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot }
-        FILTER NOT EXISTS {
-          ?blockedHead <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
-            <${DKG_KA_UAL}> ?headUal ;
-            <${DKG_ASSERTION_VERSION}> ?headVersion ;
-            <${DKG_SHARE_OPERATION_ID}> ?shareId .
-        }
+        FILTER NOT EXISTS { ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_FINALIZED_SWM_CLEANUP_TASK}> }
         ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
            <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
            <${DKG_KA_UAL}> ?headUal ;
@@ -2961,7 +2914,10 @@ async function countFreshSwmMetaSubjectRows(
       res = await store.query(`
         SELECT ?s (COUNT(*) AS ?count) WHERE {
           VALUES ?s { ${subjectValues(chunk)} }
-          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+          GRAPH <${assertSafeIri(graph)}> {
+            ?s ?p ?o .
+            ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
+          }
         }
         GROUP BY ?s
       `, {
@@ -3108,7 +3064,10 @@ async function readFreshSwmMetaSubjectWindowRows(
     const res = await store.query(`
       SELECT ?s ?p ?o WHERE {
         VALUES ?s { ${subjectValues(chunk.map((entry) => entry.subject))} }
-        GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+        GRAPH <${assertSafeIri(graph)}> {
+          ?s ?p ?o .
+          ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
+        }
       }
     `, {
       ...syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmMetaSubjectRows'),
@@ -3383,7 +3342,6 @@ async function buildFreshSwmDataGraphPlan(
   graphSet: ReadonlySet<string>,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
-  finalizedAssertionGraphs: ReadonlySet<string>,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
   const cutoffFilter =
@@ -3398,9 +3356,7 @@ async function buildFreshSwmDataGraphPlan(
   }
   const uniqueCandidates = [...new Map(
     candidates.map((candidate) => [candidate.graph, candidate]),
-  ).values()]
-    .filter((candidate) => !finalizedAssertionGraphs.has(candidate.graph))
-    .sort((a, b) => compareCodePoint(a.graph, b.graph));
+  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
   if (uniqueCandidates.length === 0) return { entries: [], totalRows: 0 };
 
   const rootsByGraph = new Map<string, Set<string>>();
