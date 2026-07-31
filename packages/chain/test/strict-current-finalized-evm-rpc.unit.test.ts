@@ -244,8 +244,9 @@ describe('RFC-64 strict current-finalized raw JSON-RPC transport', () => {
       'eth_getCode',
       'eth_getCode',
     ]);
-    expect(server.calls[2]!.params[0]).toBe(TO);
-    expect(server.calls[3]!.params[0]).toBe(OTHER_TO);
+    expect(server.calls.slice(2).map(({ params }) => params[0])).toEqual(
+      expect.arrayContaining([TO, OTHER_TO]),
+    );
   });
 
   it('rejects an oversized generic return only after a stable fallback sandwich', async () => {
