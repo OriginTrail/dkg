@@ -69,6 +69,8 @@ const LOGSP = (w, h, title, expr) => ({ w, h, def: { datasource: LOKI, type: 'lo
 const TEXT = (content) => ({ w: 24, h: 3, def: { type: 'text', title: '', options: { mode: 'markdown', content }, transparent: true } });
 const ROW = (title) => ({ w: 24, h: 1, def: { type: 'row', title, collapsed: false } });
 
+const SYNC_TERMINAL = ' | dkg_event_code = `sync.plane.terminal`';
+
 // Loki query building blocks come from the shared contract (lib/queries.mjs)
 // — the same module alerts.mjs composes from, so the stream selector,
 // severity filter shape and rpc_usage pipeline cannot drift between the
@@ -92,6 +94,24 @@ const buildFleetLogsDashboard = () => ({
     ],
     [ TS(24, 8, LOKI, 'Errors per node', [{ expr: `sum by (service_instance_id) (count_over_time(${FE}${severityIs('ERROR')} [$__auto]))`, legend: '{{service_instance_id}}' }]) ],
     [ LOGSP(24, 10, 'Recent errors (all nodes)', `${FE}${severityIs('ERROR')}`) ],
+    [ ROW('Verified VM / SWM sync') ],
+    [
+      TS(12, 8, LOKI, 'Verified sync success rate (terminal logs)', [
+        {
+          expr: `100 * sum(count_over_time(${FE}${SYNC_TERMINAL} | dkg_sync_plane = \`vm\` | dkg_outcome = \`success\` [$__auto])) / sum(count_over_time(${FE}${SYNC_TERMINAL} | dkg_sync_plane = \`vm\` [$__auto]))`,
+          legend: 'VM',
+        },
+        {
+          expr: `100 * sum(count_over_time(${FE}${SYNC_TERMINAL} | dkg_sync_plane = \`swm\` | dkg_outcome = \`success\` [$__auto])) / sum(count_over_time(${FE}${SYNC_TERMINAL} | dkg_sync_plane = \`swm\` [$__auto]))`,
+          legend: 'SWM',
+        },
+      ], 'percent'),
+      TS(12, 8, LOKI, 'Verified sync terminal outcomes (logs)', [{
+        expr: `sum by (dkg_sync_plane, dkg_outcome) (count_over_time(${FE}${SYNC_TERMINAL} [$__auto]))`,
+        legend: '{{dkg_sync_plane}} {{dkg_outcome}}',
+      }], 'short'),
+    ],
+    [ LOGSP(24, 10, 'Recent verified sync failures', `${FE}${SYNC_TERMINAL} | dkg_outcome != \`success\``) ],
     [
       TS(12, 9, LOKI, 'RPC requests per node', [{ expr: `sum by (service_instance_id) (sum_over_time(${FE}${RPCPIPE}[$__auto]))`, legend: '{{service_instance_id}}' }]),
       TS(12, 9, LOKI, 'RPC requests by method (fleet)', [{ expr: `sum by (method) (sum_over_time(${FE}${RPCPIPE}[$__auto]))`, legend: '{{method}}' }]),
@@ -131,6 +151,8 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
         options: { reduceOptions: { calcs: ['sum'], fields: '', values: false } },
         targets: [{ datasource: LOKI, refId: 'A', expr: `sum(sum_over_time(${NB}${RPCPIPE}[$__auto]))` }] } },
     ],
+    [ ROW('Verified VM / SWM sync') ],
+    [ LOGSP(24, 10, 'Sync terminal failures — $node', `${NB}${SYNC_TERMINAL} | dkg_outcome != \`success\``) ],
   ]),
 });
 
@@ -185,6 +207,31 @@ const buildMetricsDashboard = (nodeProfile, NODE_IDENTITY) => {
         { expr: `sum by (outcome) (rate(dkg_protocol_router_send_total{${SEL}}${R}))`, legend: 'send: {{outcome}}' },
         { expr: `histogram_quantile(0.95, sum by (le, protocol_id) (rate({__name__=~"dkg_protocol_router_send_duration(_milliseconds)?_bucket", ${SEL}}${R})))`, legend: 'p95 {{protocol_id}}' },
       ]),
+    ],
+    [ ROW('Verified VM / SWM sync lifecycle') ],
+    [
+      TS(8, 8, VM, 'Verified sync success rate', [{
+        expr: `100 * sum by (plane) (rate(dkg_sync_plane_terminal_total{outcome="success", ${SEL}}${R})) / sum by (plane) (rate(dkg_sync_plane_terminal_total{${SEL}}${R}))`,
+        legend: '{{plane}}',
+      }], 'percent'),
+      TS(8, 8, VM, 'Sync attempts: started vs terminal', [
+        { expr: `sum by (plane) (rate(dkg_sync_plane_started_total{${SEL}}${R}))`, legend: '{{plane}} started' },
+        { expr: `sum by (plane) (rate(dkg_sync_plane_terminal_total{${SEL}}${R}))`, legend: '{{plane}} terminal' },
+      ], 'ops'),
+      TS(8, 8, VM, 'Active logical sync planes', [{
+        expr: `sum by (plane) (dkg_sync_plane_active{${SEL}})`,
+        legend: '{{plane}}',
+      }], 'short'),
+    ],
+    [
+      TS(12, 8, VM, 'Sync terminal outcomes by plane', [{
+        expr: `sum by (plane, outcome) (rate(dkg_sync_plane_terminal_total{${SEL}}${R}))`,
+        legend: '{{plane}} {{outcome}}',
+      }], 'ops'),
+      TS(12, 8, VM, 'Sync duration p50/p95 by plane', [
+        { expr: `histogram_quantile(0.95, sum by (le, plane) (rate({__name__=~"dkg_sync_plane_duration(_milliseconds)?_bucket", outcome="success", ${SEL}}${R})))`, legend: '{{plane}} p95 success' },
+        { expr: `histogram_quantile(0.50, sum by (le, plane) (rate({__name__=~"dkg_sync_plane_duration(_milliseconds)?_bucket", outcome="success", ${SEL}}${R})))`, legend: '{{plane}} p50 success' },
+      ], 'ms'),
     ],
     [ ROW('Pipeline health (collector — live now)') ],
     [

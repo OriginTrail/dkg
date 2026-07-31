@@ -227,6 +227,10 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     m.ackPeerTotal.add(1, { result: 'decline', decline_code: 'NO_DATA_IN_SWM' });
     m.ackQuorumTotal.add(1, { outcome: 'timeout', chain_id: 'base:8453' });
     m.syncRequestTotal.add(1, { outcome: 'ok', protocol_id: '/dkg/10.0.2/sync' });
+    m.syncPlaneStartedTotal.add(1, { plane: 'vm', trigger: 'subscription' });
+    m.syncPlaneTerminalTotal.add(1, { plane: 'vm', trigger: 'subscription', outcome: 'success' });
+    m.syncPlaneDurationMs.record(15_000, { plane: 'vm', trigger: 'subscription', outcome: 'success' });
+    m.syncPlaneActive.add(1, { plane: 'vm', trigger: 'subscription' });
     m.protocolSendTotal.add(1, { outcome: 'ok', protocol_id: '/dkg/10.0.2/sync' });
     m.protocolSendDuration.record(5, { protocol_id: '/dkg/10.0.2/sync' });
     m.processHeapUsedBytes.record(1024, { phase: 'durable_data', boundary: 'requester_phase_start' });
@@ -256,7 +260,7 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     const ALLOWED = new Set([
       'outcome', 'source', 'chain_id', 'rpc_method', 'retryable', 'result',
       'decline_code', 'protocol_id', 'method', 'module', 'role', 'reason', 'error_type',
-      'phase', 'boundary',
+      'phase', 'boundary', 'plane', 'trigger',
     ]);
     expect([...keys].filter((k) => !ALLOWED.has(k))).toEqual([]);
     // high-cardinality keys must never be metric labels

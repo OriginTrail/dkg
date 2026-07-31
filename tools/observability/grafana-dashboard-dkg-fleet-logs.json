@@ -182,12 +182,124 @@
       ]
     },
     {
+      "title": "Verified VM / SWM sync",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Verified sync success rate (terminal logs)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "100 * sum(count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} | dkg_event_code = `sync.plane.terminal` | dkg_sync_plane = `vm` | dkg_outcome = `success` [$__auto])) / sum(count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} | dkg_event_code = `sync.plane.terminal` | dkg_sync_plane = `vm` [$__auto]))",
+          "legendFormat": "VM"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "B",
+          "expr": "100 * sum(count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} | dkg_event_code = `sync.plane.terminal` | dkg_sync_plane = `swm` | dkg_outcome = `success` [$__auto])) / sum(count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} | dkg_event_code = `sync.plane.terminal` | dkg_sync_plane = `swm` [$__auto]))",
+          "legendFormat": "SWM"
+        }
+      ]
+    },
+    {
+      "title": "Verified sync terminal outcomes (logs)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "sum by (dkg_sync_plane, dkg_outcome) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} | dkg_event_code = `sync.plane.terminal` [$__auto]))",
+          "legendFormat": "{{dkg_sync_plane}} {{dkg_outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Recent verified sync failures",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "logs",
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "{service_name=\"dkg-node\", deployment_environment=~\"${env:regex}\"} | dkg_event_code = `sync.plane.terminal` | dkg_outcome != `success`"
+        }
+      ]
+    },
+    {
       "title": "RPC requests per node",
       "gridPos": {
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 46
       },
       "datasource": {
         "type": "loki",
@@ -218,7 +330,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 46
       },
       "datasource": {
         "type": "loki",
@@ -249,7 +361,7 @@
         "h": 7,
         "w": 6,
         "x": 0,
-        "y": 36
+        "y": 55
       },
       "datasource": {
         "type": "loki",
@@ -288,7 +400,7 @@
         "h": 7,
         "w": 18,
         "x": 6,
-        "y": 36
+        "y": 55
       },
       "datasource": {
         "type": "loki",

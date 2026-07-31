@@ -204,6 +204,47 @@
           "expr": "sum(sum_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [$__auto]))"
         }
       ]
+    },
+    {
+      "title": "Verified VM / SWM sync",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Sync terminal failures — $node",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "logs",
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "{service_name=\"dkg-node\", service_instance_id=\"$node\"} | dkg_event_code = `sync.plane.terminal` | dkg_outcome != `success`"
+        }
+      ]
     }
   ]
 }

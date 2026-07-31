@@ -1,5 +1,10 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import {
+  DKGEvent,
+  SYSTEM_CONTEXT_GRAPHS,
+  classifySyncPlaneOutcome,
+  type SyncPlaneOutcome,
+} from '@origintrail-official/dkg-core';
 import type {
   ContextGraphReadinessProvenance,
   DashboardDB,
@@ -200,6 +205,56 @@ function catchupPlaneReadyThisRun(input: {
     : input.result.sharedMemorySynced > 0;
   return catchupPlaneCompletedWithoutFailure(diagnostics) &&
     (dataProgress || (!input.isPrivate && (diagnostics?.emptyResponses ?? 0) > 0));
+}
+
+export interface CatchupPlaneOutcomes {
+  vm: SyncPlaneOutcome;
+  swm?: SyncPlaneOutcome;
+}
+
+/**
+ * Derive current-attempt outcomes from verified per-plane evidence. Persisted
+ * readiness from an older run is intentionally ignored: it must not turn a
+ * failed retry into a successful current attempt.
+ */
+export function classifyCatchupPlaneOutcomes(input: {
+  result: CatchupJobResult;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+  isPrivate: boolean;
+}): CatchupPlaneOutcomes {
+  const connectedPeers = input.result.totalPeers ?? input.result.connectedPeers;
+  const peersResponded = input.result.peersResponded ?? input.result.peersSucceeded;
+  const classify = (plane: 'durable' | 'sharedMemory'): SyncPlaneOutcome => {
+    const diagnostics = input.result.diagnostics?.[plane];
+    return classifySyncPlaneOutcome({
+      verified: input.hasConfirmedMeta && catchupPlaneReadyThisRun({
+        result: input.result,
+        plane,
+        isPrivate: input.isPrivate,
+      }),
+      authoritativeScopeConfirmed: input.hasConfirmedMeta,
+      connectedPeers,
+      syncCapablePeers: input.result.syncCapablePeers,
+      peersTried: input.result.peersTried,
+      peersResponded,
+      // New workers report pressure per plane. During rolling upgrades an
+      // older runner can only return the aggregate counter; treat that as a
+      // deferral for every unverified requested plane rather than fabricating
+      // a failure.
+      deferredBackpressure:
+        diagnostics?.deferredBackpressure ?? input.result.deferredBackpressure,
+      deniedPhases: diagnostics?.deniedPhases ?? (
+        input.result.denied ? input.result.deniedPeers : 0
+      ),
+      timedOutPhases: diagnostics?.timedOutPhases,
+    });
+  };
+
+  return {
+    vm: classify('durable'),
+    ...(input.includeSharedMemory ? { swm: classify('sharedMemory') } : {}),
+  };
 }
 
 export interface ContextGraphCatchupReadinessClassification {

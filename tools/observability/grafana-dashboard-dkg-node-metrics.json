@@ -517,7 +517,7 @@
       ]
     },
     {
-      "title": "Pipeline health (collector — live now)",
+      "title": "Verified VM / SWM sync lifecycle",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -528,12 +528,196 @@
       "collapsed": false
     },
     {
-      "title": "Collector log records/s: accepted vs exported",
+      "title": "Verified sync success rate",
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 0,
         "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "100 * sum by (plane) (rate(dkg_sync_plane_terminal_total{outcome=\"success\", instance=~\"${node:regex}\"}[$__rate_interval])) / sum by (plane) (rate(dkg_sync_plane_terminal_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{plane}}"
+        }
+      ]
+    },
+    {
+      "title": "Sync attempts: started vs terminal",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (plane) (rate(dkg_sync_plane_started_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{plane}} started"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum by (plane) (rate(dkg_sync_plane_terminal_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{plane}} terminal"
+        }
+      ]
+    },
+    {
+      "title": "Active logical sync planes",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (plane) (dkg_sync_plane_active{instance=~\"${node:regex}\"})",
+          "legendFormat": "{{plane}}"
+        }
+      ]
+    },
+    {
+      "title": "Sync terminal outcomes by plane",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (plane, outcome) (rate(dkg_sync_plane_terminal_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{plane}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Sync duration p50/p95 by plane",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, plane) (rate({__name__=~\"dkg_sync_plane_duration(_milliseconds)?_bucket\", outcome=\"success\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{plane}} p95 success"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, sum by (le, plane) (rate({__name__=~\"dkg_sync_plane_duration(_milliseconds)?_bucket\", outcome=\"success\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{plane}} p50 success"
+        }
+      ]
+    },
+    {
+      "title": "Pipeline health (collector — live now)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Collector log records/s: accepted vs exported",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -582,7 +766,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 47
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -622,7 +806,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 47
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",

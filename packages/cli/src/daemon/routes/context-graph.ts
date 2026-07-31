@@ -65,7 +65,7 @@ import {
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, SyncAttemptObserver } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -115,6 +115,7 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
   catchupResultHasCleanResponse,
+  classifyCatchupPlaneOutcomes,
   classifyContextGraphCatchupReadiness,
   classifyExistingContextGraphReadiness,
   readContextGraphReadiness,
@@ -464,6 +465,8 @@ async function handleReconcileContextGraphRoute(
     return respondReconcileError(res, err);
   }
 }
+
+const syncOutcomeLogger = new Logger('daemon-catchup');
 
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -1835,6 +1838,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     void (async () => {
       job.status = "running";
       job.startedAt = Date.now();
+      const syncAttempt = new SyncAttemptObserver({
+        logger: syncOutcomeLogger,
+        context: createOperationContext('sync'),
+        contextGraphId,
+        trigger: 'subscription',
+        planes: shouldSyncSharedMemory ? ['vm', 'swm'] : ['vm'],
+      });
       if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
       try {
         const result = await daemonState.catchupRunner!.run({
@@ -1850,6 +1860,32 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         if (result.deferredBackpressure > 0 && !result.denied) {
           job.status = "deferred";
           job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+          // The job remains globally deferred and does not mutate readiness,
+          // but one requested plane may still have completed cleanly before a
+          // different plane hit pressure. Classify each plane independently
+          // so a SWM deferral cannot erase a verified VM result (or vice versa).
+          const hasConfirmedMeta = typeof agent.hasConfirmedMetaState === 'function'
+            ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+            : false;
+          const isPrivate = hasConfirmedMeta
+            ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+            : true;
+          const planeOutcomes = classifyCatchupPlaneOutcomes({
+            result,
+            includeSharedMemory: shouldSyncSharedMemory,
+            hasConfirmedMeta,
+            isPrivate,
+          });
+          syncAttempt.finish('vm', planeOutcomes.vm, {
+            triplesSynced: planeOutcomes.vm === 'success' ? result.dataSynced : 0,
+          });
+          if (shouldSyncSharedMemory && planeOutcomes.swm) {
+            syncAttempt.finish('swm', planeOutcomes.swm, {
+              triplesSynced: planeOutcomes.swm === 'success'
+                ? result.sharedMemorySynced
+                : 0,
+            });
+          }
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
         } else {
           const inspectReadiness = catchupResultHasCleanResponse(result);
@@ -1865,6 +1901,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             hasConfirmedMeta,
             isPrivate,
             readinessBeforeCatchup,
+          });
+          const planeOutcomes = classifyCatchupPlaneOutcomes({
+            result,
+            includeSharedMemory: shouldSyncSharedMemory,
+            hasConfirmedMeta,
+            isPrivate,
           });
 
           job.status = classification.jobStatus;
@@ -1895,6 +1937,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             job.status = "deferred";
             job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
           }
+
+          syncAttempt.finish('vm', planeOutcomes.vm, {
+            triplesSynced: planeOutcomes.vm === 'success' ? result.dataSynced : 0,
+          });
+          if (shouldSyncSharedMemory && planeOutcomes.swm) {
+            syncAttempt.finish('swm', planeOutcomes.swm, {
+              triplesSynced: planeOutcomes.swm === 'success'
+                ? result.sharedMemorySynced
+                : 0,
+            });
+          }
         }
 
         if (DEBUG_SYNC_TRACE) {
@@ -1911,6 +1964,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
+        const terminalOutcome = /timed?\s*out|timeout|aborterror/i.test(job.error)
+          ? 'timeout'
+          : 'failed';
+        syncAttempt.finishRemaining(terminalOutcome, { errorCode: 'SYNC_JOB_EXCEPTION' });
         if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
