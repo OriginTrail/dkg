@@ -24,6 +24,32 @@ export const severityMatches = (regex) => ` | severity_text=~\`${regex}\``;
  *  callers append the range selector directly: `...${RPC_USAGE_PIPELINE}[1h]`. */
 export const RPC_USAGE_PIPELINE = ' |= `rpc_usage` | logfmt | method != `` | unwrap count ';
 
+/**
+ * Build a Loki expression for the peak sampled age of every bounded
+ * backpressure operation in a phase. PR #2003 keeps at most eight operation
+ * summaries per lane, so the query expands those fixed indexes and collapses
+ * them back by source. `slot` prevents LogQL's `or` from dropping an operation
+ * that moved between array positions during the selected time range.
+ *
+ * The returned value is an elapsed age in milliseconds from the diagnostic
+ * sample. It is not CPU time, request count, or a completed-job duration.
+ */
+export const backpressurePeakAgeByOperation = (stream, phase) => {
+  if (phase !== 'active' && phase !== 'queued') {
+    throw new Error(`backpressure phase must be active or queued, got ${phase}`);
+  }
+  const field = phase === 'active' ? 'activeOperations' : 'queuedOperations';
+  const entries = Array.from({ length: 8 }, (_, index) => `max_over_time(${stream}`
+    + ' |= `[backpressure]`'
+    + ' | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})`'
+    + ' | line_format `{{.payload}}`'
+    + ` | json scheduler, lane, operation="${field}[${index}].operation", age="${field}[${index}].oldestAgeMs"`
+    + ' | operation != ``'
+    + ` | label_format phase=\`${phase}\`, slot=\`${index}\``
+    + ' | unwrap age | __error__ = `` [$__range])');
+  return `max by (scheduler, lane, phase, operation) (${entries.map((entry) => `(${entry})`).join(' or ')})`;
+};
+
 /** Loki-side node identity: the label pair every per-node log aggregation
  *  groups by (Tempo's equivalent is resource.service.instance.id). */
 export const LOKI_NODE_GROUP = 'service_instance_id, deployment_environment';

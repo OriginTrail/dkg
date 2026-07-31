@@ -141,6 +141,29 @@ Per-item enqueue/start logs are deliberately avoided. Transition and periodic
 summary logging make sustained pressure visible without creating a log storm
 that competes with the overloaded scheduler.
 
+The daemon routes these records through its structured log sink. That keeps a
+full local copy and forwards the same redacted record to enabled syslog and
+OTLP exporters, so the records reach the Loki-backed Grafana dashboards.
+
+## Grafana worker-pressure flame graph
+
+The **DKG Node — Logs** dashboard includes a **Scheduler pressure** row. Its
+flame graph expands the bounded `activeOperations` and `queuedOperations`
+arrays, groups them by scheduler, lane, and operation source, and shows the
+largest sampled `oldestAgeMs` in the selected time range.
+
+The two top-level branches have distinct meanings:
+
+- **active / admitted**: work occupying a worker slot;
+- **queued / waiting**: work still waiting for admission.
+
+Block width is elapsed pressure age in milliseconds. It answers which source
+was present and how old its oldest observed work became. It is not CPU time,
+request share, invocation count, or an exact completed-job duration. The
+monitor intentionally emits transition, periodic summary, and recovery records
+instead of a per-item event stream, so Grafana must not claim more precision
+than the log contract provides.
+
 ## Metrics
 
 The common OpenTelemetry instruments use bounded `scheduler` and `lane`

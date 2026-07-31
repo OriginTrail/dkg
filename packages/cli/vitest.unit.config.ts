@@ -31,6 +31,7 @@ export default defineConfig({
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
+          'test/backpressure-log.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/query-route-lifecycle.test.ts',
           'test/status-command-store.test.ts',

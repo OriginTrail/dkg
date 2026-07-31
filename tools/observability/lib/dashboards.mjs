@@ -4,7 +4,13 @@
 // helpers (row layout, panel constructors, node-identity discovery model)
 // live at module scope. Rendering, CLI handling and --check live in
 // ../generate-observability.mjs.
-import { dkgLogStream, severityIs, severityMatches, RPC_USAGE_PIPELINE } from './queries.mjs';
+import {
+  backpressurePeakAgeByOperation,
+  dkgLogStream,
+  severityIs,
+  severityMatches,
+  RPC_USAGE_PIPELINE,
+} from './queries.mjs';
 
 const LOKI = { type: 'loki', uid: '${loki}' };
 const VM = { type: 'prometheus', uid: '${vm}' };
@@ -68,6 +74,80 @@ const LOGSP = (w, h, title, expr) => ({ w, h, def: { datasource: LOKI, type: 'lo
   targets: [{ datasource: LOKI, refId: 'A', expr }] } });
 const TEXT = (content) => ({ w: 24, h: 3, def: { type: 'text', title: '', options: { mode: 'markdown', content }, transparent: true } });
 const ROW = (title) => ({ w: 24, h: 1, def: { type: 'row', title, collapsed: false } });
+const INSTANT_LOKI_TARGET = (refId, expr, legendFormat) => ({
+  datasource: LOKI,
+  refId,
+  expr,
+  legendFormat,
+  instant: true,
+  queryType: 'instant',
+});
+
+const BACKPRESSURE_FLAME = (stream) => {
+  const active = backpressurePeakAgeByOperation(stream, 'active');
+  const queued = backpressurePeakAgeByOperation(stream, 'queued');
+  return {
+    w: 24,
+    h: 14,
+    def: {
+      datasource: LOKI,
+      type: 'flamegraph',
+      title: 'Worker queue pressure flame graph — $node',
+      description: 'Each leaf is a PR #2003 worker source. Width is its peak sampled oldest elapsed age in the selected range (milliseconds), split between admitted/active work and queued work. This is pressure age, not CPU utilization, request share, or exact completed-job runtime.',
+      options: { showFlameGraphOnly: false },
+      fieldConfig: { defaults: { unit: 'ms' }, overrides: [] },
+      targets: [
+        INSTANT_LOKI_TARGET('A', `sum((${active}) or (${queued}))`, '0|0|all sampled worker pressure'),
+        INSTANT_LOKI_TARGET('B', `sum(${active})`, '1|0|active / admitted'),
+        INSTANT_LOKI_TARGET('C', active, '2|1|{{scheduler}}/{{lane}}/{{operation}}'),
+        INSTANT_LOKI_TARGET('D', `sum(${queued})`, '1|0|queued / waiting'),
+        INSTANT_LOKI_TARGET('E', queued, '2|1|{{scheduler}}/{{lane}}/{{operation}}'),
+      ],
+      transformations: [
+        { id: 'seriesToRows', options: {} },
+        {
+          id: 'extractFields',
+          options: {
+            source: 'Metric',
+            format: 'regexp',
+            regexp: '(?<level>\\d+)\\|(?<leaf>[01])\\|(?<label>.*)',
+            replace: false,
+          },
+        },
+        {
+          id: 'convertFieldType',
+          options: {
+            conversions: [
+              { targetField: 'level', destinationType: 'number' },
+              { targetField: 'leaf', destinationType: 'number' },
+            ],
+          },
+        },
+        {
+          id: 'calculateField',
+          options: {
+            mode: 'binary',
+            binary: {
+              left: { matcher: { id: 'byName', options: 'Value' } },
+              operator: '*',
+              right: { matcher: { id: 'byName', options: 'leaf' } },
+            },
+            alias: 'self',
+            replaceFields: false,
+          },
+        },
+        {
+          id: 'organize',
+          options: {
+            excludeByName: { Time: true, Metric: true, leaf: true },
+            indexByName: { level: 0, label: 1, Value: 2, self: 3 },
+            renameByName: { Value: 'value' },
+          },
+        },
+      ],
+    },
+  };
+};
 
 // Loki query building blocks come from the shared contract (lib/queries.mjs)
 // — the same module alerts.mjs composes from, so the stream selector,
@@ -131,6 +211,10 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
         options: { reduceOptions: { calcs: ['sum'], fields: '', values: false } },
         targets: [{ datasource: LOKI, refId: 'A', expr: `sum(sum_over_time(${NB}${RPCPIPE}[$__auto]))` }] } },
     ],
+    [ ROW('Scheduler pressure') ],
+    [ TEXT('**Worker queue diagnostics (PR #2003).** The flame graph reads structured `[backpressure]` records from Loki. A leaf answers **which scheduler/lane/operation produced the work** and shows the **largest sampled elapsed age** observed in the selected time range. Active and queued work are separate branches. These sparse transition/summary samples describe pressure; they are not CPU profiles, invocation counts, or exact end-to-end job durations.') ],
+    [ BACKPRESSURE_FLAME(NB) ],
+    [ LOGSP(24, 10, 'Backpressure transitions and summaries — $node', `${NB} |= \`[backpressure]\``) ],
   ]),
 });
 

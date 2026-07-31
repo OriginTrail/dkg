@@ -145,6 +145,49 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   }
 }
 
+// ── logs dashboard: PR #2003 worker-pressure surface ──────────────────────
+{
+  const dash = load('grafana-dashboard-dkg-node-logs.json');
+  const flame = (dash.panels ?? []).find((panel) => panel.type === 'flamegraph');
+  if (!flame) {
+    fail('logs dashboard', 'worker-pressure flamegraph panel is missing');
+  } else {
+    if (!flame.title?.includes('Worker queue pressure')) {
+      fail('logs dashboard flamegraph', `unexpected title: ${JSON.stringify(flame.title)}`);
+    }
+    if ((flame.targets ?? []).length !== 5) {
+      fail('logs dashboard flamegraph', `expected 5 ordered profile targets, got ${(flame.targets ?? []).length}`);
+    }
+    const refs = (flame.targets ?? []).map((target) => target.refId).join('');
+    if (refs !== 'ABCDE') {
+      fail('logs dashboard flamegraph', `target order is ${JSON.stringify(refs)}, want ABCDE`);
+    }
+    const exprs = (flame.targets ?? []).map((target) => target.expr ?? '').join('\n');
+    if (!exprs.includes('service_instance_id="$node"')) {
+      fail('logs dashboard flamegraph', 'queries are not scoped to the selected node');
+    }
+    if (!exprs.includes('|= `[backpressure]`')) {
+      fail('logs dashboard flamegraph', 'queries do not select PR #2003 backpressure records');
+    }
+    for (const phase of ['activeOperations', 'queuedOperations']) {
+      for (let index = 0; index < 8; index++) {
+        if (!exprs.includes(`${phase}[${index}].operation`)) {
+          fail('logs dashboard flamegraph', `missing bounded ${phase}[${index}] extraction`);
+        }
+      }
+    }
+    const transforms = (flame.transformations ?? []).map((transform) => transform.id);
+    const wanted = ['seriesToRows', 'extractFields', 'convertFieldType', 'calculateField', 'organize'];
+    if (JSON.stringify(transforms) !== JSON.stringify(wanted)) {
+      fail('logs dashboard flamegraph', `transform chain is ${JSON.stringify(transforms)}, want ${JSON.stringify(wanted)}`);
+    }
+  }
+  const raw = (dash.panels ?? []).find((panel) => panel.title?.startsWith('Backpressure transitions'));
+  if (!raw?.targets?.some((target) => target.expr?.includes('|= `[backpressure]`'))) {
+    fail('logs dashboard', 'raw backpressure evidence panel is missing');
+  }
+}
+
 // ── alert payload: datasource UID integrity + profiled rules + routing ─────
 {
   const alertsFile = 'alert-rules.provisioning.json';
