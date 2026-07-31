@@ -281,14 +281,16 @@ describe('graph-scoped finalization recovery admission', () => {
         }),
       ],
     });
-    metrics.setGlobalMeterProvider(meterProvider);
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    metrics.disable();
+    expect(metrics.setGlobalMeterProvider(meterProvider)).toBe(true);
     rebuildMetrics();
     try {
-      const store = await openSqliteFinalizationRecoveryStore(directory);
+      store = await openSqliteFinalizationRecoveryStore(directory);
       vi.spyOn(store, 'listDue').mockRejectedValueOnce(
         new Error('sqlite due read unavailable'),
       );
-      vi.spyOn(store, 'health').mockResolvedValueOnce({
+      vi.spyOn(store, 'health').mockResolvedValue({
         available: true,
         closed: false,
         stateCounts: { RECEIVED: 7 },
@@ -296,30 +298,38 @@ describe('graph-scoped finalization recovery admission', () => {
         dueEntries: 7,
         oldestDueAgeMs: 4_321,
       });
+      const warn = vi.fn();
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
-        { info: () => {}, warn: () => {} },
+        { info: () => {}, warn },
         recoveryMaterializer(),
       );
 
       await expect(recovery.processDueBatch(16)).resolves.toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('due-inbox read failed'),
+      );
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('metrics snapshot failed'),
+      );
       await meterProvider.forceFlush();
       const datapoints = new Map<string, number>();
       for (const resourceMetrics of exporter.getMetrics()) {
         for (const scopeMetrics of resourceMetrics.scopeMetrics) {
           for (const metric of scopeMetrics.metrics) {
-            const [point] = metric.dataPoints;
-            if (point && typeof point.value === 'number') {
-              datapoints.set(metric.descriptor.name, point.value);
+            for (const point of metric.dataPoints) {
+              if (typeof point.value === 'number') {
+                datapoints.set(metric.descriptor.name, point.value);
+              }
             }
           }
         }
       }
       expect(datapoints.get('dkg.finalization_recovery.due_entries')).toBe(7);
       expect(datapoints.get('dkg.finalization_recovery.oldest_due_age_ms')).toBe(4_321);
-      await store.close();
     } finally {
+      await store?.close().catch(() => {});
       await meterProvider.shutdown().catch(() => {});
       metrics.disable();
       rebuildMetrics();
