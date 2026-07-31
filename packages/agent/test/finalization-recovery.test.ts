@@ -327,6 +327,77 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('autonomously applies a pending SETTLED publisher upgrade after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-settled-upgrade-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      const chain = recoveryChain();
+      store = await openSqliteFinalizationRecoveryStore(directory);
+      const initialRecovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await initialRecovery.processLive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWRelay',
+        candidate: parsedMessage(),
+      });
+      const [settled] = await store.list();
+      expect(settled).toMatchObject({
+        state: 'SETTLED',
+        generation: 0,
+        publisherUpgradePending: false,
+      });
+      await expect(store.recordSettledPublisherUpgrade(
+        settled!.key,
+        settled!.generation,
+        '12D3KooWPublisher',
+      )).resolves.toMatchObject({ status: 'recorded' });
+      expect(await store.listDue(16)).toMatchObject([{
+        state: 'SETTLED',
+        publisherUpgradePending: true,
+      }]);
+
+      await store.close();
+      store = await openSqliteFinalizationRecoveryStore(directory);
+      let upgradeApplyCalls = 0;
+      const restartedRecovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare: async () => ({
+            onChainContextGraphId: '42',
+            localTopicOnChainContextGraphId: '42',
+            publisherPeerId: '12D3KooWPublisher',
+            accessPolicy: 'allowList' as const,
+            allowedPeers: ['12D3KooWReader'],
+          }),
+          apply: async () => {
+            upgradeApplyCalls += 1;
+            return 'applied' as const;
+          },
+        },
+      );
+
+      await expect(restartedRecovery.processDueBatch(16)).resolves.toBe(1);
+      expect(upgradeApplyCalls).toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'SETTLED',
+        generation: 1,
+        publisherUpgradePending: false,
+        trustedPublisherPeerId: '12D3KooWPublisher',
+      }]);
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a VERIFIED poison entry only after count and age budgets expire', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-exhausted-'));
     try {
