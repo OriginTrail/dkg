@@ -365,7 +365,21 @@ export class FinalizationRecovery<
         return 0;
       }
       for (const entry of entries) {
-        const outcome = await this.replayDueEntry(entry);
+        let outcome: FinalizationRecoveryReplayOutcome;
+        try {
+          outcome = await this.replayDueEntry(entry);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.log.warn(
+            `Finalization recovery due-entry replay failed for ${entry.ual}: ${reason}`,
+          );
+          await this.recordDeferred(
+            entry,
+            `background replay failed: ${reason}`,
+            deferredRetryDelayMs(entry.attemptCount),
+          );
+          outcome = 'retry-pending';
+        }
         getMetrics().finalizationRecoveryAttemptsTotal?.add(1, { outcome });
       }
       return entries.length;

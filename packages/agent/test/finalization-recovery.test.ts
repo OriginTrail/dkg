@@ -3,10 +3,18 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { metrics } from '@opentelemetry/api';
+import {
+  AggregationTemporality,
+  InMemoryMetricExporter,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+} from '@opentelemetry/sdk-metrics';
 import {
   decodeFinalizationMessage,
   encodeFinalizationMessage,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  rebuildMetrics,
   type FinalizationMessageMsg,
 } from '@origintrail-official/dkg-core';
 import {
@@ -205,14 +213,89 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
-  it('refreshes due metrics even when the due-inbox read fails', async () => {
+  it('continues a due batch after one entry throws and backs off the failed row', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-poison-'));
+    try {
+      let now = 1_000;
+      const secondTxHash = `0x${'bc'.repeat(32)}`;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async (txHash) => ({
+            status: 'confirmed',
+            receipt: confirmedReceipt({ txHash }),
+          }),
+        }),
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message({ txHash: secondTxHash })),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage({ txHash: secondTxHash }),
+      });
+      const originalReplayDueEntry = recovery.replayDueEntry.bind(recovery);
+      const replayDueEntry = vi.spyOn(recovery, 'replayDueEntry');
+      replayDueEntry
+        .mockRejectedValueOnce(new Error('poison replay'))
+        .mockImplementation(originalReplayDueEntry);
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(2);
+      expect(replayDueEntry).toHaveBeenCalledTimes(2);
+      expect(await store.list()).toMatchObject([
+        {
+          state: 'RECEIVED',
+          attemptCount: 1,
+          lastError: 'background replay failed: poison replay',
+          nextAttemptAt: 2_000,
+        },
+        {
+          state: 'SETTLED',
+          txHash: secondTxHash,
+        },
+      ]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('emits due metrics even when the due-inbox read fails', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-metrics-'));
+    const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const meterProvider = new MeterProvider({
+      readers: [
+        new PeriodicExportingMetricReader({
+          exporter,
+          exportIntervalMillis: 60_000,
+        }),
+      ],
+    });
+    metrics.setGlobalMeterProvider(meterProvider);
+    rebuildMetrics();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory);
-      const health = vi.spyOn(store, 'health');
       vi.spyOn(store, 'listDue').mockRejectedValueOnce(
         new Error('sqlite due read unavailable'),
       );
+      vi.spyOn(store, 'health').mockResolvedValueOnce({
+        available: true,
+        closed: false,
+        stateCounts: { RECEIVED: 7 },
+        livePayloadBytes: 123,
+        dueEntries: 7,
+        oldestDueAgeMs: 4_321,
+      });
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
@@ -221,9 +304,25 @@ describe('graph-scoped finalization recovery admission', () => {
       );
 
       await expect(recovery.processDueBatch(16)).resolves.toBe(0);
-      expect(health).toHaveBeenCalledTimes(1);
+      await meterProvider.forceFlush();
+      const datapoints = new Map<string, number>();
+      for (const resourceMetrics of exporter.getMetrics()) {
+        for (const scopeMetrics of resourceMetrics.scopeMetrics) {
+          for (const metric of scopeMetrics.metrics) {
+            const [point] = metric.dataPoints;
+            if (point && typeof point.value === 'number') {
+              datapoints.set(metric.descriptor.name, point.value);
+            }
+          }
+        }
+      }
+      expect(datapoints.get('dkg.finalization_recovery.due_entries')).toBe(7);
+      expect(datapoints.get('dkg.finalization_recovery.oldest_due_age_ms')).toBe(4_321);
       await store.close();
     } finally {
+      await meterProvider.shutdown().catch(() => {});
+      metrics.disable();
+      rebuildMetrics();
       await rm(directory, { recursive: true, force: true });
     }
   });
@@ -616,6 +715,7 @@ describe('graph-scoped finalization recovery admission', () => {
   it('persists RECEIVED before a store-heavy operation can fail', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-wiring-'));
     let agent: DKGAgent | undefined;
+    let releaseWorkerStop: (() => void) | undefined;
     try {
       agent = await DKGAgent.create({
         name: 'FinalizationRecoveryWiringBot',
@@ -650,8 +750,22 @@ describe('graph-scoped finalization recovery admission', () => {
         available: true,
         stateCounts: { RECEIVED: 1 },
       });
-      await agent.stop();
-      expect(stopWorker).toHaveBeenCalled();
+      const workerStopGate = new Promise<void>((resolve) => {
+        releaseWorkerStop = resolve;
+      });
+      stopWorker.mockImplementationOnce(() => workerStopGate);
+      const nextTeardown = vi.spyOn(
+        agent as unknown as {
+          closeRfc64PublicCatalogBootstrapV1(): Promise<void>;
+        },
+        'closeRfc64PublicCatalogBootstrapV1',
+      );
+      const stopping = agent.stop();
+      await vi.waitFor(() => expect(stopWorker).toHaveBeenCalledTimes(1));
+      expect(nextTeardown).not.toHaveBeenCalled();
+      releaseWorkerStop();
+      await stopping;
+      expect(nextTeardown).toHaveBeenCalled();
       expect(agent.getOrCreateFinalizationHandler()).toBe(preStartHandler);
       expect(await agent.getFinalizationRecoveryHealth()).toMatchObject({
         available: false,
@@ -659,6 +773,7 @@ describe('graph-scoped finalization recovery admission', () => {
         degradedReason: 'not-configured',
       });
     } finally {
+      releaseWorkerStop?.();
       await agent?.stop().catch(() => {});
       await agent?.store.close().catch(() => {});
       await rm(directory, { recursive: true, force: true });
