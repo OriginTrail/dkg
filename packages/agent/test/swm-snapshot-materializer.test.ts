@@ -152,6 +152,7 @@ function materializerFor(store: TripleStore) {
     store,
     writeLocks: new Map<string, Promise<void>>(),
     invalidateListContextGraphsCache: () => { invalidations += 1; },
+    insertReplacementMetadata: (quads) => store.insert([...quads]),
   });
   return { materializer, invalidations: () => invalidations };
 }

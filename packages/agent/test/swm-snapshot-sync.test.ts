@@ -97,6 +97,63 @@ describe('SWM snapshot catch-up sync', () => {
     );
   });
 
+  it('drops oversized graph-scoped replacement metadata without retrying the sync forever', async () => {
+    const nodeADataDir = await tempDataDir();
+    const nodeBDataDir = await tempDataDir();
+    const nodeA = await createAgent(nodeADataDir, 'SnapshotSyncOversizeA');
+    const nodeB = await createAgent(nodeBDataDir, 'SnapshotSyncOversizeB');
+    const sourceSnapshots = new FileWorkspacePublicSnapshotStore(join(nodeADataDir, 'swm-public-snapshots'));
+
+    const write = await nodeA.publisher.writeToWorkspace(CONTEXT_GRAPH, [
+      { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Oversize metadata guard"', graph: '' },
+    ], { publisherPeerId: 'peer-a' });
+    const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${write.shareOperationId}`;
+    const publisherPeerPredicate = 'http://dkg.io/ontology/publisherPeerId';
+    await nodeA.store.deleteByPattern({
+      graph: metaGraph,
+      subject: operationSubject,
+      predicate: publisherPeerPredicate,
+    });
+    const oversizedPeerId = 'x'.repeat(61_000);
+    await nodeA.store.insert([{
+      graph: metaGraph,
+      subject: operationSubject,
+      predicate: publisherPeerPredicate,
+      object: `"${oversizedPeerId}"`,
+    }]);
+
+    installSharedMemorySyncMock(nodeB, nodeA, sourceSnapshots);
+    const detailedSync = () => (nodeB as unknown as {
+      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{
+        failedPeers: number;
+        failedPhases: number;
+        completedPhases: number;
+      }>;
+    }).syncSharedMemoryFromPeerDetailed(REMOTE_PEER, [CONTEXT_GRAPH]);
+
+    await expect(detailedSync()).resolves.toMatchObject({
+      failedPeers: 0,
+      failedPhases: 0,
+    });
+    // A second complete round pins the no-loop property: the poisoned row is
+    // seen again, but the already materialized graph/head remains usable and
+    // the phase still completes instead of re-fetching forever.
+    await expect(detailedSync()).resolves.toMatchObject({
+      failedPeers: 0,
+      failedPhases: 0,
+    });
+
+    await expect(nodeB.store.query(
+      `ASK { GRAPH <${metaGraph}> { ?head <http://dkg.io/ontology/shareOperationId> `
+        + `"${write.shareOperationId}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(nodeB.store.query(
+      `ASK { GRAPH <${metaGraph}> { <${operationSubject}> `
+        + `<${publisherPeerPredicate}> "${oversizedPeerId}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
   it('does not insert dangling publicSnapshotRef metadata when remote snapshots are unavailable', async () => {
     const nodeADataDir = await tempDataDir();
     const nodeBDataDir = await tempDataDir();

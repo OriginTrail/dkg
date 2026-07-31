@@ -647,6 +647,22 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     for (const opId of ['x', 'y', 'z']) {
       await store.insert(workspaceOpQuads(cgId, opId, `urn:l:${opId}`, metaGraph, iso));
     }
+    const markedUal = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/1';
+    const unmarkedUal = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ac/1';
+    const markedHead = `${markedUal}#dkg-swm-head`;
+    const markedOp = `urn:dkg:share:${cgId}:marked`;
+    const unmarkedHead = `${unmarkedUal}#dkg-swm-head`;
+    const unmarkedOp = `urn:dkg:share:${cgId}:unmarked`;
+    await store.insert([
+      ...graphScopedHeadQuads(cgId, metaGraph, markedUal, 'marked', iso),
+      {
+        graph: metaGraph,
+        subject: markedHead,
+        predicate: `${DKG_NS}finalizedSwmCleanupRoot`,
+        object: `"0x${'ab'.repeat(32)}"`,
+      },
+      ...graphScopedHeadQuads(cgId, metaGraph, unmarkedUal, 'unmarked', iso),
+    ]);
 
     let legacyPagedQueries = 0;
     const originalQuery = store.query.bind(store);
@@ -679,7 +695,12 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
       { contextGraphId: cgId, includeSharedMemory: true, phase: 'meta', limit: 4, syncSessionId: 'legacy' },
       4,
     );
-    expect(lines.size).toBe(15);
+    const joined = [...lines].join('\n');
+    expect(lines.size).toBe(26);
+    expect(joined).not.toContain(markedHead);
+    expect(joined).not.toContain(markedOp);
+    expect(joined).toContain(unmarkedHead);
+    expect(joined).toContain(unmarkedOp);
     expect(legacyPagedQueries).toBeGreaterThan(0);
     await store.close();
   });

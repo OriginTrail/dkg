@@ -5290,6 +5290,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return admission;
       };
 
+      const insertSharedMemorySyncQuads = async (quads: readonly Quad[]) => {
+        // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
+        // literals BEFORE every peer-controlled SWM metadata insert,
+        // including graph-scoped head replacement, so the page cursor can
+        // advance instead of re-fetching the same poison row forever.
+        const inserted = await insertWithOversizeGuard(
+          (kept) => this.store.insert(kept, {
+            priority: 'background',
+            source: 'agent.sharedMemorySync.storeInsert',
+          }),
+          quads,
+          { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+          'swm-sync',
+        );
+        this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
+      };
+
       const syncPublicContextGraph = (contextGraphId: string, remainingContextGraphs: number) => runSharedMemorySync({
               ctx,
               remotePeerId,
@@ -5331,22 +5348,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 store: this.store,
                 writeLocks: this.writeLocks,
                 invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+                insertReplacementMetadata: insertSharedMemorySyncQuads,
               }),
-              storeInsert: async (quads) => {
-                // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
-                // literals BEFORE insert so the SWM page cursor advances instead
-                // of the store throwing and the page re-fetching forever.
-                const inserted = await insertWithOversizeGuard(
-                  (kept) => this.store.insert(kept, {
-                    priority: 'background',
-                    source: 'agent.sharedMemorySync.storeInsert',
-                  }),
-                  quads,
-                  { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
-                  'swm-sync',
-                );
-                this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
-              },
+              storeInsert: insertSharedMemorySyncQuads,
               publicSnapshotStore: this.publicSnapshotStore,
               deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
               setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
@@ -7830,6 +7834,23 @@ async function runRecoverContextGraphSwmFromPeer(
   const admission = await getSharedMemorySubGraphAdmission(
     dependencies.store, contextGraphId, dependencies.listSubGraphs(contextGraphId),
   );
+  const insertRecoveredSwmQuads = async (quads: readonly Quad[]) => {
+    // Oversize guard (OT-RFC-56) — recovered rows and graph-scoped
+    // replacement metadata are both peer-controlled data.
+    const inserted = await insertWithOversizeGuard(
+      (kept) => dependencies.store.insert(kept, {
+        priority: 'background',
+        source: 'agent.swmRecovery.insert',
+      }),
+      quads,
+      { recordDrops: (drops, seam) => dependencies.recordDrops(drops, seam) },
+      'swm-recovery',
+    );
+    if (inserted.length > 0) {
+      dependencies.invalidateListContextGraphsCache();
+      dependencies.markMetaProjectionDirty(inserted);
+    }
+  };
   return recoverContextGraphSwm({
     ctx,
     remotePeerId,
@@ -7848,22 +7869,7 @@ async function runRecoverContextGraphSwmFromPeer(
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
     store: {
-      insert: async (quads) => {
-        // Oversize guard (OT-RFC-56) — recovered rows are peer data too.
-        const inserted = await insertWithOversizeGuard(
-          (kept) => dependencies.store.insert(kept, {
-            priority: 'background',
-            source: 'agent.swmRecovery.insert',
-          }),
-          quads,
-          { recordDrops: (drops, seam) => dependencies.recordDrops(drops, seam) },
-          'swm-recovery',
-        );
-        if (inserted.length > 0) {
-          dependencies.invalidateListContextGraphsCache();
-          dependencies.markMetaProjectionDirty(inserted);
-        }
-      },
+      insert: insertRecoveredSwmQuads,
       replaceGraph: async (graph, quads) => {
         const replaced = await tryReplaceGraphAtomically(
           dependencies.store,
@@ -7957,6 +7963,7 @@ async function runRecoverContextGraphSwmFromPeer(
             contextGraphId,
             descriptor: asset,
             sourcePrefix: 'agent.swmRecovery.replaceMetaForGraphAssets',
+            insertReplacementMetadata: insertRecoveredSwmQuads,
           }),
         );
       }

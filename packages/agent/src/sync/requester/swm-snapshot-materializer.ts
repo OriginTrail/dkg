@@ -150,8 +150,15 @@ export async function replaceGraphScopedSwmHeadMetadata(params: {
   contextGraphId: string;
   descriptor: GraphScopedSwmRecoveryDescriptor;
   sourcePrefix: string;
+  insertReplacementMetadata: (quads: readonly Quad[]) => Promise<void>;
 }): Promise<void> {
-  const { store, contextGraphId, descriptor, sourcePrefix } = params;
+  const {
+    store,
+    contextGraphId,
+    descriptor,
+    sourcePrefix,
+    insertReplacementMetadata,
+  } = params;
   const preservedMarkers = await readExactFinalizedCleanupMarkers({
     store,
     contextGraphId,
@@ -200,10 +207,7 @@ export async function replaceGraphScopedSwmHeadMetadata(params: {
     ...preservedMarkers,
   ];
   if (replacementQuads.length > 0) {
-    await store.insert(replacementQuads, {
-      priority: 'background',
-      source: `${sourcePrefix}.insertReplacementMetadata`,
-    });
+    await insertReplacementMetadata(replacementQuads);
   }
 }
 
@@ -357,6 +361,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
+  /**
+   * The same filtered insert seam used by aggregate SWM pages. Replacement
+   * metadata is peer-controlled too, so bypassing this guard can re-arm the
+   * oversized-literal retry loop after the old head has been removed.
+   */
+  insertReplacementMetadata: (quads: readonly Quad[]) => Promise<void>;
 }): SharedMemorySnapshotMaterializer {
   return {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
@@ -513,6 +523,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         contextGraphId,
         descriptor,
         sourcePrefix: 'agent.sharedMemorySync.snapshotMaterializer',
+        insertReplacementMetadata: deps.insertReplacementMetadata,
       });
       deps.invalidateListContextGraphsCache();
     },

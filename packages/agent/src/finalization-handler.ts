@@ -1681,7 +1681,8 @@ export class FinalizationHandler {
             <${DKG_NS}assertionVersion> ?version ;
             <${DKG_NS}shareOperationId> ?shareId ;
             <${DKG_NS}assertionGraph> ?assertionGraph .
-          ?operation <${DKG_NS}shareOperationId> ?shareId ;
+          ?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <${DKG_NS}WorkspaceOperation> ;
+            <${DKG_NS}shareOperationId> ?shareId ;
             <${DKG_NS}kaUal> ?ual ;
             <${DKG_NS}assertionVersion> ?version .
           OPTIONAL { ?operation <${DKG_NS}subGraphName> ?subGraphName }

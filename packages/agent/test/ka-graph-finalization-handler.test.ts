@@ -2250,6 +2250,39 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
+  it('discovers the WorkspaceOperation for bounded subgraph cleanup', async () => {
+    const subGraphName = 'named-cleanup';
+    const { message, swmGraph } = await stageGraph(undefined, subGraphName);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const discoverQueries: string[] = [];
+    const originalQuery = store.query.bind(store);
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source === 'agent.finalization.graphScopedSwmCleanup.discover') {
+        discoverQueries.push(query);
+      }
+      return originalQuery(query, options);
+    });
+
+    await expect(handler.cleanupFinalizedGraphScopedSwmWhenIdle({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG, subGraphName),
+      maxCandidates: 1,
+    })).resolves.toBe(1);
+    expect(discoverQueries.some((query) => query.includes(
+      '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation>',
+    ))).toBe(true);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+      subGraphName,
+    })).resolves.toBeUndefined();
+    querySpy.mockRestore();
+  });
+
   it('retries an explicit post-catchup cleanup after a transient scheduler timeout', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
@@ -2264,7 +2297,6 @@ describe('graph-scoped finalization handler', () => {
       if (
         !injectedBusyTimeout
         && options?.source === 'agent.finalization.graphScopedSwmCleanup.discover'
-        && query.includes('SELECT ?scopeVersion ?kaUal ?assertionVersion')
       ) {
         injectedBusyTimeout = true;
         throw new StoreSchedulerBusyError(

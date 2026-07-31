@@ -919,6 +919,14 @@ export async function readSwmDataPage(params: {
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
+  const swmMetaGraphs = dataGraphs
+    .map((graph) => `${graph}_meta`)
+    .filter((graph) => graphSet.has(graph));
+  const finalizedAssertionGraphs = readFinalizedSwmAssertionGraphs(
+    params.store,
+    swmMetaGraphs,
+    params.signal,
+  );
   const candidateGraphsFor = (graph: string) => params.graphList
     .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
     .sort(compareCodePoint);
@@ -933,7 +941,10 @@ export async function readSwmDataPage(params: {
     : undefined;
 
   if (!params.cutoffIso) {
-    const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor)).sort(compareCodePoint);
+    const blockedGraphs = await finalizedAssertionGraphs;
+    const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor))
+      .filter((graph) => !blockedGraphs.has(graph))
+      .sort(compareCodePoint);
     return readPagedRowsAcrossGraphs(
       params.store,
       candidateGraphs,
@@ -947,12 +958,13 @@ export async function readSwmDataPage(params: {
   }
 
   const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) => {
-    const loadPlan = () => buildFreshSwmDataGraphPlan(
+    const loadPlan = async () => buildFreshSwmDataGraphPlan(
       params.store,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
       params.cutoffIso!,
+      await finalizedAssertionGraphs,
       signal,
     );
     const plan = params.freshGraphPlanMemo && params.rowListCacheKey
@@ -980,6 +992,33 @@ export async function readSwmDataPage(params: {
     params.limit,
     params.signal,
   );
+}
+
+/**
+ * Read the assertion graphs whose active graph-scoped SWM lifecycle has been
+ * finalized and durably marked for deferred cleanup. The marker itself is
+ * filtered from the meta phase; this companion filter keeps the corresponding
+ * payload graph out of both the cutoff-less exact plan and TTL data plans.
+ */
+async function readFinalizedSwmAssertionGraphs(
+  store: TripleStore,
+  swmMetaGraphs: readonly string[],
+  signal?: AbortSignal,
+): Promise<Set<string>> {
+  const values = graphValues(swmMetaGraphs);
+  if (!values) return new Set();
+  // sparql-scan-allow: R2 -- ?metaGraph is bound by the finite admitted SWM meta graph family
+  const result = await store.query(`
+    SELECT DISTINCT ?assertionGraph WHERE {
+      VALUES ?metaGraph { ${values} }
+      GRAPH ?metaGraph {
+        ?marked <${DKG_FINALIZED_SWM_CLEANUP_ROOT}> ?cleanupRoot ;
+          <${DKG_ASSERTION_GRAPH}> ?assertionGraph .
+      }
+    }
+  `, syncResponderStoreOptions(signal, 'sync.responder.readFinalizedSwmAssertionGraphs'));
+  if (result.type !== 'bindings') return new Set();
+  return new Set(result.bindings.map((row) => row['assertionGraph']).filter(Boolean));
 }
 
 export async function readDurableMetaPage(params: {
@@ -3344,6 +3383,7 @@ async function buildFreshSwmDataGraphPlan(
   graphSet: ReadonlySet<string>,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
+  finalizedAssertionGraphs: ReadonlySet<string>,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
   const cutoffFilter =
@@ -3358,7 +3398,9 @@ async function buildFreshSwmDataGraphPlan(
   }
   const uniqueCandidates = [...new Map(
     candidates.map((candidate) => [candidate.graph, candidate]),
-  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
+  ).values()]
+    .filter((candidate) => !finalizedAssertionGraphs.has(candidate.graph))
+    .sort((a, b) => compareCodePoint(a.graph, b.graph));
   if (uniqueCandidates.length === 0) return { entries: [], totalRows: 0 };
 
   const rootsByGraph = new Map<string, Set<string>>();

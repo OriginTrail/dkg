@@ -418,6 +418,11 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
         const opId = 'finalized-deferred-cleanup';
         const op = `urn:dkg:share:${CG_ID}:${opId}`;
         const head = `${ual}#dkg-swm-head`;
+        const assertionGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/9`;
+        const markedEntity = 'urn:swm:finalized:must-not-sync';
+        const unmarkedGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ac/10`;
+        const unmarkedRoot = 'urn:swm:unmarked:must-sync';
+        const unmarkedOp = `urn:dkg:share:${CG_ID}:unmarked-data`;
         const tupleRows = (subject: string) => [
           { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
           { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}kaUal`, object: ual },
@@ -429,8 +434,13 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
           ...tupleRows(op),
           ...tupleRows(head),
-          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/9` },
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
           { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: assertionGraph, subject: markedEntity, predicate: 'http://schema.org/name', object: '"finalized-copy"' },
+          { graph: unmarkedGraph, subject: unmarkedRoot, predicate: 'http://schema.org/name', object: '"live-copy"' },
+          { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+          { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: `${DKG_NS}rootEntity`, object: unmarkedRoot },
         ]);
         const markedCap = captureHandler();
         registerSyncHandler({
@@ -458,6 +468,19 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
         expect(out).not.toContain(head);
         expect(out).not.toContain(op);
         expect(out).not.toContain('finalizedSwmCleanupRoot');
+
+        const dataOut = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          syncSessionId: `finalized-cleanup-data-${sharedMemoryTtlMs}`,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'data',
+        });
+        expect(dataOut).not.toContain(markedEntity);
+        expect(dataOut).not.toContain('"finalized-copy"');
+        expect(dataOut).toContain(unmarkedRoot);
+        expect(dataOut).toContain('"live-copy"');
 
         // After idle cleanup removes the active head, the immutable operation
         // keeps the marker for recovery but must remain outside sync.
