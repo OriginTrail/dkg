@@ -68,6 +68,7 @@ export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
 export * from './event-bus.js';
+export * from './backpressure-observability.js';
 export {
   Logger,
   createOperationContext,

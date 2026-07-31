@@ -928,6 +928,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           UNION
           { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
         } LIMIT 1`,
+        { source: 'agent.contextGraph.register.accessPolicy' },
       );
       const apValue = accessPolicyResult.type === 'bindings'
         ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
@@ -991,6 +992,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      { source: 'agent.contextGraph.register.status' },
     );
     if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
@@ -1006,6 +1008,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         UNION
         { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
       } LIMIT 1`,
+      { source: 'agent.contextGraph.register.description' },
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
 

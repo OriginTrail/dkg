@@ -382,6 +382,7 @@ export class TripleStoreAsyncLiftPublisher
     await this.ensureGraph();
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
+      { source: 'publisher.asyncLift.getStatus' },
     );
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
@@ -405,6 +406,7 @@ export class TripleStoreAsyncLiftPublisher
     // so a transient false `none` cannot by itself create a duplicate active job.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
+      { source: 'publisher.asyncLift.lookupVmPublishIntent' },
     );
     const jobs = expectBindings(result)
       .map((row) => this.parseJobPayload(row['payload']))
@@ -451,6 +453,7 @@ export class TripleStoreAsyncLiftPublisher
     // would over-select raw-lift jobs).
     const indexed = await this.store.query(
       `SELECT ?job WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`,
+      { source: 'publisher.asyncLift.ensureVmPublishIntentIndex' },
     );
     const alreadyIndexed = new Set(
       expectBindings(indexed)
@@ -468,6 +471,7 @@ export class TripleStoreAsyncLiftPublisher
     const statusFilter = filter.status ? `FILTER (?status = ${literal(filter.status)})` : '';
     const result = await this.store.query(
       `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ?status ; <${PAYLOAD_PREDICATE}> ?payload . ${statusFilter} } }`,
+      { source: 'publisher.asyncLift.list' },
     );
     return expectBindings(result)
       .map((row) => this.parseJobPayload(row['payload']))
@@ -1087,6 +1091,7 @@ export class TripleStoreAsyncLiftPublisher
       const rows = expectBindings(
         await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
+          { source: 'publisher.asyncLift.clearTerminalJob' },
         ),
       );
       if (rows.length === 0) return { outcome: 'already_absent' };
@@ -1216,6 +1221,7 @@ export class TripleStoreAsyncLiftPublisher
   private async allocateJournalSeq(lineageKey: string): Promise<number> {
     const result = await this.store.query(
       `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${this.journalGraphUri}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
+      { source: 'publisher.asyncLift.allocateJournalSeq' },
     );
     const rows = expectBindings(result);
     const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
@@ -1288,6 +1294,7 @@ export class TripleStoreAsyncLiftPublisher
   private async readJournalEntriesBy(predicate: string, value: string): Promise<AdmissionJournalEntry[]> {
     const result = await this.store.query(
       `SELECT ?e ?p ?o WHERE { GRAPH <${this.journalGraphUri}> { ?e <${predicate}> ${literal(value)} . ?e ?p ?o } }`,
+      { source: 'publisher.asyncLift.readJournalEntries' },
     );
     const bySubject = new Map<string, Record<string, string>>();
     for (const row of expectBindings(result)) {
@@ -1375,6 +1382,7 @@ export class TripleStoreAsyncLiftPublisher
   } | null> {
     const result = await this.store.query(
       `SELECT ?job ?status ?expiresAt ?claimToken WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
+      { source: 'publisher.asyncLift.walletLock.read' },
     );
     const rows = expectBindings(result);
     if (rows.length === 0) return null;
@@ -1396,6 +1404,7 @@ export class TripleStoreAsyncLiftPublisher
     const now = this.now();
     const result = await this.store.query(
       `SELECT ?expiresAt WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . } }`,
+      { source: 'publisher.asyncLift.walletLock.active' },
     );
     const rows = expectBindings(result);
     if (rows.length === 0) return false;
@@ -1406,6 +1415,7 @@ export class TripleStoreAsyncLiftPublisher
     const now = this.now();
     const result = await this.store.query(
       `SELECT ?wallet ?job ?expiresAt ?claimToken WHERE { GRAPH <${this.walletLockGraphUri}> { ?lock <${CONTROL_WALLET_ID}> ?wallet ; <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . OPTIONAL { ?lock <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
+      { source: 'publisher.asyncLift.walletLock.sweep' },
     );
     const expiredWallets: string[] = [];
     for (const row of expectBindings(result)) {

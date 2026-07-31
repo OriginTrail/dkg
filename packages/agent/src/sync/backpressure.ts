@@ -33,6 +33,23 @@ interface GlobalQueuePayload {
   contextGraphId?: string;
 }
 
+export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
+export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
+export const DEFAULT_SYNC_PRIORITY_AGING_MS = 30_000;
+
+function syncOperationClass(label: string): string {
+  const operation = label.split(':', 1)[0];
+  switch (operation) {
+    case 'durable':
+    case 'changelog':
+    case 'shared-memory':
+    case 'swm-recovery':
+      return operation;
+    default:
+      return 'sync';
+  }
+}
+
 let inflight = 0;
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
@@ -48,11 +65,19 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     };
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
+  observability: {
+    scheduler: 'sync-global',
+    // Admission labels also carry CG/peer correlation identifiers. Collapse
+    // them to a fixed operation class before node-wide diagnostics/logging.
+    operation: (entry) => syncOperationClass(entry.payload.label),
+    inflightLimit: (entry) => entry.payload.limit,
+    thresholds: {
+      degradedQueueAgeMs: DEFAULT_SYNC_PRIORITY_AGING_MS / 2,
+      stalledActiveAgeMs: 120_000,
+    },
+    register: true,
+  },
 });
-
-export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
-export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
-export const DEFAULT_SYNC_PRIORITY_AGING_MS = 30_000;
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'displaced';
 

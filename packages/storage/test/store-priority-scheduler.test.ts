@@ -649,4 +649,62 @@ describe('StorePriorityScheduler', () => {
       'normal',
     ]);
   });
+
+  it('exposes generic pressure diagnostics without changing lane admission', async () => {
+    let now = 1_000;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: { ack: 1, health: 1, normal: 1, background: 1 },
+      queueWaitTimeoutMs: 10_000,
+      now: () => now,
+    });
+    let release!: () => void;
+    const blocker = scheduler.run('normal', 'blazegraph.query', async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    const queued = scheduler.run('normal', 'swm.atomicReplace', async () => undefined);
+
+    now += 6_000;
+    expect(scheduler.getBackpressureSnapshot()).toMatchObject({
+      scheduler: 'store',
+      state: 'saturated',
+      totals: {
+        queued: 1,
+        queueLimit: 4,
+        inflight: 1,
+        inflightLimit: 1,
+        oldestQueuedAgeMs: 6_000,
+      },
+      lanes: expect.arrayContaining([
+        expect.objectContaining({
+          lane: 'normal',
+          queued: 1,
+          inflight: 1,
+          queueLimit: 1,
+          queuedOperations: [{
+            operation: 'swm.atomicReplace',
+            count: 1,
+            oldestAgeMs: 6_000,
+          }],
+          activeOperations: [{
+            operation: 'blazegraph.query',
+            count: 1,
+            oldestAgeMs: 6_000,
+          }],
+        }),
+      ]),
+    });
+
+    release();
+    await Promise.all([blocker, queued]);
+    expect(scheduler.getBackpressureSnapshot()).toMatchObject({
+      state: 'healthy',
+      totals: { queued: 0, inflight: 0 },
+    });
+  });
 });

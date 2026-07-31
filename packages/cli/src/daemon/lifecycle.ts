@@ -70,7 +70,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -1171,6 +1171,9 @@ export async function runDaemonInner(
     if (foreground) origStdoutWrite(line + "\n");
     appendFile(logFile, line + "\n").catch(() => {});
   }
+  const backpressureMonitor = new BackpressureMonitor({
+    emit: (level, message) => log(`[${level}] ${message}`),
+  });
 
   configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
     info: log,
@@ -2524,7 +2527,9 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => {
-      const graphUris = await agent.store.listGraphs();
+      const graphUris = await agent.store.listGraphs({
+        source: "daemon.metrics.graphInventory",
+      });
       const knownContextGraphIds = new Set<string>();
       const subscribedContextGraphs = agent.getSubscribedContextGraphs();
       const shadowContextGraphIds = new Set(
@@ -2543,7 +2548,9 @@ export async function runDaemonInner(
       }
       const declarationQuery = buildContextGraphDeclarationsSparql(graphUris, knownContextGraphIds);
       const declarationResult = declarationQuery
-        ? await agent.store.query(declarationQuery)
+        ? await agent.store.query(declarationQuery, {
+            source: "daemon.metrics.contextGraphDeclarations",
+          })
         : null;
       if (declarationResult?.type === "bindings") {
         for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
@@ -2566,7 +2573,9 @@ export async function runDaemonInner(
     // that are backed by local subscription/declaration state.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
-      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
+      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL, {
+        source: "daemon.metrics.totalTriples",
+      });
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
@@ -2582,6 +2591,7 @@ export async function runDaemonInner(
     getTotalKCs: async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }",
+        { source: "daemon.metrics.totalKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
@@ -2594,18 +2604,21 @@ export async function runDaemonInner(
             ?ka <http://dkg.io/ontology/rootEntity> ?re .
             FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
         } }`,
+        { source: "daemon.metrics.totalKAs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getConfirmedKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
+        { source: "daemon.metrics.confirmedKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTentativeKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
+        { source: "daemon.metrics.tentativeKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
@@ -2864,6 +2877,7 @@ export async function runDaemonInner(
       log(`Telemetry: log exporter not started — ${r.error} (traces/metrics unaffected)`);
     }
   }
+  backpressureMonitor.start();
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
@@ -3749,6 +3763,7 @@ export async function runDaemonInner(
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
         logVolumePruner.stop();
+        backpressureMonitor.stop();
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
         // log-derived request totals exact across process lifecycles.

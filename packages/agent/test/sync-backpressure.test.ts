@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import {
+  backpressureRegistry,
+  createOperationContext,
+} from '@origintrail-official/dkg-core';
 import {
   getSyncBackpressureSnapshot,
   resolveBooleanSwitch,
@@ -211,6 +214,51 @@ describe('sync global backpressure', () => {
       'second-start',
       'third-start',
     ]);
+  });
+
+  it('removes CG and peer correlation identifiers from node-wide pressure diagnostics', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 1,
+    });
+    let releaseRunning!: () => void;
+    const running = withGlobalSyncBackpressure(
+      {
+        policy,
+        ctx,
+        label: 'durable:urn:cg:private:peer-a',
+      },
+      async () => new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      }),
+    );
+    await tick();
+    const queued = withGlobalSyncBackpressure(
+      {
+        policy,
+        ctx,
+        label: 'swm-recovery:urn:cg:private:peer-b',
+      },
+      async () => undefined,
+    );
+    await tick();
+
+    const snapshot = backpressureRegistry.capture().schedulers.find(
+      (scheduler) => scheduler.scheduler === 'sync-global',
+    );
+    expect(snapshot).toMatchObject({
+      lanes: [expect.objectContaining({
+        activeOperations: [expect.objectContaining({ operation: 'durable' })],
+        queuedOperations: [expect.objectContaining({ operation: 'swm-recovery' })],
+      })],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain('urn:cg:private');
+    expect(JSON.stringify(snapshot)).not.toContain('peer-a');
+    expect(JSON.stringify(snapshot)).not.toContain('peer-b');
+
+    releaseRunning();
+    await Promise.all([running, queued]);
   });
 
   it('starts a later elevated CG before an earlier deprioritized queued CG', async () => {
@@ -491,5 +539,67 @@ describe('sync global backpressure', () => {
       if (oldDeadline === undefined) delete process.env.DKG_STORAGE_ACK_HANDLER_DEADLINE_MS;
       else process.env.DKG_STORAGE_ACK_HANDLER_DEADLINE_MS = oldDeadline;
     }
+  });
+
+  it('projects priority admission through the generic pressure snapshot', async () => {
+    let running = 0;
+    let now = 1_000;
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: () => {
+        running += 1;
+        return () => { running -= 1; };
+      },
+      observability: {
+        scheduler: 'test-sync',
+        operation: (entry) => entry.payload,
+        inflightLimit: () => 1,
+        thresholds: { degradedQueueAgeMs: 5_000 },
+        now: () => now,
+      },
+    });
+    const options = (payload: string) => ({
+      payload,
+      lane: 'durable' as const,
+      priority: 0,
+      priorityClass: 'default' as const,
+      queueLimit: 2,
+      agingThresholdMs: 30_000,
+      now: () => now,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const first = queue.acquire(options('first'));
+    const releaseFirst = await first.release;
+    const second = queue.acquire(options('second'));
+    now += 6_000;
+
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      scheduler: 'test-sync',
+      state: 'degraded',
+      totals: {
+        queued: 1,
+        queueLimit: 2,
+        inflight: 1,
+        inflightLimit: 1,
+      },
+      lanes: [{
+        lane: 'durable',
+        queuedOperations: [{
+          operation: 'second',
+          count: 1,
+          oldestAgeMs: 6_000,
+        }],
+      }],
+    });
+
+    releaseFirst();
+    const releaseSecond = await second.release;
+    releaseSecond();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      state: 'healthy',
+      totals: { queued: 0, inflight: 0 },
+    });
   });
 });

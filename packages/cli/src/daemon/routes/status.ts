@@ -59,7 +59,7 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -682,6 +682,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         ? getCachedExternalStoreQuads(agent, Date.now())
         : peekCachedExternalStoreQuads()
       : null;
+    const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
     // the {commit: "uncommitted", distTag: "monorepo", ...}
@@ -763,6 +764,16 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         inFlight: admission.inFlight,
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
+      },
+      // Public status carries state only. Detailed lane timings and operation
+      // summaries stay behind the node-admin diagnostics route.
+      backpressure: {
+        state: backpressure.state,
+        schedulers: backpressure.schedulers.map((scheduler) => ({
+          scheduler: scheduler.scheduler,
+          state: scheduler.state,
+        })),
+        diagnosticsAvailable: '/api/diagnostics/backpressure',
       },
       connectedPeers: uniquePeers.size,
       connections: {
