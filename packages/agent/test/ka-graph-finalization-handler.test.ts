@@ -47,6 +47,7 @@ import {
 import { createCursorState } from '../src/reconcile-cursor.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import { FinalizedSwmCleanupService } from '../src/finalized-swm-cleanup-service.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -188,11 +189,22 @@ describe('graph-scoped finalization handler', () => {
     handler = new FinalizationHandler(store, legacyFinalizationChain(), { writeLocks });
   });
 
+  function cleanupService(
+    locks: Map<string, Promise<void>> | null = writeLocks,
+  ): FinalizedSwmCleanupService {
+    return new FinalizedSwmCleanupService({
+      store,
+      writeLocks: locks ?? undefined,
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [graphManager.sharedMemoryMetaUri(CG)],
+    });
+  }
+
   async function drainFinalizedSwm(
-    target = handler,
+    locks: Map<string, Promise<void>> | null = writeLocks,
     subGraphName?: string,
   ): Promise<number> {
-    return target.cleanupFinalizedGraphScopedSwmWhenIdle({
+    return cleanupService(locks).cleanupKnownMetaGraph({
       contextGraphId: CG,
       swmMetaGraph: graphManager.sharedMemoryMetaUri(CG, subGraphName),
       maxCandidates: 16,
@@ -2338,7 +2350,7 @@ describe('graph-scoped finalization handler', () => {
     await blocker;
     await finalization;
     expect(await store.countQuads(swmGraph)).toBe(2);
-    expect(await drainFinalizedSwm(lockingHandler)).toBe(1);
+    expect(await drainFinalizedSwm(writeLocks)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
@@ -2351,7 +2363,7 @@ describe('graph-scoped finalization handler', () => {
       CG,
     );
 
-    expect(await uncoordinated.cleanupFinalizedGraphScopedSwmWhenIdle({
+    expect(await cleanupService(null).cleanupKnownMetaGraph({
       contextGraphId: CG,
       swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
       maxCandidates: 16,
@@ -2389,10 +2401,7 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
 
     busy = false;
-    const restarted = new FinalizationHandler(store, legacyFinalizationChain(), {
-      writeLocks,
-    });
-    expect(await drainFinalizedSwm(restarted)).toBe(1);
+    expect(await drainFinalizedSwm()).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
     await expect(resolveKnowledgeAssetWorkspaceHead({
       store,
@@ -2446,13 +2455,13 @@ describe('graph-scoped finalization handler', () => {
     const discoverQueries: string[] = [];
     const originalQuery = store.query.bind(store);
     const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
-      if (options?.source === 'agent.finalization.graphScopedSwmCleanup.discover') {
+      if (options?.source === 'agent.finalizedSwmCleanup.discover') {
         discoverQueries.push(query);
       }
       return originalQuery(query, options);
     });
 
-    await expect(handler.cleanupFinalizedGraphScopedSwmWhenIdle({
+    await expect(cleanupService().cleanupKnownMetaGraph({
       contextGraphId: CG,
       swmMetaGraph: graphManager.sharedMemoryMetaUri(CG, subGraphName),
       maxCandidates: 1,
@@ -2479,12 +2488,12 @@ describe('graph-scoped finalization handler', () => {
     let injectedBusyTimeout = false;
     const cleanupPriorities: Array<string | undefined> = [];
     const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
-      if (options?.source?.startsWith('agent.finalization.graphScopedSwmCleanup')) {
+      if (options?.source?.startsWith('agent.finalizedSwmCleanup')) {
         cleanupPriorities.push(options.priority);
       }
       if (
         !injectedBusyTimeout
-        && options?.source === 'agent.finalization.graphScopedSwmCleanup.discover'
+        && options?.source === 'agent.finalizedSwmCleanup.discover'
         && query.includes('SELECT DISTINCT ?task ?ual ?version ?root ?shareId')
       ) {
         injectedBusyTimeout = true;
@@ -2497,7 +2506,7 @@ describe('graph-scoped finalization handler', () => {
       return originalQuery(query, options);
     });
 
-    await expect(handler.cleanupFinalizedGraphScopedSwmWhenIdle({
+    await expect(cleanupService().cleanupKnownMetaGraph({
       contextGraphId: CG,
       swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
       maxCandidates: 16,

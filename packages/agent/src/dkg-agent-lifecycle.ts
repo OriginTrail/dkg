@@ -98,7 +98,7 @@ import {
   pickNetworkTunables,
   withRetry,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type StorePressureSnapshot, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -343,6 +343,7 @@ import {
   type FinalizedSwmCleanupStats,
   type FinalizedSwmCleanupSweepResult,
 } from './finalized-swm-cleanup-worker.js';
+import { FinalizedSwmCleanupService } from './finalized-swm-cleanup-service.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
@@ -379,19 +380,6 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 
-function hasActiveStorePressure(snapshot: StorePressureSnapshot | undefined): boolean {
-  if (!snapshot) return false;
-  return [
-    snapshot.ackInflight,
-    snapshot.healthInflight ?? 0,
-    snapshot.normalInflight,
-    snapshot.backgroundInflight,
-    snapshot.ackQueued,
-    snapshot.healthQueued ?? 0,
-    snapshot.normalQueued,
-    snapshot.backgroundQueued,
-  ].some((count) => count > 0);
-}
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -7638,109 +7626,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return this.getOrCreateFinalizedSwmCleanupWorker().snapshot();
   }
 
-  /**
-   * One small idle-only GC slice. Pressure is checked before every discovery
-   * boundary and between candidates; foreground ACK, health and normal work
-   * always wins.
-   */
-  async runFinalizedSwmCleanupSweep(this: DKGAgent): Promise<FinalizedSwmCleanupSweepResult> {
-    const prior = this.finalizedSwmCleanupWorker?.snapshot();
-    const priorOldest = prior?.oldestMarkerAgeMs == null
-      ? null
-      : Date.now() - prior.oldestMarkerAgeMs;
-    const pressureResult = (): FinalizedSwmCleanupSweepResult => ({
-      backlogDepth: prior?.backlogDepth ?? 0,
-      oldestMarkerAt: priorOldest,
-      deletedItems: 0,
-      pressureSkipped: true,
-    });
-    const budgetResult = (
-      backlogDepth: number,
-      oldestMarkerAt: number | null,
-      deletedItems: number,
-    ): FinalizedSwmCleanupSweepResult => ({
-      backlogDepth: Math.max(backlogDepth, prior?.backlogDepth ?? 0),
-      oldestMarkerAt: oldestMarkerAt ?? priorOldest,
-      deletedItems,
-      pressureSkipped: false,
-      budgetExhausted: true,
-    });
-    const underPressure = () => hasActiveStorePressure(this.store.getPressureSnapshot?.());
-    if (underPressure()) return pressureResult();
-
-    const deadline = Date.now() + 10_000;
-    const deadlineSignal = AbortSignal.timeout(10_000);
-    let remaining = 4;
-    let deletedItems = 0;
-    let backlogDepth = 0;
-    let oldestMarkerAt: number | null = null;
-    // Do not even enumerate CGs while the store is busy.
-    if (underPressure()) return pressureResult();
-    const contextGraphs = (await this.listContextGraphs()).map((row) => row.id);
-    for (const contextGraphId of contextGraphs) {
-      if (underPressure()) return { ...pressureResult(), deletedItems };
-      if (Date.now() >= deadline) {
-        return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-      }
-      // Per-CG SWM meta discovery is also forbidden under pressure.
-      const metaGraphs = await listSharedMemoryMetaGraphs(this.store, contextGraphId);
-      for (const swmMetaGraph of metaGraphs) {
-        if (underPressure()) return { ...pressureResult(), deletedItems };
-        if (Date.now() >= deadline) {
-          return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-        }
-        if (remaining > 0) {
-          let cleaned: number;
-          try {
-            cleaned = await this.getOrCreateFinalizationHandler()
-              .cleanupFinalizedGraphScopedSwmWhenIdle({
-                contextGraphId,
-                swmMetaGraph,
-                maxCandidates: 1,
-                signal: deadlineSignal,
-              });
-          } catch (error) {
-            if (deadlineSignal.aborted) {
-              return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-            }
-            throw error;
-          }
-          deletedItems += cleaned;
-          remaining -= 1;
-        }
-        if (underPressure()) return { ...pressureResult(), deletedItems };
-        if (Date.now() >= deadline) {
-          return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-        }
-        let backlog: { depth: number; oldestMarkerAt: number | null };
-        try {
-          backlog = await this.getOrCreateFinalizationHandler()
-            .inspectFinalizedGraphScopedSwmCleanupBacklog({
-              swmMetaGraph,
-              signal: deadlineSignal,
-            });
-        } catch (error) {
-          if (deadlineSignal.aborted) {
-            return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-          }
-          throw error;
-        }
-        backlogDepth += backlog.depth;
-        if (
-          backlog.oldestMarkerAt !== null
-          && (oldestMarkerAt === null || backlog.oldestMarkerAt < oldestMarkerAt)
-        ) {
-          oldestMarkerAt = backlog.oldestMarkerAt;
-        }
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
+  getOrCreateFinalizedSwmCleanupService(this: DKGAgent): FinalizedSwmCleanupService {
+    if (!this.finalizedSwmCleanupService) {
+      this.finalizedSwmCleanupService = new FinalizedSwmCleanupService({
+        store: this.store,
+        writeLocks: this.writeLocks,
+        eventBus: this.eventBus,
+        listContextGraphIds: async () => (await this.listContextGraphs()).map((row) => row.id),
+        listSharedMemoryMetaGraphs: (contextGraphId) =>
+          listSharedMemoryMetaGraphs(this.store, contextGraphId),
+      });
     }
-    return { backlogDepth, oldestMarkerAt, deletedItems, pressureSkipped: false };
+    return this.finalizedSwmCleanupService;
+  }
+
+  /** Run one small idle-only GC slice in the dedicated cleanup service. */
+  async runFinalizedSwmCleanupSweep(this: DKGAgent): Promise<FinalizedSwmCleanupSweepResult> {
+    return this.getOrCreateFinalizedSwmCleanupService().runSweep();
   }
 
   /**
    * Remove expired shared-memory operations. Finalized-SWM lifecycle GC is
-   * owned exclusively by FinalizedSwmCleanupWorker above.
+   * owned exclusively by FinalizedSwmCleanupService and its scheduler above.
    */
   async cleanupExpiredSharedMemory(this: DKGAgent): Promise<number> {
     const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;

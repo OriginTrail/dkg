@@ -1640,6 +1640,7 @@ export class DKGAgent extends DKGAgentBase {
       await this.finalizedSwmCleanupWorker.close();
       this.finalizedSwmCleanupWorker = undefined;
     }
+    this.finalizedSwmCleanupService = undefined;
     if (this.hostModeReconcilerTimer) {
       clearInterval(this.hostModeReconcilerTimer);
       this.hostModeReconcilerTimer = null;
