@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120" role="img" aria-labelledby="title desc">
+  <title id="title">PR 2003 delayed-Blazegraph scheduler work distribution</title>
+  <desc id="desc">A flamegraph of 89.175 active scheduler slot-seconds measured during a 45.046 second three-node devnet run with 1200 milliseconds of injected Blazegraph latency. Normal work used 74.97 percent and background API queries used 25.03 percent. No generic blazegraph.query work remained.</desc>
+
+  <rect width="1600" height="1120" fill="#f8fafc"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" fill="#0f172a">
+    <text x="80" y="68" font-size="38" font-weight="700">Delayed-Blazegraph scheduler work distribution</text>
+    <text x="80" y="108" font-size="21" fill="#475569">3-node devnet · 45.046 s run · +1,200 ms/request · 100 ms sampling</text>
+
+    <g transform="translate(80 132)">
+      <rect width="314" height="76" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+      <text x="20" y="31" font-size="25" font-weight="700">89.175 s</text>
+      <text x="20" y="57" font-size="16" fill="#64748b">active scheduler slot-time</text>
+    </g>
+    <g transform="translate(414 132)">
+      <rect width="314" height="76" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+      <text x="20" y="31" font-size="25" font-weight="700">444 / 444</text>
+      <text x="20" y="57" font-size="16" fill="#64748b">healthy diagnostics samples</text>
+    </g>
+    <g transform="translate(748 132)">
+      <rect width="314" height="76" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+      <text x="20" y="31" font-size="25" font-weight="700">3 normal · 1 background</text>
+      <text x="20" y="57" font-size="16" fill="#64748b">maximum queued by lane</text>
+    </g>
+    <g transform="translate(1082 132)">
+      <rect width="438" height="76" rx="10" fill="#ecfdf5" stroke="#6ee7b7"/>
+      <text x="20" y="31" font-size="25" font-weight="700" fill="#065f46">0.000 s · 0.00%</text>
+      <text x="20" y="57" font-size="16" fill="#047857">generic blazegraph.query</text>
+    </g>
+
+    <text x="80" y="250" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">ALL ACTIVE SCHEDULER SLOTS</text>
+    <g transform="translate(80 266)">
+      <rect width="1440" height="62" rx="8" fill="#1e293b"/>
+      <text x="22" y="28" font-size="21" font-weight="700" fill="#ffffff">all admitted work</text>
+      <text x="22" y="51" font-size="16" fill="#cbd5e1">89.175 slot-seconds · 100.00%</text>
+    </g>
+
+    <text x="80" y="362" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">LANES</text>
+    <g transform="translate(80 378)">
+      <rect width="1079.568" height="72" rx="7" fill="#7c3aed"/>
+      <text x="20" y="31" font-size="21" font-weight="700" fill="#ffffff">normal</text>
+      <text x="20" y="56" font-size="17" fill="#ede9fe">66.858 s · 74.97%</text>
+      <rect x="1079.568" width="360.432" height="72" rx="7" fill="#2563eb"/>
+      <text x="1099.568" y="31" font-size="21" font-weight="700" fill="#ffffff">background</text>
+      <text x="1099.568" y="56" font-size="17" fill="#dbeafe">22.317 s · 25.03%</text>
+    </g>
+
+    <text x="80" y="484" font-size="16" font-weight="700" fill="#64748b" letter-spacing="1.5">CALLER / PROVIDER SOURCES</text>
+    <g transform="translate(80 500)">
+      <rect width="355.392" height="104" rx="6" fill="#8b5cf6"/>
+      <text x="16" y="29" font-size="18" font-weight="700" fill="#ffffff">privateGraphAccessPolicy</text>
+      <text x="16" y="55" font-size="15" fill="#ede9fe">agent.query</text>
+      <text x="16" y="84" font-size="17" font-weight="700" fill="#ffffff">22.012 s · 24.68%</text>
+
+      <rect x="355.392" width="320.976" height="104" rx="6" fill="#0891b2"/>
+      <text x="371.392" y="29" font-size="18" font-weight="700" fill="#ffffff">resolveOnChainId</text>
+      <text x="371.392" y="55" font-size="15" fill="#cffafe">agent.vmReconcile</text>
+      <text x="371.392" y="84" font-size="17" font-weight="700" fill="#ffffff">19.877 s · 22.29%</text>
+
+      <rect x="676.368" width="117.936" height="104" rx="6" fill="#d97706"/>
+      <text x="688.368" y="31" font-size="15" font-weight="700" fill="#ffffff">running</text>
+      <text x="688.368" y="56" font-size="14" fill="#fef3c7">promote</text>
+      <text x="688.368" y="83" font-size="14" font-weight="700" fill="#ffffff">8.19%</text>
+
+      <rect x="794.304" width="116.496" height="104" rx="6" fill="#dc2626"/>
+      <text x="806.304" y="31" font-size="15" font-weight="700" fill="#ffffff">candidates</text>
+      <text x="806.304" y="56" font-size="14" fill="#fee2e2">promote</text>
+      <text x="806.304" y="83" font-size="14" font-weight="700" fill="#ffffff">8.09%</text>
+
+      <rect x="910.8" width="111.312" height="104" rx="6" fill="#059669"/>
+      <text x="922.8" y="31" font-size="15" font-weight="700" fill="#ffffff">recover</text>
+      <text x="922.8" y="56" font-size="14" fill="#d1fae5">promote</text>
+      <text x="922.8" y="83" font-size="14" font-weight="700" fill="#ffffff">7.73%</text>
+
+      <rect x="1022.112" width="39.168" height="104" fill="#9333ea"/>
+      <rect x="1061.28" width="18.288" height="104" fill="#64748b"/>
+
+      <rect x="1079.568" width="360.432" height="104" rx="6" fill="#2563eb"/>
+      <text x="1095.568" y="31" font-size="18" font-weight="700" fill="#ffffff">api.query</text>
+      <text x="1095.568" y="57" font-size="15" fill="#dbeafe">background lane</text>
+      <text x="1095.568" y="84" font-size="17" font-weight="700" fill="#ffffff">22.317 s · 25.03%</text>
+    </g>
+
+    <text x="80" y="652" font-size="25" font-weight="700">Exact measured distribution</text>
+    <line x1="80" y1="674" x2="1520" y2="674" stroke="#cbd5e1"/>
+
+    <g font-size="17">
+      <text x="112" y="710" font-weight="700" fill="#475569">Lane</text>
+      <text x="290" y="710" font-weight="700" fill="#475569">Source</text>
+      <text x="1280" y="710" text-anchor="end" font-weight="700" fill="#475569">Slot time</text>
+      <text x="1500" y="710" text-anchor="end" font-weight="700" fill="#475569">Share</text>
+
+      <g transform="translate(0 728)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#2563eb"/>
+        <text x="112" y="13">background</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">api.query</text>
+        <text x="1280" y="13" text-anchor="end">22.317 s</text>
+        <text x="1500" y="13" text-anchor="end">25.03%</text>
+      </g>
+      <g transform="translate(0 774)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#8b5cf6"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">agent.query.privateGraphAccessPolicy</text>
+        <text x="1280" y="13" text-anchor="end">22.012 s</text>
+        <text x="1500" y="13" text-anchor="end">24.68%</text>
+      </g>
+      <g transform="translate(0 820)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#0891b2"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">agent.vmReconcile.resolveOnChainId</text>
+        <text x="1280" y="13" text-anchor="end">19.877 s</text>
+        <text x="1500" y="13" text-anchor="end">22.29%</text>
+      </g>
+      <g transform="translate(0 866)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#d97706"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.claimNext.running</text>
+        <text x="1280" y="13" text-anchor="end">7.300 s</text>
+        <text x="1500" y="13" text-anchor="end">8.19%</text>
+      </g>
+      <g transform="translate(0 912)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#dc2626"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.claimNext.candidates</text>
+        <text x="1280" y="13" text-anchor="end">7.216 s</text>
+        <text x="1500" y="13" text-anchor="end">8.09%</text>
+      </g>
+      <g transform="translate(0 958)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#059669"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.recoverExpired</text>
+        <text x="1280" y="13" text-anchor="end">6.894 s</text>
+        <text x="1500" y="13" text-anchor="end">7.73%</text>
+      </g>
+      <g transform="translate(0 1004)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#9333ea"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">publisher.asyncPromote.list</text>
+        <text x="1280" y="13" text-anchor="end">2.425 s</text>
+        <text x="1500" y="13" text-anchor="end">2.72%</text>
+      </g>
+      <g transform="translate(0 1050)">
+        <rect x="82" y="0" width="12" height="12" rx="2" fill="#64748b"/>
+        <text x="112" y="13">normal</text>
+        <text x="290" y="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">agent.swmHostMode.listContextGraphs</text>
+        <text x="1280" y="13" text-anchor="end">1.134 s</text>
+        <text x="1500" y="13" text-anchor="end">1.27%</text>
+      </g>
+    </g>
+
+    <line x1="80" y1="1086" x2="1520" y2="1086" stroke="#cbd5e1"/>
+    <text x="80" y="1110" font-size="15" fill="#64748b">Active slot-time profile, not CPU time. Percentages are integrated active-operation counts sampled every 100 ms.</text>
+  </g>
+</svg>
