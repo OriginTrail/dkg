@@ -2,12 +2,14 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+  authoritativeSyncPeerId,
   classifyDurableProgress,
   normalizeDurableSyncResult,
   type DKGAgent,
   type DurableProgressSummary,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
@@ -877,14 +879,20 @@ class WorkerCatchupRunner implements CatchupRunner {
         // the registry fallback twice for a wallet-address curator) per
         // catch-up, and the resolver evicts the bootstrap hint once metadata
         // confirms a curator, so the second call is not the same call.
-        const resolution: { peerId?: string; provenance?: string } =
+        const resolution: SyncPeerResolution =
           typeof agent.resolveSyncPeerWithProvenance === 'function'
             ? await agent.resolveSyncPeerWithProvenance(contextGraphId)
-            : { peerId: await agent.resolvePreferredSyncPeerId(contextGraphId) };
-        const preferredPeerId: string | undefined = resolution.peerId;
-        const authoritativePeerId = resolution.provenance === 'metadata'
-          ? resolution.peerId
-          : undefined;
+            : {
+              peerId: await agent.resolvePreferredSyncPeerId(contextGraphId),
+              // An agent without the provenance resolver cannot establish
+              // authority, and must not be assumed to have it.
+              provenance: 'bootstrap-hint',
+            };
+        const preferredPeerId = resolution.peerId;
+        // The agent's own definition of "may end the walk", not a restatement
+        // of it: a renamed or added provenance value has to break here rather
+        // than silently downgrade every curator to non-authoritative.
+        const authoritativePeerId = authoritativeSyncPeerId(resolution);
         if (preferredPeerId) {
           await agent.ensurePeerConnected(preferredPeerId);
         }

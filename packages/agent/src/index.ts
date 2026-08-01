@@ -336,6 +336,16 @@ export {
   type CatchupPlanePolicyResult,
   type CatchupPlaneResult,
 } from './sync/catchup-policy.js';
+// Which peer may let one answer stand for a WHOLE Context Graph is the load-
+// bearing distinction of the foreground catch-up walk (#2006), and the walk
+// lives in the CLI's worker. Publishing the model — rather than letting the
+// bridge re-shape it into a bare string — is what keeps the two sides from
+// drifting: adding or renaming a provenance value must break the consumer, not
+// silently downgrade it to "not authoritative".
+export {
+  authoritativeSyncPeerId,
+  type SyncPeerResolution,
+} from './dkg-agent-cg-resolve.js';
 export {
   classifyDurableProgress,
   createFailedPeerDurableSyncResult,
