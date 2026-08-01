@@ -91,6 +91,48 @@ const NATIVE_DEPLOYMENT = Object.freeze({
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
 const rpcHarness = createLoopbackJsonRpcTestHarness();
+const RFC64_M0_RECOVERY_SCENARIOS = [
+  'cold-restart',
+  'provider-failover',
+  'curated-parity',
+] as const;
+const RFC64_M0_RECOVERY_TEST_TITLES = {
+  'cold-restart':
+    'automatically cold-joins a published public catalog and recovers it after restart',
+  'provider-failover': 'retries an initial miss and fails over to the later provider',
+  'curated-parity':
+    'keeps warm and cold public-curated receivers at one exact finalized head across restart',
+} as const;
+type Rfc64M0RecoveryScenario = typeof RFC64_M0_RECOVERY_SCENARIOS[number];
+const activeRfc64M0RecoveryScenario = process.env.DKG_RFC64_M0_RECOVERY_SCENARIO;
+if (
+  activeRfc64M0RecoveryScenario !== undefined
+  && !(RFC64_M0_RECOVERY_SCENARIOS as readonly string[])
+    .includes(activeRfc64M0RecoveryScenario)
+) {
+  throw new Error(
+    `Unknown DKG_RFC64_M0_RECOVERY_SCENARIO: ${activeRfc64M0RecoveryScenario}`,
+  );
+}
+const ordinaryIt = activeRfc64M0RecoveryScenario === undefined ? it : it.skip;
+const registeredRfc64M0RecoveryScenarios = new Set<Rfc64M0RecoveryScenario>();
+
+function m0RecoveryIt(
+  scenario: Rfc64M0RecoveryScenario,
+  title: string,
+  handler: () => void | Promise<void>,
+  timeout?: number,
+): void {
+  if (registeredRfc64M0RecoveryScenarios.has(scenario)) {
+    throw new Error(`Duplicate RFC-64 M0 recovery scenario registration: ${scenario}`);
+  }
+  registeredRfc64M0RecoveryScenarios.add(scenario);
+  const scenarioIt = activeRfc64M0RecoveryScenario === undefined
+    || activeRfc64M0RecoveryScenario === scenario
+    ? it
+    : it.skip;
+  scenarioIt(title, handler, timeout);
+}
 
 afterEach(async () => {
   for (const agent of agents.splice(0)) {
@@ -307,7 +349,7 @@ function privateCatalogRoster(
 }
 
 describe('RFC-64 DKGAgent production native catalog wiring', () => {
-  it('snapshots and canonicalizes the deterministic local deployment override', () => {
+  ordinaryIt('snapshots and canonicalizes the deterministic local deployment override', () => {
     const callerOwned = {
       networkId: NETWORK_ID,
       assertedAtChainId: '20430',
@@ -325,7 +367,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })).toThrow(/non-zero EVM address/);
   });
 
-  it('snapshots the opt-in normal-publication catalog producer configuration', () => {
+  ordinaryIt('snapshots the opt-in normal-publication catalog producer configuration', () => {
     const callerOwned = {
       peers: ['12D3KooReceiver'],
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
@@ -345,7 +387,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })).toThrow(/duplicated/u);
   });
 
-  it('snapshots a bounded public-root bootstrap manifest', () => {
+  ordinaryIt('snapshots a bounded public-root bootstrap manifest', () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -379,7 +421,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
   });
 
-  it('rejects bootstrap without persistence before node startup', async () => {
+  ordinaryIt('rejects bootstrap without persistence before node startup', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -396,7 +438,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })).rejects.toThrow(/rfc64PublicCatalogBootstrap requires dataDir/u);
   });
 
-  it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
+  ordinaryIt('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
     const receiver = await startNativeAgent('auto-publish-receiver');
     const author = await startNativeAgent(
       'auto-publish-author',
@@ -517,7 +559,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('canonicalizes ordinary literal lexical forms before catalog projection verification', async () => {
+  ordinaryIt('canonicalizes ordinary literal lexical forms before catalog projection verification', async () => {
     const author = await startNativeAgent(
       'auto-publish-canonical-literal',
       NATIVE_DEPLOYMENT,
@@ -550,7 +592,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })).resolves.toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
   }, 60_000);
 
-  it('uses the chain signer for a confirmed author when no custodial key is available', async () => {
+  ordinaryIt('uses the chain signer for a confirmed author when no custodial key is available', async () => {
     const author = await startNativeAgent(
       'auto-publish-chain-signer',
       NATIVE_DEPLOYMENT,
@@ -608,7 +650,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(signMessageAs).toHaveBeenCalled();
   }, 60_000);
 
-  it('does not expose an empty applied head when first-asset successor staging fails', async () => {
+  ordinaryIt('does not expose an empty applied head when first-asset successor staging fails', async () => {
     const author = await startNativeAgent(
       'auto-publish-first-asset-retry',
       NATIVE_DEPLOYMENT,
@@ -662,7 +704,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('atomically serializes concurrent first-asset catalog upserts without losing a row', async () => {
+  ordinaryIt('atomically serializes concurrent first-asset catalog upserts without losing a row', async () => {
     const receiver = await startNativeAgent('auto-publish-concurrent-receiver');
     const author = await startNativeAgent(
       'auto-publish-concurrent-author',
@@ -739,7 +781,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     ));
   }, 60_000);
 
-  it('[M0_RECOVERY_COLD_RESTART] automatically cold-joins a published public catalog and recovers it after restart', async () => {
+  m0RecoveryIt('cold-restart', RFC64_M0_RECOVERY_TEST_TITLES['cold-restart'], async () => {
     const author = await startNativeAgent(
       'bootstrap-author',
       NATIVE_DEPLOYMENT,
@@ -848,7 +890,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('[M0_RECOVERY_PROVIDER_FAILOVER] retries an initial miss and fails over to the later provider', async () => {
+  m0RecoveryIt('provider-failover', RFC64_M0_RECOVERY_TEST_TITLES['provider-failover'], async () => {
     const emptyProvider = await startNativeAgent('bootstrap-empty-provider');
     const author = await startNativeAgent(
       'bootstrap-retry-author',
@@ -937,7 +979,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })?.currentCatalogHeadDigest).toBe(published?.currentCatalogHeadDigest);
   }, 60_000);
 
-  it('clears applied metadata when a later bootstrap refresh misses', async () => {
+  ordinaryIt('clears applied metadata when a later bootstrap refresh misses', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -989,7 +1031,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
   }, 30_000);
 
 
-  it('serializes mixed-case projection terms in raw UTF-8 order', async () => {
+  ordinaryIt('serializes mixed-case projection terms in raw UTF-8 order', async () => {
     const author = await startNativeAgent(
       'auto-publish-byte-order',
       NATIVE_DEPLOYMENT,
@@ -1030,7 +1072,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(applied).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
   }, 60_000);
 
-  it('explicitly skips private-bearing ordinary publishes in the public-only V1 bridge', async () => {
+  ordinaryIt('explicitly skips private-bearing ordinary publishes in the public-only V1 bridge', async () => {
     const author = await startNativeAgent(
       'auto-publish-private-skip',
       NATIVE_DEPLOYMENT,
@@ -1079,7 +1121,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
   }, 60_000);
 
 
-  it('snapshots the explicit access authority and fails closed before private activation', async () => {
+  ordinaryIt('snapshots the explicit access authority and fails closed before private activation', async () => {
     const resolver = async () => AUTHOR;
     const callerOwned = {
       localAgentAddress: ethers.getAddress(AUTHOR) as EvmAddressV1,
@@ -1188,7 +1230,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('uses the trusted override to fetch provider content and durably apply native genesis', async () => {
+  ordinaryIt('uses the trusted override to fetch provider content and durably apply native genesis', async () => {
     const [author, receiver] = await Promise.all([
       startNativeAgent('author'),
       startNativeAgent('receiver'),
@@ -1262,7 +1304,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     )).toBeNull();
   }, 60_000);
 
-  it('reads the exact staged head variant to dedupe a durably applied multi-row set', async () => {
+  ordinaryIt('reads the exact staged head variant to dedupe a durably applied multi-row set', async () => {
     const [author, receiver] = await Promise.all([
       startNativeAgent('multi-author'),
       startNativeAgent('multi-receiver'),
@@ -1355,7 +1397,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('cold-starts after publication from a provider current-head snapshot', async () => {
+  ordinaryIt('cold-starts after publication from a provider current-head snapshot', async () => {
     const [author, provider] = await Promise.all([
       startNativeAgent('cold-author'),
       startNativeAgent('cold-provider'),
@@ -1464,7 +1506,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('rejects the provider-sync API when scheduled semantic activation fails', async () => {
+  ordinaryIt('rejects the provider-sync API when scheduled semantic activation fails', async () => {
     const [author, provider] = await Promise.all([
       startNativeAgent('failure-author'),
       startNativeAgent('failure-provider'),
@@ -1537,7 +1579,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     })).toBeNull();
   }, 60_000);
 
-  it('materializes finalized VM through production two-agent wiring before applying the head', async () => {
+  ordinaryIt('materializes finalized VM through production two-agent wiring before applying the head', async () => {
     const kaNumber = 7n;
     const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
@@ -1707,7 +1749,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(finalizedCallTargets).not.toContain(KAV10);
   }, 60_000);
 
-  it('[M0_RECOVERY_CURATED_PARITY] keeps warm and cold public-curated receivers at one exact finalized head across restart', async () => {
+  m0RecoveryIt('curated-parity', RFC64_M0_RECOVERY_TEST_TITLES['curated-parity'], async () => {
     const kaNumbers = [41n] as const;
     const assets = kaNumbers.map((kaNumber) => Object.freeze({
       assertionRoot: ASSERTION_ROOT,
@@ -1953,7 +1995,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     ]);
   }, 90_000);
 
-  it('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {
+  ordinaryIt('exposes bounded typed failure evidence when wire scope differs from local deployment', async () => {
     const [author, receiver] = await Promise.all([
       startNativeAgent('mismatch-author'),
       startNativeAgent('mismatch-receiver', {
@@ -2006,7 +2048,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     )).toBeNull();
   }, 60_000);
 
-  it('rejects a stale-network durable dedupe after restart under a new local pin', async () => {
+  ordinaryIt('rejects a stale-network durable dedupe after restart under a new local pin', async () => {
     const receiverDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-native-repin-'));
     tempDirs.push(receiverDataDir);
     const [author, firstReceiver] = await Promise.all([
@@ -2068,6 +2110,12 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       errorCode: 'catalog-native-receiver-authorization',
     });
   }, 60_000);
+
+  it('registers the complete structural M0 recovery scenario set', () => {
+    expect([...registeredRfc64M0RecoveryScenarios].sort()).toEqual(
+      [...RFC64_M0_RECOVERY_SCENARIOS].sort(),
+    );
+  });
 });
 
 async function authorSeal(

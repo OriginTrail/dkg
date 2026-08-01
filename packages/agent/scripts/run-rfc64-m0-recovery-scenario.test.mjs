@@ -2,46 +2,44 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  RFC64_M0_RECOVERY_SCENARIO_ENV,
   RFC64_M0_RECOVERY_SCENARIOS,
-  validateRecoveryReport,
+  runRecoveryScenario,
 } from './run-rfc64-m0-recovery-scenario.mjs';
 
-test('keeps scenario selection independent of human-readable display text', () => {
-  const scenario = RFC64_M0_RECOVERY_SCENARIOS['provider-failover'];
-  const matchingAssertion = {
-    status: 'passed',
-    title: `[${scenario.id}] this display text can change freely`,
-  };
+test('dispatches a stable structural scenario without title filters or reporter parsing', async () => {
+  let invocation;
+  await runRecoveryScenario('provider-failover', {
+    run: async (args, env) => {
+      invocation = { args, env };
+    },
+  });
 
-  assert.doesNotThrow(() => validateRecoveryReport(scenario, {
-    numFailedTests: 0,
-    numPassedTests: 1,
-    testResults: [{ assertionResults: [matchingAssertion] }],
-  }));
+  assert.deepEqual(invocation.args, [
+    'exec',
+    'vitest',
+    'run',
+    '--config',
+    'vitest.unit.config.ts',
+    'test/rfc64-dkg-agent-native-wiring.integration.test.ts',
+  ]);
+  assert.equal(invocation.env[RFC64_M0_RECOVERY_SCENARIO_ENV], 'provider-failover');
+  assert.equal(invocation.args.includes('-t'), false);
+  assert.equal(invocation.args.some((arg) => arg.includes('reporter')), false);
 });
 
-test('rejects a missing, skipped, or duplicated scenario proof', () => {
-  const scenario = RFC64_M0_RECOVERY_SCENARIOS['provider-failover'];
-  const matchingAssertion = {
-    status: 'passed',
-    title: `[${scenario.id}] source recovery`,
-  };
-
-  assert.throws(() => validateRecoveryReport(scenario, {
-    numFailedTests: 0,
-    numPassedTests: 0,
-    testResults: [{ assertionResults: [] }],
-  }), /did not prove exactly one passing/);
-
-  assert.throws(() => validateRecoveryReport(scenario, {
-    numFailedTests: 0,
-    numPassedTests: 0,
-    testResults: [{ assertionResults: [{ ...matchingAssertion, status: 'skipped' }] }],
-  }), /did not prove exactly one passing/);
-
-  assert.throws(() => validateRecoveryReport(scenario, {
-    numFailedTests: 0,
-    numPassedTests: 2,
-    testResults: [{ assertionResults: [matchingAssertion, { ...matchingAssertion }] }],
-  }), /did not prove exactly one passing/);
+test('rejects unknown structural scenario targets before invoking Vitest', async () => {
+  let invoked = false;
+  await assert.rejects(
+    runRecoveryScenario('missing-scenario', {
+      run: async () => { invoked = true; },
+    }),
+    /Unknown RFC-64 M0 recovery scenario/,
+  );
+  assert.equal(invoked, false);
+  assert.deepEqual(RFC64_M0_RECOVERY_SCENARIOS, [
+    'cold-restart',
+    'provider-failover',
+    'curated-parity',
+  ]);
 });

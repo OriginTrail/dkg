@@ -32,13 +32,13 @@ The runtime sub-gates write their existing commit-bound artifacts under:
 - `devnet/rfc64-gate2-multi-asset-completeness/artifacts/`
 
 The three recovery rows call stable proof scripts owned by the agent package
-and run as independent child commands. The agent-local proof boundary validates
-each Vitest report and requires exactly one matching machine scenario ID to
-pass, so display-text changes do not affect selection and a removed, duplicated,
-skipped, or failed scenario cannot be hidden by another recovery test. The
-bounded-work row selects stable test files rather than English test titles.
-Every child process exit status is part of the composed gate; focused tests do
-not substitute fixture data for runtime observations.
+and run as independent child commands. An agent-local structural dispatcher
+selects one registered scenario without title filters or reporter parsing; it
+fails during test discovery if any required scenario is missing or duplicated.
+Display-text changes therefore do not affect selection. The bounded-work row
+selects stable test files rather than English test titles. Every child process
+exit status is part of the composed gate; focused tests do not substitute
+fixture data for runtime observations.
 
 ## What M0 does not prove
 
