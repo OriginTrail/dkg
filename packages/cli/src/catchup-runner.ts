@@ -554,12 +554,29 @@ export function catchupPlaneProvenByData(
  * empty (`sync-verify-worker-impl.ts`), so an empty response can never carry
  * hosting evidence — there is no per-peer signal that could distinguish the two.
  *
- * Emptiness is therefore only provable as a verdict over the whole round:
- * at least one peer completed cleanly empty, nobody delivered any content, and
- * nothing failed, timed out, was denied, or was deferred. One data-bearing peer
- * that fails is enough to void it — that exact shape (122,705 triples fetched,
- * five failed phases, five unrelated peers answering empty) is what settled
- * issue #2006's run as `done` with 1 KA out of 40.
+ * Emptiness is therefore a verdict over the whole round: some peer completed
+ * cleanly empty, nobody delivered any graph CONTENT, and no peer engaged and
+ * then failed part-way. That exact shape — 122,705 data triples fetched and
+ * five failed phases, with five unrelated peers answering empty — is what
+ * settled issue #2006's run as `done` with 1 KA out of 40, and either clause
+ * kills it on its own.
+ *
+ * Two counters are deliberately NOT consulted:
+ *
+ * - `fetchedMetaTriples`. Every registered Context Graph carries definition
+ *   triples in its own `<cg>/_meta`, so any peer that hosts the graph at all
+ *   returns metadata even when the graph holds zero Knowledge Assets. Treating
+ *   metadata as content would make a legitimately empty public graph
+ *   permanently unreadable rather than merely unproven.
+ * - `failedPeers`. That is a transport failure to a peer we never heard from —
+ *   on a live testnet a majority of connected peers can be unreachable — and an
+ *   unreachable stranger is evidence of nothing. A peer that DID engage and
+ *   then failed shows up in `failedPhases` / `timedOutPhases` / `deniedPhases`
+ *   / `deferredBackpressure`, all of which do void the verdict.
+ *
+ * Residual, unchanged from before this rule existed: if the only host is
+ * unreachable while another peer answers cleanly empty, the round still reads
+ * as empty. Readiness is re-derived on the next catch-up.
  */
 export function catchupPlaneProvenByUnanimousEmpty(
   completion: CatchupPlaneCompletionEvidence | undefined,
@@ -574,9 +591,7 @@ export function catchupPlaneProvenByUnanimousEmpty(
     || (diagnostics?.emptyResponses ?? 0) > 0;
   if (!cleanEmptyObserved) return false;
   if ((diagnostics?.fetchedDataTriples ?? 0) > 0) return false;
-  if ((diagnostics?.fetchedMetaTriples ?? 0) > 0) return false;
-  return (diagnostics?.failedPeers ?? 0) === 0
-    && (diagnostics?.failedPhases ?? 0) === 0
+  return (diagnostics?.failedPhases ?? 0) === 0
     && (diagnostics?.timedOutPhases ?? 0) === 0
     && (diagnostics?.deniedPhases ?? 0) === 0
     && (diagnostics?.deferredBackpressure ?? 0) === 0;
@@ -692,6 +707,8 @@ class WorkerCatchupRunner implements CatchupRunner {
   private readonly worker: Worker;
   private nextRunId = 0;
   private readonly pendingRuns = new Map<number, PendingRun>();
+  /** Set once the worker dies; every later run fails fast instead of hanging. */
+  private workerFailure: Error | undefined;
 
   constructor(private readonly agent: DKGAgent) {
     const jsWorkerUrl = new URL('./catchup-runner-worker-impl.js', import.meta.url);
@@ -712,26 +729,31 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
     });
     this.worker.on('error', (error) => {
-      this.rejectPendingRuns(error);
+      this.fail(error);
     });
-    // `close()` terminates the worker, which emits 'exit' — never 'error'.
-    // Without this handler every in-flight `run()` promise stays pending
-    // forever, so the daemon's fire-and-forget subscribe job is pinned at
-    // `running` with no `finishedAt` for the rest of the process's life.
+    // `close()` terminates the worker, which emits 'exit' — never 'error'. A
+    // crashed or terminated worker is also permanent: the runner is constructed
+    // once per daemon and `postMessage` to a dead worker neither throws nor
+    // delivers. Without this, an in-flight run stayed pending forever AND every
+    // later run did too, so the daemon's fire-and-forget subscribe jobs were
+    // pinned at `running` with no `finishedAt` for the rest of the process's
+    // life — and the route's dedupe then hands that stuck job back on every
+    // re-subscribe, so an operator cannot even retrigger.
     this.worker.on('exit', (code) => {
-      this.rejectPendingRuns(
-        new Error(`Catch-up worker exited (code ${code}) before the run completed`),
-      );
+      this.fail(new Error(`Catch-up worker exited (code ${code}) before the run completed`));
     });
   }
 
-  private rejectPendingRuns(error: Error): void {
+  /** Latch the terminal failure and settle everything waiting on the worker. */
+  private fail(error: Error): void {
+    this.workerFailure ??= error;
     const pending = [...this.pendingRuns.values()];
     this.pendingRuns.clear();
     for (const run of pending) run.reject(error);
   }
 
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
+    if (this.workerFailure) return Promise.reject(this.workerFailure);
     const runId = this.nextRunId++;
     return new Promise<CatchupJobResult>((resolve, reject) => {
       this.pendingRuns.set(runId, { resolve, reject });

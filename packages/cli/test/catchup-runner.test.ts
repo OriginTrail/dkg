@@ -683,8 +683,6 @@ describe('catch-up plane proof predicates', () => {
   it.each([
     ['a data-bearing peer that failed', { fetchedDataTriples: 122_705, failedPhases: 5 }],
     ['fetched data with no verified completion', { fetchedDataTriples: 5_000 }],
-    ['a peer that returned metadata', { fetchedMetaTriples: 12 }],
-    ['a transport failure', { failedPeers: 1 }],
     ['a failed phase', { failedPhases: 1 }],
     ['a timed-out phase', { timedOutPhases: 1 }],
     ['a denial', { deniedPhases: 1 }],
@@ -694,6 +692,38 @@ describe('catch-up plane proof predicates', () => {
     expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, diagnostics, { isPrivate: false }))
       .toBe(false);
     expect(catchupPlaneReady(emptyPeers, diagnostics, { isPrivate: false })).toBe(false);
+  });
+
+  it.each([
+    // Every registered Context Graph carries definition triples in its own
+    // `<cg>/_meta`, so ANY peer that hosts the graph returns metadata even when
+    // the graph holds zero Knowledge Assets. Treating that as content would make
+    // a legitimately empty public graph permanently unreadable.
+    ['metadata from a hosting peer', { fetchedMetaTriples: 12 }],
+    // A transport failure is a peer we never heard from. On a live testnet a
+    // majority of connected peers can be unreachable; an unreachable stranger is
+    // evidence of nothing. A peer that DID engage and then failed shows up in
+    // the voiding counters above.
+    ['a transport failure to an unreachable peer', { failedPeers: 4 }],
+  ])('still proves an empty public round despite %s', (_label, overrides) => {
+    const diagnostics = { ...cleanEmptyRound, ...overrides };
+    expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, diagnostics, { isPrivate: false }))
+      .toBe(true);
+    expect(catchupPlaneReady(emptyPeers, diagnostics, { isPrivate: false })).toBe(true);
+  });
+
+  it('proves a registered public graph that simply has no Knowledge Assets yet', () => {
+    // The shape a freshly registered, still-empty public Context Graph actually
+    // produces: its host serves the CG definition triples (metadata) and no
+    // data, other peers answer clean-empty, and some connected peers are
+    // unreachable. This must reach `done`, not sit at `unreachable` forever.
+    const registeredButEmpty = {
+      ...cleanEmptyRound,
+      fetchedMetaTriples: 9,
+      emptyResponses: 3,
+      failedPeers: 2,
+    };
+    expect(catchupPlaneReady(emptyPeers, registeredButEmpty, { isPrivate: false })).toBe(true);
   });
 
   it('still reports ready when a peer delivered verified data despite other failures', () => {

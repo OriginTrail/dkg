@@ -262,7 +262,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         if ((durable.emptyResponses ?? 0) > 0) {
           cleanPlaneCompletions.durable.emptyPeers += 1;
         }
-        if (fromAuthority && provenByData) authorityProven.durable = true;
+        // The curator answering cleanly settles this plane whether it carried
+        // data or was legitimately empty: "the host says there is nothing here"
+        // is the authoritative empty proof, and without it a graph with no
+        // public data on one plane could never stop the walk.
+        if (fromAuthority && (provenByData || (durable.emptyResponses ?? 0) > 0)) {
+          authorityProven.durable = true;
+        }
       }
     }
 
@@ -290,10 +296,17 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       if (catchupPlaneCompletedWithoutFailure(shared)) {
         if ((shared.insertedDataTriples ?? 0) > 0) {
           cleanPlaneCompletions.sharedMemory.verifiedDataPeers += 1;
-          if (fromAuthority) authorityProven.sharedMemory = true;
         }
         if ((shared.emptyResponses ?? 0) > 0) {
           cleanPlaneCompletions.sharedMemory.emptyPeers += 1;
+        }
+        // Same rule as durable: the curator settles the plane by answering
+        // cleanly, with data or empty. Shared memory is frequently empty for a
+        // graph that has durable data, and `includeSharedMemory` defaults to
+        // true on subscribe, so without this the early stop would almost never
+        // fire in the shape the fix targets.
+        if (fromAuthority && ((shared.insertedDataTriples ?? 0) > 0 || (shared.emptyResponses ?? 0) > 0)) {
+          authorityProven.sharedMemory = true;
         }
       }
     }

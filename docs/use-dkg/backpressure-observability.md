@@ -87,6 +87,17 @@ it — as `<work class>:<source>`:
 | `swm-recovery` | curator-targeted shared-memory recovery |
 | `unspecified` | a caller that did not declare an origin |
 
+### Tuning foreground catch-up
+
+Two knobs govern the foreground Context Graph catch-up that most often shows up
+as `catchup-foreground` pressure. Both are read once at daemon start.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DKG_CATCHUP_STOP_ON_PROOF` | on | The catch-up walks peers in escalating waves and stops once the resolved curator has settled every requested plane. Set to `0`, `false`, `no`, or `off` to restore the previous behaviour: every sync-capable peer, both requested planes, no early stop. Use this if a graph ever lands short — foreground catch-up optimises for one authoritative payload, while breadth remains the background reconcile lane's job. |
+| `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS` | `180000` | Wall-clock budget one foreground plane may spend waiting for local `sync-global` capacity before the job reports a retryable `deferred`. The default sits above both a full head-of-line round (120 s) and the queue waits that motivated it. An explicit `0` disables retries; a blank value is treated as unset. |
+| `DKG_CATCHUP_MAX_CONCURRENT_PEERS` | `4` | Caps in-flight per-peer sync rounds, and therefore the widest escalation wave. Raising it above the `sync-global` queue depth lets a single catch-up saturate the scheduler against itself. |
+
 So `{"operation":"durable:catchup-foreground","count":4,"oldestAgeMs":109000}`
 in a `queuedOperations` summary reads as "four explicit catch-up durable
 admissions are queued, the oldest for 109 seconds", and the matching

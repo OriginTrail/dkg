@@ -26,8 +26,14 @@ export const CATCHUP_BACKPRESSURE_JITTER_RATIO = 0.25;
  * pinning it at `running` forever.
  */
 export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number = (() => {
-  const raw = Number(process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
-  return Number.isInteger(raw) && raw >= 0 ? raw : 180_000;
+  // A blank env var is the normal docker-compose / `.env` / systemd shape for
+  // "not set", and `Number('')` is 0 — which would silently disable retries
+  // entirely, strictly worse than the ladder this replaced. Treat empty as
+  // unset; an explicit `0` still means "do not retry".
+  const raw = process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS?.trim();
+  if (!raw) return 180_000;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 180_000;
 })();
 
 /** Bounded admission origin recorded on node-wide scheduler diagnostics. */

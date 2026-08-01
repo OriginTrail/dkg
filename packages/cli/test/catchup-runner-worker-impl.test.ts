@@ -9,10 +9,11 @@
 //     probes) may ever be in flight, per-peer failures stay isolated, and the
 //     aggregation keeps its one-result-per-peer input-order shape;
 //   * the issue #2006 progressive walk: peers are contacted in escalating
-//     waves over the authority-ranked list and the walk STOPS as soon as every
-//     requested plane is proven by verified data, so the happy path transfers
-//     one payload instead of one per peer. An empty response proves nothing on
-//     its own and can never stop the walk.
+//     waves over the authority-ranked list and the walk STOPS as soon as the
+//     RESOLVED CURATOR has settled every requested plane, so the happy path
+//     transfers one payload instead of one per peer. A non-authoritative peer's
+//     clean round settles nothing — it can neither stop the walk nor narrow a
+//     later peer to one plane.
 import { describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
@@ -21,8 +22,8 @@ import {
 } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 
-// The foreground backpressure budget is wall-clock (default 60s). Shrink it for
-// this file so the persistently-deferred case settles quickly; the exact
+// The foreground backpressure budget is wall-clock (default 180s). Shrink it
+// for this file so the persistently-deferred case settles quickly; the exact
 // deadline arithmetic is pinned deterministically in
 // packages/agent/test/catchup-policy.test.ts with an injected clock.
 vi.hoisted(() => {
@@ -262,11 +263,15 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
 
   it('keeps walking past a non-authoritative peer that returned verified data', async () => {
     // A peer's `complete` flag proves it served ITS OWN manifest, not the union
-    // of what the network holds: peer-a can cleanly return KA-1 while peer-b
-    // holds KA-2 for the same graph. Without a resolved curator there is no
+    // of what the network holds: peer-0 can cleanly return KA-1 while a later
+    // peer holds KA-2 for the same graph. Without a resolved curator there is no
     // reference snapshot, so a clean data-bearing round must NOT cut the walk
-    // short and strand peer-b's Knowledge Asset.
-    const peerIds = ['peer-a', 'peer-b', 'peer-c'];
+    // short and strand the other peers' Knowledge Assets.
+    //
+    // The peer set must exceed the concurrency cap, or the whole walk is one
+    // wave and this assertion could not fail regardless of the gate.
+    const peerIds = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
+    expect(peerIds.length).toBeGreaterThan(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
     const durableCalls: string[] = [];
 
     const result = await runWorkerCatchup({ contextGraphId: 'cg-disjoint', includeSharedMemory: false }, async (method, args) => {
@@ -285,9 +290,168 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       }
     });
 
-    expect(durableCalls.sort()).toEqual([...peerIds].sort());
+    expect([...durableCalls].sort()).toEqual([...peerIds].sort());
     expect(result.peersNotAttempted).toBe(0);
     expect(result.dataSynced).toBe(peerIds.length);
+  });
+
+  it('does not let a non-authoritative peer narrow a later peer to one plane', async () => {
+    // The other half of the authority gate: a non-curator peer settling shared
+    // memory must not cause later peers to be contacted for durable only.
+    const peerIds = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    await runWorkerCatchup({ contextGraphId: 'cg-no-narrow', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return { ...durableResult(), complete: false };
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          return sharedResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect([...durableCalls].sort()).toEqual([...peerIds].sort());
+    expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
+  });
+
+  it('stops after the curator proves the only requested plane', async () => {
+    // Plain `subscribe` with no workspace is the most common production shape
+    // for the early stop; the multi-wave curator case above requests both
+    // planes, so this pins the durable-only path.
+    const peerIds = Array.from({ length: 10 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-durable-only', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-0']);
+    expect(result.peersNotAttempted).toBe(peerIds.length - 1);
+  });
+
+  it('lets the curator settle a plane by answering cleanly empty', async () => {
+    // Shared memory is frequently empty for a graph that has durable data, and
+    // `includeSharedMemory` defaults to true on subscribe. If only inserted
+    // rows could settle a plane, the early stop would almost never fire in the
+    // shape this fix targets.
+    const peerIds = Array.from({ length: 10 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-empty-swm', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          return {
+            ...sharedResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            completedPhases: 2,
+            emptyResponses: 1,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-0']);
+    expect(sharedCalls).toEqual(['peer-0']);
+    expect(result.peersNotAttempted).toBe(peerIds.length - 1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.emptyPeers).toBe(1);
+  });
+
+  it('skips the durable plane on fallback peers once the curator settled it', async () => {
+    // The `durable: null` round — the reason the peer-accounting helpers accept
+    // a missing plane at all. The curator settles durable but not shared
+    // memory, so later peers must be contacted for shared memory only and must
+    // not be credited with a durable response.
+    const peerIds = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-swm-fallback', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          // The curator engages and fails (so SWM is never settled); every
+          // fallback peer transport-fails, delivering nothing at all.
+          return args[0] === 'peer-0'
+            ? {
+              ...sharedResult(),
+              insertedTriples: 0,
+              insertedDataTriples: 0,
+              completedPhases: 0,
+              failedPhases: 1,
+            }
+            : {
+              ...sharedResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 0,
+              failedPeers: 1,
+            };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // Durable pulled once, from the curator; shared memory from everyone.
+    expect(durableCalls).toEqual(['peer-0']);
+    expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
+    expect(result.peersTried).toBe(peerIds.length);
+    expect(result.peersNotAttempted).toBe(0);
+    // The skipped durable plane must not manufacture a response for peers whose
+    // only requested plane transport-failed: only the curator responded.
+    expect(result.peersResponded).toBe(1);
+    expect(result.peersSucceeded).toBe(0);
+    // One durable round in the whole walk — that is the amplification fix.
+    expect(result.diagnostics?.durable.fetchedDataTriples).toBe(1);
+    expect(result.dataSynced).toBe(1);
   });
 
   it('opens at the full concurrency cap when no curator resolved', async () => {
@@ -354,12 +518,11 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(peak).toBe(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
   });
 
-  it('narrows fallback peers to the planes still in question', async () => {
-    // A Context Graph whose public durable data is empty can never prove its
-    // durable plane by verified data, so the walk must cover every peer to
-    // establish the whole-round empty verdict. Without per-plane narrowing that
-    // would drag a full re-pull of the ALREADY PROVEN shared-memory plane out of
-    // every remaining peer — the exact amplification this fix removes.
+  it('narrows fallback peers to the planes the curator already settled', async () => {
+    // The curator settles shared memory but never settles durable (its durable
+    // round engages and fails). Without per-plane narrowing, walking on for
+    // durable would drag a full re-pull of the ALREADY SETTLED shared-memory
+    // plane out of every remaining peer — the exact amplification this removes.
     const peerIds = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
     const durableCalls: string[] = [];
     const sharedCalls: string[] = [];
@@ -374,12 +537,11 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           durableCalls.push(args[0] as string);
           return {
             ...durableResult(),
+            complete: false,
             insertedTriples: 0,
-            fetchedDataTriples: 0,
             insertedDataTriples: 0,
-            bytesReceived: 0,
-            completedPhases: 2,
-            emptyResponses: 1,
+            completedPhases: 0,
+            timedOutPhases: 1,
           };
         case 'syncSharedMemory':
           sharedCalls.push(args[0] as string);
@@ -391,14 +553,12 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       }
     });
 
-    // Shared memory is proven by the first peer and never pulled again…
+    // Shared memory is settled by the curator and never pulled again…
     expect(sharedCalls).toEqual(['peer-0']);
-    // …while the (cheap, empty) durable plane still walks everyone, because a
-    // clean empty answer only proves emptiness as a whole-round verdict.
+    // …while the unsettled durable plane still walks everyone.
     expect(durableCalls).toEqual(peerIds);
     expect(result.sharedMemorySynced).toBe(1);
     expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(1);
-    expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBe(peerIds.length);
   });
 
   it('keeps per-peer failure isolation and probe filtering under the bounded fan-out', async () => {

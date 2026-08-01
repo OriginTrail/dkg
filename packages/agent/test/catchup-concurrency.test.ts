@@ -51,7 +51,12 @@ describe('catchupWaveSizes', () => {
   });
 
   it('keeps the shared fan-out cap a small positive number', () => {
+    // The cap is env-overridable, so this is a guard on operator input as much
+    // as on the default: a cap above the sync-global queue depth would let one
+    // catch-up saturate the scheduler against itself, which is the shape of the
+    // 2026-07-07 sync storm.
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeGreaterThan(0);
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeLessThanOrEqual(16);
+    expect(Number.isInteger(CATCHUP_MAX_CONCURRENT_PEER_SYNCS)).toBe(true);
   });
 });
