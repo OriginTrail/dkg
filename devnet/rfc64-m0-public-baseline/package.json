@@ -7,6 +7,6 @@
   "scripts": {
     "test": "pnpm run test:unit && pnpm run test:acceptance",
     "test:acceptance": "node runner.mjs",
-    "test:unit": "node --test runner.test.mjs"
+    "test:unit": "node --test runner.test.mjs && pnpm --filter @origintrail-official/dkg-agent test:rfc64-m0-recovery:unit"
   }
 }

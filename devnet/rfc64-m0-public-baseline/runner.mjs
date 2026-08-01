@@ -1,20 +1,13 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../..');
 const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-const recoveryTestFile = 'test/rfc64-dkg-agent-native-wiring.integration.test.ts';
 
 function commandRow(id, label, args) {
   return Object.freeze({ id, label, kind: 'command', args: Object.freeze(args) });
-}
-
-function recoveryRow(id, label, scenarioId) {
-  return Object.freeze({ id, label, kind: 'recovery', scenarioId });
 }
 
 export const M0_ACCEPTANCE_ROWS = Object.freeze([
@@ -29,20 +22,32 @@ export const M0_ACCEPTANCE_ROWS = Object.freeze([
     '@devnet/rfc64-gate2-multi-asset-completeness',
     'live:public-vm',
   ]),
-  recoveryRow(
+  commandRow(
     'automatic-cold-start-and-restart',
     'Automatic cold start and restart',
-    'M0_RECOVERY_COLD_RESTART',
+    [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'test:rfc64-m0-recovery:cold-restart',
+    ],
   ),
-  recoveryRow(
+  commandRow(
     'source-recovery',
     'Source recovery',
-    'M0_RECOVERY_PROVIDER_FAILOVER',
+    [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'test:rfc64-m0-recovery:provider-failover',
+    ],
   ),
-  recoveryRow(
+  commandRow(
     'public-curated-cold-warm-parity',
     'Public-curated cold/warm parity',
-    'M0_RECOVERY_CURATED_PARITY',
+    [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'test:rfc64-m0-recovery:curated-parity',
+    ],
   ),
   commandRow('bounded-work', 'Bounded work', [
     '--filter',
@@ -57,32 +62,6 @@ export const M0_ACCEPTANCE_ROWS = Object.freeze([
     'test/sync-on-connect-churn.test.ts',
   ]),
 ]);
-
-export function validateRecoveryReport(row, report) {
-  const expectedTitlePrefix = `[${row.scenarioId}]`;
-  const assertionResults = (report.testResults ?? []).flatMap(
-    (testResult) => testResult.assertionResults ?? [],
-  );
-  const matchingAssertions = assertionResults.filter(
-    ({ title }) => typeof title === 'string' && title.startsWith(expectedTitlePrefix),
-  );
-  const passedAssertions = assertionResults.filter(({ status }) => status === 'passed');
-
-  if (
-    report.numFailedTests !== 0
-    || report.numPassedTests !== 1
-    || passedAssertions.length !== 1
-    || matchingAssertions.length !== 1
-    || matchingAssertions[0].status !== 'passed'
-    || passedAssertions[0] !== matchingAssertions[0]
-  ) {
-    throw new Error(
-      `${row.label} did not prove exactly one passing ${expectedTitlePrefix} scenario `
-      + `(passed=${String(report.numPassedTests)}, failed=${String(report.numFailedTests)}, `
-      + `matching=${matchingAssertions.length})`,
-    );
-  }
-}
 
 export function runProcess(args, { command = pnpmCommand } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -105,32 +84,7 @@ export function runProcess(args, { command = pnpmCommand } = {}) {
 }
 
 export async function executeRow(row) {
-  if (row.kind === 'command') {
-    await runProcess(row.args);
-    return;
-  }
-
-  const reportDirectory = await mkdtemp(join(tmpdir(), 'dkg-rfc64-m0-'));
-  const reportPath = join(reportDirectory, `${row.id}.json`);
-  try {
-    await runProcess([
-      '--filter',
-      '@origintrail-official/dkg-agent',
-      'exec',
-      'vitest',
-      'run',
-      '--config',
-      'vitest.unit.config.ts',
-      recoveryTestFile,
-      '-t',
-      row.scenarioId,
-      '--reporter=json',
-      `--outputFile=${reportPath}`,
-    ]);
-    validateRecoveryReport(row, JSON.parse(await readFile(reportPath, 'utf8')));
-  } finally {
-    await rm(reportDirectory, { recursive: true, force: true });
-  }
+  await runProcess(row.args);
 }
 
 export async function runM0Rows({ execute = executeRow } = {}) {

@@ -5,7 +5,6 @@ import {
   M0_ACCEPTANCE_ROWS,
   runM0Rows,
   runProcess,
-  validateRecoveryReport,
 } from './runner.mjs';
 
 const expectedRowIds = Object.freeze([
@@ -29,6 +28,18 @@ test('invokes every declared M0 acceptance row exactly once and in order', async
   });
 
   assert.deepEqual(invoked, expectedRowIds);
+});
+
+test('delegates recovery rows to stable agent-package proof scripts', () => {
+  const recoveryScripts = M0_ACCEPTANCE_ROWS.slice(3, 6).map(
+    ({ args }) => args.at(-1),
+  );
+
+  assert.deepEqual(recoveryScripts, [
+    'test:rfc64-m0-recovery:cold-restart',
+    'test:rfc64-m0-recovery:provider-failover',
+    'test:rfc64-m0-recovery:curated-parity',
+  ]);
 });
 
 test('fails the composed gate immediately when a child row fails', async () => {
@@ -55,30 +66,4 @@ test('rejects a child process that exits unsuccessfully', async () => {
     runProcess(['-e', 'process.exit(17)'], { command: process.execPath }),
     /exit code 17/,
   );
-});
-
-test('requires exactly one passing recovery assertion with the stable scenario ID', () => {
-  const row = M0_ACCEPTANCE_ROWS.find(({ id }) => id === 'source-recovery');
-  const matchingAssertion = {
-    status: 'passed',
-    title: `[${row.scenarioId}] provider failover description may change`,
-  };
-
-  assert.doesNotThrow(() => validateRecoveryReport(row, {
-    numFailedTests: 0,
-    numPassedTests: 1,
-    testResults: [{ assertionResults: [matchingAssertion] }],
-  }));
-
-  assert.throws(() => validateRecoveryReport(row, {
-    numFailedTests: 0,
-    numPassedTests: 0,
-    testResults: [{ assertionResults: [{ ...matchingAssertion, status: 'skipped' }] }],
-  }), /did not prove exactly one passing/);
-
-  assert.throws(() => validateRecoveryReport(row, {
-    numFailedTests: 0,
-    numPassedTests: 2,
-    testResults: [{ assertionResults: [matchingAssertion, { ...matchingAssertion }] }],
-  }), /did not prove exactly one passing/);
 });
