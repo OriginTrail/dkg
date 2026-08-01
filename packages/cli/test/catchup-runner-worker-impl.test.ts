@@ -673,6 +673,89 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(0);
   });
 
+  it('does not stop on a hosted-empty curator that the round already contradicted', async () => {
+    // The curator says "nothing here" while another peer in the SAME wave served
+    // content that failed verification. Readiness treats that as content
+    // EXISTING, so it voids the empty proof — and if the walk had already
+    // stopped on the curator's word, the job ends unready having skipped peers
+    // that might have delivered valid data. Worst of both.
+    //
+    // The curator is deliberately NOT first, so the opening wave is full width
+    // and both responses land in the same wave: this is exactly the ordering
+    // where a per-peer stop decision cannot see the contradiction.
+    // `peer-later` MUST sit in a later wave: with the curator not first the
+    // opening wave is full width, so a three-peer list would contact everyone
+    // regardless and the test could not observe an early stop at all.
+    const wave1 = ['peer-rejected', 'peer-curator', 'peer-quiet-a', 'peer-quiet-b'];
+    const peerIds = [...wave1, 'peer-later', 'peer-quiet-c'];
+    expect(wave1.length).toBe(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
+    expect(peerIds.length).toBeGreaterThan(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-contradicted', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-curator',
+            authoritativePeerId: 'peer-curator',
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable': {
+          durableCalls.push(args[0] as string);
+          if (args[0] === 'peer-curator') {
+            return {
+              ...durableResult(),
+              insertedTriples: 9,
+              fetchedMetaTriples: 9,
+              fetchedDataTriples: 0,
+              insertedMetaTriples: 9,
+              insertedDataTriples: 0,
+              metaOnlyResponses: 1,
+              completedPhases: 2,
+            };
+          }
+          if (args[0] === 'peer-rejected') {
+            // Served content for this graph; verification threw it out.
+            return {
+              ...durableResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 4_000,
+              insertedDataTriples: 0,
+              rejectedKcs: 1,
+            };
+          }
+          if (args[0] === 'peer-later') return durableResult();
+          // Everyone else answers content-free, so the only verified data in the
+          // run is the one behind the wave boundary.
+          return {
+            ...durableResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            emptyResponses: 1,
+            completedPhases: 2,
+          };
+        }
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // The contradiction is visible round-wide, so the curator's emptiness does
+    // not settle the plane and the remaining peer is still reached.
+    expect(durableCalls).toContain('peer-later');
+    expect(result.peersNotAttempted).toBe(0);
+    // …and that last peer's verified data is what actually proves the plane.
+    expect(result.cleanPlaneCompletions?.durable.verifiedDataPeers).toBeGreaterThan(0);
+  });
+
   it('does not settle the SHARED-MEMORY plane on curator metadata alone', async () => {
     // End-to-end counterpart of the plane-aware reducer: shared memory is
     // contributed by many members rather than owned by the curator, so

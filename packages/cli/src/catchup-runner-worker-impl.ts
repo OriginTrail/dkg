@@ -16,6 +16,7 @@ import {
   catchupPeerPlaneEvidence,
   catchupPeerResponded,
   catchupPeerSucceeded,
+  catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
   type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
@@ -215,21 +216,55 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     && (!request.includeSharedMemory || authorityProven.sharedMemory);
 
   /**
+   * The CURATOR's own evidence, kept apart from the round total.
+   *
+   * The round total mixes in every peer, and only the curator may end the walk —
+   * so proof-by-data has to be read from this, not from
+   * `cleanPlaneCompletions`, or any peer's data would stop it.
+   */
+  const authorityEvidence: Record<'durable' | 'sharedMemory', CatchupPlaneCompletionEvidence> = {
+    durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
+    sharedMemory: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
+  };
+
+  /**
    * Whether the curator's round settles a plane well enough to stop walking.
    *
-   * Verified content always does. A content-free round only does for a PUBLIC
-   * graph: readiness deliberately refuses to prove a private plane from an
-   * empty response, so stopping on one would strand the walk without proving
-   * anything — skipping fallback peers that may hold authorized private data
-   * and turning a recoverable catch-up into `unreachable`. A verified
-   * private-only response is content, not emptiness, and still counts.
+   * Verified content from the curator always does. Its EMPTINESS is weaker: it
+   * is exactly `catchupPlaneProvenByAuthorityHostedEmpty`, the same predicate
+   * the readiness classifier applies — called here with the round's diagnostics
+   * so the two cannot disagree.
    *
-   * `authorityEmptyPeers` is set by the same reducer readiness consumes, so the
-   * stop condition and the readiness verdict cannot drift apart.
+   * That matters, because the round can contradict the curator. If another peer
+   * fetched data, or served content that failed verification, the curator's
+   * "there is nothing here" is stale and readiness voids it. Stopping the walk
+   * on it anyway would skip peers that might have delivered valid content and
+   * then report the job unready — the worst of both.
+   *
+   * Evaluated at the END of a wave rather than per peer, so a contradiction
+   * raised by ANY member of the same wave is already visible regardless of the
+   * order results happened to arrive in.
    */
-  const authoritySettles = (evidence: CatchupPlaneCompletionEvidence): boolean =>
-    catchupPlaneProvenByData(evidence)
-    || (!prepared.isPrivateContextGraph && (evidence.authorityEmptyPeers ?? 0) > 0);
+  const authoritySettles = (
+    plane: 'durable' | 'sharedMemory',
+  ): boolean => catchupPlaneProvenByData(authorityEvidence[plane])
+    || catchupPlaneProvenByAuthorityHostedEmpty(
+      authorityEvidence[plane],
+      diagnostics[plane],
+      { isPrivate: prepared.isPrivateContextGraph },
+    );
+
+  /** Fold the wave's accumulated state into the stop flags. */
+  const settleAuthorityForWave = (): void => {
+    if (!authorityProven.durable && authoritySettles('durable')) {
+      authorityProven.durable = true;
+    }
+    if (request.includeSharedMemory
+      && !authorityProven.sharedMemory
+      && authoritySettles('sharedMemory')) {
+      authorityProven.sharedMemory = true;
+    }
+  };
 
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
@@ -310,17 +345,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         plane: 'durable',
       });
       addCatchupPlaneEvidence(cleanPlaneCompletions.durable, durableEvidence);
-      // The curator answering cleanly settles this plane whether it carried
-      // data or was legitimately empty: "the host says there is nothing here"
-      // is the authoritative empty proof, and without it a graph with no
-      // public data on one plane could never stop the walk.
-      //
-      // The positive half runs through the SAME predicate the readiness
-      // classifier uses, just applied to one peer's evidence rather than the
-      // round's, so the stop condition cannot drift from the readiness rule.
-      if (fromAuthority && authoritySettles(durableEvidence)) {
-        authorityProven.durable = true;
-      }
+      if (fromAuthority) addCatchupPlaneEvidence(authorityEvidence.durable, durableEvidence);
     }
 
     if (shared) {
@@ -348,14 +373,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // evidence only ever has data/empty set — the same reducer still applies.
       const sharedEvidence = catchupPeerPlaneEvidence(shared, { fromAuthority, plane: 'shared-memory' });
       addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
-      // Same rule as durable: the curator settles the plane by answering
-      // cleanly, with data or empty. Shared memory is frequently empty for a
-      // graph that has durable data, and `includeSharedMemory` defaults to
-      // true on subscribe, so without this the early stop would almost never
-      // fire in the shape the fix targets.
-      if (fromAuthority && authoritySettles(sharedEvidence)) {
-        authorityProven.sharedMemory = true;
-      }
+      if (fromAuthority) addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
     }
 
     if (peerDenied) {
@@ -440,6 +458,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       syncPeer,
     );
     for (const round of rounds) accumulate(round);
+    settleAuthorityForWave();
     if (CATCHUP_STOP_ON_PROOF && authorityProvedEverything()) break;
   }
 

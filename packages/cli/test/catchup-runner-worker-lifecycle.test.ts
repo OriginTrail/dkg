@@ -38,6 +38,11 @@ const workerControl = vi.hoisted(() => {
       for (const listener of state.listeners.get('message') ?? []) listener(message);
     }
 
+    /** Test-only: raise an arbitrary worker event (`error`, `exit`, …). */
+    static emitEvent(event: string, ...args: unknown[]) {
+      for (const listener of state.listeners.get(event) ?? []) listener(...args);
+    }
+
     postMessage(message: unknown) {
       state.posted.push(message);
     }
@@ -103,6 +108,34 @@ describe('WorkerCatchupRunner lifecycle', () => {
     expect((outcome as Error).message).toContain('exited');
     // …and it must not have queued work onto the dead worker.
     expect(workerControl.state.posted).toHaveLength(postedBeforeLaterRun);
+  });
+
+  it('latches a worker `error` for the in-flight run AND every later one', async () => {
+    // Node usually emits `exit` after `error`, so the exit tests cover many real
+    // crashes indirectly — but the `error` handler moved from a one-off pending
+    // rejection to the shared latch, and nothing pinned that. Restoring the old
+    // behaviour would let a LATER subscribe post into a dead worker again, which
+    // is the half of #2006's hang that made every subsequent job stick at
+    // `running`.
+    const runner = createCatchupRunner(stubAgent);
+    const inFlight = runner.run({ contextGraphId: 'cg-crash', includeSharedMemory: false })
+      .then(() => 'resolved' as const, (error: Error) => error);
+    expect(workerControl.state.posted).toHaveLength(1);
+
+    workerControl.FakeWorker.emitEvent('error', new Error('boom'));
+
+    const first = await withinTick(inFlight);
+    expect(first).toBeInstanceOf(Error);
+    expect((first as Error).message).toContain('boom');
+
+    // The latch, not just this run: a later run must fail fast…
+    const postedBeforeLater = workerControl.state.posted.length;
+    const later = runner.run({ contextGraphId: 'cg-after-crash', includeSharedMemory: false })
+      .then(() => 'resolved' as const, (error: Error) => error);
+    const second = await withinTick(later);
+    expect(second).toBeInstanceOf(Error);
+    // …and must not have queued work onto the dead worker.
+    expect(workerControl.state.posted).toHaveLength(postedBeforeLater);
   });
 
   it('rejects every pending run exactly once', async () => {
