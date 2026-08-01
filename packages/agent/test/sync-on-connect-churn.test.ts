@@ -132,7 +132,10 @@ describe('sync-on-connect churn gates', () => {
     await (agent as any).reconcileSyncFromConnectedPeers();
     await flushTimers();
 
-    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function)]]);
+    // The third argument is the bounded admission origin (issue #2006): the
+    // reconciler's queue pressure must be attributable to `reconcile`, not
+    // indistinguishable from sync-on-connect.
+    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function), 'reconcile']]);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {
