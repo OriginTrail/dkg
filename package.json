@@ -52,6 +52,7 @@
     "test:e2e:ui": "pnpm --filter @origintrail-official/dkg-node-ui test:e2e",
     "test:e2e:agent-provenance": "pnpm --filter @origintrail-official/dkg-publisher exec vitest run test/agent-provenance-e2e.test.ts",
     "test:devnet:agent-provenance": "vitest run --config devnet/agent-provenance/vitest.config.ts",
+    "test:m0:rfc64-public-baseline": "pnpm --filter @devnet/rfc64-m0-public-baseline test",
     "test:gate0:rfc64-persistence-lifecycle": "pnpm run test:gate0:rfc64-persistence-lifecycle:generate && pnpm run test:gate0:rfc64-persistence-lifecycle:verify",
     "test:gate0:rfc64-persistence-lifecycle:generate": "pnpm -r --filter @origintrail-official/dkg-agent... --filter '!@origintrail-official/dkg-evm-module' run build && node --experimental-sqlite --import tsx devnet/rfc64-persistence-lifecycle/run.ts",
     "test:gate0:rfc64-persistence-lifecycle:verify": "node --import tsx devnet/rfc64-persistence-lifecycle/verify.ts",

@@ -57,6 +57,7 @@ import {
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
 } from './support/rfc64-finalized-vm-loopback-fixture.js';
+import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../scripts/rfc64-m0-recovery-manifest.mjs';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -91,6 +92,55 @@ const NATIVE_DEPLOYMENT = Object.freeze({
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
 const rpcHarness = createLoopbackJsonRpcTestHarness();
+const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze(
+  RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ id }) => id),
+);
+const rfc64M0RecoveryScenarioById = new Map(
+  RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => [scenario.id, scenario]),
+);
+type Rfc64M0RecoveryScenario = string;
+interface Rfc64M0RecoveryScenarioSpec {
+  readonly title: string;
+  readonly handler: () => void | Promise<void>;
+  readonly timeout?: number;
+}
+const activeRfc64M0RecoveryScenario = process.env.DKG_RFC64_M0_RECOVERY_SCENARIO;
+if (
+  activeRfc64M0RecoveryScenario !== undefined
+  && !(RFC64_M0_RECOVERY_SCENARIOS as readonly string[])
+    .includes(activeRfc64M0RecoveryScenario)
+) {
+  throw new Error(
+    `Unknown DKG_RFC64_M0_RECOVERY_SCENARIO: ${activeRfc64M0RecoveryScenario}`,
+  );
+}
+const registeredRfc64M0RecoveryScenarios = new Map<
+  Rfc64M0RecoveryScenario,
+  Rfc64M0RecoveryScenarioSpec
+>();
+const ordinaryNativeWiringDescribe = describe.skipIf(
+  activeRfc64M0RecoveryScenario !== undefined,
+);
+
+function registerM0RecoveryScenario(
+  scenario: Rfc64M0RecoveryScenario,
+  title: string,
+  handler: () => void | Promise<void>,
+  timeout?: number,
+): void {
+  if (registeredRfc64M0RecoveryScenarios.has(scenario)) {
+    throw new Error(`Duplicate RFC-64 M0 recovery scenario registration: ${scenario}`);
+  }
+  registeredRfc64M0RecoveryScenarios.set(scenario, { title, handler, timeout });
+}
+
+function rfc64M0RecoveryTitle(scenario: Rfc64M0RecoveryScenario): string {
+  const metadata = rfc64M0RecoveryScenarioById.get(scenario);
+  if (metadata === undefined) {
+    throw new Error(`Missing RFC-64 M0 recovery scenario metadata: ${scenario}`);
+  }
+  return metadata.title;
+}
 
 afterEach(async () => {
   for (const agent of agents.splice(0)) {
@@ -306,7 +356,7 @@ function privateCatalogRoster(
   };
 }
 
-describe('RFC-64 DKGAgent production native catalog wiring', () => {
+ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
   it('snapshots and canonicalizes the deterministic local deployment override', () => {
     const callerOwned = {
       networkId: NETWORK_ID,
@@ -739,7 +789,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     ));
   }, 60_000);
 
-  it('automatically cold-joins a published public catalog and recovers it after restart', async () => {
+  registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
     const author = await startNativeAgent(
       'bootstrap-author',
       NATIVE_DEPLOYMENT,
@@ -848,7 +898,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('retries an initial miss and fails over to the later provider', async () => {
+  registerM0RecoveryScenario('provider-failover', rfc64M0RecoveryTitle('provider-failover'), async () => {
     const emptyProvider = await startNativeAgent('bootstrap-empty-provider');
     const author = await startNativeAgent(
       'bootstrap-retry-author',
@@ -1707,7 +1757,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(finalizedCallTargets).not.toContain(KAV10);
   }, 60_000);
 
-  it('keeps warm and cold public-curated receivers at one exact finalized head across restart', async () => {
+  registerM0RecoveryScenario('curated-parity', rfc64M0RecoveryTitle('curated-parity'), async () => {
     const kaNumbers = [41n] as const;
     const assets = kaNumbers.map((kaNumber) => Object.freeze({
       assertionRoot: ASSERTION_ROOT,
@@ -2068,6 +2118,27 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
       errorCode: 'catalog-native-receiver-authorization',
     });
   }, 60_000);
+
+});
+
+describe('RFC-64 M0 recovery scenarios', () => {
+  it('registers the complete structural M0 recovery scenario set', () => {
+    expect([...registeredRfc64M0RecoveryScenarios.keys()].sort()).toEqual(
+      [...RFC64_M0_RECOVERY_SCENARIOS].sort(),
+    );
+  });
+
+  for (const scenario of RFC64_M0_RECOVERY_SCENARIOS) {
+    const spec = registeredRfc64M0RecoveryScenarios.get(scenario);
+    if (spec === undefined) {
+      throw new Error(`Missing RFC-64 M0 recovery scenario registration: ${scenario}`);
+    }
+    const scenarioIt = activeRfc64M0RecoveryScenario === undefined
+      || activeRfc64M0RecoveryScenario === scenario
+      ? it
+      : it.skip;
+    scenarioIt(spec.title, spec.handler, spec.timeout);
+  }
 });
 
 async function authorSeal(
