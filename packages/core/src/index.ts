@@ -76,7 +76,9 @@ export {
   type OperationName,
   type LogSink,
   type LogRecord,
+  type LogSemanticAttributes,
 } from './logger.js';
+export * from './sync-outcome-observability.js';
 export {
   KA_LIFECYCLE_ROLES,
   KA_LIFECYCLE_STAGES,

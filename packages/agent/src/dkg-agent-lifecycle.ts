@@ -97,6 +97,9 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   withRetry,
+  SyncAttemptObserver,
+  classifySyncPlaneOutcome,
+  type SyncTrigger,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
@@ -5571,6 +5574,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
      * during this context-graph catch-up run.
      */
     deniedPeers: number;
+    cleanPlaneCompletions: {
+      durable: {
+        verifiedDataPeers: number;
+        verifiedPrivateOnlyPeers: number;
+        emptyPeers: number;
+      };
+      sharedMemory: {
+        verifiedDataPeers: number;
+        emptyPeers: number;
+      };
+    };
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
@@ -5588,6 +5602,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
 
     return runSyncSingleFlight(this, singleFlightKey, async (): Promise<ContextGraphCatchupResult> => {
+      const trigger: SyncTrigger = mode === 'foreground' ? 'foreground' : 'background';
+      const syncAttempt = new SyncAttemptObserver({
+        logger: this.log,
+        context: ctx,
+        contextGraphId,
+        trigger,
+        planes: includeSharedMemory ? ['vm', 'swm'] : ['vm'],
+      });
+      try {
       const isPrivateContextGraph = await this.isPrivateContextGraph(contextGraphId);
 
       const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
@@ -5635,7 +5658,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
         totalPeers: orderedPeers.length,
         mode,
+        trigger,
+        observer: syncAttempt,
       });
+      } catch (error) {
+        const message = error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error);
+        syncAttempt.finishRemaining(
+          /timed?\s*out|timeout|aborterror/i.test(message) ? 'timeout' : 'failed',
+          { errorCode: 'SYNC_JOB_EXCEPTION' },
+        );
+        throw error;
+      }
     });
   }
 
@@ -5725,7 +5760,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     includeSharedMemory: boolean,
     peers: Array<{ toString(): string }>,
-    stats?: { totalPeers?: number; mode?: CatchupMode },
+    stats?: {
+      totalPeers?: number;
+      mode?: CatchupMode;
+      trigger?: SyncTrigger;
+      observer?: SyncAttemptObserver;
+    },
   ): Promise<{
     /** Ordered connected peers before optional caller windowing. */
     connectedPeers: number;
@@ -5744,9 +5784,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sharedMemoryCompletedCleanly: boolean;
     denied: boolean;
     deniedPeers: number;
+    cleanPlaneCompletions: {
+      durable: {
+        verifiedDataPeers: number;
+        verifiedPrivateOnlyPeers: number;
+        emptyPeers: number;
+      };
+      sharedMemory: {
+        verifiedDataPeers: number;
+        emptyPeers: number;
+      };
+    };
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
+    const trigger = stats?.trigger ?? (
+      stats?.mode === 'foreground' ? 'foreground' : 'background'
+    );
+    const syncAttempt = stats?.observer ?? new SyncAttemptObserver({
+        logger: this.log,
+        context: ctx,
+        contextGraphId,
+        trigger,
+        planes: includeSharedMemory ? ['vm', 'swm'] : ['vm'],
+      });
+    try {
     let syncCapablePeers = 0;
     let peersTried = 0;
     let peersResponded = 0;
@@ -5754,6 +5816,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let dataSynced = 0;
     let sharedMemorySynced = 0;
     let noProtocolPeers = 0;
+    let durableDeniedPhases = 0;
+    let sharedMemoryDeniedPhases = 0;
+    const cleanPlaneCompletions = {
+      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    };
     const diagnostics: CatchupSyncDiagnostics = {
       noProtocolPeers: 0,
       durable: {
@@ -5940,9 +6008,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
         cleanDurablePrivateOnlyCompletions +=
           durableProgress.hasVerifiedPrivateOnlyResponse ? 1 : 0;
+        if (r.durable.insertedDataTriples > 0) {
+          cleanPlaneCompletions.durable.verifiedDataPeers += 1;
+        }
+        if (durableProgress.hasVerifiedPrivateOnlyResponse) {
+          cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers += 1;
+        }
+        if (r.durable.emptyResponses > 0) {
+          cleanPlaneCompletions.durable.emptyPeers += 1;
+        }
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
+        cleanPlaneCompletions.sharedMemory.verifiedDataPeers += 1;
+      }
+      if (
+        r.shared
+        && sharedProgress?.completedWithoutFailure
+        && r.shared.emptyResponses > 0
+      ) {
+        cleanPlaneCompletions.sharedMemory.emptyPeers += 1;
       }
       if (durableResponded || sharedResponded) {
         peersResponded++;
@@ -5963,6 +6048,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         peersSucceeded++;
       }
       dataSynced += r.durable.insertedDataTriples;
+      durableDeniedPhases += r.durable.deniedPhases ?? 0;
       diagnostics.durable.fetchedMetaTriples += r.durable.fetchedMetaTriples;
       diagnostics.durable.fetchedDataTriples += r.durable.fetchedDataTriples;
       diagnostics.durable.insertedMetaTriples += r.durable.insertedMetaTriples;
@@ -5986,6 +6072,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
+        sharedMemoryDeniedPhases += r.shared.deniedPhases ?? 0;
         diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
         diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
         diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;
@@ -6042,6 +6129,48 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
     }
 
+    const hasConfirmedMeta = await this.hasConfirmedMetaState(contextGraphId)
+      .catch(() => false);
+    const isPrivate = hasConfirmedMeta
+      ? await this.isPrivateContextGraph(contextGraphId).catch(() => true)
+      : true;
+    const commonEvidence = {
+      authoritativeScopeConfirmed: hasConfirmedMeta,
+      connectedPeers: stats?.totalPeers ?? peers.length,
+      syncCapablePeers,
+      peersTried,
+      peersResponded,
+    };
+    const vmOutcome = classifySyncPlaneOutcome({
+      ...commonEvidence,
+      verified: hasConfirmedMeta && (
+        cleanPlaneCompletions.durable.verifiedDataPeers > 0
+        || cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers > 0
+        || (!isPrivate && cleanPlaneCompletions.durable.emptyPeers > 0)
+      ),
+      deferredBackpressure: diagnostics.durable.deferredBackpressure,
+      deniedPhases: durableDeniedPhases,
+      timedOutPhases: diagnostics.durable.timedOutPhases,
+    });
+    syncAttempt.finish('vm', vmOutcome, {
+      triplesSynced: vmOutcome === 'success' ? cleanDurableDataSynced : 0,
+    });
+    if (includeSharedMemory) {
+      const swmOutcome = classifySyncPlaneOutcome({
+        ...commonEvidence,
+        verified: hasConfirmedMeta && (
+          cleanPlaneCompletions.sharedMemory.verifiedDataPeers > 0
+          || (!isPrivate && cleanPlaneCompletions.sharedMemory.emptyPeers > 0)
+        ),
+        deferredBackpressure: diagnostics.sharedMemory.deferredBackpressure,
+        deniedPhases: sharedMemoryDeniedPhases,
+        timedOutPhases: diagnostics.sharedMemory.timedOutPhases,
+      });
+      syncAttempt.finish('swm', swmOutcome, {
+        triplesSynced: swmOutcome === 'success' ? cleanSharedMemoryDataSynced : 0,
+      });
+    }
+
     return {
       connectedPeers: stats?.totalPeers ?? peers.length,
       totalPeers: stats?.totalPeers ?? peers.length,
@@ -6056,8 +6185,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemoryCompletedCleanly,
       denied: accessDeniedPeers > 0,
       deniedPeers: accessDeniedPeers,
+      cleanPlaneCompletions,
       diagnostics,
     };
+    } catch (error) {
+      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      syncAttempt.finishRemaining(
+        /timed?\s*out|timeout|aborterror/i.test(message) ? 'timeout' : 'failed',
+        { errorCode: 'SYNC_JOB_EXCEPTION' },
+      );
+      throw error;
+    }
   }
 
   async primeCatchupConnections(this: DKGAgent): Promise<void> {
@@ -6162,6 +6300,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               contextGraphId,
               includeSharedMemory,
               [curatorRemote],
+              { trigger: 'post-approval' },
             );
             totalDataSynced += result.dataSynced;
             totalSharedMemorySynced += result.sharedMemorySynced;

@@ -27,7 +27,9 @@ channels): `example-alerts.md` (importable payloads: `alert-rules.provisioning.j
 - Severity is **structured metadata**: filter with `| severity_text=`ERROR``
   (values DEBUG/INFO/WARN/ERROR) or `detected_level`. There is no `level` label.
 - Other metadata available per line: `dkg_module`, `dkg_operation_id`,
-  `dkg_peer_id`, `dkg_chain`, `dkg_node_role` — filter the same way.
+  `dkg_peer_id`, `dkg_chain`, `dkg_node_role`, `dkg_event_code`,
+  `dkg_sync_plane`, `dkg_sync_trigger`, `dkg_outcome`, `dkg_duration_ms`, and
+  `dkg_triples_synced` — filter the same way.
 - `rpc_usage` accounting lines parse directly:
   `|= `rpc_usage` | logfmt | method != `` | unwrap count`.
 - **Loki 3 gotcha:** *instant* metric queries over ranges ≥ a few hours are
@@ -53,6 +55,32 @@ silent no-ops.
 > and metrics have no such mode switch and follow the resolved endpoint
 > directly. (The fleet's current nodes already ship logs, so they have this
 > set; this matters when provisioning new nodes from a template.)
+
+### Verified VM / SWM sync success contract
+
+Sync success is measured once per requested logical plane, after final
+verification. A transport response or a non-zero inserted-triple count does
+not count as success: partial progress followed by a timeout remains
+`timeout`, local admission pressure is `deferred`, ACL rejection is `denied`,
+and missing peers or authoritative graph metadata is `unreachable`. A clean
+empty response is successful only when the graph is public and authoritative
+metadata is present.
+
+The metrics dashboard uses:
+
+- `dkg_sync_plane_started_total{plane,trigger}` — accepted logical attempts;
+- `dkg_sync_plane_terminal_total{plane,trigger,outcome}` — exactly one final
+  outcome per started plane;
+- `dkg_sync_plane_duration_milliseconds` — start-to-terminal duration;
+- `dkg_sync_plane_active{plane,trigger}` — process-local in-flight attempts.
+
+The fleet/node log dashboards use terminal events with
+`dkg_event_code="sync.plane.terminal"` for outcome rates and drill-down. Do
+not alert on a bare success percentage until the fleet has a representative
+baseline. Any future rule must use a window longer than the configured sync
+timeout and require a minimum number of terminal samples; separately alert on
+a sustained started-vs-terminal gap or active attempts to expose abandoned
+work without treating an in-progress transfer as a failure.
 
 ---
 

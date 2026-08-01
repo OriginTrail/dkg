@@ -260,6 +260,14 @@ export interface DkgMetrics {
   /** outcome={ok|busy|limit|error|invalid} — `invalid` = malformed request
    *  (e.g. missing contextGraphId) short-circuited before serving. */
   syncResponseTotal: Counter;
+  /** plane={vm|swm}, trigger={foreground|background|subscription|post-approval} */
+  syncPlaneStartedTotal: Counter;
+  /** plane, trigger, outcome={success|failed|timeout|deferred|denied|unreachable} */
+  syncPlaneTerminalTotal: Counter;
+  /** ms; plane, trigger, outcome are bounded sync lifecycle enums */
+  syncPlaneDurationMs: Histogram;
+  /** process-local logical plane attempts currently awaiting a terminal result */
+  syncPlaneActive: UpDownCounter;
   /** outcome={ok|error}, protocol_id — outbound P2P protocol send */
   protocolSendTotal: Counter;
   /** ms; protocol_id — P2P protocol send duration */
@@ -455,6 +463,20 @@ function buildMetrics(): DkgMetrics {
     chainRpcFailoverTotal: meter.createCounter('dkg.chain.rpc.failover.total', { description: 'Chain RPC endpoint failover events' }),
     syncRequestTotal: meter.createCounter('dkg.sync.request.total', { description: 'Outbound sync requests' }),
     syncResponseTotal: meter.createCounter('dkg.sync.response.total', { description: 'Inbound sync responses' }),
+    syncPlaneStartedTotal: meter.createCounter('dkg.sync.plane.started.total', {
+      description: 'Logical VM/SWM sync plane attempts started',
+    }),
+    syncPlaneTerminalTotal: meter.createCounter('dkg.sync.plane.terminal.total', {
+      description: 'Terminal verified VM/SWM sync plane outcomes',
+    }),
+    syncPlaneDurationMs: meter.createHistogram('dkg.sync.plane.duration', {
+      unit: 'ms',
+      description: 'Logical VM/SWM sync plane wall-time to a terminal verified outcome',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    syncPlaneActive: meter.createUpDownCounter('dkg.sync.plane.active', {
+      description: 'Logical VM/SWM sync plane attempts currently awaiting a terminal result',
+    }),
     protocolSendTotal: meter.createCounter('dkg.protocol_router.send.total', { description: 'Outbound P2P protocol sends' }),
     oversizeTombstonesTotal: meter.createCounter('dkg.sync.oversize_tombstones.total', {
       description: 'Synced quads refused for exceeding the RDF-literal size invariant (OT-RFC-56)',

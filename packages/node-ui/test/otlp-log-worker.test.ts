@@ -102,7 +102,21 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
     workers.push(w);
     w.start();
 
-    w.push(rec({ level: 'error', message: 'boom', operationId: 'op-1', sourceOperationId: 'op-src' }));
+    w.push(rec({
+      level: 'error',
+      message: 'boom',
+      operationId: 'op-1',
+      sourceOperationId: 'op-src',
+      eventCode: 'sync.plane.terminal',
+      component: 'sync',
+      outcome: 'timeout',
+      retryable: true,
+      errorCode: 'SYNC_PLANE_TIMEOUT',
+      syncPlane: 'vm',
+      syncTrigger: 'subscription',
+      durationMs: 12_345,
+      triplesSynced: 0,
+    }));
     await waitFor(() => srv.received.length >= 1);
 
     const { body, headers } = srv.received[0];
@@ -132,6 +146,15 @@ describe('OtlpLogWorker — OTLP/HTTP log export', () => {
     expect(recAttrs['dkg.operation_id']).toBe('op-1');
     expect(recAttrs['dkg.source_operation_id']).toBe('op-src');
     expect(recAttrs['dkg.module']).toBe('publisher');
+    expect(recAttrs['dkg.event_code']).toBe('sync.plane.terminal');
+    expect(recAttrs['dkg.component']).toBe('sync');
+    expect(recAttrs['dkg.outcome']).toBe('timeout');
+    expect(recAttrs['dkg.retryable']).toBe('true');
+    expect(recAttrs['dkg.error_code']).toBe('SYNC_PLANE_TIMEOUT');
+    expect(recAttrs['dkg.sync_plane']).toBe('vm');
+    expect(recAttrs['dkg.sync_trigger']).toBe('subscription');
+    expect(recAttrs['dkg.duration_ms']).toBe('12345');
+    expect(recAttrs['dkg.triples_synced']).toBe('0');
   });
 
   it('batches multiple records into a single request', async () => {

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
-import { classifyContextGraphCatchupReadiness } from '../src/context-graph-readiness.js';
+import {
+  classifyCatchupPlaneOutcomes,
+  classifyContextGraphCatchupReadiness,
+} from '../src/context-graph-readiness.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   return {
@@ -11,6 +14,7 @@ function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
     peersTried: 2,
     peersResponded: 2,
     peersSucceeded: verifiedDataPeers > 0 ? 1 : 0,
+    deferredBackpressure: 0,
     dataSynced: 5,
     sharedMemorySynced: 0,
     denied: true,
@@ -217,5 +221,54 @@ describe('context graph catch-up readiness classification', () => {
         sharedMemoryVerified: false,
       },
     });
+  });
+
+  it('classifies VM and SWM from their own verified terminal evidence', () => {
+    const result = mixedPeerResult(1);
+    if (!result.diagnostics?.sharedMemory) throw new Error('SWM diagnostics missing');
+    result.diagnostics.sharedMemory.timedOutPhases = 1;
+
+    expect(classifyCatchupPlaneOutcomes({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+    })).toEqual({ vm: 'success', swm: 'timeout' });
+  });
+
+  it('keeps a verified VM success when only SWM is deferred', () => {
+    const result = mixedPeerResult(1);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.deferredBackpressure = 1;
+    if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
+      throw new Error('plane diagnostics missing');
+    }
+    result.diagnostics.durable.deniedPhases = 0;
+    result.diagnostics.durable.timedOutPhases = 0;
+    result.diagnostics.sharedMemory.deferredBackpressure = 1;
+
+    expect(classifyCatchupPlaneOutcomes({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+    })).toEqual({ vm: 'success', swm: 'deferred' });
+  });
+
+  it('does not report clean payload data as success without authoritative metadata', () => {
+    const result = mixedPeerResult(1);
+    result.denied = false;
+    result.deniedPeers = 0;
+    if (!result.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    result.diagnostics.durable.deniedPhases = 0;
+    result.diagnostics.durable.timedOutPhases = 0;
+
+    expect(classifyCatchupPlaneOutcomes({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: false,
+      isPrivate: true,
+    })).toEqual({ vm: 'unreachable' });
   });
 });
