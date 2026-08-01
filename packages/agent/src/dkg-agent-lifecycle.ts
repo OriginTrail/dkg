@@ -313,6 +313,7 @@ import {
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
   orderContextGraphIdsByPriority,
   syncPriorityClass,
   type SyncAdmissionSource,
@@ -1170,11 +1171,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       /** Admission override for foreground catch-up / VM recovery. */
       priorityOverride?: number;
       operationSignal?: AbortSignal;
-      /** Which trigger enqueued this admission; clamped to the closed set. */
+      /**
+       * Which trigger enqueued this admission. Accepted as a loose string
+       * because it can arrive from the catch-up Worker RPC; normalized to the
+       * closed set HERE so every layer past this boundary carries the union.
+       */
       source?: string;
     } = {},
   ): Promise<T> {
-    const { priorityOverride, operationSignal, source } = admission;
+    const { priorityOverride, operationSignal } = admission;
+    const source = normalizeSyncAdmissionSource(admission.source);
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
     const admissionBoundary = combineSyncAdmissionSignals(
@@ -4385,7 +4391,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphIds,
           onAccessDenied,
           options?.priority,
-          options?.source,
+          normalizeSyncAdmissionSource(options?.source),
         );
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
@@ -4765,7 +4771,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[],
     onAccessDenied?: (contextGraphId: string) => void,
     priority?: number,
-    source?: string,
+    source?: SyncAdmissionSource,
   ): Promise<{ result?: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {

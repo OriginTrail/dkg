@@ -282,7 +282,9 @@ describe('sync global backpressure', () => {
         policy,
         ctx,
         label: 'durable:cg-x:peer-x',
-        source: 'leak-urn:cg:private:xyz',
+        // The option is typed `SyncAdmissionSource`; the cast is the point —
+        // the scheduler clamp is defence in depth for exactly this.
+        source: 'leak-urn:cg:private:xyz' as never,
       },
       async () => new Promise<void>((resolve) => {
         releaseRunning = resolve;

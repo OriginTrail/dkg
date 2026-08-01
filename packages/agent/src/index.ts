@@ -225,6 +225,8 @@ export {
   type ImportedArtifactByteStore,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SharedMemorySyncDiagnostics,
+  type SharedMemorySyncResult,
 } from './dkg-agent-types.js';
 export {
   computeImportedArtifactSelector,

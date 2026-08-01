@@ -274,13 +274,13 @@ export async function withGlobalSyncBackpressure<T>(
     priority?: number;
     priorityClass?: SyncPriorityClass;
     /**
-     * Which trigger enqueued this admission. This is the untrusted edge of the
-     * label space — the value can originate across the catch-up Worker RPC
-     * boundary — so it is `string` here and clamped exactly once, below, by
-     * `normalizeSyncAdmissionSource`. Everything from the queue payload onward
-     * is typed `SyncAdmissionSource`.
+     * Which trigger enqueued this admission. Callers normalize at the boundary
+     * where the value enters (`runContextGraphSyncWithBackpressure`); the clamp
+     * below is defence in depth for anything that reaches the scheduler by
+     * another route, so a bad cast can still only widen the label space to
+     * `unspecified`.
      */
-    source?: string;
+    source?: SyncAdmissionSource;
     signal?: AbortSignal;
     /** Deterministic scheduler injection; not operator configuration. */
     agingThresholdMs?: number;
