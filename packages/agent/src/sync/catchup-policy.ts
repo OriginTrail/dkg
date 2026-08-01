@@ -25,16 +25,30 @@ export const CATCHUP_BACKPRESSURE_JITTER_RATIO = 0.25;
  * saturated node fails the catch-up job with a retryable status instead of
  * pinning it at `running` forever.
  */
-export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number = (() => {
-  // A blank env var is the normal docker-compose / `.env` / systemd shape for
-  // "not set", and `Number('')` is 0 — which would silently disable retries
-  // entirely, strictly worse than the ladder this replaced. Treat empty as
-  // unset; an explicit `0` still means "do not retry".
-  const raw = process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS?.trim();
-  if (!raw) return 180_000;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 180_000;
-})();
+export const DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = 180_000;
+
+/**
+ * Parse the operator-facing retry budget.
+ *
+ * Exported as a pure function because the constant below is resolved once at
+ * module load, which makes the env contract untestable in place — and the
+ * contract has a sharp edge worth pinning: a BLANK assignment is the normal
+ * docker-compose / `.env` / systemd shape for "not set", but `Number('')` is
+ * `0`, which would silently disable retries entirely and land strictly worse
+ * than the fixed ladder this replaced. Blank is unset; an explicit `0` still
+ * means "do not retry".
+ */
+export function resolveCatchupBackpressureMaxWaitMs(raw: string | undefined): number {
+  const trimmed = raw?.trim();
+  if (!trimmed) return DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
+}
+
+export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number =
+  resolveCatchupBackpressureMaxWaitMs(process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
 
 /** Bounded admission origin recorded on node-wide scheduler diagnostics. */
 export type CatchupAdmissionSource = 'catchup-foreground' | 'catchup-background';

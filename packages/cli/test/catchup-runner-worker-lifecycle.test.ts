@@ -82,6 +82,24 @@ describe('WorkerCatchupRunner lifecycle', () => {
     expect((outcome as Error).message).toContain('exited');
   });
 
+  it('fails a run started after the worker died instead of posting into the void', async () => {
+    // The pending-run case alone is not enough: the runner is constructed once
+    // per daemon, and `postMessage` to a dead worker neither throws nor
+    // delivers, so without the latch every LATER subscribe hung too.
+    const runner = createCatchupRunner(stubAgent);
+    await runner.close();
+    const postedBeforeLaterRun = workerControl.state.posted.length;
+
+    const later = runner.run({ contextGraphId: 'cg-later', includeSharedMemory: false })
+      .then(() => 'resolved' as const, (error: Error) => error);
+
+    const outcome = await withinTick(later);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain('exited');
+    // …and it must not have queued work onto the dead worker.
+    expect(workerControl.state.posted).toHaveLength(postedBeforeLaterRun);
+  });
+
   it('rejects every pending run exactly once', async () => {
     const runner = createCatchupRunner(stubAgent);
     const first = runner.run({ contextGraphId: 'cg-a', includeSharedMemory: false })

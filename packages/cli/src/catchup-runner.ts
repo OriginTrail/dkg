@@ -822,6 +822,13 @@ class WorkerCatchupRunner implements CatchupRunner {
         const [contextGraphId] = args as [string];
         const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
         const preferredPeerId = await agent.resolvePreferredSyncPeerId(contextGraphId);
+        // Ranking uses the preferred peer; letting ONE peer's answer stand for
+        // the whole graph requires the stricter notion. A join-approval
+        // bootstrap hint is authenticated but can be stale, so it orders the
+        // walk without being allowed to end it.
+        const authoritativePeerId = typeof agent.resolveAuthoritativeSyncPeerId === 'function'
+          ? await agent.resolveAuthoritativeSyncPeerId(contextGraphId)
+          : undefined;
         if (preferredPeerId) {
           await agent.ensurePeerConnected(preferredPeerId);
         }
@@ -837,6 +844,7 @@ class WorkerCatchupRunner implements CatchupRunner {
 
         return {
           preferredPeerId,
+          authoritativePeerId,
           isPrivateContextGraph,
           peerIds,
           connectedPeers: peerIds.length,

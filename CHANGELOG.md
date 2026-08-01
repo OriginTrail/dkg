@@ -14,6 +14,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 - **`sync-global` scheduler diagnostics attribute queue pressure to a trigger** (#2006): the `operation` dimension in `GET /api/diagnostics/backpressure` and in the `[backpressure]` log records changes from the work class alone (`durable`, which merely duplicated `lane`) to `<work class>:<source>` — for example `durable:catchup-foreground` versus `durable:on-connect` or `durable:reconcile`. Both halves are closed sets, so the label space stays bounded and free of Context Graph and peer identifiers; an unrecognised source clamps to `unspecified`. Dashboards that group on `operation` for the `sync-global` scheduler will see the new values. `GET /api/sync/catchup-status` gains `result.peersNotAttempted`, the count of sync-capable peers the walk deliberately skipped.
 
+### Removed
+
+- **`CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS` and the `retryDelaysMs` option are gone from `@origintrail-official/dkg-agent`** (#2006). Both described the fixed `[100, 250, 500]` ladder, which no longer exists: delays are now derived per attempt from an exponential curve, jitter, and the remaining wall-clock budget. A compatibility alias could only have exported a schedule the node no longer follows, so a consumer would have kept compiling while reasoning about behaviour that had changed underneath it — this is called out here rather than shipped as a silent removal. Callers that tuned the ladder should use `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS`, or the injectable `retry` / `now` / `wait` / `random` seams on `runCatchupPlanesWithPolicy` for deterministic tests.
+
 ### Operator knobs
 
 | Variable | Default | Effect |

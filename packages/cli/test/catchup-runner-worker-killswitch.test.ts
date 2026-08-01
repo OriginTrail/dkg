@@ -125,7 +125,7 @@ describe('catch-up progressive walk kill-switch', () => {
     const result = await runWorkerCatchup({ contextGraphId: 'cg-killswitch', includeSharedMemory: true }, async (method, args) => {
       switch (method) {
         case 'prepareCatchup':
-          return { preferredPeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+          return { preferredPeerId: 'peer-0', authoritativePeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
         case 'waitForSyncProtocol':
           return true;
         case 'syncDurable': {

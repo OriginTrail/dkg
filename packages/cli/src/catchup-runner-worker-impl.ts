@@ -88,6 +88,12 @@ function emptyShared() {
 async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult> {
   const prepared = await invoke<{
     preferredPeerId?: string;
+    /**
+     * The preferred peer ONLY when it came from authoritative Context Graph
+     * metadata. A join-approval bootstrap hint arrives as `preferredPeerId`
+     * without this, so it orders the walk but can never end it.
+     */
+    authoritativePeerId?: string;
     isPrivateContextGraph: boolean;
     peerIds: string[];
     connectedPeers: number;
@@ -209,7 +215,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const needDurable = !optimize || !authorityProven.durable;
     const needSharedMemory = request.includeSharedMemory
       && (!optimize || !authorityProven.sharedMemory);
-    const fromAuthority = peerId === prepared.preferredPeerId;
+    const fromAuthority = prepared.authoritativePeerId !== undefined
+      && peerId === prepared.authoritativePeerId;
     if (!needDurable) {
       const shared = needSharedMemory
         ? await runCatchupPlaneWithPolicy('foreground', syncSharedMemory)
@@ -358,8 +365,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // add a round-trip to the front of every round, with no early stop to earn it
   // back. In that case the walk opens at the full concurrency cap — the previous
   // first-round latency.
-  const authorityFirst = prepared.preferredPeerId !== undefined
-    && syncCapable[0] === prepared.preferredPeerId;
+  const authorityFirst = prepared.authoritativePeerId !== undefined
+    && syncCapable[0] === prepared.authoritativePeerId;
   const waveSizes = CATCHUP_STOP_ON_PROOF
     ? catchupWaveSizes(
       syncCapable.length,

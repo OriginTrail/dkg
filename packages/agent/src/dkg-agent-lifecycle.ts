@@ -6307,6 +6307,33 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return curatorPeerId ?? this.preferredSyncPeers.get(contextGraphId);
   }
 
+  /**
+   * The preferred sync peer, but only when it came from authoritative Context
+   * Graph metadata rather than the bootstrap join-approval hint.
+   *
+   * `resolveCuratorPeerId` deletes the hint the moment metadata resolves a
+   * curator, so a returned peer that is STILL the live hint means metadata did
+   * not resolve one and we are looking at a bootstrap value that can be stale
+   * (a curator that has since rotated its libp2p identity, leaving an ordinary
+   * member on that peer id).
+   *
+   * Callers that merely want to try the best peer first should keep using
+   * {@link resolvePreferredSyncPeerId}. Only callers that let one peer's answer
+   * stand for the whole graph — the foreground catch-up walk's early stop —
+   * need this stricter notion, because a non-curator that happens to be ranked
+   * first must never be able to cut the walk short.
+   */
+  async resolveAuthoritativeSyncPeerId(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string | undefined> {
+    const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
+    if (!preferredPeerId) return undefined;
+    return preferredPeerId === this.preferredSyncPeers.get(contextGraphId)
+      ? undefined
+      : preferredPeerId;
+  }
+
   async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {
     await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId);
     if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, createOperationContext('connect'))) return;

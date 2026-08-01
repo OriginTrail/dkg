@@ -3,6 +3,8 @@ import {
   CATCHUP_BACKPRESSURE_BASE_DELAY_MS,
   CATCHUP_BACKPRESSURE_MAX_DELAY_MS,
   CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
+  DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
+  resolveCatchupBackpressureMaxWaitMs,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
   nextCatchupBackpressureDelayMs,
   runCatchupPlaneWithPolicy,
@@ -265,5 +267,70 @@ describe('CATCHUP_BACKPRESSURE_MAX_WAIT_MS', () => {
     expect(result.deferredBackpressure).toBe(0);
     expect(clock.now()).toBeGreaterThanOrEqual(90_000);
     expect(clock.now()).toBeLessThanOrEqual(CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+  });
+});
+
+describe('resolveCatchupBackpressureMaxWaitMs', () => {
+  it('treats a blank assignment as unset, not as zero', () => {
+    // `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS=` in a compose file / .env / unit
+    // file is the normal shape for "not set". `Number('')` is 0, so a naive
+    // parser turns it into "never retry" — silently worse than the fixed ladder
+    // this policy replaced, and with no log to notice it by.
+    expect(resolveCatchupBackpressureMaxWaitMs('')).toBe(DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+    expect(resolveCatchupBackpressureMaxWaitMs('   ')).toBe(DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+    expect(resolveCatchupBackpressureMaxWaitMs(undefined)).toBe(DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+  });
+
+  it('honours an explicit zero as "do not retry"', () => {
+    expect(resolveCatchupBackpressureMaxWaitMs('0')).toBe(0);
+    expect(resolveCatchupBackpressureMaxWaitMs(' 0 ')).toBe(0);
+  });
+
+  it('honours a positive integer budget', () => {
+    expect(resolveCatchupBackpressureMaxWaitMs('45000')).toBe(45_000);
+    expect(resolveCatchupBackpressureMaxWaitMs(' 600000 ')).toBe(600_000);
+  });
+
+  it('falls back to the default for values it cannot honour', () => {
+    for (const raw of ['-1', '1.5', 'abc', 'NaN', 'Infinity', '1e3ms']) {
+      expect(resolveCatchupBackpressureMaxWaitMs(raw)).toBe(DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+    }
+  });
+
+  it('resolves the module constant through the same parser', () => {
+    expect(CATCHUP_BACKPRESSURE_MAX_WAIT_MS).toBe(
+      resolveCatchupBackpressureMaxWaitMs(process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS),
+    );
+  });
+});
+
+describe('foreground backoff timer', () => {
+  it('unrefs the pending sleep so a backoff cannot outlive agent.stop()', async () => {
+    // The budget is minutes now. A referenced timer would hold the event loop
+    // open for that long past shutdown, and every other test injects `wait`,
+    // so the real `defaultWait` would otherwise never be exercised.
+    const realSetTimeout = globalThis.setTimeout;
+    const unref = vi.fn();
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...rest: unknown[]
+    ) => {
+      const handle = (realSetTimeout as any)(handler, Math.min(timeout ?? 0, 1), ...rest);
+      return Object.assign(handle as object, { unref }) as never;
+    }) as never);
+
+    try {
+      let attempts = 0;
+      await runCatchupPlaneWithPolicy('foreground', async () => {
+        attempts += 1;
+        return { deferredBackpressure: attempts === 1 ? 1 : 0 };
+      }, { retry: { maxWaitMs: 5_000 } });
+
+      expect(attempts).toBe(2);
+      expect(unref).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
