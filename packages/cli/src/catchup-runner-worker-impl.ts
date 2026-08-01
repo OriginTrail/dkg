@@ -7,6 +7,9 @@ import {
   mapWithConcurrency,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
+  type CatchupPlaneContext,
+  type DurableSyncResult,
+  type SharedMemorySyncResult,
 } from '@origintrail-official/dkg-agent';
 import {
   addCatchupPlaneEvidence,
@@ -55,16 +58,31 @@ parentPort!.on('message', async (message: any) => {
   }
 });
 
-/** A per-peer sync round; a plane is absent when the walk skipped it. */
+/**
+ * One peer's durable plane. The wire shape is the agent's own
+ * `DurableSyncResult`, structured-cloned back across the Worker RPC;
+ * `verifiedPrivateOnlyResponses` is normalized to a number on arrival so the
+ * accumulation below never has to re-guard it.
+ */
+type CatchupDurableResult = DurableSyncResult & { verifiedPrivateOnlyResponses: number };
+
+/** One peer's shared-memory plane, as returned across the Worker RPC. */
+type CatchupSharedMemoryResult = SharedMemorySyncResult;
+
+/**
+ * One peer's sync round. A plane is `null` when the walk deliberately skipped
+ * it because the authority already settled that plane — that is the ONLY
+ * exceptional case, and it is distinct from a plane that ran and failed.
+ */
 interface PeerRound {
   peerId: string;
   /** The resolved curator for this Context Graph produced this round. */
   fromAuthority: boolean;
-  durable: any | null;
-  shared: any | null;
+  durable: CatchupDurableResult | null;
+  shared: CatchupSharedMemoryResult | null;
 }
 
-function emptyShared() {
+function emptyShared(): CatchupSharedMemoryResult {
   return {
     insertedTriples: 0,
     fetchedMetaTriples: 0,
@@ -210,15 +228,19 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
   const syncPeer = async (peerId: string): Promise<PeerRound> => {
-    const syncDurable = ({ priority, source }: { priority?: number; source?: string }) =>
-      invoke<any>('syncDurable', peerId, request.contextGraphId, priority, source)
+    const syncDurable = (
+      { priority, source }: CatchupPlaneContext,
+    ): Promise<CatchupDurableResult> =>
+      invoke<DurableSyncResult>('syncDurable', peerId, request.contextGraphId, priority, source)
         .catch(() => createFailedPeerDurableSyncResult())
-        .then((rawDurable: any) => ({
+        .then((rawDurable) => ({
           ...rawDurable,
           verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
         }));
-    const syncSharedMemory = ({ priority, source }: { priority?: number; source?: string }) =>
-      invoke<any>('syncSharedMemory', peerId, request.contextGraphId, priority, source)
+    const syncSharedMemory = (
+      { priority, source }: CatchupPlaneContext,
+    ): Promise<CatchupSharedMemoryResult> =>
+      invoke<CatchupSharedMemoryResult>('syncSharedMemory', peerId, request.contextGraphId, priority, source)
         .catch(() => emptyShared());
 
     // Narrow each fallback peer to the planes the AUTHORITY has not already
