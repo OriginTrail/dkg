@@ -4,6 +4,24 @@ export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number = (() => {
   return Number.isInteger(raw) && raw > 0 ? raw : 4;
 })();
 
+/** The spellings `DKG_CATCHUP_STOP_ON_PROOF` accepts as "off"; documented verbatim. */
+const CATCHUP_STOP_ON_PROOF_OFF_VALUES = ['0', 'false', 'no', 'off'] as const;
+
+/**
+ * Parse the progressive-walk kill-switch.
+ *
+ * Exported as a pure function because the constant below resolves once at
+ * module load, which makes the operator contract untestable in place — and the
+ * contract is four documented spellings plus trimming and case-folding, any one
+ * of which could be dropped without a single test noticing. Default is ON:
+ * anything unrecognised (including unset) leaves the walk enabled, so a typo
+ * cannot silently restore the pre-#2006 fan-out.
+ */
+export function resolveCatchupStopOnProof(raw: string | undefined): boolean {
+  const normalized = raw?.trim().toLowerCase();
+  return !CATCHUP_STOP_ON_PROOF_OFF_VALUES.some((value) => value === normalized);
+}
+
 /**
  * Operator kill-switch for the progressive catch-up walk (issue #2006).
  *
@@ -13,10 +31,8 @@ export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number = (() => {
  * its own manifest, so stopping early can land one peer's snapshot instead of
  * the union of every peer's.
  */
-export const CATCHUP_STOP_ON_PROOF: boolean = (() => {
-  const raw = process.env.DKG_CATCHUP_STOP_ON_PROOF?.trim().toLowerCase();
-  return !(raw === '0' || raw === 'false' || raw === 'no' || raw === 'off');
-})();
+export const CATCHUP_STOP_ON_PROOF: boolean =
+  resolveCatchupStopOnProof(process.env.DKG_CATCHUP_STOP_ON_PROOF);
 
 /**
  * Escalating wave sizes for the progressive peer walk: `startWidth`, ×2, ×2, …

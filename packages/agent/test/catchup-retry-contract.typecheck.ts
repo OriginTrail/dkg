@@ -1,9 +1,15 @@
 import {
+  CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   runCatchupPlaneWithPolicy,
   type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlaneResult,
 } from '@origintrail-official/dkg-agent';
+// @ts-expect-error CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS is REMOVED from the
+// package root. It named the fixed [100, 250, 500] ladder, which no longer
+// exists — re-exporting it would hand a consumer a schedule the node does not
+// follow. A stale caller must fail to resolve it, not compile against a lie.
+import { CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS } from '@origintrail-official/dkg-agent';
 
 // `retryDelaysMs` configured the fixed `[100, 250, 500]` ladder that issue #2006
 // replaced with a wall-clock budget. It is retained as `never` rather than
@@ -50,8 +56,10 @@ const planes: CatchupPlanePolicyOptions<CatchupPlaneResult, CatchupPlaneResult> 
   retryDelaysMs: [10],
 };
 
-// The replacement is `retry.maxWaitMs`, and it must stay assignable.
+// The replacements must stay importable and assignable, so this file cannot
+// pass merely because the whole surface decayed.
 const supported: CatchupPlanePolicyClock = { retry: { maxWaitMs: 5_000 } };
+const replacementBudget: number = CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
 
 export declare const pinned: [
   typeof clock,
@@ -59,5 +67,7 @@ export declare const pinned: [
   typeof supported,
   typeof stale,
   typeof ladderIsUninhabited,
+  typeof replacementBudget,
+  typeof CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
   typeof runCatchupPlaneWithPolicy,
 ];

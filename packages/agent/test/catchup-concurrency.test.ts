@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  CATCHUP_STOP_ON_PROOF,
   catchupWaveSizes,
+  resolveCatchupStopOnProof,
 } from '../src/sync/catchup-concurrency.js';
 
 describe('catchupWaveSizes', () => {
@@ -59,5 +61,34 @@ describe('catchupWaveSizes', () => {
     // default.
     expect(Number.isInteger(CATCHUP_MAX_CONCURRENT_PEER_SYNCS)).toBe(true);
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeGreaterThan(0);
+  });
+});
+
+describe('resolveCatchupStopOnProof', () => {
+  // The kill-switch is operator-facing and documented with four disabled
+  // spellings. `CATCHUP_STOP_ON_PROOF` resolves once at module load, so without
+  // a pure parser only the spelling the suite happens to set is ever exercised
+  // — dropping `'false'` would leave an operator who set it silently running
+  // the very fan-out they turned off, with every test still green.
+  it.each(['0', 'false', 'no', 'off'])('treats %s as off', (value) => {
+    expect(resolveCatchupStopOnProof(value)).toBe(false);
+  });
+
+  it.each(['  off  ', 'OFF', 'False', 'No\t', ' 0'])('normalizes case and surrounding space in %j', (value) => {
+    expect(resolveCatchupStopOnProof(value)).toBe(false);
+  });
+
+  it.each([undefined, '', '   ', '1', 'true', 'yes', 'on', 'nope', 'offf', '0.0'])(
+    'leaves the walk ON for %j',
+    (value) => {
+      // Default-on is the safe direction: an unrecognised value or a typo must
+      // not silently restore the pre-#2006 fan-out.
+      expect(resolveCatchupStopOnProof(value)).toBe(true);
+    },
+  );
+
+  it('resolves the module constant through the same parser', () => {
+    expect(CATCHUP_STOP_ON_PROOF)
+      .toBe(resolveCatchupStopOnProof(process.env.DKG_CATCHUP_STOP_ON_PROOF));
   });
 });
