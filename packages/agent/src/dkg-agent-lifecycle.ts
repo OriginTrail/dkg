@@ -474,7 +474,11 @@ import {
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
-import { resolveCuratorSyncPeer } from './dkg-agent-cg-resolve.js';
+import {
+  authoritativeSyncPeerId,
+  resolveCuratorSyncPeer,
+  type SyncPeerResolution,
+} from './dkg-agent-cg-resolve.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -6299,21 +6303,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.knownCorePeerIds);
   }
 
+  /**
+   * Resolve the catch-up sync peer ONCE, with both notions the walk needs.
+   *
+   * They are one resolution, not two: ranking takes the best peer available
+   * whatever its provenance, while letting one peer's answer stand for the
+   * whole graph requires a metadata-resolved curator. The authenticated
+   * join-approval hint ranks but never settles — it can be stale, since a
+   * curator that rotated its libp2p key leaves an ordinary member sitting on
+   * the id it names.
+   *
+   * Deriving that distinction from two calls would read `_meta` twice (and run
+   * the registry fallback twice for a wallet-address curator) per catch-up, and
+   * would hide that the resolver has a side effect — it evicts the bootstrap
+   * hint once metadata confirms a curator, so the second call is not the same
+   * call as the first.
+   */
+  async resolveSyncPeerWithProvenance(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<SyncPeerResolution> {
+    return resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId);
+  }
+
   async resolvePreferredSyncPeerId(this: DKGAgent, contextGraphId: string): Promise<string | undefined> {
-    // Ranking takes the best peer available, whatever its provenance.
+    // Deliberately NOT routed through the sibling method: each of these is one
+    // resolution on its own, and going through `this` would make them
+    // unusable against the hand-built receivers several suites call them on.
     return (await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId)).peerId;
   }
 
   /**
    * The sync peer ONLY when it is a metadata-resolved curator.
-   *
-   * Callers that merely want to try the best peer first should use
-   * {@link resolvePreferredSyncPeerId}. Only callers that let one peer's answer
-   * stand for the whole graph — the foreground catch-up walk's early stop —
-   * need this stricter notion, because a peer that happens to be ranked first
-   * must never be able to cut the walk short. The authenticated join-approval
-   * hint ranks but never settles: it can be stale, since a curator that rotated
-   * its libp2p key leaves an ordinary member sitting on the id it names.
    *
    * Provenance comes from {@link resolveCuratorSyncPeer} itself. Deriving it
    * here — by comparing the resolved id against the hint — would be wrong in
@@ -6324,8 +6345,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<string | undefined> {
-    const resolved = await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId);
-    return resolved.provenance === 'metadata' ? resolved.peerId : undefined;
+    return authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId),
+    );
   }
 
   async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {

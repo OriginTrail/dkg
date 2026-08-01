@@ -688,6 +688,12 @@ describe('catch-up plane proof predicates', () => {
     ['a timed-out phase', { timedOutPhases: 1 }],
     ['a denial', { deniedPhases: 1 }],
     ['a local admission deferral', { deferredBackpressure: 1 }],
+    // An integrity rejection is stronger than a failure: it is a peer that
+    // SERVED CONTENT for this graph which then failed verification, so it is
+    // positive evidence the graph is not empty. `classifyDurableProgress`
+    // already treats both as blocking failures per peer.
+    ['data rejected for missing metadata', { dataRejectedMissingMeta: 1 }],
+    ['a rejected Knowledge Collection', { rejectedKcs: 1 }],
   ])('voids the empty proof when the round contains %s', (_label, overrides) => {
     const diagnostics = { ...cleanEmptyRound, ...overrides };
     expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, diagnostics, { isPrivate: false }))
@@ -795,6 +801,20 @@ describe('catch-up plane proof predicates', () => {
       expect(catchupPlaneProvenByUnanimousEmpty(
         { ...noEvidence, authorityEmptyPeers: 1 },
         { ...hostedEmptyDiagnostics, fetchedDataTriples: 122_705 },
+        { isPrivate: false },
+      )).toBe(false);
+    });
+
+    it.each([
+      ['data rejected for missing metadata', { dataRejectedMissingMeta: 1 }],
+      ['a rejected Knowledge Collection', { rejectedKcs: 1 }],
+    ])('is voided by %s elsewhere in the round, ahead of the curator\'s word', (_label, overrides) => {
+      // Content that failed verification still proves content EXISTS, which
+      // outranks the curator saying the graph is empty — unlike a plain
+      // transport or phase failure, which the curator's answer does outrank.
+      expect(catchupPlaneProvenByUnanimousEmpty(
+        { ...noEvidence, authorityEmptyPeers: 1 },
+        { ...hostedEmptyDiagnostics, ...overrides },
         { isPrivate: false },
       )).toBe(false);
     });

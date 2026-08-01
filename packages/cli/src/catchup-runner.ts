@@ -528,6 +528,9 @@ export interface CatchupPlaneRoundDiagnostics {
   timedOutPhases?: number;
   deniedPhases?: number;
   deferredBackpressure?: number;
+  /** Durable-only integrity rejections; the shared-memory plane never sets them. */
+  dataRejectedMissingMeta?: number;
+  rejectedKcs?: number;
 }
 
 /**
@@ -654,10 +657,18 @@ export function catchupPlaneProvenByUnanimousEmpty(
   // private graph is fully synchronized; that stays unchanged.
   if (options.isPrivate) return false;
   if (catchupPlaneProvenByData(completion)) return false;
+  // An integrity rejection is not "a peer that failed" — it is a peer that
+  // SERVED CONTENT for this graph which then failed verification. That is
+  // positive evidence the graph is not empty, so it voids an empty verdict
+  // outright, ahead of even the curator's own word. `classifyDurableProgress`
+  // already treats these as blocking failures per peer; this is the same rule
+  // applied to the round.
+  if ((diagnostics?.dataRejectedMissingMeta ?? 0) > 0
+    || (diagnostics?.rejectedKcs ?? 0) > 0) return false;
   // The curator hosting the graph and carrying no data settles it on its own —
-  // it is the reference for the whole graph, so another peer failing part-way
-  // cannot contradict it. Another peer DELIVERING data can, which is the one
-  // guard kept: that means the curator's view is behind the network's.
+  // it is the reference for the whole graph, so another peer merely failing
+  // part-way cannot contradict it. Another peer DELIVERING data can, which is
+  // the guard kept here: that means the curator's view is behind the network's.
   if ((completion?.authorityEmptyPeers ?? 0) > 0) {
     return (diagnostics?.fetchedDataTriples ?? 0) === 0;
   }
@@ -858,13 +869,21 @@ class WorkerCatchupRunner implements CatchupRunner {
       case 'prepareCatchup': {
         const [contextGraphId] = args as [string];
         const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
-        const preferredPeerId = await agent.resolvePreferredSyncPeerId(contextGraphId);
-        // Ranking uses the preferred peer; letting ONE peer's answer stand for
-        // the whole graph requires the stricter notion. A join-approval
-        // bootstrap hint is authenticated but can be stale, so it orders the
-        // walk without being allowed to end it.
-        const authoritativePeerId = typeof agent.resolveAuthoritativeSyncPeerId === 'function'
-          ? await agent.resolveAuthoritativeSyncPeerId(contextGraphId)
+        // ONE resolution, two notions. Ranking uses whatever peer is available;
+        // letting one peer's answer stand for the whole graph requires the
+        // stricter notion, because a join-approval bootstrap hint is
+        // authenticated but can be stale — it orders the walk without being
+        // allowed to end it. Resolving twice would read `_meta` twice (and run
+        // the registry fallback twice for a wallet-address curator) per
+        // catch-up, and the resolver evicts the bootstrap hint once metadata
+        // confirms a curator, so the second call is not the same call.
+        const resolution: { peerId?: string; provenance?: string } =
+          typeof agent.resolveSyncPeerWithProvenance === 'function'
+            ? await agent.resolveSyncPeerWithProvenance(contextGraphId)
+            : { peerId: await agent.resolvePreferredSyncPeerId(contextGraphId) };
+        const preferredPeerId: string | undefined = resolution.peerId;
+        const authoritativePeerId = resolution.provenance === 'metadata'
+          ? resolution.peerId
           : undefined;
         if (preferredPeerId) {
           await agent.ensurePeerConnected(preferredPeerId);

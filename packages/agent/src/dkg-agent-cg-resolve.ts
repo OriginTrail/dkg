@@ -529,6 +529,15 @@ export interface SyncPeerResolution {
 }
 
 /**
+ * The peer allowed to let one answer stand for a whole Context Graph — a
+ * metadata-resolved curator and nothing else. A single definition so the walk's
+ * early-stop rule cannot be restated slightly differently at another call site.
+ */
+export function authoritativeSyncPeerId(resolution: SyncPeerResolution): string | undefined {
+  return resolution.provenance === 'metadata' ? resolution.peerId : undefined;
+}
+
+/**
  * Resolve the curator peer for a Context Graph together with WHERE it came from.
  *
  * Two routes produce a peer id here and they are NOT interchangeable:

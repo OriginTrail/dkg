@@ -131,10 +131,13 @@ describe('WorkerCatchupRunner lifecycle', () => {
 describe('WorkerCatchupRunner agent bridge', () => {
   function bridgeAgent(overrides: Record<string, unknown> = {}) {
     const calls: Record<string, unknown[][]> = { durable: [], shared: [] };
+    let resolutionCalls = 0;
     const agent = {
       isPrivateContextGraph: async () => false,
-      resolvePreferredSyncPeerId: async () => 'peer-hint',
-      resolveAuthoritativeSyncPeerId: async () => undefined,
+      resolveSyncPeerWithProvenance: async () => {
+        resolutionCalls += 1;
+        return { peerId: 'peer-hint', provenance: 'bootstrap-hint' };
+      },
       ensurePeerConnected: async () => {},
       primeCatchupConnections: async () => {},
       selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
@@ -149,7 +152,11 @@ describe('WorkerCatchupRunner agent bridge', () => {
       },
       ...overrides,
     };
-    return { agent: agent as unknown as DKGAgent, calls };
+    return {
+      agent: agent as unknown as DKGAgent,
+      calls,
+      resolutionCalls: () => resolutionCalls,
+    };
   }
 
   /** Drive one `invoke` through the real bridge and return what it posted back. */
@@ -164,24 +171,46 @@ describe('WorkerCatchupRunner agent bridge', () => {
   }
 
   it('does not report a bootstrap-hint peer as the catch-up authority', async () => {
-    const { agent } = bridgeAgent();
+    const { agent, resolutionCalls } = bridgeAgent();
     const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-hint']);
 
     // The hint still ranks the walk…
     expect(posted.result.preferredPeerId).toBe('peer-hint');
     // …but must not be handed to the worker as an authority.
     expect(posted.result.authoritativePeerId).toBeUndefined();
+    // …and both notions came from ONE resolution. The resolver reads `_meta`
+    // (and may hit the agent registry), and it evicts the bootstrap hint once
+    // metadata confirms a curator — so a second call is neither free nor the
+    // same call.
+    expect(resolutionCalls()).toBe(1);
   });
 
   it('reports a metadata-resolved curator as the catch-up authority', async () => {
-    const { agent } = bridgeAgent({
-      resolvePreferredSyncPeerId: async () => 'peer-curator',
-      resolveAuthoritativeSyncPeerId: async () => 'peer-curator',
+    const { agent, resolutionCalls } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
     });
     const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-meta']);
 
     expect(posted.result.preferredPeerId).toBe('peer-curator');
     expect(posted.result.authoritativePeerId).toBe('peer-curator');
+    expect(resolutionCalls()).toBe(0);
+  });
+
+  it('falls back to ranking alone when the agent predates the provenance resolver', async () => {
+    // The bridge talks to whatever agent the daemon composed; one without
+    // `resolveSyncPeerWithProvenance` must still rank the walk rather than
+    // throw — and must NOT infer an authority it cannot establish.
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: undefined,
+      resolvePreferredSyncPeerId: async () => 'peer-legacy',
+    });
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-legacy']);
+
+    expect(posted.result.preferredPeerId).toBe('peer-legacy');
+    expect(posted.result.authoritativePeerId).toBeUndefined();
   });
 
   it('forwards the admission source into both detailed sync calls', async () => {

@@ -13,11 +13,30 @@ import {
 // discover the change than a type error.
 //
 // That guarantee is a property of the PUBLISHED type, so it is pinned here
-// rather than in a runtime test — no runtime assertion can observe it. Each
-// `@ts-expect-error` below fails the build in BOTH directions: it errors today
-// if the option were quietly made assignable again, and it errors as an unused
-// suppression if the option were deleted outright (which would make a stale
-// caller compile against a field that no longer exists at all).
+// rather than in a runtime test — no runtime assertion can observe it.
+//
+// Object literals alone CANNOT carry it. Excess-property checking rejects
+// `{ retryDelaysMs: [...] }` against an annotated target whether the member is
+// declared `never` or absent entirely, so a literal-only test passes in both
+// worlds and proves nothing about the difference. Deleting the member is
+// precisely the stale-caller silent-ignore case the `never` exists to prevent,
+// so it is pinned two ways that a deletion breaks: an indexed access on the
+// member itself, and a stale options object flowing through a VARIABLE, where
+// excess properties are permitted and only a declared `never` can refuse them.
+
+// Fails to compile (TS2339) if the member is deleted rather than kept `never`.
+declare const removedLadder: CatchupPlanePolicyClock['retryDelaysMs'];
+// …and `undefined` is the only value it can hold.
+const ladderIsUninhabited: undefined = removedLadder;
+
+declare const staleCallerOptions: {
+  retry: { maxWaitMs: number };
+  retryDelaysMs: number[];
+};
+// @ts-expect-error a stale options VARIABLE carrying the removed ladder must not
+// flow in structurally — this is the case excess-property checking would let by,
+// and the one that silently reverted to a full-budget wait before the `never`.
+const stale: CatchupPlanePolicyClock = staleCallerOptions;
 
 // @ts-expect-error retryDelaysMs was removed with the fixed ladder it configured.
 const clock: CatchupPlanePolicyClock = { retryDelaysMs: [10, 20] };
@@ -34,4 +53,11 @@ const planes: CatchupPlanePolicyOptions<CatchupPlaneResult, CatchupPlaneResult> 
 // The replacement is `retry.maxWaitMs`, and it must stay assignable.
 const supported: CatchupPlanePolicyClock = { retry: { maxWaitMs: 5_000 } };
 
-export declare const pinned: [typeof clock, typeof planes, typeof supported, typeof runCatchupPlaneWithPolicy];
+export declare const pinned: [
+  typeof clock,
+  typeof planes,
+  typeof supported,
+  typeof stale,
+  typeof ladderIsUninhabited,
+  typeof runCatchupPlaneWithPolicy,
+];

@@ -10,7 +10,7 @@ import {
   validateSyncResponderSnapshotLimitsConfig,
 } from '../src/sync/policy.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { resolveCuratorSyncPeer } from '../src/dkg-agent-cg-resolve.js';
+import { authoritativeSyncPeerId, resolveCuratorSyncPeer } from '../src/dkg-agent-cg-resolve.js';
 
 describe('sync Context Graph policy', () => {
   it('normalizes safe integer priorities and preserves stable input order for ties', () => {
@@ -166,6 +166,35 @@ describe('curator sync-peer provenance', () => {
 
     expect(await resolveCuratorSyncPeer(agent as never, hints, CG))
       .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+  });
+
+  it('answers ranking and authority from ONE resolution', async () => {
+    // The catch-up boundary needs both notions, and resolving twice is not
+    // free or even equivalent: each resolution reads `_meta` (and can drive the
+    // registry fallback), and the resolver EVICTS the bootstrap hint once
+    // metadata confirms a curator, so the second call runs against a different
+    // map than the first.
+    let metaReads = 0;
+    const agent = {
+      preferredSyncPeers: new Map([[CG, CURATOR]]),
+      getCgMeta: async () => {
+        metaReads += 1;
+        return { curator: `did:dkg:agent:${CURATOR}`, curators: [], creators: [] };
+      },
+      discovery: { findAgents: async () => [] },
+    };
+
+    const resolved = await LifecycleSyncMethods.prototype.resolveSyncPeerWithProvenance
+      .call(agent as never, CG);
+
+    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'metadata' });
+    expect(metaReads).toBe(1);
+    // Both narrow notions are derivable from it, matching the wrappers exactly.
+    expect(resolved.peerId).toBe(CURATOR);
+    expect(authoritativeSyncPeerId(resolved)).toBe(CURATOR);
+    expect(authoritativeSyncPeerId({ peerId: CURATOR, provenance: 'bootstrap-hint' }))
+      .toBeUndefined();
+    expect(authoritativeSyncPeerId({ provenance: 'none' })).toBeUndefined();
   });
 
   it('ranks on any provenance but only lets metadata settle the walk', async () => {
