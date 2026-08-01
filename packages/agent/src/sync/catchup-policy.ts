@@ -72,6 +72,21 @@ export interface CatchupBackpressureRetryPolicy {
 
 /** Deterministic seams for tests; never operator configuration. */
 export interface CatchupPlanePolicyClock {
+  /**
+   * Removed with the fixed `[100, 250, 500]` ladder it configured.
+   *
+   * Declared as `never` rather than deleted outright so a caller that still
+   * sets it FAILS TO COMPILE instead of having it silently ignored — an
+   * ignored `retryDelaysMs: [10]` would turn an intended 10 ms schedule into a
+   * wait of up to `CATCHUP_BACKPRESSURE_MAX_WAIT_MS`, which is a much worse way
+   * to learn about the change than a type error.
+   *
+   * Operators: use `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS`. Tests: use `retry`
+   * with `now` / `wait` / `random`.
+   *
+   * @deprecated
+   */
+  retryDelaysMs?: never;
   retry?: CatchupBackpressureRetryPolicy;
   wait?: (delayMs: number) => Promise<void>;
   now?: () => number;
