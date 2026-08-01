@@ -19,6 +19,17 @@ describe('catchupWaveSizes', () => {
     expect(catchupWaveSizes(7, 8)).toEqual([1, 2, 4]);
   });
 
+  it('opens at the full cap when there is no authority to spend the first wave on', () => {
+    // A single-peer opening wave buys "one payload from the curator". With no
+    // resolvable curator it buys nothing and would just add a round-trip to the
+    // front of every round, so callers open at the cap instead.
+    expect(catchupWaveSizes(14, 4, 4)).toEqual([4, 4, 4, 2]);
+    expect(catchupWaveSizes(3, 4, 4)).toEqual([3]);
+    // startWidth can never exceed the concurrency cap.
+    expect(catchupWaveSizes(9, 2, 8)).toEqual([2, 2, 2, 2, 1]);
+    expect(catchupWaveSizes(5, 4, 0)).toEqual([1, 2, 2]);
+  });
+
   it('never exceeds the cap or the peer count', () => {
     for (const cap of [1, 2, 3, 4, 8]) {
       for (const peerCount of [0, 1, 3, 5, 13, 40]) {

@@ -260,6 +260,70 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.dataSynced).toBe(peerIds.length);
   });
 
+  it('opens at the full concurrency cap when no curator resolved', async () => {
+    // A single-peer opening wave buys "one payload from the curator". Without a
+    // resolvable curator it buys nothing, so the walk must not serialise the
+    // head of the list and pay an extra round-trip on every round.
+    const peerIds = Array.from({ length: 12 }, (_, i) => `peer-${i}`);
+    let inFlight = 0;
+    let peak = 0;
+    const startOrder: string[] = [];
+
+    await runWorkerCatchup({ contextGraphId: 'cg-no-curator', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable': {
+          startOrder.push(args[0] as string);
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await delay(4);
+          inFlight -= 1;
+          return { ...durableResult(), complete: false };
+        }
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(peak).toBe(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
+    expect(startOrder).toEqual(peerIds);
+  });
+
+  it('spends the single-peer opening wave only on a sync-capable curator', async () => {
+    // The curator is ranked first but is NOT sync-capable, so the walk has no
+    // authority to try alone and must not serialise an arbitrary peer instead.
+    const peerIds = ['peer-curator', 'peer-a', 'peer-b', 'peer-c', 'peer-d'];
+    let inFlight = 0;
+    let peak = 0;
+
+    await runWorkerCatchup({ contextGraphId: 'cg-curator-offline', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-curator', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return args[0] !== 'peer-curator';
+        case 'syncDurable': {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await delay(4);
+          inFlight -= 1;
+          return { ...durableResult(), complete: false };
+        }
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(peak).toBe(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
+  });
+
   it('narrows fallback peers to the planes still in question', async () => {
     // A Context Graph whose public durable data is empty can never prove its
     // durable plane by verified data, so the walk must cover every peer to

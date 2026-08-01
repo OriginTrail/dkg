@@ -323,8 +323,21 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // catch-up therefore optimises for one fast authoritative payload; breadth and
   // eventual convergence remain the background reconcile lane's job.
   // DKG_CATCHUP_STOP_ON_PROOF=0 restores the previous full fan-out.
+  //
+  // The single-peer opening wave is spent on the authority, so it is only taken
+  // when there IS one: if no curator resolved (or it is not sync-capable), the
+  // head of the ranked list has no special claim and serialising it would just
+  // add a round-trip to the front of every round. In that case the walk opens at
+  // the full concurrency cap — the previous first-round latency — and still
+  // stops as soon as something is proven.
+  const authorityFirst = prepared.preferredPeerId !== undefined
+    && syncCapable[0] === prepared.preferredPeerId;
   const waveSizes = CATCHUP_STOP_ON_PROOF
-    ? catchupWaveSizes(syncCapable.length, CATCHUP_MAX_CONCURRENT_PEER_SYNCS)
+    ? catchupWaveSizes(
+      syncCapable.length,
+      CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+      authorityFirst ? 1 : CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+    )
     : [syncCapable.length];
   let cursor = 0;
   for (const waveSize of waveSizes) {
