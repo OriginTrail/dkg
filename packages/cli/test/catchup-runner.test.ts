@@ -740,6 +740,24 @@ describe('catch-up plane proof predicates', () => {
       { isPrivate: false },
     )).toBe(false);
   });
+
+  it('accepts either evidence carrier for the clean empty completion', () => {
+    // Per-peer evidence (`cleanPlaneCompletions`) and the aggregate counter
+    // (`diagnostics.emptyResponses`) are separate carriers, and the legacy
+    // no-`cleanPlaneCompletions` branch in the readiness classifier can only
+    // supply the aggregate one. Pin each independently so neither disjunct can
+    // be dropped unnoticed.
+    expect(catchupPlaneProvenByUnanimousEmpty(
+      { ...noEvidence, emptyPeers: 1 },
+      { ...cleanEmptyRound, emptyResponses: 0 },
+      { isPrivate: false },
+    )).toBe(true);
+    expect(catchupPlaneProvenByUnanimousEmpty(
+      noEvidence,
+      { ...cleanEmptyRound, emptyResponses: 1 },
+      { isPrivate: false },
+    )).toBe(true);
+  });
 });
 
 describe('catch-up peer accounting with a skipped plane', () => {

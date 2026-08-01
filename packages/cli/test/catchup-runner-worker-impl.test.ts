@@ -18,7 +18,6 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
-  catchupWaveSizes,
 } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 
@@ -250,8 +249,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(peakProbes).toBeLessThanOrEqual(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
     // …but later waves are still actually parallel, not accidentally serialised.
     expect(peakSyncs).toBeGreaterThan(1);
-    // The first wave is a single peer, so a proving authority costs one payload.
-    expect(catchupWaveSizes(peerIds.length, CATCHUP_MAX_CONCURRENT_PEER_SYNCS)[0]).toBe(1);
+    // No curator resolved here, so the opening wave is NOT narrowed to one peer
+    // (that narrowing only buys anything when there is an authority to spend it
+    // on). The ranked order is still honoured.
     expect(startOrder[0]).toBe('peer-0');
 
     // Coverage preserved when nothing proves: every peer walked, in rank order.

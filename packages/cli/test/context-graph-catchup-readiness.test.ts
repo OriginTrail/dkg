@@ -277,6 +277,38 @@ describe('context graph catch-up readiness classification', () => {
     expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
   });
 
+  it('applies the same fail-closed empty rule to a legacy runner result', () => {
+    // A result without `cleanPlaneCompletions` (an older in-process runner
+    // during a rolling upgrade) takes the compatibility branch. It must not be
+    // a way around the round-level guard.
+    const masked = publicEmptyRoundResult();
+    delete masked.cleanPlaneCompletions;
+    masked.diagnostics!.durable.fetchedDataTriples = 122_705;
+    masked.diagnostics!.durable.failedPhases = 5;
+
+    expect(classifyContextGraphCatchupReadiness({
+      result: masked,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    }).jobStatus).not.toBe('done');
+
+    // …and a legacy result from a genuinely empty round still settles.
+    const clean = publicEmptyRoundResult();
+    delete clean.cleanPlaneCompletions;
+    expect(classifyContextGraphCatchupReadiness({
+      result: clean,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    })).toMatchObject({
+      jobStatus: 'done',
+      readinessPatch: { durableVerified: true },
+    });
+  });
+
   it('never proves a private plane from an empty round', () => {
     const classification = classifyContextGraphCatchupReadiness({
       result: publicEmptyRoundResult(),
