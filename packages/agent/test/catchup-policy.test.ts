@@ -241,6 +241,57 @@ describe('runCatchupPlanesWithPolicy', () => {
   });
 });
 
+describe('the wait/now clock seam', () => {
+  // Before #2006 `retryDelaysMs` bounded the loop, so an injected `wait` that
+  // resolved instantly still terminated after three steps. The ladder is gone and
+  // the terminator now lives behind `now`, so injecting `wait` ALONE removes the
+  // bound: measured against the built module, 6,873,671 attempts in a 2 s budget
+  // with the macrotask queue starved — ~700 million at the shipped 180 s default.
+  // `{ wait }` on its own is also what a NEW caller naturally writes to keep a
+  // test fast, so this is a live footgun, not only a stale-caller hazard.
+  it('rejects an injected wait with no matching now', async () => {
+    await expect(
+      runCatchupPlaneWithPolicy('foreground', async () => ({ deferredBackpressure: 1 }), {
+        wait: async () => {},
+        retry: { maxWaitMs: 50 },
+      }),
+    ).rejects.toThrow(/must be injected together/);
+  });
+
+  it('allows an injected wait in background mode, which never enters the loop', async () => {
+    // The complement, so the guard cannot be widened into something that breaks a
+    // legitimate caller: background mode returns before the retry loop, so `wait`
+    // alone is harmless there and one test below relies on exactly that.
+    await expect(
+      runCatchupPlaneWithPolicy('background', async () => ({ deferredBackpressure: 1 }), {
+        wait: async () => { throw new Error('background mode must not wait'); },
+      }),
+    ).resolves.toEqual({ deferredBackpressure: 1 });
+  });
+
+  it('allows the paired seam, and it still terminates on the budget', async () => {
+    const clock = virtualClock();
+    const result = await runCatchupPlaneWithPolicy(
+      'foreground',
+      async () => ({ deferredBackpressure: 1 }),
+      { retry: { maxWaitMs: 300 }, now: clock.now, wait: clock.wait, random: () => 0 },
+    );
+    expect(result.deferredBackpressure).toBe(1);
+    expect(clock.elapsed()).toBeLessThanOrEqual(300);
+  });
+
+  it('leaves the un-injected production path alone', async () => {
+    // Neither the agent nor the CLI worker injects a clock, so the default
+    // `Date.now` + real `setTimeout` pairing must keep working untouched.
+    const result = await runCatchupPlaneWithPolicy(
+      'foreground',
+      async () => ({ deferredBackpressure: 1 }),
+      { retry: { maxWaitMs: 0 } },
+    );
+    expect(result.deferredBackpressure).toBe(1);
+  });
+});
+
 describe('the removed retryDelaysMs ladder', () => {
   // Retaining it as `?: never` makes a TypeScript caller fail to compile, which the
   // enforced type test pins. But TypeScript is not the runtime: a JS caller compiled

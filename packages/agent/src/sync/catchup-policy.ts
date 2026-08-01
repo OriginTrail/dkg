@@ -190,6 +190,36 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   };
   if (mode !== 'foreground') return run(context);
 
+  // `wait` and `now` are ONE seam, not two independent ones.
+  //
+  // Before #2006 the loop was bounded by the fixed `retryDelaysMs` ladder, so an
+  // injected `wait` could return immediately and the loop still ended after three
+  // steps. #2006 deleted the ladder and moved the terminator onto a wall-clock
+  // deadline read through `now` — so a caller that injects only `wait` no longer
+  // has a bound: `wait` resolves instantly while `now` is the real clock, and the
+  // loop spins as fast as the microtask queue allows for the WHOLE budget.
+  // Measured against the built module: 6,873,671 attempts in a 2 s budget, with
+  // the macrotask queue starved throughout — roughly 700 million at the shipped
+  // 180 s default. A frozen `now` never terminates at all.
+  //
+  // This is not only a stale-caller hazard: `{ wait }` alone is what a NEW caller
+  // naturally writes to keep a test fast, and it type-checks today. Rejected here
+  // rather than defaulted, because silently pairing it with the real clock is the
+  // hang, and silently pairing it with a fake one would invent a timeline the
+  // caller never asked for.
+  //
+  // Placed after the background early-return on purpose: background mode never
+  // enters the retry loop, so injecting `wait` alone there is harmless and one
+  // test legitimately does it to assert the loop is not entered.
+  if (options.wait !== undefined && options.now === undefined) {
+    throw new TypeError(
+      'runCatchupPlaneWithPolicy: `wait` and `now` must be injected together. '
+      + 'Since issue #2006 the retry loop is bounded by a wall-clock deadline read '
+      + 'through `now`, so an injected `wait` without a matching `now` spins for the '
+      + 'entire budget instead of stepping a schedule.',
+    );
+  }
+
   const now = options.now ?? Date.now;
   const wait = options.wait ?? defaultWait;
   const maxWaitMs = options.retry?.maxWaitMs ?? CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
