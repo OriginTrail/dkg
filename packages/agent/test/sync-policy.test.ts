@@ -103,14 +103,27 @@ describe('curator sync-peer provenance', () => {
   const HINT = '12D3KooWBootstrapHint';
   const CURATOR = '12D3KooWMetadataCurator';
 
-  function agentWithMeta(meta: {
+  type MetaFacts = {
     curator?: string;
     curators?: string[];
     creator?: string;
     creators?: string[];
-  }, findAgents: () => Promise<Array<{ agentAddress?: string; peerId: string }>> = async () => []) {
+  };
+
+  /**
+   * `getCgMeta` is the MERGED projection (`_meta` + AGENTS + `_catalog` +
+   * ONTOLOGY); `getOwnCgMetaFacts` is what the Context Graph declared about
+   * itself. `ownMeta` defaults to `meta` — the ordinary case where they agree —
+   * so any test exercising the difference has to say so out loud.
+   */
+  function agentWithMeta(
+    meta: MetaFacts,
+    findAgents: () => Promise<Array<{ agentAddress?: string; peerId: string }>> = async () => [],
+    ownMeta: MetaFacts = meta,
+  ) {
     return {
       getCgMeta: async () => ({ curators: [], creators: [], ...meta }),
+      getOwnCgMetaFacts: async () => ({ curators: [], creators: [], ...ownMeta }),
       discovery: { findAgents },
     };
   }
@@ -157,17 +170,94 @@ describe('curator sync-peer provenance', () => {
       .toEqual({ provenance: 'none' });
   });
 
-  it('resolves a UNIQUELY registered wallet curator as authoritative', async () => {
-    // One registration for the wallet is a deterministic binding, so the early
-    // stop is preserved for the ordinary case.
+  it('never lets a registry match be an authority, however unique it looks locally', async () => {
+    // `findAgents()` queries the LOCAL Agent Registry only, so "one match" means
+    // one match on THIS node — not that the wallet has a single registration on
+    // the network. Local cardinality cannot establish a binding, so this route
+    // ranks and never settles.
     const hints = new Map([[CG, HINT]]);
     const agent = agentWithMeta(
       { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
       async () => [{ agentAddress: '0x00000000000000000000000000000000000000AB', peerId: CURATOR }],
     );
 
-    expect(await resolveCuratorSyncPeer(agent as never, hints, CG))
-      .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+    const resolved = await resolveCuratorSyncPeer(agent as never, hints, CG);
+    expect(resolved.peerId).toBe(CURATOR);
+    expect(resolved.provenance).toBe('registry');
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+  });
+
+  it('authorises a wallet curator the graph binds to a peer in its OWN _meta', async () => {
+    // The route that keeps the early stop for V10 wallet-address curators: the
+    // Context Graph itself declares both the curator DID and the creator peer.
+    const hints = new Map([[CG, HINT]]);
+    const declared = {
+      curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
+      creator: `did:dkg:agent:${CURATOR}`,
+    };
+    const agent = agentWithMeta(declared, async () => {
+      throw new Error('an own-_meta binding must not need the registry');
+    }, declared);
+
+    const resolved = await resolveCuratorSyncPeer(agent as never, hints, CG);
+    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'metadata' });
+    expect(authoritativeSyncPeerId(resolved)).toBe(CURATOR);
+  });
+
+  it('demotes a creator the MERGED projection supplied but the graph did not', async () => {
+    // `getCgMeta()` unions `_meta` with AGENTS / `_catalog` / ONTOLOGY under
+    // first-wins precedence and discards which graph supplied each fact. A
+    // creator contributed by an AGENTS-only declaration therefore looks identical
+    // to one the graph declared about itself — but only the latter may end the
+    // walk. Here the projection offers a creator the graph's own `_meta` does not.
+    const hints = new Map([[CG, HINT]]);
+    const agent = agentWithMeta(
+      {
+        curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
+        creator: `did:dkg:agent:${CURATOR}`,
+      },
+      async () => [],
+      // The graph names the curator, but binds no creator peer itself.
+      { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
+    );
+
+    const resolved = await resolveCuratorSyncPeer(agent as never, hints, CG);
+    expect(resolved.peerId).toBe(CURATOR);
+    expect(resolved.provenance).toBe('projection');
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+  });
+
+  it('demotes when the graph does not name that curator at all', async () => {
+    // A curator the merged projection asserts but the graph never claimed.
+    const agent = agentWithMeta(
+      { curator: `did:dkg:agent:${CURATOR}` },
+      async () => [],
+      {},
+    );
+
+    const resolved = await resolveCuratorSyncPeer(agent as never, new Map(), CG);
+    expect(resolved.peerId).toBe(CURATOR);
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+  });
+
+  it('fails closed to ranking when the source-qualified read is unavailable', async () => {
+    // A receiver without the reader, or one whose read throws, must never be
+    // upgraded to authority.
+    const noReader = {
+      getCgMeta: async () => ({ curator: `did:dkg:agent:${CURATOR}`, curators: [], creators: [] }),
+      discovery: { findAgents: async () => [] },
+    };
+    expect(authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(noReader as never, new Map(), CG),
+    )).toBeUndefined();
+
+    const throwingReader = {
+      ...noReader,
+      getOwnCgMetaFacts: async () => { throw new Error('store unavailable'); },
+    };
+    expect(authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(throwingReader as never, new Map(), CG),
+    )).toBeUndefined();
   });
 
   it('will not make an AMBIGUOUS registry match an authority', async () => {
@@ -206,12 +296,13 @@ describe('curator sync-peer provenance', () => {
       await resolveCuratorSyncPeer(bareDid as never, new Map(), CG),
     )).toBe(CURATOR);
 
-    const viaCreator = agentWithMeta({
+    const declared = {
       curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
       creator: `did:dkg:agent:${CURATOR}`,
-    }, async () => {
+    };
+    const viaCreator = agentWithMeta(declared, async () => {
       throw new Error('the DKG_CREATOR route must not need the registry');
-    });
+    }, declared);
     expect(authoritativeSyncPeerId(
       await resolveCuratorSyncPeer(viaCreator as never, new Map(), CG),
     )).toBe(CURATOR);
@@ -224,12 +315,15 @@ describe('curator sync-peer provenance', () => {
     // metadata confirms a curator, so the second call runs against a different
     // map than the first.
     let metaReads = 0;
+    const declared = { curator: `did:dkg:agent:${CURATOR}`, curators: [], creators: [] };
     const agent = {
       preferredSyncPeers: new Map([[CG, CURATOR]]),
       getCgMeta: async () => {
         metaReads += 1;
-        return { curator: `did:dkg:agent:${CURATOR}`, curators: [], creators: [] };
+        return declared;
       },
+      // The graph declares this curator itself, so the binding is authoritative.
+      getOwnCgMetaFacts: async () => declared,
       discovery: { findAgents: async () => [] },
     };
 

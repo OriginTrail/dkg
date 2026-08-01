@@ -241,6 +241,59 @@ describe('runCatchupPlanesWithPolicy', () => {
   });
 });
 
+describe('the retry budget is bounded even under bad input or a moving clock', () => {
+  it.each([
+    ['an unsafe magnitude from the environment', '1e308'],
+    ['a fractional value', '12.5'],
+    ['a negative value', '-1'],
+    ['a non-number', 'soon'],
+  ])('falls back to the documented default for %s', (_label, raw) => {
+    // `Number.isInteger` alone accepts 1e308 — an integer by IEEE-754 and a
+    // budget nobody meant. An unusable env value must become the default, never
+    // an unbounded wait.
+    expect(resolveCatchupBackpressureMaxWaitMs(raw))
+      .toBe(DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+  });
+
+  it.each([
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['an unsafe integer', 1e308],
+    ['a negative budget', -1],
+    ['a fractional budget', 5.5],
+  ])('rejects %s supplied through the in-process retry seam', async (_label, maxWaitMs) => {
+    // This path bypasses the env parser entirely. A NaN budget makes every
+    // computed delay NaN, which the default timer treats as "immediately" —
+    // turning a bounded backoff into a spin under persistent refusal.
+    await expect(
+      runCatchupPlaneWithPolicy('foreground', async () => ({ deferredBackpressure: 1 }), {
+        retry: { maxWaitMs: maxWaitMs as number },
+      }),
+    ).rejects.toThrow(/non-negative safe integer/);
+  });
+
+  it('reads the deadline from a MONOTONIC clock, not the wall clock', async () => {
+    // The budget is a DURATION, so it must not follow an NTP correction: a
+    // backwards wall-clock step would silently hand back the time it rewound,
+    // extending the advertised budget in the one direction a bound must not move.
+    //
+    // Asserted by what production READS rather than by simulating a rollback —
+    // an injected `now` is honoured verbatim, so injection would bypass the very
+    // protection under test.
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      await runCatchupPlaneWithPolicy(
+        'foreground',
+        async () => ({ deferredBackpressure: 1 }),
+        { retry: { maxWaitMs: 0 } },
+      );
+      expect(dateNow).not.toHaveBeenCalled();
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+});
+
 describe('the wait/now clock seam', () => {
   // Before #2006 `retryDelaysMs` bounded the loop, so an injected `wait` that
   // resolved instantly still terminated after three steps. The ladder is gone and

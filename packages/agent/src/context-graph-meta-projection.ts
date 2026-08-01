@@ -312,6 +312,52 @@ export class ContextGraphMetaProjection {
     return (await this.store.listGraphs(options)).filter((graphUri) => graphUri.startsWith(prefix));
   }
 
+  /**
+   * Facts declared by the Context Graph's OWN `<cg>/_meta` graph, with nothing
+   * merged in.
+   *
+   * `get()` deliberately unions `_meta`, AGENTS, `_catalog` and ONTOLOGY under
+   * first-wins precedence, which is right for privacy and listing reads — an
+   * AGENTS-only declaration can legitimately mark a graph private. It is NOT
+   * right for deciding who speaks for the graph: the merged record discards
+   * WHICH graph supplied each fact, so a creator contributed by AGENTS or
+   * ONTOLOGY is indistinguishable from one the Context Graph declared about
+   * itself.
+   *
+   * Catch-up authority needs that distinction (issue #2006), so it reads here
+   * instead. Same loader, one source.
+   */
+  async getOwnMetaFacts(
+    contextGraphId: string,
+    options: QueryOptions = {},
+  ): Promise<ContextGraphMetaRecord> {
+    const uri = contextGraphDataUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    assertSafeIri(uri);
+    assertSafeIri(metaGraph);
+
+    const record: ContextGraphMetaRecord = {
+      id: contextGraphId,
+      uri,
+      declared: false,
+      isSystem: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
+      creators: [],
+      curators: [],
+      allowedPeers: [],
+      allowedAgents: [],
+      participantAgents: [],
+      participantIdentityIds: [],
+      revokedAgents: [],
+      delegations: [],
+      subGraphs: [],
+      hasAgentGate: false,
+      hasPeerGate: false,
+      hasLegacyParticipantGate: false,
+    };
+    await this.loadContextGraphFacts(metaGraph, uri, record, options);
+    return record;
+  }
+
   private async rebuild(contextGraphId: string, options: QueryOptions): Promise<ContextGraphMetaRecord> {
     const uri = contextGraphDataUri(contextGraphId);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);

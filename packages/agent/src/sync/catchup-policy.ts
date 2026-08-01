@@ -44,7 +44,10 @@ export function resolveCatchupBackpressureMaxWaitMs(raw: string | undefined): nu
   const trimmed = raw?.trim();
   if (!trimmed) return DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
   const parsed = Number(trimmed);
-  return Number.isInteger(parsed) && parsed >= 0
+  // `Number.isInteger` alone accepts `1e308`, which is an integer by IEEE-754 and
+  // a budget no operator meant. Require a SAFE integer so an unusable value falls
+  // back to the documented default instead of becoming an unbounded wait.
+  return Number.isSafeInteger(parsed) && parsed >= 0
     ? parsed
     : DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
 }
@@ -131,6 +134,17 @@ export function catchupPriorityForMode(mode: CatchupMode): number | undefined {
 export function catchupSourceForMode(mode: CatchupMode): CatchupAdmissionSource {
   return mode === 'foreground' ? 'catchup-foreground' : 'catchup-background';
 }
+
+/**
+ * Elapsed-time source for the retry deadline.
+ *
+ * `performance.now()` is monotonic; `Date.now()` is not, and the budget here is a
+ * duration rather than a point in time, so it must not follow a wall-clock
+ * correction. Falls back to `Date.now` only if `performance` is unavailable.
+ */
+const monotonicNow: () => number = typeof performance?.now === 'function'
+  ? () => performance.now()
+  : Date.now;
 
 /** A pending backoff must never keep the process alive past `agent.stop()`. */
 function defaultWait(delayMs: number): Promise<void> {
@@ -233,7 +247,23 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
     );
   }
 
-  const now = options.now ?? Date.now;
+  // `retry.maxWaitMs` reaches the loop without passing the env parser, so a
+  // `NaN` or unsafe value here would make every computed delay `NaN` — which the
+  // default timer treats as "as soon as possible", turning a bounded backoff into
+  // a spin under persistent refusal.
+  const configuredMaxWait = options.retry?.maxWaitMs;
+  if (configuredMaxWait !== undefined
+    && !(Number.isSafeInteger(configuredMaxWait) && configuredMaxWait >= 0)) {
+    throw new TypeError(
+      `runCatchupPlaneWithPolicy: retry.maxWaitMs must be a non-negative safe integer, got ${String(configuredMaxWait)}.`,
+    );
+  }
+
+  // Monotonic by default. `Date.now()` moves with the wall clock, so an NTP step
+  // BACKWARDS during a catch-up silently extends the advertised budget — the one
+  // direction a bound must not move. Tests still inject `now`, and the paired
+  // seam is enforced above.
+  const now = options.now ?? monotonicNow;
   const wait = options.wait ?? defaultWait;
   const maxWaitMs = options.retry?.maxWaitMs ?? CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
   // Absolute deadline fixed once per plane, taken BEFORE the first admission

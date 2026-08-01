@@ -526,14 +526,23 @@ async function applyContextGraphListPrivacy(
 export interface SyncPeerResolution {
   peerId?: string;
   /**
-   * - `'metadata'`   — resolved deterministically from `<cg>/_meta`. AUTHORITATIVE.
-   * - `'registry'`   — a wallet-address curator matched more than one agent
-   *                    registration, so which peer we got is arbitrary. Ranks the
-   *                    walk; may NOT end it.
-   * - `'bootstrap-hint'` — the authenticated join-approval hint. Ranks only.
+   * Only `'metadata'` is AUTHORITATIVE — see {@link authoritativeSyncPeerId}.
+   * Everything else ranks the walk and may never end it.
+   *
+   * - `'metadata'`   — the Context Graph's OWN `<cg>/_meta` declares the
+   *                    curator→peer binding, and that binding is internally
+   *                    consistent.
+   * - `'projection'` — the binding came from the merged metadata projection,
+   *                    which unions `_meta` with AGENTS / `_catalog` / ONTOLOGY
+   *                    and discards which graph supplied each fact. Good enough
+   *                    to rank; not a statement the graph made about itself.
+   * - `'registry'`   — a wallet-address curator resolved through the agent
+   *                    registry, which is queried STRICTLY LOCALLY, so even a
+   *                    single local match is not proof of a network-wide binding.
+   * - `'bootstrap-hint'` — the authenticated join-approval hint; can be stale.
    * - `'none'`       — no peer at all.
    */
-  provenance: 'metadata' | 'registry' | 'bootstrap-hint' | 'none';
+  provenance: 'metadata' | 'projection' | 'registry' | 'bootstrap-hint' | 'none';
 }
 
 /**
@@ -561,10 +570,14 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
  *
  * - `'metadata'` — `<cg>/_meta` names a curator DID and it resolved to a peer.
  *   Authoritative: that peer speaks for the whole graph.
- * - `'registry'` — the curator DID named a WALLET address and more than one agent
- *   registration claimed it, so the peer we picked is arbitrary. Ranks the walk;
- *   never ends it. A single registration stays `'metadata'`, because that is a
- *   deterministic binding.
+ * - `'projection'` / `'registry'` — a peer was resolved, but not from a source that
+ *   can speak for the graph. `getCgMeta()` is a MERGED projection: it unions
+ *   `<cg>/_meta` with the AGENTS, `_catalog` and ONTOLOGY graphs under first-wins
+ *   precedence and discards which graph supplied each fact, so a creator
+ *   contributed by an AGENTS-only declaration is indistinguishable from one the
+ *   graph declared about itself. The agent registry is queried strictly locally,
+ *   so even a unique local match is not evidence of a network-wide binding.
+ *   Both rank the walk and neither may end it.
  * - `'bootstrap-hint'` — the authenticated join-approval hint recorded in
  *   `preferredSyncPeers`, used while `_meta` has not arrived yet (and restored
  *   from the durable join-approved membership row after restart). It is a fine
@@ -578,6 +591,56 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
  * "metadata confirmed the curator" from "metadata found nothing and the hint
  * was echoed back". Only the resolver knows which branch it took.
  */
+
+/**
+ * Does the Context Graph's OWN `<cg>/_meta` graph declare this exact
+ * curator→peer binding?
+ *
+ * The merged projection cannot answer this: it unions `_meta` with AGENTS,
+ * `_catalog` and ONTOLOGY and drops the source of each fact, so a stale or
+ * third-party creator declaration is indistinguishable from the graph's own.
+ * Catch-up authority lets ONE peer stand for a whole graph, so it needs the
+ * stronger statement.
+ *
+ * Returns false on any read failure — fail closed to ranking, never to authority.
+ */
+async function ownMetaConfirmsCuratorBinding(
+  agent: DKGAgent,
+  contextGraphId: string,
+  curatorDid: string,
+  curatorPeerId: string,
+  options: { signal?: AbortSignal },
+): Promise<boolean> {
+  // Fail closed if the receiver cannot answer: an agent (or a hand-built test
+  // receiver) without the source-qualified reader ranks, never authorises.
+  if (typeof agent.getOwnCgMetaFacts !== 'function') return false;
+  let own;
+  try {
+    own = await agent.getOwnCgMetaFacts(contextGraphId, { signal: options.signal });
+  } catch {
+    throwIfSyncAuthAborted(options.signal);
+    return false;
+  }
+
+  // The graph must name this curator itself…
+  const ownCurators = [own.curator, ...own.curators].filter(Boolean);
+  if (!ownCurators.includes(curatorDid)) return false;
+
+  const didPrefix = 'did:dkg:agent:';
+  const curatorIdentifier = curatorDid.slice(didPrefix.length);
+  // …and for a bare peer-id DID that IS the binding, with nothing to reconcile.
+  if (!curatorDidNeedsRegistryResolution(curatorIdentifier)) {
+    return curatorPeerId === curatorIdentifier;
+  }
+
+  // For a wallet-address curator, the peer must come from a creator the graph
+  // declared about itself — not one contributed by AGENTS or ONTOLOGY.
+  return [own.creator, ...own.creators]
+    .filter((value): value is string => Boolean(value))
+    .some((creatorDid) => creatorDid.startsWith(didPrefix)
+      && creatorDid.slice(didPrefix.length) === curatorPeerId);
+}
+
 export async function resolveCuratorSyncPeer(
   agent: DKGAgent,
   /**
@@ -609,9 +672,10 @@ export async function resolveCuratorSyncPeer(
   // stores the libp2p peer ID) over the agent registry (which may return
   // an arbitrary match when multiple agents register the same wallet).
   let curatorPeerId = curatorIdentifier;
-  // Deterministic until proven otherwise: a bare peer-id DID and the projected
-  // `DKG_CREATOR` route both come straight out of `<cg>/_meta`.
-  let provenance: SyncPeerResolution['provenance'] = 'metadata';
+  // Assume the weaker classification and EARN `'metadata'` below. The previous
+  // comment here claimed the projected `DKG_CREATOR` route came "straight out of
+  // `<cg>/_meta`"; it does not — `getCgMeta()` merges four graphs.
+  let provenance: SyncPeerResolution['provenance'] = 'projection';
   if (curatorDidNeedsRegistryResolution(curatorIdentifier)) {
     let resolved = false;
 
@@ -647,14 +711,11 @@ export async function resolveCuratorSyncPeer(
         if (match) {
           curatorPeerId = match.peerId;
           resolved = true;
-          // Which registration we get is arbitrary when a wallet has more than
-          // one. That was harmless while this only RANKED the walk; it is not
-          // harmless now that `'metadata'` means "may end the walk", because an
-          // ordinary member sharing the curator's wallet could answer with a
-          // clean subset and stop the walk before the real curator is reached.
-          // A single registration is still a deterministic binding, so the
-          // common case keeps the early stop.
-          if (matches.length > 1) provenance = 'registry';
+          // NEVER authoritative, however many matches came back. `findAgents()`
+          // queries the LOCAL Agent Registry only, so "one match" means one match
+          // on this node — not that the wallet has a single registration on the
+          // network. Local cardinality cannot prove a binding.
+          provenance = 'registry';
         }
       } catch {
         throwIfSyncAuthAborted(options.signal);
@@ -663,6 +724,15 @@ export async function resolveCuratorSyncPeer(
     }
 
     if (!resolved) return fromHint();
+  }
+
+  // Earn `'metadata'`: re-derive the binding from the Context Graph's OWN `_meta`
+  // graph and require it to agree. This is what makes the label mean "the graph
+  // said so", rather than "something in the merged projection said so".
+  if (provenance === 'projection') {
+    provenance = await ownMetaConfirmsCuratorBinding(
+      agent, contextGraphId, curatorDid, curatorPeerId, options,
+    ) ? 'metadata' : 'projection';
   }
 
   bootstrapHints.delete(contextGraphId);
@@ -676,6 +746,22 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetaRecord> {
     return this.contextGraphMetaProjection.get(contextGraphId, { signal: options.signal });
+  }
+
+  /**
+   * Facts from the Context Graph's OWN `<cg>/_meta` graph only — the
+   * source-qualified counterpart of {@link getCgMeta}, which merges four graphs.
+   * Used where a fact has to be attributable to the graph itself; see
+   * `resolveCuratorSyncPeer`.
+   */
+  async getOwnCgMetaFacts(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphMetaRecord> {
+    return this.contextGraphMetaProjection.getOwnMetaFacts(contextGraphId, {
+      signal: options.signal,
+    });
   }
 
   async listContextGraphsFromProjection(this: DKGAgent, opts?: { callerAgentAddress?: string | null }): Promise<ListContextGraphsRow[]> {

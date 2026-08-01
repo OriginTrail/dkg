@@ -1231,14 +1231,18 @@ describe('refreshMetaFromCurator', () => {
     const bootstrapPeer = 'peer-from-join-approval';
     const authoritativePeer = 'peer-from-authoritative-meta';
     const preferredSyncPeers = new Map([[contextGraphId, bootstrapPeer]]);
+    const declaredFacts = {
+      curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
+      curators: [],
+      creator: `did:dkg:agent:${authoritativePeer}`,
+      creators: [],
+    };
     const agent = {
       preferredSyncPeers,
-      getCgMeta: async () => ({
-        curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
-        curators: [],
-        creator: `did:dkg:agent:${authoritativePeer}`,
-        creators: [],
-      }),
+      getCgMeta: async () => declaredFacts,
+      // The Context Graph declares this curator→peer binding in its OWN `_meta`,
+      // which is what makes it authoritative rather than merely rankable (#2006).
+      getOwnCgMetaFacts: async () => declaredFacts,
       discovery: {
         findAgents: async () => {
           throw new Error('creator metadata should resolve the curator peer');
