@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { runProcess } from '../../../scripts/lib/run-process.mjs';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
@@ -14,22 +15,12 @@ export const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze([
 ]);
 
 function runVitest(args, env) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(pnpmCommand, args, {
-      cwd: packageRoot,
-      env,
-      stdio: 'inherit',
-    });
-    child.once('error', rejectPromise);
-    child.once('exit', (code, signal) => {
-      if (code === 0) {
-        resolvePromise();
-        return;
-      }
-      rejectPromise(new Error(
-        `RFC-64 M0 recovery Vitest failed with ${signal ? `signal ${signal}` : `exit code ${String(code)}`}`,
-      ));
-    });
+  return runProcess({
+    args,
+    command: pnpmCommand,
+    cwd: packageRoot,
+    env,
+    failureLabel: 'RFC-64 M0 recovery Vitest',
   });
 }
 

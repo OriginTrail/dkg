@@ -32,9 +32,10 @@ The runtime sub-gates write their existing commit-bound artifacts under:
 - `devnet/rfc64-gate2-multi-asset-completeness/artifacts/`
 
 The three recovery rows call stable proof scripts owned by the agent package
-and run as independent child commands. An agent-local structural dispatcher
-selects one registered scenario without title filters or reporter parsing; it
-fails during test discovery if any required scenario is missing or duplicated.
+and run as independent child commands. A focused agent-local recovery describe
+owns the structural registry and selects one scenario without title filters or
+reporter parsing. The ordinary native-wiring suite is skipped as one unit in
+focused mode, and discovery fails if any required scenario is missing or duplicated.
 Display-text changes therefore do not affect selection. The bounded-work row
 selects stable test files rather than English test titles. Every child process
 exit status is part of the composed gate; focused tests do not substitute

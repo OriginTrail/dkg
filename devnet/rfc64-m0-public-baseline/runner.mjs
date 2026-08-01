@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { runProcess as runChildProcess } from '../../scripts/lib/run-process.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../..');
@@ -64,22 +65,10 @@ export const M0_ACCEPTANCE_ROWS = Object.freeze([
 ]);
 
 export function runProcess(args, { command = pnpmCommand } = {}) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, {
-      cwd: repoRoot,
-      env: process.env,
-      stdio: 'inherit',
-    });
-    child.once('error', rejectPromise);
-    child.once('exit', (code, signal) => {
-      if (code === 0) {
-        resolvePromise();
-        return;
-      }
-      rejectPromise(new Error(
-        `${command} ${args.join(' ')} failed with ${signal ? `signal ${signal}` : `exit code ${String(code)}`}`,
-      ));
-    });
+  return runChildProcess({
+    args,
+    command,
+    cwd: repoRoot,
   });
 }
 
