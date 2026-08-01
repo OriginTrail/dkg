@@ -769,7 +769,7 @@ describe('catch-up plane proof predicates', () => {
       emptyResponses: 0,
     };
 
-    it('does not read SHARED-MEMORY metadata as hosting evidence', () => {
+    it('never reads a SHARED-MEMORY round as hosted-empty evidence', () => {
       // `<cg>/_meta` definition triples are a DURABLE fact: serving them proves
       // the peer hosts the Context Graph. Shared-memory metadata is a different
       // artifact, and shared memory is contributed by many members rather than
@@ -791,11 +791,13 @@ describe('catch-up plane proof predicates', () => {
         plane: 'shared-memory',
       })).toMatchObject({ authorityEmptyPeers: 0 });
 
-      // A genuine wire-empty shared-memory round from the curator still counts.
+      // Nor does a wire-empty one: on this plane NOBODY's emptiness is
+      // authoritative, because the curator does not own the members' layers.
+      // An empty SWM plane is still provable, but only as a whole-round verdict.
       expect(catchupPeerPlaneEvidence(
         { ...curatorSharedMetaOnly, insertedTriples: 0, insertedMetaTriples: 0, emptyResponses: 1 },
         { fromAuthority: true, plane: 'shared-memory' },
-      )).toMatchObject({ authorityEmptyPeers: 1 });
+      )).toMatchObject({ authorityEmptyPeers: 0, emptyPeers: 1 });
 
       // …and the identical shape on the DURABLE plane is hosting evidence.
       expect(catchupPeerPlaneEvidence(curatorSharedMetaOnly, {

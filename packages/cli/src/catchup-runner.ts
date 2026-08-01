@@ -578,16 +578,31 @@ export function catchupPeerPlaneEvidence(
   // peer does not have it.
   const carriedNoData = (plane.insertedDataTriples ?? 0) === 0
     && (plane.fetchedDataTriples ?? 0) === 0;
-  // Metadata counts as hosting evidence on the DURABLE plane only. There,
-  // `<cg>/_meta` carries the Context Graph's own definition triples, so serving
-  // it proves the peer hosts the graph. Shared-memory metadata is a different
-  // artifact and carries no such guarantee — and shared memory is contributed by
-  // many members rather than owned by the curator, so "the curator has SWM
-  // structure but no SWM rows" does not mean the network has none. On that
-  // plane, only a genuine wire-empty response counts.
-  const hostsGraph = options.plane !== 'shared-memory'
-    && ((plane.metaOnlyResponses ?? 0) > 0 || (plane.insertedMetaTriples ?? 0) > 0);
-  const answered = (plane.emptyResponses ?? 0) > 0 || hostsGraph;
+  // Whose emptiness counts, and on which plane.
+  //
+  // DURABLE: the Context Graph is the curator's. `<cg>/_meta` carries its own
+  // definition triples, so a curator serving them proves it hosts the graph, and
+  // a curator with no data means the graph has none. Both wire-empty and
+  // metadata-only rounds are hosted-empty evidence there.
+  //
+  // SHARED MEMORY: nobody's emptiness counts, not even the curator's. SWM is a
+  // per-agent-address layered union (`<swm>/<addr>/<number>`) contributed by many
+  // members, so a curator holding no SWM rows says nothing about the members'
+  // layers — it does not own them. Letting it settle the plane skipped peers that
+  // held valid rows and could report `sharedMemoryVerified` with
+  // `sharedMemorySynced: 0`. An empty SWM plane is still provable, but only as a
+  // WHOLE-ROUND verdict once every peer has answered, which is what
+  // `catchupPlaneProvenByUnanimousEmpty` is for.
+  //
+  // Verified DATA from the curator still settles either plane. That is the
+  // tradeoff this PR states openly — a peer's `complete` flag proves only its own
+  // manifest, and the background reconciler remains the convergence mechanism —
+  // and it is what keeps the amplification fixed for an SWM-heavy graph, which
+  // issue #2006 measured at 122,705 fetched triples on the shared plane alone.
+  const answered = options.plane !== 'shared-memory'
+    && ((plane.emptyResponses ?? 0) > 0
+      || (plane.metaOnlyResponses ?? 0) > 0
+      || (plane.insertedMetaTriples ?? 0) > 0);
   return {
     verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
     verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,

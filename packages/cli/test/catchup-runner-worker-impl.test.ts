@@ -363,16 +363,14 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersNotAttempted).toBe(peerIds.length - 1);
   });
 
-  it('lets the curator settle a plane by answering cleanly empty', async () => {
-    // Shared memory is frequently empty for a graph that has durable data, and
-    // `includeSharedMemory` defaults to true on subscribe. If only inserted
-    // rows could settle a plane, the early stop would almost never fire in the
-    // shape this fix targets.
+  it('lets the curator settle the DURABLE plane by answering cleanly empty', async () => {
+    // The Context Graph is the curator's, so its "there is nothing here" is
+    // authoritative for the durable plane and one payload settles it. The
+    // shared-memory plane is deliberately NOT symmetric — see the next test.
     const peerIds = Array.from({ length: 10 }, (_, i) => `peer-${i}`);
     const durableCalls: string[] = [];
-    const sharedCalls: string[] = [];
 
-    const result = await runWorkerCatchup({ contextGraphId: 'cg-empty-swm', includeSharedMemory: true }, async (method, args) => {
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-empty-durable', includeSharedMemory: false }, async (method, args) => {
       switch (method) {
         case 'prepareCatchup':
           return { preferredPeerId: 'peer-0', authoritativePeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
@@ -380,11 +378,8 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           return true;
         case 'syncDurable':
           durableCalls.push(args[0] as string);
-          return durableResult();
-        case 'syncSharedMemory':
-          sharedCalls.push(args[0] as string);
           return {
-            ...sharedResult(),
+            ...durableResult(),
             insertedTriples: 0,
             fetchedDataTriples: 0,
             insertedDataTriples: 0,
@@ -400,9 +395,62 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     });
 
     expect(durableCalls).toEqual(['peer-0']);
-    expect(sharedCalls).toEqual(['peer-0']);
     expect(result.peersNotAttempted).toBe(peerIds.length - 1);
-    expect(result.cleanPlaneCompletions?.sharedMemory.emptyPeers).toBe(1);
+    expect(result.cleanPlaneCompletions?.durable.authorityEmptyPeers).toBe(1);
+  });
+
+  it('does NOT let the curator settle the shared-memory plane by answering empty', async () => {
+    // Shared memory is a per-agent-address layered union
+    // (`<swm>/<addr>/<number>`) contributed by many members, so a curator that
+    // holds no SWM rows has not said anything about the members' layers — it
+    // does not own them. Settling on its silence skipped peers that held valid
+    // rows, and could report `sharedMemoryVerified` with `sharedMemorySynced: 0`.
+    //
+    // The durable plane still settles on the curator's round, so the expensive
+    // half of the walk is still one payload: fallback peers are narrowed to SWM.
+    const peerIds = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-swm-union', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-0', authoritativePeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          // The curator has nothing; a later member holds the rows.
+          if (args[0] === 'peer-0') {
+            return {
+              ...sharedResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 2,
+              emptyResponses: 1,
+            };
+          }
+          return sharedResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // The expensive plane is still pulled once…
+    expect(durableCalls).toEqual(['peer-0']);
+    // …while the union plane keeps walking, and reaches the member that has rows.
+    expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
+    expect(result.peersNotAttempted).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBeGreaterThan(0);
+    expect(result.sharedMemorySynced).toBeGreaterThan(0);
   });
 
   it('skips the durable plane on fallback peers once the curator settled it', async () => {
@@ -619,7 +667,10 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     // …while the unproven shared plane keeps walking every remaining peer.
     expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
     expect(result.peersNotAttempted).toBe(0);
-    expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(1);
+    // The shared plane produces no authority evidence at all now — privacy is no
+    // longer the only thing standing between an empty curator round and a
+    // settled SWM plane.
+    expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(0);
   });
 
   it('does not settle the SHARED-MEMORY plane on curator metadata alone', async () => {
