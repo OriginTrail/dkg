@@ -228,6 +228,52 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(calls.shared[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
   });
 
+  it('hands the resolved peer into selection and returns an authority-ranked list', async () => {
+    // The whole load reduction depends on the walk opening with the curator,
+    // and the worker only ever sees an ALREADY-ranked `peerIds`. Every
+    // worker test supplies that list itself, so the handoff that produces it —
+    // resolve, then rank the live connections against the resolved peer — was
+    // covered nowhere. Dropping the second argument here would leave the worker
+    // suite green while production opened at the full cap.
+    const selectCalls: unknown[][] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-b', 'peer-curator', 'peer-a', 'peer-b'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (...args: unknown[]) => {
+        selectCalls.push(args);
+        const peers = args[0] as Array<{ toString(): string }>;
+        const preferred = args[1] as string | undefined;
+        // Stand in for the real ranking: preferred first, rest in order.
+        return [...peers].sort((a, b) => Number(b.toString() === preferred)
+          - Number(a.toString() === preferred));
+      },
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-rank']);
+
+    expect(selectCalls).toHaveLength(1);
+    const [candidates, preferred, isPrivate] = selectCalls[0]!;
+    // Live connections are de-duplicated before ranking…
+    expect((candidates as Array<{ toString(): string }>).map((p) => p.toString()))
+      .toEqual(['peer-b', 'peer-curator', 'peer-a']);
+    // …the RESOLVED peer is what selection ranks against…
+    expect(preferred).toBe('peer-curator');
+    expect(isPrivate).toBe(false);
+    // …and the worker receives the ranked ids as plain strings, curator first.
+    expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-b', 'peer-a']);
+    expect(posted.result.authoritativePeerId).toBe('peer-curator');
+    expect(posted.result.connectedPeers).toBe(3);
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 
