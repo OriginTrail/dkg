@@ -324,27 +324,30 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // node-wide sync-global queue (2 inflight / 4 queued) saturated against
   // itself.
   //
-  // Instead, walk escalating waves (1, 2, 4, ...) and stop as soon as every
-  // requested plane is proven by real verified data. Wave 1 is the curator when
-  // one is resolvable, so the happy path transfers exactly one payload.
+  // Instead, walk escalating waves and stop as soon as the AUTHORITY has proven
+  // every requested plane with verified data — see `authorityProven` above for
+  // why only the curator's snapshot may cut the walk short. Wave 1 is that
+  // curator when one is resolvable, so the happy path transfers exactly one
+  // payload; with no resolvable curator nothing is ever authority-proven and
+  // this degrades to the previous full bounded fan-out.
   //
-  // The stop condition is deliberately POSITIVE-only: an empty round proves
+  // The stop condition is also deliberately POSITIVE-only: an empty round proves
   // nothing on its own (an unrelated peer and an empty host are byte-identical
   // on the wire), so emptiness stays a whole-round verdict evaluated by
   // `catchupPlaneProvenByUnanimousEmpty` after every peer has been walked.
   //
-  // Tradeoff, stated deliberately: a peer's `complete` flag proves it served its
-  // own manifest, not that the manifest was network-complete. Foreground
-  // catch-up therefore optimises for one fast authoritative payload; breadth and
-  // eventual convergence remain the background reconcile lane's job.
+  // Tradeoff, stated deliberately: even the curator's `complete` flag proves it
+  // served its own manifest, not that the manifest was network-complete.
+  // Foreground catch-up therefore optimises for one fast authoritative payload;
+  // breadth and eventual convergence remain the background reconcile lane's job.
   // DKG_CATCHUP_STOP_ON_PROOF=0 restores the previous full fan-out.
   //
   // The single-peer opening wave is spent on the authority, so it is only taken
   // when there IS one: if no curator resolved (or it is not sync-capable), the
   // head of the ranked list has no special claim and serialising it would just
-  // add a round-trip to the front of every round. In that case the walk opens at
-  // the full concurrency cap — the previous first-round latency — and still
-  // stops as soon as something is proven.
+  // add a round-trip to the front of every round, with no early stop to earn it
+  // back. In that case the walk opens at the full concurrency cap — the previous
+  // first-round latency.
   const authorityFirst = prepared.preferredPeerId !== undefined
     && syncCapable[0] === prepared.preferredPeerId;
   const waveSizes = CATCHUP_STOP_ON_PROOF
