@@ -7,18 +7,81 @@ import {
   runProcess,
 } from './runner.mjs';
 
-const expectedRowIds = Object.freeze([
-  'persistence-lifecycle',
-  'public-swm-policy-parity',
-  'finalized-public-vm',
-  'automatic-cold-start-and-restart',
-  'source-recovery',
-  'public-curated-cold-warm-parity',
-  'bounded-work',
+const expectedRows = Object.freeze([
+  {
+    id: 'persistence-lifecycle',
+    label: 'Persistence lifecycle',
+    kind: 'command',
+    args: ['test:gate0:rfc64-persistence-lifecycle'],
+  },
+  {
+    id: 'public-swm-policy-parity',
+    label: 'Public SWM policy parity',
+    kind: 'command',
+    args: ['test:m1:rfc64-public-swm-parity'],
+  },
+  {
+    id: 'finalized-public-vm',
+    label: 'Finalized public VM',
+    kind: 'command',
+    args: [
+      '--filter',
+      '@devnet/rfc64-gate2-multi-asset-completeness',
+      'live:public-vm',
+    ],
+  },
+  {
+    id: 'automatic-cold-start-and-restart',
+    label: 'Automatic cold start and restart',
+    kind: 'command',
+    args: [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'test:rfc64-m0-recovery:cold-restart',
+    ],
+  },
+  {
+    id: 'source-recovery',
+    label: 'Source recovery',
+    kind: 'command',
+    args: [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'test:rfc64-m0-recovery:provider-failover',
+    ],
+  },
+  {
+    id: 'public-curated-cold-warm-parity',
+    label: 'Public-curated cold/warm parity',
+    kind: 'command',
+    args: [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'test:rfc64-m0-recovery:curated-parity',
+    ],
+  },
+  {
+    id: 'bounded-work',
+    label: 'Bounded work',
+    kind: 'command',
+    args: [
+      '--filter',
+      '@origintrail-official/dkg-agent',
+      'exec',
+      'vitest',
+      'run',
+      '--config',
+      'vitest.unit.config.ts',
+      'test/rfc64-public-catalog-receiver-v1.test.ts',
+      'test/sync-backpressure.test.ts',
+      'test/sync-on-connect-churn.test.ts',
+    ],
+  },
 ]);
+const expectedRowIds = Object.freeze(expectedRows.map(({ id }) => id));
 
-test('invokes every declared M0 acceptance row exactly once and in order', async () => {
-  assert.deepEqual(M0_ACCEPTANCE_ROWS.map(({ id }) => id), expectedRowIds);
+test('locks every declared M0 acceptance command and invokes each row in order', async () => {
+  assert.deepEqual(M0_ACCEPTANCE_ROWS, expectedRows);
   const invoked = [];
 
   await runM0Rows({
