@@ -9,7 +9,8 @@ import {
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
 } from '../src/sync/policy.js';
-import { classifySyncPeerProvenance } from '../src/dkg-agent-lifecycle.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { resolveCuratorSyncPeer } from '../src/dkg-agent-cg-resolve.js';
 
 describe('sync Context Graph policy', () => {
   it('normalizes safe integer priorities and preserves stable input order for ties', () => {
@@ -90,42 +91,101 @@ describe('normalizeSyncAdmissionSource', () => {
   });
 });
 
-describe('classifySyncPeerProvenance', () => {
+/**
+ * These drive the REAL resolver — `resolveCuratorSyncPeer` and the two
+ * lifecycle methods on their actual prototypes — not a stub of it. Which of
+ * the two routes produced a peer id is what decides whether one peer's answer
+ * may stand for a whole Context Graph, and that decision is made inside the
+ * resolver, so stubbing it out would leave the interesting half untested.
+ */
+describe('curator sync-peer provenance', () => {
+  const CG = 'cg/provenance';
   const HINT = '12D3KooWBootstrapHint';
   const CURATOR = '12D3KooWMetadataCurator';
 
-  it('marks a metadata-resolved curator as authoritative', () => {
-    expect(classifySyncPeerProvenance(undefined, CURATOR))
+  function agentWithMeta(meta: {
+    curator?: string;
+    curators?: string[];
+    creator?: string;
+    creators?: string[];
+  }, findAgents: () => Promise<Array<{ agentAddress?: string; peerId: string }>> = async () => []) {
+    return {
+      getCgMeta: async () => ({ curators: [], creators: [], ...meta }),
+      discovery: { findAgents },
+    };
+  }
+
+  it('reports a metadata curator as authoritative EVEN when it equals the bootstrap hint', async () => {
+    // The ordinary case on a healthy network: the join approval came from the
+    // curator, so both routes name the same peer. Deriving provenance by
+    // comparing the resolved id against the hint therefore reads the normal
+    // case as "unconfirmed hint" and never lets the catch-up walk stop —
+    // exactly where the early-stop optimisation is worth the most.
+    const hints = new Map([[CG, CURATOR]]);
+    const agent = agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` });
+
+    expect(await resolveCuratorSyncPeer(agent as never, hints, CG))
       .toEqual({ peerId: CURATOR, provenance: 'metadata' });
-    expect(classifySyncPeerProvenance(HINT, CURATOR))
-      .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+    // …and the resolver consumed the hint now that metadata has confirmed it.
+    expect(hints.has(CG)).toBe(false);
   });
 
-  it('marks an echoed bootstrap hint as NOT authoritative', () => {
-    // `resolveCuratorPeerId` echoes the join-approval hint when metadata
-    // resolves no curator. That hint can be stale — peer ids are cryptographic
-    // identities, so a curator that has rotated its libp2p key leaves an
-    // ordinary member on the id the hint still names — so it may rank the walk
-    // but must never let one peer stand for the whole graph.
-    expect(classifySyncPeerProvenance(HINT, HINT))
+  it('marks an echoed bootstrap hint as NOT authoritative', async () => {
+    // With no curator in `_meta` the resolver echoes the join-approval hint.
+    // That hint can be stale — peer ids are cryptographic identities, so a
+    // curator that rotated its libp2p key leaves an ordinary member on the id
+    // it still names — so it may rank the walk but must never end it.
+    const hints = new Map([[CG, HINT]]);
+
+    expect(await resolveCuratorSyncPeer(agentWithMeta({}) as never, hints, CG))
       .toEqual({ peerId: HINT, provenance: 'bootstrap-hint' });
-    expect(classifySyncPeerProvenance(HINT, undefined))
+    // A non-DKG curator DID is equally unresolvable.
+    expect(await resolveCuratorSyncPeer(agentWithMeta({ curator: 'did:web:example' }) as never, hints, CG))
       .toEqual({ peerId: HINT, provenance: 'bootstrap-hint' });
+    // …as is a wallet-address curator no registry can resolve.
+    expect(await resolveCuratorSyncPeer(
+      agentWithMeta({ curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' }) as never,
+      hints,
+      CG,
+    )).toEqual({ peerId: HINT, provenance: 'bootstrap-hint' });
+    // The hint survives every fallback: it is still the best peer available.
+    expect(hints.get(CG)).toBe(HINT);
   });
 
-  it('reports no peer when neither source produced one', () => {
-    expect(classifySyncPeerProvenance(undefined, undefined))
+  it('reports no peer when neither route produced one', async () => {
+    expect(await resolveCuratorSyncPeer(agentWithMeta({}) as never, new Map(), CG))
       .toEqual({ provenance: 'none' });
   });
 
-  it('keeps ranking availability identical to authority eligibility only for metadata', () => {
-    // The ranking caller takes `.peerId` regardless of provenance; the
-    // early-stop caller takes it only for 'metadata'. Pin that they differ
-    // exactly on the hint case.
-    for (const [hint, curator] of [[HINT, HINT], [HINT, undefined]] as const) {
-      const resolved = classifySyncPeerProvenance(hint, curator);
-      expect(resolved.peerId).toBe(HINT);
-      expect(resolved.provenance).not.toBe('metadata');
-    }
+  it('resolves a wallet-address curator through the registry as authoritative', async () => {
+    const hints = new Map([[CG, HINT]]);
+    const agent = agentWithMeta(
+      { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
+      async () => [{ agentAddress: '0x00000000000000000000000000000000000000AB', peerId: CURATOR }],
+    );
+
+    expect(await resolveCuratorSyncPeer(agent as never, hints, CG))
+      .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+  });
+
+  it('ranks on any provenance but only lets metadata settle the walk', async () => {
+    // The two lifecycle entry points, on their real prototypes: ranking takes
+    // whatever peer is available, authority takes it only from metadata.
+    const confirmedCurator = {
+      preferredSyncPeers: new Map([[CG, CURATOR]]),
+      ...agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` }),
+    };
+    const hintOnly = {
+      preferredSyncPeers: new Map([[CG, HINT]]),
+      ...agentWithMeta({}),
+    };
+    const rank = LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId;
+    const authority = LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId;
+
+    expect(await rank.call(confirmedCurator as never, CG)).toBe(CURATOR);
+    expect(await authority.call(confirmedCurator as never, CG)).toBe(CURATOR);
+
+    expect(await rank.call(hintOnly as never, CG)).toBe(HINT);
+    expect(await authority.call(hintOnly as never, CG)).toBeUndefined();
   });
 });

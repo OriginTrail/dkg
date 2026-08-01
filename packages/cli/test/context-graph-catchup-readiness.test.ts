@@ -321,4 +321,72 @@ describe('context graph catch-up readiness classification', () => {
     expect(classification.jobStatus).toBe('unreachable');
     expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
   });
+
+  // A registered public graph with no Knowledge Assets yet. Its host serves the
+  // CG definition triples from `<cg>/_meta`, so it answers metadata-only rather
+  // than wire-empty and the whole-round rule above can never fire — no peer in
+  // the round produced an `emptyResponses`. The curator's own hosted-empty
+  // round is the only evidence such a graph can produce.
+  function curatorHostedEmptyResult(): CatchupJobResult {
+    const result = publicEmptyRoundResult();
+    if (!result.cleanPlaneCompletions || !result.diagnostics?.durable) {
+      throw new Error('durable completion evidence missing');
+    }
+    result.cleanPlaneCompletions.durable.emptyPeers = 0;
+    result.cleanPlaneCompletions.durable.authorityEmptyPeers = 1;
+    result.diagnostics.durable.emptyResponses = 0;
+    result.diagnostics.durable.metaOnlyResponses = 1;
+    result.diagnostics.durable.fetchedMetaTriples = 9;
+    result.diagnostics.durable.insertedMetaTriples = 9;
+    return result;
+  }
+
+  it('settles a registered-but-empty public graph on the curator hosted-empty round', () => {
+    expect(classifyContextGraphCatchupReadiness({
+      result: curatorHostedEmptyResult(),
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    })).toMatchObject({
+      jobStatus: 'done',
+      statePatch: { synced: true },
+      readinessPatch: { durableVerified: true },
+    });
+  });
+
+  it.each([
+    ['the round came from members rather than the curator', (result: CatchupJobResult) => {
+      result.cleanPlaneCompletions!.durable.authorityEmptyPeers = 0;
+    }],
+    ['another peer delivered data the curator did not have', (result: CatchupJobResult) => {
+      result.diagnostics!.durable.fetchedDataTriples = 122_705;
+    }],
+  ])('keeps the same round unready when %s', (_label, mutate) => {
+    const result = curatorHostedEmptyResult();
+    mutate(result);
+
+    expect(classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    })).toMatchObject({
+      jobStatus: 'unreachable',
+      readinessPatch: { durableVerified: false },
+    });
+  });
+
+  it('never settles a PRIVATE plane on a curator hosted-empty round', () => {
+    // Private planes stay proof-by-content only: an authorized-but-filtered
+    // response is indistinguishable from an empty one on this side of the wire.
+    expect(classifyContextGraphCatchupReadiness({
+      result: curatorHostedEmptyResult(),
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup,
+    }).jobStatus).toBe('unreachable');
+  });
 });

@@ -522,6 +522,111 @@ async function applyContextGraphListPrivacy(
     .map(({ policyKnown: _policyKnown, ...row }) => row);
 }
 
+/** Where a resolved catch-up sync peer came from; see {@link resolveCuratorSyncPeer}. */
+export interface SyncPeerResolution {
+  peerId?: string;
+  provenance: 'metadata' | 'bootstrap-hint' | 'none';
+}
+
+/**
+ * Resolve the curator peer for a Context Graph together with WHERE it came from.
+ *
+ * Two routes produce a peer id here and they are NOT interchangeable:
+ *
+ * - `'metadata'` — `<cg>/_meta` names a curator DID and it resolved to a peer.
+ *   Authoritative: that peer speaks for the whole graph.
+ * - `'bootstrap-hint'` — the authenticated join-approval hint recorded in
+ *   `preferredSyncPeers`, used while `_meta` has not arrived yet (and restored
+ *   from the durable join-approved membership row after restart). It is a fine
+ *   ranking signal but can be stale: peer ids are cryptographic identities, so
+ *   a curator that rotated its libp2p key leaves an ordinary member sitting on
+ *   the id the hint still names.
+ *
+ * Provenance is returned rather than inferred by a caller because the two
+ * routes routinely produce the SAME id — the join approval normally comes from
+ * the curator — so comparing the result against the hint cannot tell
+ * "metadata confirmed the curator" from "metadata found nothing and the hint
+ * was echoed back". Only the resolver knows which branch it took.
+ */
+export async function resolveCuratorSyncPeer(
+  agent: DKGAgent,
+  /**
+   * The agent's `preferredSyncPeers`, passed explicitly because it is both read
+   * and evicted here — and because that makes the resolver directly drivable in
+   * a test without standing up an agent.
+   */
+  bootstrapHints: Map<string, string>,
+  contextGraphId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SyncPeerResolution> {
+  const approvedCuratorPeerId = bootstrapHints.get(contextGraphId);
+  const fromHint = (): SyncPeerResolution => (approvedCuratorPeerId
+    ? { peerId: approvedCuratorPeerId, provenance: 'bootstrap-hint' }
+    : { provenance: 'none' });
+
+  const meta = await agent.getCgMeta(contextGraphId, { signal: options.signal });
+  const curatorDid = meta.curator ?? meta.curators[0] ?? '';
+  // Once `_meta` identifies a curator, that authoritative route must win over
+  // the bootstrap hint.
+  if (!curatorDid) return fromHint();
+  const didPrefix = 'did:dkg:agent:';
+  if (!curatorDid.startsWith(didPrefix)) return fromHint();
+  const curatorIdentifier = curatorDid.slice(didPrefix.length);
+
+  // Resolve curator identifier to a peer ID. The DID value is either a
+  // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
+  // wallet addresses, prefer the deterministic DKG_CREATOR triple (which
+  // stores the libp2p peer ID) over the agent registry (which may return
+  // an arbitrary match when multiple agents register the same wallet).
+  let curatorPeerId = curatorIdentifier;
+  if (curatorIdentifier.startsWith('0x')) {
+    let resolved = false;
+
+    // Preferred: use the same projected metadata resolution as privacy and
+    // listing reads. AGENTS-only declarations can mark a graph private, so
+    // the refresh path must be able to discover their creator route too.
+    const creatorCandidates = [
+      meta.creator,
+      ...meta.creators,
+    ].filter((value): value is string => Boolean(value));
+    for (const creatorDid of creatorCandidates) {
+      if (creatorDid.startsWith(didPrefix)) {
+        const creatorId = creatorDid.slice(didPrefix.length);
+        if (!creatorId.startsWith('0x')) {
+          curatorPeerId = creatorId;
+          resolved = true;
+          break;
+        }
+      }
+    }
+
+    // Fallback: agent registry lookup (non-deterministic if multiple agents
+    // share the same wallet address, but better than failing outright)
+    if (!resolved) {
+      try {
+        throwIfSyncAuthAborted(options.signal);
+        const agents = await agent.discovery.findAgents();
+        throwIfSyncAuthAborted(options.signal);
+        const match = agents.find(
+          (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
+        );
+        if (match) {
+          curatorPeerId = match.peerId;
+          resolved = true;
+        }
+      } catch {
+        throwIfSyncAuthAborted(options.signal);
+        /* registry unavailable */
+      }
+    }
+
+    if (!resolved) return fromHint();
+  }
+
+  bootstrapHints.delete(contextGraphId);
+  return { peerId: curatorPeerId, provenance: 'metadata' };
+}
+
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(
     this: DKGAgent,
@@ -1807,76 +1912,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
-    const approvedCuratorPeerId = this.preferredSyncPeers.get(contextGraphId);
-    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
-    const curatorDid = meta.curator ?? meta.curators[0] ?? '';
-    if (!curatorDid) {
-      // Join approval authenticates the notification sender before recording
-      // this hint. It is the only curator route available during the bootstrap
-      // window where `_meta` has not arrived yet (and is restored from the
-      // durable join-approved membership row after restart). Once `_meta`
-      // identifies a curator, however, that authoritative route must win over
-      // the bootstrap hint.
-      return approvedCuratorPeerId;
-    }
-    const didPrefix = 'did:dkg:agent:';
-    if (!curatorDid.startsWith(didPrefix)) {
-      return approvedCuratorPeerId;
-    }
-    const curatorIdentifier = curatorDid.slice(didPrefix.length);
-
-    // Resolve curator identifier to a peer ID. The DID value is either a
-    // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
-    // wallet addresses, prefer the deterministic DKG_CREATOR triple (which
-    // stores the libp2p peer ID) over the agent registry (which may return
-    // an arbitrary match when multiple agents register the same wallet).
-    let curatorPeerId = curatorIdentifier;
-    if (curatorIdentifier.startsWith('0x')) {
-      let resolved = false;
-
-      // Preferred: use the same projected metadata resolution as privacy and
-      // listing reads. AGENTS-only declarations can mark a graph private, so
-      // the refresh path must be able to discover their creator route too.
-      const creatorCandidates = [
-        meta.creator,
-        ...meta.creators,
-      ].filter((value): value is string => Boolean(value));
-      for (const creatorDid of creatorCandidates) {
-        if (creatorDid.startsWith(didPrefix)) {
-          const creatorId = creatorDid.slice(didPrefix.length);
-          if (!creatorId.startsWith('0x')) {
-            curatorPeerId = creatorId;
-            resolved = true;
-            break;
-          }
-        }
-      }
-
-      // Fallback: agent registry lookup (non-deterministic if multiple agents
-      // share the same wallet address, but better than failing outright)
-      if (!resolved) {
-        try {
-          throwIfSyncAuthAborted(options.signal);
-          const agents = await this.discovery.findAgents();
-          throwIfSyncAuthAborted(options.signal);
-          const match = agents.find(
-            (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
-          );
-          if (match) {
-            curatorPeerId = match.peerId;
-            resolved = true;
-          }
-        } catch {
-          throwIfSyncAuthAborted(options.signal);
-          /* registry unavailable */
-        }
-      }
-
-      if (!resolved) return approvedCuratorPeerId;
-    }
-
-    this.preferredSyncPeers.delete(contextGraphId);
-    return curatorPeerId;
+    return (await resolveCuratorSyncPeer(
+      this,
+      this.preferredSyncPeers,
+      contextGraphId,
+      options,
+    )).peerId;
   }
 
   async refreshMetaFromCurator(

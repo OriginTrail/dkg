@@ -563,6 +563,158 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers).toBe(1);
   });
 
+  it('does not let an empty curator round settle a PRIVATE shared-memory plane', async () => {
+    // The shared-memory half of the private rule. It needs its own coverage:
+    // `includeSharedMemory` defaults to true on subscribe and shared memory is
+    // frequently empty, so this is the plane an over-eager empty rule would
+    // settle first — stranding the walk before any authorized peer holding SWM
+    // data is contacted. The durable plane settles by verified content here, so
+    // only the shared plane's rule is under test.
+    const peerIds = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-private-swm', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-0',
+            authoritativePeerId: 'peer-0',
+            isPrivateContextGraph: true,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return {
+            ...durableResult(),
+            insertedTriples: 8,
+            fetchedMetaTriples: 8,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 8,
+            insertedDataTriples: 0,
+            verifiedPrivateOnlyResponses: 1,
+          };
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          return {
+            ...sharedResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            emptyResponses: 1,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // Durable settled on the curator's verified content and is not re-pulled…
+    expect(durableCalls).toEqual(['peer-0']);
+    // …while the unproven shared plane keeps walking every remaining peer.
+    expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
+    expect(result.peersNotAttempted).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(1);
+  });
+
+  it('settles a public plane when the CURATOR hosts the graph and has no data', async () => {
+    // A registered public Context Graph with no Knowledge Assets yet. Its host
+    // still serves the CG definition triples from `<cg>/_meta`, so it answers
+    // metadata-only — never wire-empty — and no whole-round emptiness rule can
+    // fire for it. The curator saying "I host this and there is nothing in it"
+    // is the only evidence that exists, and without it such a graph would sit
+    // at `unreachable` forever while re-walking every peer on every retry.
+    const peerIds = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-registered-empty', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-0',
+            authoritativePeerId: 'peer-0',
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return {
+            ...durableResult(),
+            insertedTriples: 9,
+            fetchedMetaTriples: 9,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 9,
+            insertedDataTriples: 0,
+            metaOnlyResponses: 1,
+            completedPhases: 2,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-0']);
+    expect(result.peersNotAttempted).toBe(peerIds.length - 1);
+    expect(result.cleanPlaneCompletions?.durable.authorityEmptyPeers).toBe(1);
+    // The same round from a peer that is NOT the curator proves nothing: it is
+    // what any member holding `_meta` but no data looks like.
+    expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBe(0);
+  });
+
+  it('does not let a non-curator metadata-only round stop the walk', async () => {
+    // The counterpart of the test above, and the reason it is scoped to the
+    // curator: mid-sync members answering metadata-only are the commonest
+    // state on the network. Accepting theirs would resettle #2006 exactly —
+    // `done` with zero Knowledge Assets out of forty.
+    const peerIds = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-members-only', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-0',
+            authoritativePeerId: undefined,
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return {
+            ...durableResult(),
+            insertedTriples: 9,
+            fetchedMetaTriples: 9,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 9,
+            insertedDataTriples: 0,
+            metaOnlyResponses: 1,
+            completedPhases: 2,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect([...durableCalls].sort()).toEqual([...peerIds].sort());
+    expect(result.peersNotAttempted).toBe(0);
+    expect(result.cleanPlaneCompletions?.durable.authorityEmptyPeers).toBe(0);
+  });
+
   it('does not let a bootstrap-hint preferred peer stop the walk', async () => {
     // `resolvePreferredSyncPeerId` falls back to the authenticated join-approval
     // hint when metadata resolves no curator. That hint can be stale — a curator
@@ -996,8 +1148,13 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.diagnostics?.durable.deniedPhases).toBe(1);
     expect(result.diagnostics?.sharedMemory.deniedPhases).toBe(1);
     expect(result.cleanPlaneCompletions).toEqual({
-      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
-      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+      durable: {
+        verifiedDataPeers: 0,
+        verifiedPrivateOnlyPeers: 0,
+        emptyPeers: 0,
+        authorityEmptyPeers: 0,
+      },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
     });
     expect(result.diagnostics?.durable.verifiedPrivateOnlyResponses).toBe(0);
   });
@@ -1046,6 +1203,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedDataPeers: 1,
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
+      authorityEmptyPeers: 0,
     });
   });
 
@@ -1084,6 +1242,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedDataPeers: 0,
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
+      authorityEmptyPeers: 0,
     });
   });
 
@@ -1129,6 +1288,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedDataPeers: 0,
       verifiedPrivateOnlyPeers: 1,
       emptyPeers: 0,
+      authorityEmptyPeers: 0,
     });
   });
 
@@ -1169,6 +1329,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedDataPeers: 0,
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
+      authorityEmptyPeers: 0,
     });
   });
 
@@ -1227,8 +1388,13 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       sharedMemorySynced: 0,
     });
     expect(result.cleanPlaneCompletions).toEqual({
-      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: peerIds.length },
-      sharedMemory: { verifiedDataPeers: 0, emptyPeers: peerIds.length },
+      durable: {
+        verifiedDataPeers: 0,
+        verifiedPrivateOnlyPeers: 0,
+        emptyPeers: peerIds.length,
+        authorityEmptyPeers: 0,
+      },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: peerIds.length, authorityEmptyPeers: 0 },
     });
   });
 });

@@ -18,6 +18,7 @@ import {
   catchupPeerSucceeded,
   catchupPlaneProvenByData,
   type CatchupJobResult,
+  type CatchupPlaneCompletionEvidence,
   type CatchupRunRequest,
 } from './catchup-runner.js';
 
@@ -128,8 +129,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let noProtocolPeers = 0;
 
   const cleanPlaneCompletions: NonNullable<CatchupJobResult['cleanPlaneCompletions']> = {
-    durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
-    sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    durable: {
+      verifiedDataPeers: 0,
+      verifiedPrivateOnlyPeers: 0,
+      emptyPeers: 0,
+      authorityEmptyPeers: 0,
+    },
+    sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
   };
 
   const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
@@ -211,19 +217,19 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   /**
    * Whether the curator's round settles a plane well enough to stop walking.
    *
-   * Verified content always does. A clean EMPTY round only does for a PUBLIC
+   * Verified content always does. A content-free round only does for a PUBLIC
    * graph: readiness deliberately refuses to prove a private plane from an
    * empty response, so stopping on one would strand the walk without proving
    * anything — skipping fallback peers that may hold authorized private data
    * and turning a recoverable catch-up into `unreachable`. A verified
    * private-only response is content, not emptiness, and still counts.
+   *
+   * `authorityEmptyPeers` is set by the same reducer readiness consumes, so the
+   * stop condition and the readiness verdict cannot drift apart.
    */
-  const authoritySettles = (evidence: {
-    verifiedDataPeers: number;
-    verifiedPrivateOnlyPeers?: number;
-    emptyPeers: number;
-  }): boolean => catchupPlaneProvenByData(evidence)
-    || (!prepared.isPrivateContextGraph && evidence.emptyPeers > 0);
+  const authoritySettles = (evidence: CatchupPlaneCompletionEvidence): boolean =>
+    catchupPlaneProvenByData(evidence)
+    || (!prepared.isPrivateContextGraph && (evidence.authorityEmptyPeers ?? 0) > 0);
 
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
@@ -298,7 +304,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
       peerDenied = peerDenied || durable.deniedPhases > 0;
 
-      const durableEvidence = catchupPeerPlaneEvidence(durable, { complete: durable.complete });
+      const durableEvidence = catchupPeerPlaneEvidence(durable, {
+        complete: durable.complete,
+        fromAuthority,
+      });
       addCatchupPlaneEvidence(cleanPlaneCompletions.durable, durableEvidence);
       // The curator answering cleanly settles this plane whether it carried
       // data or was legitimately empty: "the host says there is nothing here"
@@ -336,7 +345,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
       // Shared memory carries no verified-private-only signal, so the shared
       // evidence only ever has data/empty set — the same reducer still applies.
-      const sharedEvidence = catchupPeerPlaneEvidence(shared);
+      const sharedEvidence = catchupPeerPlaneEvidence(shared, { fromAuthority });
       addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
       // Same rule as durable: the curator settles the plane by answering
       // cleanly, with data or empty. Shared memory is frequently empty for a

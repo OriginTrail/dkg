@@ -57,16 +57,9 @@ export interface CatchupJobResult {
    * the same plane cleanly and stored verified data.
    */
   cleanPlaneCompletions?: {
-    durable: {
-      verifiedDataPeers: number;
-      /** Peers that cleanly verified one or more V2 KAs with no public triples. */
-      verifiedPrivateOnlyPeers: number;
-      emptyPeers: number;
-    };
-    sharedMemory: {
-      verifiedDataPeers: number;
-      emptyPeers: number;
-    };
+    /** Always carries `verifiedPrivateOnlyPeers`; only the durable plane can produce it. */
+    durable: CatchupPlaneCompletionEvidence & { verifiedPrivateOnlyPeers: number };
+    sharedMemory: CatchupPlaneCompletionEvidence;
   };
   diagnostics?: {
     noProtocolPeers: number;
@@ -517,6 +510,12 @@ export interface CatchupPlaneCompletionEvidence {
   /** Peers that cleanly verified one or more V2 KAs with no public triples. */
   verifiedPrivateOnlyPeers?: number;
   emptyPeers: number;
+  /**
+   * The metadata-resolved curator cleanly completed this plane while hosting
+   * the graph and carrying no data at all. See
+   * {@link catchupPlaneProvenByUnanimousEmpty}.
+   */
+  authorityEmptyPeers?: number;
 }
 
 /** The aggregate per-plane counters a whole-round verdict is allowed to consult. */
@@ -543,15 +542,34 @@ export interface CatchupPlaneRoundDiagnostics {
  * A plane that did not complete cleanly contributes nothing at all.
  */
 export function catchupPeerPlaneEvidence(
-  plane: (CatchupPhaseProgress & { emptyResponses?: number }) | null | undefined,
-  options: { complete?: boolean } = {},
+  plane:
+    | (CatchupPhaseProgress & { emptyResponses?: number; fetchedDataTriples?: number })
+    | null
+    | undefined,
+  options: { complete?: boolean; fromAuthority?: boolean } = {},
 ): CatchupPlaneCompletionEvidence {
-  const none = { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 };
+  const none = {
+    verifiedDataPeers: 0,
+    verifiedPrivateOnlyPeers: 0,
+    emptyPeers: 0,
+    authorityEmptyPeers: 0,
+  };
   if (!plane || !catchupPlaneCompletedWithoutFailure(plane, options.complete)) return none;
+  // "The host says there is nothing here." Only the curator can say it: a
+  // response is content-free either by being wire-empty or by carrying nothing
+  // but `_meta`, and only the metadata-resolved curator's silence about data
+  // means the graph has none. Any other peer's identical answer just means that
+  // peer does not have it.
+  const carriedNoData = (plane.insertedDataTriples ?? 0) === 0
+    && (plane.fetchedDataTriples ?? 0) === 0;
+  const answered = (plane.emptyResponses ?? 0) > 0
+    || (plane.metaOnlyResponses ?? 0) > 0
+    || (plane.insertedMetaTriples ?? 0) > 0;
   return {
     verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
     verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,
     emptyPeers: (plane.emptyResponses ?? 0) > 0 ? 1 : 0,
+    authorityEmptyPeers: options.fromAuthority && carriedNoData && answered ? 1 : 0,
   };
 }
 
@@ -566,6 +584,9 @@ export function addCatchupPlaneEvidence(
       + peer.verifiedPrivateOnlyPeers;
   }
   total.emptyPeers += peer.emptyPeers;
+  if (peer.authorityEmptyPeers) {
+    total.authorityEmptyPeers = (total.authorityEmptyPeers ?? 0) + peer.authorityEmptyPeers;
+  }
 }
 
 /**
@@ -598,6 +619,15 @@ export function catchupPlaneProvenByData(
  * settled issue #2006's run as `done` with 1 KA out of 40, and either clause
  * kills it on its own.
  *
+ * A registered public graph that really is empty is therefore proven by its
+ * CURATOR instead — `authorityEmptyPeers`. Such a graph still carries
+ * definition triples in its own `<cg>/_meta`, so the peer hosting it answers
+ * metadata-only rather than wire-empty and could never satisfy the round rule
+ * above. Only the metadata-resolved curator counts: any OTHER peer's
+ * metadata-only round is the commonest state on the network — a member that
+ * has `_meta` but has not synced the data yet — and accepting it would resettle
+ * issue #2006's exact failure as `done` with zero Knowledge Assets.
+ *
  * Two counters are deliberately NOT consulted:
  *
  * - `fetchedMetaTriples`. Every registered Context Graph carries definition
@@ -624,6 +654,13 @@ export function catchupPlaneProvenByUnanimousEmpty(
   // private graph is fully synchronized; that stays unchanged.
   if (options.isPrivate) return false;
   if (catchupPlaneProvenByData(completion)) return false;
+  // The curator hosting the graph and carrying no data settles it on its own —
+  // it is the reference for the whole graph, so another peer failing part-way
+  // cannot contradict it. Another peer DELIVERING data can, which is the one
+  // guard kept: that means the curator's view is behind the network's.
+  if ((completion?.authorityEmptyPeers ?? 0) > 0) {
+    return (diagnostics?.fetchedDataTriples ?? 0) === 0;
+  }
   const cleanEmptyObserved = (completion?.emptyPeers ?? 0) > 0
     || (diagnostics?.emptyResponses ?? 0) > 0;
   if (!cleanEmptyObserved) return false;

@@ -1253,10 +1253,16 @@ describe('refreshMetaFromCurator', () => {
     expect(resolved).toBe(authoritativePeer);
     expect(preferredSyncPeers.has(contextGraphId)).toBe(false);
 
-    const lifecycleResolved = await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId.call({
+    // The same resolution through the lifecycle entry points, against the real
+    // metadata rather than a stubbed curator: the join-approved peer ranks only
+    // until `_meta` names someone, and the metadata answer is authoritative.
+    const lifecycleAgent = {
+      ...agent,
       preferredSyncPeers: new Map([[contextGraphId, bootstrapPeer]]),
-      resolveCuratorPeerId: async () => authoritativePeer,
-    } as never, contextGraphId);
-    expect(lifecycleResolved).toBe(authoritativePeer);
+    };
+    expect(await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
+    expect(await LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
   });
 });

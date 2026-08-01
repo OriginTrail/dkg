@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  catchupPeerPlaneEvidence,
   catchupPeerResponded,
   catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
@@ -739,6 +740,72 @@ describe('catch-up plane proof predicates', () => {
       { ...cleanEmptyRound, emptyResponses: 0 },
       { isPrivate: false },
     )).toBe(false);
+  });
+
+  // A registered public graph that really is empty still carries definition
+  // triples in its own `<cg>/_meta`, so the peer hosting it answers
+  // metadata-only, never wire-empty. Nothing in the whole-round rule above can
+  // ever fire for it — the curator has to say so itself.
+  describe('an empty graph whose only responder is its curator', () => {
+    const hostedEmptyRound = {
+      insertedTriples: 9,
+      insertedMetaTriples: 9,
+      insertedDataTriples: 0,
+      fetchedDataTriples: 0,
+      metaOnlyResponses: 1,
+      emptyResponses: 0,
+      completedPhases: 2,
+    };
+    const hostedEmptyDiagnostics = {
+      ...cleanEmptyRound,
+      fetchedMetaTriples: 9,
+      emptyResponses: 0,
+    };
+
+    it('counts the curator, and ONLY the curator, as hosted-empty evidence', () => {
+      expect(catchupPeerPlaneEvidence(hostedEmptyRound, {
+        complete: true,
+        fromAuthority: true,
+      })).toMatchObject({ verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 1 });
+      // The identical round from any other peer is the commonest state on the
+      // network — a member holding `_meta` that has not synced the data yet —
+      // and counting it would resettle #2006 as `done` with zero KAs.
+      expect(catchupPeerPlaneEvidence(hostedEmptyRound, { complete: true }))
+        .toMatchObject({ authorityEmptyPeers: 0 });
+      // Neither does a curator round that fetched data but inserted none.
+      expect(catchupPeerPlaneEvidence(
+        { ...hostedEmptyRound, fetchedDataTriples: 4_000 },
+        { complete: true, fromAuthority: true },
+      )).toMatchObject({ authorityEmptyPeers: 0 });
+    });
+
+    it('proves the public plane with no wire-empty response anywhere in the round', () => {
+      const completion = { ...noEvidence, authorityEmptyPeers: 1 };
+      expect(catchupPlaneProvenByUnanimousEmpty(
+        completion,
+        hostedEmptyDiagnostics,
+        { isPrivate: false },
+      )).toBe(true);
+      expect(catchupPlaneReady(completion, hostedEmptyDiagnostics, { isPrivate: false })).toBe(true);
+      // Without the curator's own evidence the same round proves nothing.
+      expect(catchupPlaneReady(noEvidence, hostedEmptyDiagnostics, { isPrivate: false })).toBe(false);
+    });
+
+    it('is voided when another peer delivered data the curator did not have', () => {
+      expect(catchupPlaneProvenByUnanimousEmpty(
+        { ...noEvidence, authorityEmptyPeers: 1 },
+        { ...hostedEmptyDiagnostics, fetchedDataTriples: 122_705 },
+        { isPrivate: false },
+      )).toBe(false);
+    });
+
+    it('never proves a private plane', () => {
+      expect(catchupPlaneProvenByUnanimousEmpty(
+        { ...noEvidence, authorityEmptyPeers: 1 },
+        hostedEmptyDiagnostics,
+        { isPrivate: true },
+      )).toBe(false);
+    });
   });
 
   it('accepts either evidence carrier for the clean empty completion', () => {

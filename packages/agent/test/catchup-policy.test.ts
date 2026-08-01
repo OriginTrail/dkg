@@ -26,6 +26,10 @@ function virtualClock(startMs = 1_000) {
       waits.push(delayMs);
       nowMs += delayMs;
     },
+    /** Charge time to something other than a backoff sleep — an attempt itself. */
+    advance: (deltaMs: number) => {
+      nowMs += deltaMs;
+    },
     elapsed: () => nowMs - startMs,
   };
 }
@@ -126,6 +130,34 @@ describe('runCatchupPlanesWithPolicy', () => {
     // …and bounded by the budget rather than running forever.
     expect(clock.elapsed()).toBeLessThanOrEqual(90_000);
     expect(clock.waits.reduce((sum, value) => sum + value, 0)).toBe(clock.elapsed());
+  });
+
+  it('starts the budget before the first attempt, not after it', async () => {
+    // An attempt is not free: it can sit in the sync-global queue for seconds
+    // before being refused. Taking the deadline AFTER the first attempt made
+    // the real bound "however long that attempt took, PLUS maxWaitMs" — the one
+    // thing an operator setting a wall-clock budget is not asking for.
+    const clock = virtualClock();
+    const attemptCostMs = 400;
+    const maxWaitMs = 1_000;
+    const syncDurable = vi.fn(async () => {
+      clock.advance(attemptCostMs);
+      return { deferredBackpressure: 1 };
+    });
+    const startedAt = clock.now();
+
+    await runCatchupPlaneWithPolicy('foreground', syncDurable, {
+      retry: { maxWaitMs },
+      now: clock.now,
+      wait: clock.wait,
+      random: () => 0,
+    });
+
+    // At most ONE in-flight attempt may overrun the deadline — the policy
+    // cannot preempt a round it has already started. With the clock taken after
+    // the first attempt this lands at 1800 ms against a 1000 ms budget.
+    expect(clock.now() - startedAt).toBeLessThanOrEqual(maxWaitMs + attemptCostMs);
+    expect(syncDurable).toHaveBeenCalledTimes(2);
   });
 
   it('never sleeps past the retry deadline', async () => {

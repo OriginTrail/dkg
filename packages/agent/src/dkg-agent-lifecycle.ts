@@ -474,6 +474,7 @@ import {
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
+import { resolveCuratorSyncPeer } from './dkg-agent-cg-resolve.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -1158,28 +1159,6 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
     totalSnapshots: 0,
     completed: true,
   };
-}
-
-/** Where a resolved catch-up sync peer came from; see `resolveSyncPeerWithProvenance`. */
-export interface SyncPeerResolution {
-  peerId?: string;
-  provenance: 'metadata' | 'bootstrap-hint' | 'none';
-}
-
-/**
- * Classify a resolved curator against the join-approval hint captured BEFORE
- * resolution. Pure, so the distinction that decides whether one peer may stand
- * for a whole Context Graph does not depend on any cache side effect.
- */
-export function classifySyncPeerProvenance(
-  bootstrapHint: string | undefined,
-  curatorPeerId: string | undefined,
-): SyncPeerResolution {
-  if (curatorPeerId && curatorPeerId !== bootstrapHint) {
-    return { peerId: curatorPeerId, provenance: 'metadata' };
-  }
-  const peerId = curatorPeerId ?? bootstrapHint;
-  return peerId ? { peerId, provenance: 'bootstrap-hint' } : { provenance: 'none' };
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
@@ -6320,37 +6299,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.knownCorePeerIds);
   }
 
-  /**
-   * Resolve the catch-up sync peer together with WHERE it came from.
-   *
-   * The distinction is load-bearing, so it is a return value rather than
-   * something a caller has to infer: only a metadata-resolved curator may let
-   * one peer's answer stand for the whole graph. The authenticated
-   * join-approval hint is a fine ranking signal but can be stale — peer ids are
-   * cryptographic identities, so a curator that has rotated its libp2p key
-   * leaves an ordinary member sitting on the id the hint still names.
-   *
-   * The bootstrap hint is captured BEFORE resolution so this does not depend on
-   * `resolveCuratorPeerId`'s cache-eviction side effect; the only property
-   * relied on is its documented contract, that it either returns a
-   * metadata-derived curator or echoes that same hint back.
-   */
-  async resolveSyncPeerWithProvenance(this: DKGAgent, contextGraphId: string): Promise<SyncPeerResolution> {
-    const bootstrapHint = this.preferredSyncPeers.get(contextGraphId);
-    return classifySyncPeerProvenance(
-      bootstrapHint,
-      await this.resolveCuratorPeerId(contextGraphId),
-    );
-  }
-
   async resolvePreferredSyncPeerId(this: DKGAgent, contextGraphId: string): Promise<string | undefined> {
-    // Ranking takes the best peer available, whatever its provenance. Kept
-    // independent of the sibling method so this stays exercisable on its own.
-    const bootstrapHint = this.preferredSyncPeers.get(contextGraphId);
-    return classifySyncPeerProvenance(
-      bootstrapHint,
-      await this.resolveCuratorPeerId(contextGraphId),
-    ).peerId;
+    // Ranking takes the best peer available, whatever its provenance.
+    return (await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId)).peerId;
   }
 
   /**
@@ -6360,13 +6311,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * {@link resolvePreferredSyncPeerId}. Only callers that let one peer's answer
    * stand for the whole graph — the foreground catch-up walk's early stop —
    * need this stricter notion, because a peer that happens to be ranked first
-   * must never be able to cut the walk short.
+   * must never be able to cut the walk short. The authenticated join-approval
+   * hint ranks but never settles: it can be stale, since a curator that rotated
+   * its libp2p key leaves an ordinary member sitting on the id it names.
+   *
+   * Provenance comes from {@link resolveCuratorSyncPeer} itself. Deriving it
+   * here — by comparing the resolved id against the hint — would be wrong in
+   * the ordinary case, where the join approval came from the curator and both
+   * routes name the SAME peer.
    */
   async resolveAuthoritativeSyncPeerId(
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<string | undefined> {
-    const resolved = await this.resolveSyncPeerWithProvenance(contextGraphId);
+    const resolved = await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId);
     return resolved.provenance === 'metadata' ? resolved.peerId : undefined;
   }
 

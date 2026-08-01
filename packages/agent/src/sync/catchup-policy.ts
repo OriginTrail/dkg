@@ -153,6 +153,16 @@ export function nextCatchupBackpressureDelayMs(input: {
  * Cancellation needs no extra plumbing: an aborted admission raises an
  * `AbortError`, not a `SyncBackpressureBusyError`, so it never sets
  * `deferredBackpressure` and the loop's own guard exits on the next iteration.
+ *
+ * SCOPE. The budget bounds how long this plane keeps ASKING. It does not
+ * preempt a round the scheduler has already ACCEPTED: once admitted, the plane
+ * is doing (or waiting to do) real work, and the only cancellation seam reaching
+ * it — `operationSignal` — aborts the whole sync, so firing it at the deadline
+ * would kill productive catch-up under exactly the load this exists to survive.
+ * An accepted round is separately bounded by `SYNC_TOTAL_TIMEOUT_MS`, and the
+ * queue it waits in is depth-bounded, so the wait is finite either way. Refusal
+ * is the only signal that means "no capacity, come back later", and refusal is
+ * what this retries.
  */
 export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   mode: CatchupMode,
@@ -163,15 +173,18 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
     priority: catchupPriorityForMode(mode),
     source: catchupSourceForMode(mode),
   };
-  let result = await run(context);
-  if (mode !== 'foreground') return result;
+  if (mode !== 'foreground') return run(context);
 
   const now = options.now ?? Date.now;
   const wait = options.wait ?? defaultWait;
   const maxWaitMs = options.retry?.maxWaitMs ?? CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
-  // Absolute deadline fixed once per plane, so retries cannot compound with the
-  // time the refused rounds themselves consumed.
+  // Absolute deadline fixed once per plane, taken BEFORE the first admission
+  // attempt. The attempts themselves are what consume the wall clock — a round
+  // that sits in the scheduler queue and then gets refused can take seconds —
+  // so starting the clock after the first one would make the budget "however
+  // long the first attempt took, PLUS maxWaitMs" instead of a per-plane bound.
   const retryUntil = now() + maxWaitMs;
+  let result = await run(context);
   for (let attempt = 0; ; attempt += 1) {
     if ((result.deferredBackpressure ?? 0) === 0) return result;
     const delayMs = nextCatchupBackpressureDelayMs({
