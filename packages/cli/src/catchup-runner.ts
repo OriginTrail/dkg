@@ -5,6 +5,7 @@ import {
   authoritativeSyncPeerId,
   classifyDurableProgress,
   normalizeDurableSyncResult,
+  normalizeSyncAdmissionSource,
   type DKGAgent,
   type DurableProgressSummary,
   type DurableSyncDiagnostics,
@@ -967,7 +968,7 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'syncDurable': {
         const [peerId, contextGraphId, priority, source] = args as [
-          string, string, number | undefined, string | undefined,
+          string, string, number | undefined, unknown,
         ];
         return agent.syncFromPeerDetailed(
           peerId,
@@ -975,17 +976,31 @@ class WorkerCatchupRunner implements CatchupRunner {
           undefined,
           undefined,
           undefined,
-          { ...(priority === undefined ? {} : { priority }), source },
+          {
+            ...(priority === undefined ? {} : { priority }),
+            // This RPC argument crossed a structured-clone boundary, so its
+            // compile-time type guaranteed nothing. Clamp it to the closed
+            // diagnostic set HERE, at the untrusted edge, so every in-process
+            // caller past it is typed `SyncAdmissionSource`.
+            source: normalizeSyncAdmissionSource(
+              typeof source === 'string' ? source : undefined,
+            ),
+          },
         );
       }
       case 'syncSharedMemory': {
         const [peerId, contextGraphId, priority, source] = args as [
-          string, string, number | undefined, string | undefined,
+          string, string, number | undefined, unknown,
         ];
         return agent.syncSharedMemoryFromPeerDetailed(
           peerId,
           [contextGraphId],
-          { ...(priority === undefined ? {} : { priority }), source },
+          {
+            ...(priority === undefined ? {} : { priority }),
+            source: normalizeSyncAdmissionSource(
+              typeof source === 'string' ? source : undefined,
+            ),
+          },
         );
       }
       case 'finalizeCatchup': {

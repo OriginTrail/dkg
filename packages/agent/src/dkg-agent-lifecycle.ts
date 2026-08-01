@@ -951,14 +951,14 @@ export type DurableSyncOptions = {
    * node-wide scheduler diagnostics so queue pressure can be attributed to an
    * origin.
    *
-   * Typed `string`, not `SyncAdmissionSource`, on purpose: these options are
-   * reconstructed from a `postMessage` payload after crossing the catch-up
-   * Worker RPC boundary, where the compile-time union guarantees nothing. This
-   * is the untrusted edge; `normalizeSyncAdmissionSource` clamps it to the
-   * closed set once, in `acquire`, and every layer past that clamp is typed
-   * `SyncAdmissionSource`.
+   * The closed union, so an ordinary in-process caller cannot introduce an
+   * unbounded or identifier-bearing label. The catch-up Worker RPC is the one
+   * path where the compile-time union guarantees nothing — a `postMessage`
+   * payload is whatever crossed the wire — and that edge clamps with
+   * `normalizeSyncAdmissionSource` in the CLI bridge before calling in.
+   * The scheduler re-clamps anyway, as defence in depth.
    */
-  source?: string;
+  source?: SyncAdmissionSource;
 };
 
 type LegacyDurableContextGraphOptions = {
@@ -1177,11 +1177,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       priorityOverride?: number;
       operationSignal?: AbortSignal;
       /**
-       * Which trigger enqueued this admission. Accepted as a loose string
-       * because it can arrive from the catch-up Worker RPC; normalized to the
-       * closed set HERE so every layer past this boundary carries the union.
+       * Which trigger enqueued this admission. Typed as the closed union for
+       * ordinary callers; still normalized HERE, because this is the single
+       * choke point every admission passes through and a clamp that cannot be
+       * bypassed is worth more than one that merely type-checks.
        */
-      source?: string;
+      source?: SyncAdmissionSource;
     } = {},
   ): Promise<T> {
     const { priorityOverride, operationSignal } = admission;
@@ -5254,11 +5255,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       /** Admission override for foreground catch-up. */
       priority?: number;
       /**
-       * Bounded admission origin for node-wide scheduler diagnostics. `string`
-       * because it can arrive across the catch-up Worker RPC boundary; clamped
-       * to the closed `SyncAdmissionSource` set in `acquire`.
+       * Bounded admission origin for node-wide scheduler diagnostics. The
+       * closed union: the catch-up Worker RPC is the only untrusted producer
+       * and it clamps in the CLI bridge, while `acquire` re-clamps regardless.
        */
-      source?: string;
+      source?: SyncAdmissionSource;
     },
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');

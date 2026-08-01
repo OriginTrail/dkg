@@ -213,6 +213,21 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.authoritativePeerId).toBeUndefined();
   });
 
+  it('clamps an unbounded RPC source at the untrusted edge', async () => {
+    // A worker RPC argument crossed a structured-clone boundary, so its
+    // compile-time type guaranteed nothing. If an identifier-bearing value
+    // reached the scheduler it would become a metric and log DIMENSION,
+    // re-opening the correlation-identifier leak that collapsing the operation
+    // label was added to close, and multiplying diagnostic cardinality.
+    const { agent, calls } = bridgeAgent();
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer-a', 'cg-x', 2000, 'durable:urn:cg:private:abc']);
+    await invokeThroughBridge(agent, 'syncSharedMemory', ['peer-a', 'cg-x', 2000, { not: 'a string' }]);
+
+    expect(calls.durable[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
+    expect(calls.shared[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 
