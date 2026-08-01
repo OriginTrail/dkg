@@ -957,22 +957,54 @@ describe('catch-up plane proof predicates', () => {
     });
   });
 
-  it('accepts either evidence carrier for the clean empty completion', () => {
+  it('uses per-peer completion evidence, and the aggregate ONLY without it', () => {
     // Per-peer evidence (`cleanPlaneCompletions`) and the aggregate counter
-    // (`diagnostics.emptyResponses`) are separate carriers, and the legacy
-    // no-`cleanPlaneCompletions` branch in the readiness classifier can only
-    // supply the aggregate one. Pin each independently so neither disjunct can
-    // be dropped unnoticed.
+    // (`diagnostics.emptyResponses`) are separate carriers, but they are not
+    // interchangeable and must not be ORed together.
+    //
+    // `emptyResponses` counts an empty PAYLOAD; `emptyPeers` counts a peer whose
+    // round was empty AND clean. A peer that answered empty but did not complete
+    // raises the first and not the second — so consulting the aggregate when
+    // per-peer evidence exists lets an explicitly incomplete response prove the
+    // plane ready, which is the false-`done` class this proof exists to prevent.
     expect(catchupPlaneProvenByUnanimousEmpty(
       { ...noEvidence, emptyPeers: 1 },
       { ...cleanEmptyRound, emptyResponses: 0 },
       { isPrivate: false },
     )).toBe(true);
+
+    // Completion evidence PRESENT and negative: the aggregate must not re-admit
+    // it. This is the assertion that fails if the carriers are ORed.
     expect(catchupPlaneProvenByUnanimousEmpty(
       noEvidence,
       { ...cleanEmptyRound, emptyResponses: 1 },
       { isPrivate: false },
+    )).toBe(false);
+
+    // Completion evidence genuinely ABSENT (the legacy runner result): the
+    // aggregate is the only carrier there is, so it still counts. Without this
+    // row, dropping the fallback entirely would look like a passing change.
+    expect(catchupPlaneProvenByUnanimousEmpty(
+      undefined,
+      { ...cleanEmptyRound, emptyResponses: 1 },
+      { isPrivate: false },
     )).toBe(true);
+  });
+
+  it('does not let an explicitly incomplete empty peer prove the plane', () => {
+    // The production shape of the row above: the worker reports a peer that
+    // returned an empty payload but whose round never completed, so the peer is
+    // absent from `emptyPeers` while `emptyResponses` still counts it.
+    const incompleteEmpty = catchupPeerPlaneEvidence(
+      { emptyResponses: 1, completedPhases: 0, bytesReceived: 0 },
+      { plane: 'durable', complete: false },
+    );
+    expect(incompleteEmpty.emptyPeers).toBe(0);
+    expect(catchupPlaneProvenByUnanimousEmpty(
+      incompleteEmpty,
+      { ...cleanEmptyRound, emptyResponses: 1 },
+      { isPrivate: false },
+    )).toBe(false);
   });
 });
 

@@ -781,8 +781,17 @@ export function catchupPlaneProvenByUnanimousEmpty(
   // A non-curator that has `_meta` and no data cannot tell "the graph is empty"
   // from "I have not synced it yet". See the note above.
   if ((diagnostics?.metaOnlyResponses ?? 0) > 0) return false;
-  const cleanEmptyObserved = (completion?.emptyPeers ?? 0) > 0
-    || (diagnostics?.emptyResponses ?? 0) > 0;
+  // Completion evidence is PER-PEER and says explicitly whether that peer's
+  // round was clean; `diagnostics.emptyResponses` is a raw aggregate that counts
+  // an empty payload even when the peer's round was NOT complete. Where the
+  // runner supplied completion evidence it is the whole truth for this plane, so
+  // the aggregate must not re-admit a response the per-peer view already
+  // excluded — otherwise an explicitly incomplete empty result proves the plane
+  // ready. The aggregate is a fallback for legacy callers that carry no
+  // completion evidence at all, never a second chance for callers that do.
+  const cleanEmptyObserved = completion !== undefined
+    ? (completion.emptyPeers ?? 0) > 0
+    : (diagnostics?.emptyResponses ?? 0) > 0;
   if (!cleanEmptyObserved) return false;
   // The one peer whose silence is decisive. See the note above for why this is
   // scoped to the curator rather than to `failedPeers`.

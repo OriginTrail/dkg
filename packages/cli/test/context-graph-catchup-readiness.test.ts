@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
-import { classifyContextGraphCatchupReadiness } from '../src/context-graph-readiness.js';
+import {
+  CONTEXT_GRAPH_READINESS_VERSION,
+  classifyContextGraphCatchupReadiness,
+} from '../src/context-graph-readiness.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   return {
@@ -209,7 +212,7 @@ describe('context graph catch-up readiness classification', () => {
     return result;
   }
 
-  it('accepts a unanimously clean-empty public round as proof the plane is empty', () => {
+  it('settles a unanimously clean-empty public round WITHOUT freezing it', () => {
     const classification = classifyContextGraphCatchupReadiness({
       result: publicEmptyRoundResult(),
       includeSharedMemory: false,
@@ -224,11 +227,71 @@ describe('context graph catch-up readiness classification', () => {
         synced: true,
         sharedMemorySynced: false,
       },
+      // Reported ready, but NOT persisted as provenance: readiness derived from
+      // the absence of evidence has to be re-derived every run. See the
+      // two-run regression below.
       readinessPatch: {
-        durableVerified: true,
+        durableVerified: false,
         sharedMemoryVerified: false,
       },
     });
+  });
+
+  it('re-derives an empty verdict instead of carrying it into the next run', () => {
+    // The false-`done` residual: with no authoritative curator, one unrelated
+    // empty response alongside transport-level peer failures satisfies the
+    // unanimous-empty proof. That is survivable as a per-run verdict, but the
+    // readiness OR against `readinessBeforeCatchup` would otherwise make it
+    // permanent — every later run would report `done` without re-proving
+    // anything, which is exactly the false-`done` class issue #2006 targets.
+    const firstRun = publicEmptyRoundResult();
+    firstRun.cleanPlaneCompletions!.durable.emptyPeers = 1;
+    firstRun.diagnostics!.durable.emptyResponses = 1;
+    firstRun.diagnostics!.durable.failedPeers = 1;
+
+    const first = classifyContextGraphCatchupReadiness({
+      result: firstRun,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+    expect(first.jobStatus).toBe('done');
+    expect(first.readinessPatch).toMatchObject({ durableVerified: false });
+
+    // Second run: metadata only, nothing proven. Feed back exactly what run one
+    // persisted. If the empty verdict had been frozen, this would still say
+    // `done` while proving nothing.
+    const secondRun = publicEmptyRoundResult();
+    secondRun.cleanPlaneCompletions!.durable.emptyPeers = 0;
+    secondRun.diagnostics!.durable.emptyResponses = 0;
+    secondRun.diagnostics!.durable.metaOnlyResponses = 1;
+
+    const second = classifyContextGraphCatchupReadiness({
+      result: secondRun,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup: {
+        ...readinessBeforeCatchup,
+        version: CONTEXT_GRAPH_READINESS_VERSION,
+        durableVerified: first.readinessPatch!.durableVerified!,
+      },
+    });
+    expect(second.jobStatus).not.toBe('done');
+
+    // The other half of the contract: readiness proven by CONTENT is still
+    // sticky, so a graph that really did sync does not re-prove itself forever.
+    const proven = publicEmptyRoundResult();
+    proven.dataSynced = 12;
+    proven.cleanPlaneCompletions!.durable.verifiedDataPeers = 1;
+    expect(classifyContextGraphCatchupReadiness({
+      result: proven,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    }).readinessPatch).toMatchObject({ durableVerified: true });
   });
 
   it('does not accept a public clean-empty peer when another peer denies', () => {
@@ -305,7 +368,8 @@ describe('context graph catch-up readiness classification', () => {
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'done',
-      readinessPatch: { durableVerified: true },
+      // Same rule as the non-legacy path: settled for this run, not frozen.
+      readinessPatch: { durableVerified: false },
     });
   });
 

@@ -6,6 +6,9 @@ import type {
 } from '@origintrail-official/dkg-node-ui';
 import {
   catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByAuthorityHostedEmpty,
+  catchupPlaneProvenByData,
+  catchupPlaneProvenByUnanimousEmpty,
   catchupPlaneReady,
   type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
@@ -184,15 +187,50 @@ export function catchupResultHasCleanResponse(result: CatchupJobResult): boolean
     (!result.denied && peerReturnedMetadata);
 }
 
-function catchupPlaneReadyThisRun(input: {
+interface CatchupPlaneReadinessThisRun {
+  /** Whether this plane counts as ready for THIS run's reported job status. */
+  ready: boolean;
+  /**
+   * Whether the evidence is strong enough to PERSIST as sticky readiness
+   * provenance.
+   *
+   * Readiness provenance is carried forward by an OR against
+   * `readinessBeforeCatchup`, so anything recorded here is permanent for the
+   * subscription. Only positive evidence earns that: verified content, or the
+   * curator's own word that it hosts an empty graph.
+   *
+   * A unanimous-empty round does NOT. It is a verdict derived from ABSENCE of
+   * evidence over the peers that answered, and with no authoritative curator to
+   * anchor it a single unrelated empty response alongside transport-level peer
+   * failures can produce it. That is tolerable as a per-run verdict — it lets a
+   * genuinely empty public graph settle instead of retrying forever — but it
+   * must be re-derived every run rather than frozen, so a wrong verdict heals on
+   * the next catch-up instead of becoming permanent (issue #2006).
+   *
+   * The alternative — failing closed on unaccounted peers whenever no authority
+   * resolves — was rejected: it makes the unanimous-empty mode unusable on any
+   * lossy network, leaving such graphs permanently `unreachable` and retried
+   * forever, which is the resource drain this issue set out to reduce.
+   */
+  persistable: boolean;
+}
+
+function catchupPlaneReadinessThisRun(input: {
   result: CatchupJobResult;
   plane: 'durable' | 'sharedMemory';
   isPrivate: boolean;
-}): boolean {
+}): CatchupPlaneReadinessThisRun {
   const diagnostics = input.result.diagnostics?.[input.plane];
   const completion = input.result.cleanPlaneCompletions?.[input.plane];
+  const options = { isPrivate: input.isPrivate };
   if (completion) {
-    return catchupPlaneReady(completion, diagnostics, { isPrivate: input.isPrivate });
+    const provenPositively = catchupPlaneProvenByData(completion)
+      || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
+    return {
+      ready: provenPositively
+        || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options),
+      persistable: provenPositively,
+    };
   }
 
   // Backward compatibility for callers that construct a legacy result (for
@@ -205,12 +243,19 @@ function catchupPlaneReadyThisRun(input: {
     ? input.result.dataSynced > 0 ||
       (input.result.diagnostics?.durable.verifiedPrivateOnlyResponses ?? 0) > 0
     : input.result.sharedMemorySynced > 0;
-  if (catchupPlaneCompletedWithoutFailure(diagnostics) && dataProgress) return true;
-  return catchupPlaneReady(
-    { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
-    diagnostics,
-    { isPrivate: input.isPrivate },
-  );
+  if (catchupPlaneCompletedWithoutFailure(diagnostics) && dataProgress) {
+    return { ready: true, persistable: true };
+  }
+  // Pass NO completion evidence rather than an all-zero stand-in: the empty
+  // proof consults the raw aggregate counters only when completion evidence is
+  // genuinely absent, and a synthetic `emptyPeers: 0` would read as "the
+  // per-peer view saw no clean empty response" and suppress the legacy path.
+  return {
+    ready: catchupPlaneReady(undefined, diagnostics, options),
+    // No completion evidence means neither positive proof mode can fire, so
+    // there is nothing here that may be frozen into provenance.
+    persistable: false,
+  };
 }
 
 export interface ContextGraphCatchupReadinessClassification {
@@ -267,25 +312,34 @@ export function classifyContextGraphCatchupReadiness(input: {
       };
     }
 
-    const durableReadyThisRun = catchupPlaneReadyThisRun({
+    const durableThisRun = catchupPlaneReadinessThisRun({
       result,
       plane: 'durable',
       isPrivate: input.isPrivate,
     });
-    const sharedMemoryReadyThisRun = input.includeSharedMemory &&
-      catchupPlaneReadyThisRun({
+    const sharedMemoryThisRun = input.includeSharedMemory
+      ? catchupPlaneReadinessThisRun({
         result,
         plane: 'sharedMemory',
         isPrivate: input.isPrivate,
-      });
+      })
+      : { ready: false, persistable: false };
+    const durableReadyThisRun = durableThisRun.ready;
+    const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
     const currentReadinessProvenance =
       input.readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
-    const durableVerified =
-      (currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified) ||
-      durableReadyThisRun;
-    const sharedMemoryVerified =
-      (currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified) ||
-      sharedMemoryReadyThisRun;
+    const durableVerifiedBefore =
+      currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
+    const sharedMemoryVerifiedBefore =
+      currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
+    const durableVerified = durableVerifiedBefore || durableReadyThisRun;
+    const sharedMemoryVerified = sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun;
+    // What this run is allowed to FREEZE, as opposed to what it reports. These
+    // diverge only for a unanimous-empty verdict, which stays re-derived per run
+    // so that a wrong empty verdict cannot become permanent.
+    const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
+    const sharedMemoryVerifiedPersisted =
+      sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
     const overallVerified = durableVerified || sharedMemoryVerified;
     const missingGraphProof = !overallVerified;
     const missingRequestedSharedMemory =
@@ -319,8 +373,8 @@ export function classifyContextGraphCatchupReadiness(input: {
         pendingMeta: false,
       },
       readinessPatch: {
-        durableVerified,
-        sharedMemoryVerified,
+        durableVerified: durableVerifiedPersisted,
+        sharedMemoryVerified: sharedMemoryVerifiedPersisted,
       },
       eventPayload: durableReadyThisRun || sharedMemoryReadyThisRun
         ? {

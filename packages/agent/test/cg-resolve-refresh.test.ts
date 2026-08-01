@@ -1242,7 +1242,7 @@ describe('refreshMetaFromCurator', () => {
       getCgMeta: async () => declaredFacts,
       // The Context Graph declares this curator→peer binding in its OWN `_meta`,
       // which is what makes it authoritative rather than merely rankable (#2006).
-      getOwnCgMetaFacts: async () => declaredFacts,
+      getOwnCgDefinitionFacts: async () => declaredFacts,
       discovery: {
         findAgents: async () => {
           throw new Error('creator metadata should resolve the curator peer');
