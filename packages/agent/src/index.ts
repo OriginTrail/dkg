@@ -314,17 +314,17 @@ export {
   CATCHUP_STOP_ON_PROOF,
   catchupWaveSizes,
 } from './sync/catchup-concurrency.js';
+// Only what a cross-package consumer genuinely needs. The CLI daemon's Worker
+// catch-up runner drives the same plane policy and must not deep-import the
+// compiled `dist/`; everything else here — the backoff curve, the env parser,
+// the injected clock seams — is retry-policy internals, and in-package tests
+// import those from `./sync/catchup-policy.js` directly rather than pinning
+// them to the published surface.
 export {
-  CATCHUP_BACKPRESSURE_BASE_DELAY_MS,
-  CATCHUP_BACKPRESSURE_JITTER_RATIO,
-  CATCHUP_BACKPRESSURE_MAX_DELAY_MS,
   CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
-  DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
-  resolveCatchupBackpressureMaxWaitMs,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
   catchupPriorityForMode,
   catchupSourceForMode,
-  nextCatchupBackpressureDelayMs,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
   type CatchupAdmissionSource,

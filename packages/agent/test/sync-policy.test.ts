@@ -9,6 +9,7 @@ import {
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
 } from '../src/sync/policy.js';
+import { classifySyncPeerProvenance } from '../src/dkg-agent-lifecycle.js';
 
 describe('sync Context Graph policy', () => {
   it('normalizes safe integer priorities and preserves stable input order for ties', () => {
@@ -85,6 +86,46 @@ describe('normalizeSyncAdmissionSource', () => {
     expect(SYNC_ADMISSION_SOURCES.length).toBeLessThanOrEqual(12);
     for (const source of SYNC_ADMISSION_SOURCES) {
       expect(source).toMatch(/^[a-z][a-z-]*$/);
+    }
+  });
+});
+
+describe('classifySyncPeerProvenance', () => {
+  const HINT = '12D3KooWBootstrapHint';
+  const CURATOR = '12D3KooWMetadataCurator';
+
+  it('marks a metadata-resolved curator as authoritative', () => {
+    expect(classifySyncPeerProvenance(undefined, CURATOR))
+      .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+    expect(classifySyncPeerProvenance(HINT, CURATOR))
+      .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+  });
+
+  it('marks an echoed bootstrap hint as NOT authoritative', () => {
+    // `resolveCuratorPeerId` echoes the join-approval hint when metadata
+    // resolves no curator. That hint can be stale — peer ids are cryptographic
+    // identities, so a curator that has rotated its libp2p key leaves an
+    // ordinary member on the id the hint still names — so it may rank the walk
+    // but must never let one peer stand for the whole graph.
+    expect(classifySyncPeerProvenance(HINT, HINT))
+      .toEqual({ peerId: HINT, provenance: 'bootstrap-hint' });
+    expect(classifySyncPeerProvenance(HINT, undefined))
+      .toEqual({ peerId: HINT, provenance: 'bootstrap-hint' });
+  });
+
+  it('reports no peer when neither source produced one', () => {
+    expect(classifySyncPeerProvenance(undefined, undefined))
+      .toEqual({ provenance: 'none' });
+  });
+
+  it('keeps ranking availability identical to authority eligibility only for metadata', () => {
+    // The ranking caller takes `.peerId` regardless of provenance; the
+    // early-stop caller takes it only for 'metadata'. Pin that they differ
+    // exactly on the hint case.
+    for (const [hint, curator] of [[HINT, HINT], [HINT, undefined]] as const) {
+      const resolved = classifySyncPeerProvenance(hint, curator);
+      expect(resolved.peerId).toBe(HINT);
+      expect(resolved.provenance).not.toBe('metadata');
     }
   });
 });

@@ -1160,6 +1160,28 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
   };
 }
 
+/** Where a resolved catch-up sync peer came from; see `resolveSyncPeerWithProvenance`. */
+export interface SyncPeerResolution {
+  peerId?: string;
+  provenance: 'metadata' | 'bootstrap-hint' | 'none';
+}
+
+/**
+ * Classify a resolved curator against the join-approval hint captured BEFORE
+ * resolution. Pure, so the distinction that decides whether one peer may stand
+ * for a whole Context Graph does not depend on any cache side effect.
+ */
+export function classifySyncPeerProvenance(
+  bootstrapHint: string | undefined,
+  curatorPeerId: string | undefined,
+): SyncPeerResolution {
+  if (curatorPeerId && curatorPeerId !== bootstrapHint) {
+    return { peerId: curatorPeerId, provenance: 'metadata' };
+  }
+  const peerId = curatorPeerId ?? bootstrapHint;
+  return peerId ? { peerId, provenance: 'bootstrap-hint' } : { provenance: 'none' };
+}
+
 export class LifecycleSyncMethods extends DKGAgentBase {
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
     ctx: OperationContext,
@@ -6298,40 +6320,54 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.knownCorePeerIds);
   }
 
+  /**
+   * Resolve the catch-up sync peer together with WHERE it came from.
+   *
+   * The distinction is load-bearing, so it is a return value rather than
+   * something a caller has to infer: only a metadata-resolved curator may let
+   * one peer's answer stand for the whole graph. The authenticated
+   * join-approval hint is a fine ranking signal but can be stale — peer ids are
+   * cryptographic identities, so a curator that has rotated its libp2p key
+   * leaves an ordinary member sitting on the id the hint still names.
+   *
+   * The bootstrap hint is captured BEFORE resolution so this does not depend on
+   * `resolveCuratorPeerId`'s cache-eviction side effect; the only property
+   * relied on is its documented contract, that it either returns a
+   * metadata-derived curator or echoes that same hint back.
+   */
+  async resolveSyncPeerWithProvenance(this: DKGAgent, contextGraphId: string): Promise<SyncPeerResolution> {
+    const bootstrapHint = this.preferredSyncPeers.get(contextGraphId);
+    return classifySyncPeerProvenance(
+      bootstrapHint,
+      await this.resolveCuratorPeerId(contextGraphId),
+    );
+  }
+
   async resolvePreferredSyncPeerId(this: DKGAgent, contextGraphId: string): Promise<string | undefined> {
-    // resolveCuratorPeerId consults authoritative metadata first and only then
-    // falls back to the authenticated join-approval hint. Calling it before
-    // reading preferredSyncPeers prevents that bootstrap hint from pinning all
-    // later catchups to a curator that metadata has superseded.
-    const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
-    return curatorPeerId ?? this.preferredSyncPeers.get(contextGraphId);
+    // Ranking takes the best peer available, whatever its provenance. Kept
+    // independent of the sibling method so this stays exercisable on its own.
+    const bootstrapHint = this.preferredSyncPeers.get(contextGraphId);
+    return classifySyncPeerProvenance(
+      bootstrapHint,
+      await this.resolveCuratorPeerId(contextGraphId),
+    ).peerId;
   }
 
   /**
-   * The preferred sync peer, but only when it came from authoritative Context
-   * Graph metadata rather than the bootstrap join-approval hint.
+   * The sync peer ONLY when it is a metadata-resolved curator.
    *
-   * `resolveCuratorPeerId` deletes the hint the moment metadata resolves a
-   * curator, so a returned peer that is STILL the live hint means metadata did
-   * not resolve one and we are looking at a bootstrap value that can be stale
-   * (a curator that has since rotated its libp2p identity, leaving an ordinary
-   * member on that peer id).
-   *
-   * Callers that merely want to try the best peer first should keep using
+   * Callers that merely want to try the best peer first should use
    * {@link resolvePreferredSyncPeerId}. Only callers that let one peer's answer
    * stand for the whole graph — the foreground catch-up walk's early stop —
-   * need this stricter notion, because a non-curator that happens to be ranked
-   * first must never be able to cut the walk short.
+   * need this stricter notion, because a peer that happens to be ranked first
+   * must never be able to cut the walk short.
    */
   async resolveAuthoritativeSyncPeerId(
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<string | undefined> {
-    const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
-    if (!preferredPeerId) return undefined;
-    return preferredPeerId === this.preferredSyncPeers.get(contextGraphId)
-      ? undefined
-      : preferredPeerId;
+    const resolved = await this.resolveSyncPeerWithProvenance(contextGraphId);
+    return resolved.provenance === 'metadata' ? resolved.peerId : undefined;
   }
 
   async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {

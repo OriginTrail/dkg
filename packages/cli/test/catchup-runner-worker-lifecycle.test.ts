@@ -33,6 +33,11 @@ const workerControl = vi.hoisted(() => {
       state.listeners.set(event, existing);
     }
 
+    /** Test-only: deliver a message as if the worker had sent it. */
+    static emitToRunner(message: unknown) {
+      for (const listener of state.listeners.get('message') ?? []) listener(message);
+    }
+
     postMessage(message: unknown) {
       state.posted.push(message);
     }
@@ -113,5 +118,87 @@ describe('WorkerCatchupRunner lifecycle', () => {
 
     await expect(withinTick(Promise.all([first, second])))
       .resolves.toEqual(['rejected', 'rejected']);
+  });
+});
+
+/**
+ * The parent-side bridge (`WorkerCatchupRunner.invokeAgent`) is the boundary
+ * every worker-impl test stubs out — those tests supply `authoritativePeerId`
+ * and observe `source` themselves, so a regression HERE would leave them green
+ * while production early-stopped on a stale bootstrap hint or reported
+ * foreground catch-up as `unspecified` in scheduler diagnostics.
+ */
+describe('WorkerCatchupRunner agent bridge', () => {
+  function bridgeAgent(overrides: Record<string, unknown> = {}) {
+    const calls: Record<string, unknown[][]> = { durable: [], shared: [] };
+    const agent = {
+      isPrivateContextGraph: async () => false,
+      resolvePreferredSyncPeerId: async () => 'peer-hint',
+      resolveAuthoritativeSyncPeerId: async () => undefined,
+      ensurePeerConnected: async () => {},
+      primeCatchupConnections: async () => {},
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      node: { libp2p: { getConnections: () => [] } },
+      syncFromPeerDetailed: async (...args: unknown[]) => {
+        calls.durable.push(args);
+        return {};
+      },
+      syncSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.shared.push(args);
+        return {};
+      },
+      ...overrides,
+    };
+    return { agent: agent as unknown as DKGAgent, calls };
+  }
+
+  /** Drive one `invoke` through the real bridge and return what it posted back. */
+  async function invokeThroughBridge(agent: DKGAgent, method: string, args: unknown[]) {
+    createCatchupRunner(agent);
+    const before = workerControl.state.posted.length;
+    workerControl.FakeWorker.emitToRunner({ type: 'invoke', invokeId: 1, method, args });
+    for (let i = 0; i < 50 && workerControl.state.posted.length === before; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    return workerControl.state.posted.at(-1) as { result?: any; error?: string };
+  }
+
+  it('does not report a bootstrap-hint peer as the catch-up authority', async () => {
+    const { agent } = bridgeAgent();
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-hint']);
+
+    // The hint still ranks the walk…
+    expect(posted.result.preferredPeerId).toBe('peer-hint');
+    // …but must not be handed to the worker as an authority.
+    expect(posted.result.authoritativePeerId).toBeUndefined();
+  });
+
+  it('reports a metadata-resolved curator as the catch-up authority', async () => {
+    const { agent } = bridgeAgent({
+      resolvePreferredSyncPeerId: async () => 'peer-curator',
+      resolveAuthoritativeSyncPeerId: async () => 'peer-curator',
+    });
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-meta']);
+
+    expect(posted.result.preferredPeerId).toBe('peer-curator');
+    expect(posted.result.authoritativePeerId).toBe('peer-curator');
+  });
+
+  it('forwards the admission source into both detailed sync calls', async () => {
+    const { agent, calls } = bridgeAgent();
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer-a', 'cg-x', 2000, 'catchup-foreground']);
+    await invokeThroughBridge(agent, 'syncSharedMemory', ['peer-a', 'cg-x', 2000, 'catchup-foreground']);
+
+    expect(calls.durable).toHaveLength(1);
+    expect(calls.durable[0]!.at(-1)).toMatchObject({
+      priority: 2000,
+      source: 'catchup-foreground',
+    });
+    expect(calls.shared).toHaveLength(1);
+    expect(calls.shared[0]!.at(-1)).toMatchObject({
+      priority: 2000,
+      source: 'catchup-foreground',
+    });
   });
 });

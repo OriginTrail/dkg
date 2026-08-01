@@ -190,6 +190,23 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   const authorityProvedEverything = (): boolean => authorityProven.durable
     && (!request.includeSharedMemory || authorityProven.sharedMemory);
 
+  /**
+   * Whether the curator's round settles a plane well enough to stop walking.
+   *
+   * Verified content always does. A clean EMPTY round only does for a PUBLIC
+   * graph: readiness deliberately refuses to prove a private plane from an
+   * empty response, so stopping on one would strand the walk without proving
+   * anything — skipping fallback peers that may hold authorized private data
+   * and turning a recoverable catch-up into `unreachable`. A verified
+   * private-only response is content, not emptiness, and still counts.
+   */
+  const authoritySettles = (evidence: {
+    verifiedDataPeers: number;
+    verifiedPrivateOnlyPeers?: number;
+    emptyPeers: number;
+  }): boolean => catchupPlaneProvenByData(evidence)
+    || (!prepared.isPrivateContextGraph && evidence.emptyPeers > 0);
+
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
   const syncPeer = async (peerId: string): Promise<PeerRound> => {
@@ -269,10 +286,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // The positive half runs through the SAME predicate the readiness
       // classifier uses, just applied to one peer's evidence rather than the
       // round's, so the stop condition cannot drift from the readiness rule.
-      if (
-        fromAuthority
-        && (catchupPlaneProvenByData(durableEvidence) || durableEvidence.emptyPeers > 0)
-      ) {
+      if (fromAuthority && authoritySettles(durableEvidence)) {
         authorityProven.durable = true;
       }
     }
@@ -307,10 +321,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // graph that has durable data, and `includeSharedMemory` defaults to
       // true on subscribe, so without this the early stop would almost never
       // fire in the shape the fix targets.
-      if (
-        fromAuthority
-        && (catchupPlaneProvenByData(sharedEvidence) || sharedEvidence.emptyPeers > 0)
-      ) {
+      if (fromAuthority && authoritySettles(sharedEvidence)) {
         authorityProven.sharedMemory = true;
       }
     }

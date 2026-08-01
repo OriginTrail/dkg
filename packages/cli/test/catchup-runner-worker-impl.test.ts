@@ -464,6 +464,94 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.dataSynced).toBe(1);
   });
 
+  it('does not let an empty curator round settle a PRIVATE plane', async () => {
+    // Readiness deliberately refuses to prove a private plane from an empty
+    // response, so stopping the walk on one would strand it: fallback peers
+    // that may hold authorized private data are skipped and a recoverable
+    // catch-up turns into `unreachable`. Emptiness only settles public planes.
+    const peerIds = ['peer-curator', 'peer-with-data', 'peer-c', 'peer-d', 'peer-e', 'peer-f'];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-private-empty', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-curator',
+            authoritativePeerId: 'peer-curator',
+            isPrivateContextGraph: true,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          if (args[0] === 'peer-curator') {
+            return {
+              ...durableResult(),
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              completedPhases: 2,
+              emptyResponses: 1,
+            };
+          }
+          return durableResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // The authorized fallback peer must still be reached.
+    expect(durableCalls).toContain('peer-with-data');
+    expect(result.cleanPlaneCompletions?.durable.verifiedDataPeers).toBeGreaterThan(0);
+  });
+
+  it('still lets a verified private-only curator round settle a private plane', async () => {
+    // The complement: a cryptographically verified V2 response whose public
+    // graph is intentionally empty is CONTENT, not emptiness, and must keep
+    // working as positive proof on a private graph.
+    const peerIds = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-private-only', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-0',
+            authoritativePeerId: 'peer-0',
+            isPrivateContextGraph: true,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return {
+            ...durableResult(),
+            insertedTriples: 8,
+            fetchedMetaTriples: 8,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 8,
+            insertedDataTriples: 0,
+            verifiedPrivateOnlyResponses: 1,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-0']);
+    expect(result.peersNotAttempted).toBe(peerIds.length - 1);
+    expect(result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers).toBe(1);
+  });
+
   it('does not let a bootstrap-hint preferred peer stop the walk', async () => {
     // `resolvePreferredSyncPeerId` falls back to the authenticated join-approval
     // hint when metadata resolves no curator. That hint can be stale — a curator
