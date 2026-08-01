@@ -622,6 +622,53 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(1);
   });
 
+  it('does not settle the SHARED-MEMORY plane on curator metadata alone', async () => {
+    // End-to-end counterpart of the plane-aware reducer: shared memory is
+    // contributed by many members rather than owned by the curator, so
+    // `insertedMetaTriples` there is not the hosting proof `<cg>/_meta` is on
+    // the durable plane. Settling on it would stop the walk before any member
+    // holding the SWM rows is contacted. Public graph, so privacy is not what
+    // is doing the work here.
+    const peerIds = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-swm-meta', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-0',
+            authoritativePeerId: 'peer-0',
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          return {
+            ...sharedResult(),
+            insertedTriples: 5,
+            insertedMetaTriples: 5,
+            insertedDataTriples: 0,
+            fetchedDataTriples: 0,
+            bytesReceived: 0,
+            emptyResponses: 0,
+            completedPhases: 2,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
+    expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(0);
+  });
+
   it('settles a public plane when the CURATOR hosts the graph and has no data', async () => {
     // A registered public Context Graph with no Knowledge Assets yet. Its host
     // still serves the CG definition triples from `<cg>/_meta`, so it answers

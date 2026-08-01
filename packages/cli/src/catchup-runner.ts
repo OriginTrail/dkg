@@ -554,7 +554,15 @@ export function catchupPeerPlaneEvidence(
     | (CatchupPhaseProgress & { emptyResponses?: number; fetchedDataTriples?: number })
     | null
     | undefined,
-  options: { complete?: boolean; fromAuthority?: boolean } = {},
+  options: {
+    complete?: boolean;
+    fromAuthority?: boolean;
+    /**
+     * Which plane this result came from. Required for authority evidence
+     * because "metadata proves the peer hosts the graph" is a DURABLE fact.
+     */
+    plane?: 'durable' | 'shared-memory';
+  } = {},
 ): CatchupPlaneCompletionEvidence {
   const none = {
     verifiedDataPeers: 0,
@@ -570,9 +578,16 @@ export function catchupPeerPlaneEvidence(
   // peer does not have it.
   const carriedNoData = (plane.insertedDataTriples ?? 0) === 0
     && (plane.fetchedDataTriples ?? 0) === 0;
-  const answered = (plane.emptyResponses ?? 0) > 0
-    || (plane.metaOnlyResponses ?? 0) > 0
-    || (plane.insertedMetaTriples ?? 0) > 0;
+  // Metadata counts as hosting evidence on the DURABLE plane only. There,
+  // `<cg>/_meta` carries the Context Graph's own definition triples, so serving
+  // it proves the peer hosts the graph. Shared-memory metadata is a different
+  // artifact and carries no such guarantee — and shared memory is contributed by
+  // many members rather than owned by the curator, so "the curator has SWM
+  // structure but no SWM rows" does not mean the network has none. On that
+  // plane, only a genuine wire-empty response counts.
+  const hostsGraph = options.plane !== 'shared-memory'
+    && ((plane.metaOnlyResponses ?? 0) > 0 || (plane.insertedMetaTriples ?? 0) > 0);
+  const answered = (plane.emptyResponses ?? 0) > 0 || hostsGraph;
   return {
     verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
     verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,

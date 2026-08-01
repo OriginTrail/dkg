@@ -307,6 +307,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       const durableEvidence = catchupPeerPlaneEvidence(durable, {
         complete: durable.complete,
         fromAuthority,
+        plane: 'durable',
       });
       addCatchupPlaneEvidence(cleanPlaneCompletions.durable, durableEvidence);
       // The curator answering cleanly settles this plane whether it carried
@@ -345,7 +346,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
       // Shared memory carries no verified-private-only signal, so the shared
       // evidence only ever has data/empty set — the same reducer still applies.
-      const sharedEvidence = catchupPeerPlaneEvidence(shared, { fromAuthority });
+      const sharedEvidence = catchupPeerPlaneEvidence(shared, { fromAuthority, plane: 'shared-memory' });
       addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
       // Same rule as durable: the curator settles the plane by answering
       // cleanly, with data or empty. Shared memory is frequently empty for a
