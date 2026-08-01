@@ -1185,6 +1185,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       source?: SyncAdmissionSource;
     } = {},
   ): Promise<T> {
+    // Before #2006 this took `(…, priorityOverride?: number, operationSignal?: AbortSignal)`
+    // positionally. Those collapsed into one `admission` object so the new `source`
+    // dimension did not become a fourth positional argument.
+    //
+    // TypeScript rejects the old shape, but a JS caller compiled against it would
+    // pass a number here, destructure to `undefined`, and silently lose BOTH its
+    // priority override AND its cancellation — an operation that ignores its abort
+    // signal keeps running after the caller gave up. Losing cancellation quietly is
+    // strictly worse than failing, so the old shape fails loudly.
+    //
+    // Deliberately NOT a compatibility shim translating the old arguments: this is an
+    // internal admission helper with no caller outside `packages/agent`, and a
+    // translated second shape would have to be carried and tested forever.
+    if (typeof admission !== 'object' || admission === null
+      || typeof (admission as { aborted?: unknown }).aborted === 'boolean') {
+      throw new TypeError(
+        'runContextGraphSyncWithBackpressure takes a single `admission` object '
+        + '({ priorityOverride, operationSignal, source }). The positional '
+        + 'priority/signal arguments used before issue #2006 are no longer accepted, '
+        + 'because ignoring them would silently drop the caller\'s cancellation.',
+      );
+    }
     const { priorityOverride, operationSignal } = admission;
     const source = normalizeSyncAdmissionSource(admission.source);
     const priority = priorityOverride

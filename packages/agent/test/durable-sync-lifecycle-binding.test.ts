@@ -344,6 +344,35 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
   });
 
+  it.each([
+    ['a positional priority override', 2000],
+    ['a positional AbortSignal', 'SIGNAL'],
+  ])('rejects the pre-#2006 positional admission shape: %s', async (_label, sixth) => {
+    // The old signature was (ctx, cg, lane, label, work, priorityOverride?, signal?).
+    // A JS caller compiled against it would destructure to undefined and silently
+    // lose its priority AND its cancellation — an operation that ignores its abort
+    // signal keeps running after the caller gave up. That must fail loudly.
+    const sixthArg = sixth === 'SIGNAL' ? new AbortController().signal : sixth;
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      node: { stopSignal: undefined },
+      syncScheduler: { acquire: async () => ({ release: () => {} }) },
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure as any).call(
+        agentLike,
+        {},
+        'cg-legacy',
+        'durable',
+        'label',
+        async () => 'done',
+        sixthArg,
+      ),
+    ).rejects.toThrow(/takes a single .admission. object/);
+  });
+
   it('labels standalone SWM recovery admissions at the call site', async () => {
     // The sibling of the VM-recovery assertion above, and the one that had NO
     // coverage: a regression dropping this source would report SWM recovery
