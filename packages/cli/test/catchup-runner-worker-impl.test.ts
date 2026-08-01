@@ -785,19 +785,34 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
   });
 
   it('spends the single-peer opening wave only on a sync-capable curator', async () => {
-    // The curator is ranked first but is NOT sync-capable, so the walk has no
-    // authority to try alone and must not serialise an arbitrary peer instead.
+    // A REAL authority that is offline: metadata resolved a curator, so
+    // `authoritativePeerId` is set, but the protocol probe filters it out. The
+    // opening wave narrows to one peer only when the authority is the peer that
+    // wave would actually contact — otherwise the walk would serialise an
+    // arbitrary fallback peer for nothing.
+    //
+    // The fixture must set `authoritativePeerId`: without it the walk takes the
+    // no-curator branch (covered separately above) and neither half of the
+    // guard is exercised.
     const peerIds = ['peer-curator', 'peer-a', 'peer-b', 'peer-c', 'peer-d'];
+    const durableCalls: string[] = [];
     let inFlight = 0;
     let peak = 0;
 
     await runWorkerCatchup({ contextGraphId: 'cg-curator-offline', includeSharedMemory: false }, async (method, args) => {
       switch (method) {
         case 'prepareCatchup':
-          return { preferredPeerId: 'peer-curator', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+          return {
+            preferredPeerId: 'peer-curator',
+            authoritativePeerId: 'peer-curator',
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
         case 'waitForSyncProtocol':
           return args[0] !== 'peer-curator';
         case 'syncDurable': {
+          durableCalls.push(args[0] as string);
           inFlight += 1;
           peak = Math.max(peak, inFlight);
           await delay(4);
@@ -812,6 +827,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     });
 
     expect(peak).toBe(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
+    // The offline authority is never contacted, and every reachable peer is.
+    expect(durableCalls).not.toContain('peer-curator');
+    expect([...durableCalls].sort()).toEqual(['peer-a', 'peer-b', 'peer-c', 'peer-d']);
   });
 
   it('narrows fallback peers to the planes the curator already settled', async () => {

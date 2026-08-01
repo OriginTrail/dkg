@@ -407,6 +407,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // add a round-trip to the front of every round, with no early stop to earn it
   // back. In that case the walk opens at the full concurrency cap — the previous
   // first-round latency.
+  // The `!== undefined` half is DEFENSIVE, not behavioural, and is called out
+  // as such so it does not read as a load-bearing clause a test should pin:
+  // with no resolvable curator and no sync-capable peers both sides are
+  // `undefined` and would compare equal, but `catchupWaveSizes(0, …)` is `[]`
+  // (pinned in `catchup-concurrency.test.ts`), so a zero-peer walk runs no
+  // waves and the opening width is unobservable. The comparison is what
+  // actually decides: narrow the opening wave only when the authority IS the
+  // peer that wave would contact.
   const authorityFirst = prepared.authoritativePeerId !== undefined
     && syncCapable[0] === prepared.authoritativePeerId;
   const waveSizes = CATCHUP_STOP_ON_PROOF
