@@ -29,7 +29,7 @@ test('dispatches a stable structural scenario without title filters or reporter 
   assert.equal(invocation.args.some((arg) => arg.includes('reporter')), false);
 });
 
-test('uses the canonical manifest for scenario ids and package-script routing', () => {
+test('uses the canonical manifest as the only scenario registry', () => {
   assert.deepEqual(
     RFC64_M0_RECOVERY_SCENARIOS,
     RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ id }) => id),
@@ -37,12 +37,6 @@ test('uses the canonical manifest for scenario ids and package-script routing', 
   assert.equal(
     new Set(RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ id }) => id)).size,
     RFC64_M0_RECOVERY_SCENARIO_MANIFEST.length,
-  );
-  assert.deepEqual(
-    RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ packageScript }) => packageScript),
-    RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(
-      ({ id }) => `test:rfc64-m0-recovery:${id}`,
-    ),
   );
 });
 

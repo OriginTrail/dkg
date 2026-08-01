@@ -12,19 +12,16 @@ const expectedRows = Object.freeze([
   {
     id: 'persistence-lifecycle',
     label: 'Persistence lifecycle',
-    kind: 'command',
     args: ['test:gate0:rfc64-persistence-lifecycle'],
   },
   {
     id: 'public-swm-policy-parity',
     label: 'Public SWM policy parity',
-    kind: 'command',
     args: ['test:m1:rfc64-public-swm-parity'],
   },
   {
     id: 'finalized-public-vm',
     label: 'Finalized public VM',
-    kind: 'command',
     args: [
       '--filter',
       '@devnet/rfc64-gate2-multi-asset-completeness',
@@ -34,17 +31,18 @@ const expectedRows = Object.freeze([
   ...RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => ({
     id: scenario.rowId,
     label: scenario.label,
-    kind: 'command',
     args: [
       '--filter',
       '@origintrail-official/dkg-agent',
-      scenario.packageScript,
+      'exec',
+      'node',
+      'scripts/run-rfc64-m0-recovery-scenario.mjs',
+      scenario.id,
     ],
   })),
   {
     id: 'bounded-work',
     label: 'Bounded work',
-    kind: 'command',
     args: [
       '--filter',
       '@origintrail-official/dkg-agent',
@@ -74,7 +72,7 @@ test('locks every declared M0 acceptance command and invokes each row in order',
   assert.deepEqual(invoked, expectedRowIds);
 });
 
-test('delegates recovery rows to stable agent-package proof scripts', () => {
+test('delegates recovery rows to one stable dispatcher using manifest ids', () => {
   assert.deepEqual(
     M0_ACCEPTANCE_ROWS.slice(3, 6).map(({ id, args }) => ({ id, args })),
     RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => ({
@@ -82,7 +80,10 @@ test('delegates recovery rows to stable agent-package proof scripts', () => {
       args: [
         '--filter',
         '@origintrail-official/dkg-agent',
-        scenario.packageScript,
+        'exec',
+        'node',
+        'scripts/run-rfc64-m0-recovery-scenario.mjs',
+        scenario.id,
       ],
     })),
   );

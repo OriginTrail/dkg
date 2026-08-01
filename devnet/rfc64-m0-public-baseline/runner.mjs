@@ -9,7 +9,7 @@ const repoRoot = resolve(here, '../..');
 const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 function commandRow(id, label, args) {
-  return Object.freeze({ id, label, kind: 'command', args: Object.freeze(args) });
+  return Object.freeze({ id, label, args: Object.freeze(args) });
 }
 
 export const M0_ACCEPTANCE_ROWS = Object.freeze([
@@ -30,7 +30,10 @@ export const M0_ACCEPTANCE_ROWS = Object.freeze([
     [
       '--filter',
       '@origintrail-official/dkg-agent',
-      scenario.packageScript,
+      'exec',
+      'node',
+      'scripts/run-rfc64-m0-recovery-scenario.mjs',
+      scenario.id,
     ],
   )),
   commandRow('bounded-work', 'Bounded work', [
