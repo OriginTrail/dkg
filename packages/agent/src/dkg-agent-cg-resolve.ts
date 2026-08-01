@@ -525,7 +525,15 @@ async function applyContextGraphListPrivacy(
 /** Where a resolved catch-up sync peer came from; see {@link resolveCuratorSyncPeer}. */
 export interface SyncPeerResolution {
   peerId?: string;
-  provenance: 'metadata' | 'bootstrap-hint' | 'none';
+  /**
+   * - `'metadata'`   — resolved deterministically from `<cg>/_meta`. AUTHORITATIVE.
+   * - `'registry'`   — a wallet-address curator matched more than one agent
+   *                    registration, so which peer we got is arbitrary. Ranks the
+   *                    walk; may NOT end it.
+   * - `'bootstrap-hint'` — the authenticated join-approval hint. Ranks only.
+   * - `'none'`       — no peer at all.
+   */
+  provenance: 'metadata' | 'registry' | 'bootstrap-hint' | 'none';
 }
 
 /**
@@ -538,12 +546,25 @@ export function authoritativeSyncPeerId(resolution: SyncPeerResolution): string 
 }
 
 /**
+ * Does this DID identify a peer directly, or does it need resolving through a
+ * registry? Wallet-address curators (V10) are the indirect case; a bare libp2p
+ * peer id (legacy) is already the answer.
+ */
+function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
+  return curatorIdentifier.startsWith('0x');
+}
+
+/**
  * Resolve the curator peer for a Context Graph together with WHERE it came from.
  *
  * Two routes produce a peer id here and they are NOT interchangeable:
  *
  * - `'metadata'` — `<cg>/_meta` names a curator DID and it resolved to a peer.
  *   Authoritative: that peer speaks for the whole graph.
+ * - `'registry'` — the curator DID named a WALLET address and more than one agent
+ *   registration claimed it, so the peer we picked is arbitrary. Ranks the walk;
+ *   never ends it. A single registration stays `'metadata'`, because that is a
+ *   deterministic binding.
  * - `'bootstrap-hint'` — the authenticated join-approval hint recorded in
  *   `preferredSyncPeers`, used while `_meta` has not arrived yet (and restored
  *   from the durable join-approved membership row after restart). It is a fine
@@ -588,7 +609,10 @@ export async function resolveCuratorSyncPeer(
   // stores the libp2p peer ID) over the agent registry (which may return
   // an arbitrary match when multiple agents register the same wallet).
   let curatorPeerId = curatorIdentifier;
-  if (curatorIdentifier.startsWith('0x')) {
+  // Deterministic until proven otherwise: a bare peer-id DID and the projected
+  // `DKG_CREATOR` route both come straight out of `<cg>/_meta`.
+  let provenance: SyncPeerResolution['provenance'] = 'metadata';
+  if (curatorDidNeedsRegistryResolution(curatorIdentifier)) {
     let resolved = false;
 
     // Preferred: use the same projected metadata resolution as privacy and
@@ -616,12 +640,21 @@ export async function resolveCuratorSyncPeer(
         throwIfSyncAuthAborted(options.signal);
         const agents = await agent.discovery.findAgents();
         throwIfSyncAuthAborted(options.signal);
-        const match = agents.find(
+        const matches = agents.filter(
           (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
         );
+        const match = matches[0];
         if (match) {
           curatorPeerId = match.peerId;
           resolved = true;
+          // Which registration we get is arbitrary when a wallet has more than
+          // one. That was harmless while this only RANKED the walk; it is not
+          // harmless now that `'metadata'` means "may end the walk", because an
+          // ordinary member sharing the curator's wallet could answer with a
+          // clean subset and stop the walk before the real curator is reached.
+          // A single registration is still a deterministic binding, so the
+          // common case keeps the early stop.
+          if (matches.length > 1) provenance = 'registry';
         }
       } catch {
         throwIfSyncAuthAborted(options.signal);
@@ -633,7 +666,7 @@ export async function resolveCuratorSyncPeer(
   }
 
   bootstrapHints.delete(contextGraphId);
-  return { peerId: curatorPeerId, provenance: 'metadata' };
+  return { peerId: curatorPeerId, provenance };
 }
 
 export class ContextGraphResolveMethods extends DKGAgentBase {

@@ -157,7 +157,9 @@ describe('curator sync-peer provenance', () => {
       .toEqual({ provenance: 'none' });
   });
 
-  it('resolves a wallet-address curator through the registry as authoritative', async () => {
+  it('resolves a UNIQUELY registered wallet curator as authoritative', async () => {
+    // One registration for the wallet is a deterministic binding, so the early
+    // stop is preserved for the ordinary case.
     const hints = new Map([[CG, HINT]]);
     const agent = agentWithMeta(
       { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
@@ -166,6 +168,53 @@ describe('curator sync-peer provenance', () => {
 
     expect(await resolveCuratorSyncPeer(agent as never, hints, CG))
       .toEqual({ peerId: CURATOR, provenance: 'metadata' });
+  });
+
+  it('will not make an AMBIGUOUS registry match an authority', async () => {
+    // `findAgents()` returns whichever registrations exist for a wallet, and the
+    // code has always documented the pick as arbitrary when there are several.
+    // That was harmless while this only ranked the walk. It is not harmless now
+    // that `'metadata'` means "may end the walk": an ordinary member sharing the
+    // curator's wallet could answer with a clean subset and stop the walk before
+    // the real curator is ever contacted.
+    const hints = new Map([[CG, HINT]]);
+    const agent = agentWithMeta(
+      { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
+      async () => [
+        { agentAddress: '0x00000000000000000000000000000000000000AB', peerId: '12D3KooWMemberA' },
+        { agentAddress: '0x00000000000000000000000000000000000000ab', peerId: '12D3KooWMemberB' },
+      ],
+    );
+
+    const resolved = await resolveCuratorSyncPeer(agent as never, hints, CG);
+    // It still RANKS the walk — an arbitrary co-registrant is a better first try
+    // than nothing…
+    expect(resolved.peerId).toBe('12D3KooWMemberA');
+    expect(resolved.provenance).toBe('registry');
+    // …but it can never END it.
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+  });
+
+  it('keeps the deterministic metadata routes authoritative', async () => {
+    // The positive complement, so the guard cannot be widened into something
+    // that disables the early stop wholesale. Neither of these routes touches
+    // the registry: a bare peer-id DID, and the projected DKG_CREATOR triple.
+    const bareDid = agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` }, async () => {
+      throw new Error('a bare peer-id DID must not need the registry');
+    });
+    expect(authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(bareDid as never, new Map(), CG),
+    )).toBe(CURATOR);
+
+    const viaCreator = agentWithMeta({
+      curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
+      creator: `did:dkg:agent:${CURATOR}`,
+    }, async () => {
+      throw new Error('the DKG_CREATOR route must not need the registry');
+    });
+    expect(authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(viaCreator as never, new Map(), CG),
+    )).toBe(CURATOR);
   });
 
   it('answers ranking and authority from ONE resolution', async () => {
