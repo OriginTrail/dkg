@@ -335,8 +335,40 @@ describe('durable sync lifecycle chain binding', () => {
       exactAssetUals: [exactUal],
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
+      // The admission SOURCE is what makes this show up as `durable:vm-recovery`
+      // rather than `durable:unspecified` on the sync-global scheduler, which is
+      // the whole point of the label. Without this line, deleting it from the
+      // call site keeps every test green and only the Grafana attribution rots.
+      source: 'vm-recovery',
     });
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
+  });
+
+  it('labels standalone SWM recovery admissions at the call site', async () => {
+    // The sibling of the VM-recovery assertion above, and the one that had NO
+    // coverage: a regression dropping this source would report SWM recovery
+    // pressure as `shared-memory:unspecified` on the sync-global scheduler.
+    // Asserted on the real prototype so it pins the production call site, not a
+    // re-statement of it.
+    const runContextGraphSyncWithBackpressure = vi.fn(async () => ({}));
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      runContextGraphSyncWithBackpressure,
+    };
+
+    await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(
+      agentLike as any,
+      '12D3KooWSwmRecoveryPeer',
+      'private-cg',
+    );
+
+    expect(runContextGraphSyncWithBackpressure).toHaveBeenCalledTimes(1);
+    const [, contextGraphId, lane, , , admission] =
+      runContextGraphSyncWithBackpressure.mock.calls[0] as unknown as unknown[];
+    expect(contextGraphId).toBe('private-cg');
+    expect(lane).toBe('swm_recovery');
+    expect(admission).toEqual({ source: 'swm-recovery' });
   });
 
   it('honors an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
