@@ -1,3 +1,5 @@
+import type { SyncAdmissionSource } from './policy.js';
+
 export type CatchupMode = 'background' | 'foreground';
 
 export const FOREGROUND_CATCHUP_SYNC_PRIORITY = 2_000;
@@ -50,8 +52,19 @@ export function resolveCatchupBackpressureMaxWaitMs(raw: string | undefined): nu
 export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number =
   resolveCatchupBackpressureMaxWaitMs(process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
 
-/** Bounded admission origin recorded on node-wide scheduler diagnostics. */
-export type CatchupAdmissionSource = 'catchup-foreground' | 'catchup-background';
+/**
+ * Bounded admission origin recorded on node-wide scheduler diagnostics.
+ *
+ * DERIVED from the scheduler's own closed set rather than restating its literals.
+ * The boundedness of this label space is load-bearing — it is a metric and log
+ * dimension — and the scheduler owns that contract. Restating the strings meant a
+ * rename in `SYNC_ADMISSION_SOURCES` would leave `catchupSourceForMode` returning a
+ * stale literal that the scheduler then silently clamped to `unspecified`, with
+ * nothing connecting the two declarations. `Extract` makes that a compile error:
+ * a renamed member collapses this to `never` and the returns below stop building.
+ */
+export type CatchupAdmissionSource =
+  Extract<SyncAdmissionSource, 'catchup-foreground' | 'catchup-background'>;
 
 export interface CatchupPlaneResult {
   deferredBackpressure?: number;

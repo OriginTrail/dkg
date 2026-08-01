@@ -673,6 +673,76 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.cleanPlaneCompletions?.sharedMemory.authorityEmptyPeers).toBe(0);
   });
 
+  it('reports the curator as unanswered when it was selected and transport-failed', async () => {
+    // The exact #2006 shape, produced by the walk's own design: a resolvable
+    // curator is ranked first and gets wave 1 ALONE, so when it transport-fails
+    // the walk moves on to strangers, one answers empty, and without this signal
+    // that stranger's silence would settle a 40-KA graph as `done` with zero.
+    const peerIds = ['peer-curator', 'peer-a', 'peer-b', 'peer-c'];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-curator-silent', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-curator',
+            authoritativePeerId: 'peer-curator',
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          if (args[0] === 'peer-curator') {
+            // Transport failure: no clean completion from the one peer that knows.
+            return { ...durableResult(), complete: false, insertedTriples: 0,
+              fetchedDataTriples: 0, insertedDataTriples: 0, bytesReceived: 0,
+              completedPhases: 0, failedPeers: 1 };
+          }
+          return { ...durableResult(), insertedTriples: 0, fetchedDataTriples: 0,
+            insertedDataTriples: 0, bytesReceived: 0, completedPhases: 2, emptyResponses: 1 };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(result.diagnostics?.durable.authorityUnanswered).toBe(true);
+    // Strangers still answered cleanly empty — that is exactly what must NOT
+    // settle the plane now.
+    expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBeGreaterThan(0);
+  });
+
+  it('reports the curator as answered when it completed cleanly', async () => {
+    // The complement, so the flag cannot be hardwired true: a curator that
+    // answers must leave the round provable.
+    const peerIds = ['peer-curator', 'peer-a'];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-curator-answered', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            preferredPeerId: 'peer-curator',
+            authoritativePeerId: 'peer-curator',
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          return durableResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(result.diagnostics?.durable.authorityUnanswered).toBe(false);
+  });
+
   it('does not stop on a hosted-empty curator that the round already contradicted', async () => {
     // The curator says "nothing here" while another peer in the SAME wave served
     // content that failed verification. Readiness treats that as content

@@ -18,6 +18,8 @@ vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOr
   };
 });
 
+import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
+import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
@@ -379,6 +381,47 @@ describe('durable sync lifecycle chain binding', () => {
         ...legacyArgs,
       ),
     ).rejects.toThrow(/takes a single .admission. object/);
+  });
+
+  it('labels changelog-lane admissions at the call site', async () => {
+    // The changelog delta lane (OT-RFC-59) is a SEPARATE production admission path
+    // from the durable and shared-memory ones already covered. A public Context
+    // Graph on a changelog-capable peer never reaches `runLegacyDurableSync`, so a
+    // dropped source here would surface only as `changelog:unspecified` on
+    // /api/diagnostics/backpressure while every existing source test stayed green.
+    const admissions: unknown[][] = [];
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      // Record the admission and return a real accumulator: the lane folds the
+      // result, so an empty object would fail inside the merge before the
+      // assertion below could run.
+      runContextGraphSyncWithBackpressure: async (...args: unknown[]) => {
+        admissions.push(args);
+        return createDurableSyncAccumulator();
+      },
+    };
+
+    await LifecycleSyncMethods.prototype.runChangelogLane.call(
+      agentLike as never,
+      ctx,
+      '12D3KooWChangelogPeer',
+      ['public-cg'],
+      undefined,
+      2_000,
+      'catchup-foreground',
+    );
+
+    expect(admissions).toHaveLength(1);
+    const [, contextGraphId, lane, , , admission] = admissions[0] as unknown[];
+    expect(contextGraphId).toBe('public-cg');
+    expect(lane).toBe('changelog');
+    expect(admission).toMatchObject({
+      priorityOverride: 2_000,
+      source: 'catchup-foreground',
+    });
   });
 
   it('labels standalone SWM recovery admissions at the call site', async () => {

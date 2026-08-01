@@ -918,6 +918,45 @@ describe('catch-up plane proof predicates', () => {
     });
   });
 
+  describe('a curator that was selected but never cleanly answered', () => {
+    // The walk puts a resolvable curator ALONE in wave 1, so when it
+    // transport-fails the walk moves on to strangers, one answers empty, and the
+    // graph's 40 Knowledge Assets get reported as zero. That is issue #2006's own
+    // symptom in its sharpest form.
+    const curatorSilent = { ...cleanEmptyRound, failedPeers: 1, authorityUnanswered: true };
+
+    it('cannot have its plane proven by a stranger answering empty', () => {
+      expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, curatorSilent, { isPrivate: false }))
+        .toBe(false);
+      expect(catchupPlaneReady(emptyPeers, curatorSilent, { isPrivate: false })).toBe(false);
+    });
+
+    it.each([
+      // No curator resolved at all. The hosted-empty backstop structurally
+      // cannot fire here, so voiding on a mere unreachable STRANGER would pin a
+      // legitimately empty public graph at `unreachable` forever — the liveness
+      // failure this rule exists to avoid. Only the CURATOR's silence is decisive.
+      ['no curator was resolvable', { ...cleanEmptyRound, failedPeers: 4 }],
+      // Registered-but-empty public graph on a lossy network, curator absent
+      // from the round entirely.
+      ['the graph is registered but empty', {
+        ...cleanEmptyRound, fetchedMetaTriples: 9, emptyResponses: 3, failedPeers: 2,
+      }],
+    ])('still proves an empty round when %s', (_label, diagnostics) => {
+      expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, diagnostics, { isPrivate: false }))
+        .toBe(true);
+      expect(catchupPlaneReady(emptyPeers, diagnostics, { isPrivate: false })).toBe(true);
+    });
+
+    it('is still proven when the curator DID answer, unreachable strangers aside', () => {
+      // The positive complement: the flag is about the curator's silence, not
+      // about the round being lossy.
+      const curatorAnswered = { ...cleanEmptyRound, failedPeers: 3, authorityUnanswered: false };
+      expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, curatorAnswered, { isPrivate: false }))
+        .toBe(true);
+    });
+  });
+
   it('accepts either evidence carrier for the clean empty completion', () => {
     // Per-peer evidence (`cleanPlaneCompletions`) and the aggregate counter
     // (`diagnostics.emptyResponses`) are separate carriers, and the legacy

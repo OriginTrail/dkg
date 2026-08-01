@@ -16,6 +16,7 @@ import {
   catchupPeerPlaneEvidence,
   catchupPeerResponded,
   catchupPeerSucceeded,
+  catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
   type CatchupJobResult,
@@ -254,6 +255,17 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       { isPrivate: prepared.isPrivateContextGraph },
     );
 
+  /**
+   * Did the curator cleanly answer this plane at all?
+   *
+   * Separate from `authorityProven`: a curator that answered with data proves the
+   * plane, and one that answered content-free may or may not, but BOTH count as
+   * having answered. What readiness needs to know is the third case — the curator
+   * was selected and we never heard a clean word from it — because then a
+   * stranger's empty response cannot stand for the graph.
+   */
+  const authorityAnswered = { durable: false, sharedMemory: false };
+
   /** Fold the wave's accumulated state into the stop flags. */
   const settleAuthorityForWave = (): void => {
     if (!authorityProven.durable && authoritySettles('durable')) {
@@ -345,7 +357,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         plane: 'durable',
       });
       addCatchupPlaneEvidence(cleanPlaneCompletions.durable, durableEvidence);
-      if (fromAuthority) addCatchupPlaneEvidence(authorityEvidence.durable, durableEvidence);
+      if (fromAuthority) {
+        addCatchupPlaneEvidence(authorityEvidence.durable, durableEvidence);
+        if (catchupPlaneCompletedWithoutFailure(durable, durable.complete)) {
+          authorityAnswered.durable = true;
+        }
+      }
     }
 
     if (shared) {
@@ -373,7 +390,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // evidence only ever has data/empty set — the same reducer still applies.
       const sharedEvidence = catchupPeerPlaneEvidence(shared, { fromAuthority, plane: 'shared-memory' });
       addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
-      if (fromAuthority) addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
+      if (fromAuthority) {
+        addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
+        if (catchupPlaneCompletedWithoutFailure(shared)) {
+          authorityAnswered.sharedMemory = true;
+        }
+      }
     }
 
     if (peerDenied) {
@@ -460,6 +482,16 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     for (const round of rounds) accumulate(round);
     settleAuthorityForWave();
     if (CATCHUP_STOP_ON_PROOF && authorityProvedEverything()) break;
+  }
+
+  // A curator we resolved but never heard cleanly from makes the round
+  // incomplete rather than empty. Recorded per plane, since a curator can answer
+  // one and fail the other.
+  if (prepared.authoritativePeerId !== undefined) {
+    diagnostics.durable.authorityUnanswered = !authorityAnswered.durable;
+    if (request.includeSharedMemory) {
+      diagnostics.sharedMemory.authorityUnanswered = !authorityAnswered.sharedMemory;
+    }
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;

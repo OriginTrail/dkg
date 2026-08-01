@@ -86,6 +86,9 @@ export interface CatchupJobResult {
       failedPhases: number;
       deferredBackpressure: number;
       deniedPhases?: number;
+      /** A resolvable curator never cleanly answered this plane; see
+       * `catchupPlaneProvenByUnanimousEmpty`. */
+      authorityUnanswered?: boolean;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -103,6 +106,9 @@ export interface CatchupJobResult {
       failedPhases: number;
       deferredBackpressure: number;
       deniedPhases?: number;
+      /** A resolvable curator never cleanly answered this plane; see
+       * `catchupPlaneProvenByUnanimousEmpty`. */
+      authorityUnanswered?: boolean;
     };
   };
 }
@@ -536,6 +542,12 @@ export interface CatchupPlaneRoundDiagnostics {
   /** Durable-only integrity rejections; the shared-memory plane never sets them. */
   dataRejectedMissingMeta?: number;
   rejectedKcs?: number;
+  /**
+   * A metadata-resolved curator WAS selected for this walk and did not cleanly
+   * answer this plane — it transport-failed, timed out, was denied, or never got
+   * contacted. Distinct from `failedPeers`, which counts any unreachable peer.
+   */
+  authorityUnanswered?: boolean;
 }
 
 /**
@@ -721,8 +733,27 @@ export function catchupPlaneProvenByAuthorityHostedEmpty(
  * proof mode 1 has already settled the plane, so voiding here costs the
  * legitimately-empty graph nothing.
  *
+ * The verdict IS voided when the round had a resolvable curator that never
+ * cleanly answered (`authorityUnanswered`). The peer best placed to know is the
+ * one we failed to hear from, so "nobody had anything" is not established — the
+ * round is incomplete, not empty. That closes issue #2006's own symptom in its
+ * sharpest form: the walk puts a resolvable curator alone in wave 1, so when the
+ * curator transport-fails the walk moves on to strangers, one answers empty, and
+ * 40 Knowledge Assets get reported as zero.
+ *
+ * Scoped to the AUTHORITY rather than to `failedPeers`, and the difference is
+ * load-bearing. `failedPeers` counts any unreachable peer, so voiding on it would
+ * also kill the verdict when NO curator is resolvable at all — the state where
+ * the hosted-empty backstop structurally cannot fire — leaving a legitimately
+ * empty public graph pinned at `unreachable` by a single unreachable stranger.
+ * That is the liveness failure this rule was originally written to avoid, and it
+ * is still worth avoiding; it is only the curator's silence that is decisive.
+ *
  * Two counters are deliberately NOT consulted:
  *
+ * - `failedPeers`. A transport failure to a peer we never heard from, which on a
+ *   live testnet can be most of the connected set. An unreachable STRANGER is
+ *   evidence of nothing; an unreachable CURATOR is, and has its own signal above.
  * - `fetchedMetaTriples`. A raw triple count, not a per-peer verdict: a delta
  *   sync legitimately carries the whole metadata phase with nothing newer than
  *   the watermark, and the requester deliberately does NOT flag that as
@@ -753,6 +784,9 @@ export function catchupPlaneProvenByUnanimousEmpty(
   const cleanEmptyObserved = (completion?.emptyPeers ?? 0) > 0
     || (diagnostics?.emptyResponses ?? 0) > 0;
   if (!cleanEmptyObserved) return false;
+  // The one peer whose silence is decisive. See the note above for why this is
+  // scoped to the curator rather than to `failedPeers`.
+  if (diagnostics?.authorityUnanswered) return false;
   return (diagnostics?.failedPhases ?? 0) === 0
     && (diagnostics?.timedOutPhases ?? 0) === 0
     && (diagnostics?.deniedPhases ?? 0) === 0
