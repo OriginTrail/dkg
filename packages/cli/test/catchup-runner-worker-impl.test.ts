@@ -14,7 +14,7 @@
 //     transfers one payload instead of one per peer. A non-authoritative peer's
 //     clean round settles nothing — it can neither stop the walk nor narrow a
 //     later peer to one plane.
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
@@ -25,8 +25,19 @@ import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.
 // for this file so the persistently-deferred case settles quickly; the exact
 // deadline arithmetic is pinned deterministically in
 // packages/agent/test/catchup-policy.test.ts with an injected clock.
-vi.hoisted(() => {
+// `vi.hoisted` runs before imports so the module-load-time constant picks this
+// up — but it mutates the REAL process env, and vitest can reuse a worker
+// process across files in a shard. Anything loaded afterwards, including a
+// daemon spawned by a sibling suite, would otherwise inherit the shortened backpressure budget.
+const previousCATCHUPBACKPRESSUREMAXWAITMS = vi.hoisted(() => {
+  const before = process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
   process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = '250';
+  return before;
+});
+
+afterAll(() => {
+  if (previousCATCHUPBACKPRESSUREMAXWAITMS === undefined) delete process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
+  else process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = previousCATCHUPBACKPRESSUREMAXWAITMS;
 });
 
 // The worker impl wires itself to `parentPort` at module load, so a

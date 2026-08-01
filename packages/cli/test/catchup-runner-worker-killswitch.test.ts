@@ -5,12 +5,23 @@
 // them, and no early stop — so an operator can back the optimisation out
 // without a redeploy if a graph ever lands short. The switch is read once at
 // module load, which is why this lives in its own file.
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 
-vi.hoisted(() => {
+// `vi.hoisted` runs before imports so the module-load-time constant picks this
+// up — but it mutates the REAL process env, and vitest can reuse a worker
+// process across files in a shard. Anything loaded afterwards, including a
+// daemon spawned by a sibling suite, would otherwise inherit the kill-switch.
+const previousCATCHUPSTOPONPROOF = vi.hoisted(() => {
+  const before = process.env.DKG_CATCHUP_STOP_ON_PROOF;
   process.env.DKG_CATCHUP_STOP_ON_PROOF = '0';
+  return before;
+});
+
+afterAll(() => {
+  if (previousCATCHUPSTOPONPROOF === undefined) delete process.env.DKG_CATCHUP_STOP_ON_PROOF;
+  else process.env.DKG_CATCHUP_STOP_ON_PROOF = previousCATCHUPSTOPONPROOF;
 });
 
 const fakeParentPort = vi.hoisted(() => {
