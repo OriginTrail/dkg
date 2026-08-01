@@ -4,6 +4,7 @@ import {
   catchupPeerResponded,
   catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
   catchupPlaneProvenByUnanimousEmpty,
   catchupPlaneReady,
@@ -787,7 +788,7 @@ describe('catch-up plane proof predicates', () => {
 
     it('proves the public plane with no wire-empty response anywhere in the round', () => {
       const completion = { ...noEvidence, authorityEmptyPeers: 1 };
-      expect(catchupPlaneProvenByUnanimousEmpty(
+      expect(catchupPlaneProvenByAuthorityHostedEmpty(
         completion,
         hostedEmptyDiagnostics,
         { isPrivate: false },
@@ -798,7 +799,7 @@ describe('catch-up plane proof predicates', () => {
     });
 
     it('is voided when another peer delivered data the curator did not have', () => {
-      expect(catchupPlaneProvenByUnanimousEmpty(
+      expect(catchupPlaneProvenByAuthorityHostedEmpty(
         { ...noEvidence, authorityEmptyPeers: 1 },
         { ...hostedEmptyDiagnostics, fetchedDataTriples: 122_705 },
         { isPrivate: false },
@@ -812,7 +813,7 @@ describe('catch-up plane proof predicates', () => {
       // Content that failed verification still proves content EXISTS, which
       // outranks the curator saying the graph is empty — unlike a plain
       // transport or phase failure, which the curator's answer does outrank.
-      expect(catchupPlaneProvenByUnanimousEmpty(
+      expect(catchupPlaneProvenByAuthorityHostedEmpty(
         { ...noEvidence, authorityEmptyPeers: 1 },
         { ...hostedEmptyDiagnostics, ...overrides },
         { isPrivate: false },
@@ -825,6 +826,56 @@ describe('catch-up plane proof predicates', () => {
         hostedEmptyDiagnostics,
         { isPrivate: true },
       )).toBe(false);
+    });
+  });
+
+  describe('a non-curator that has `_meta` but no data', () => {
+    // The requester itself logs "peer may have empty or pruned data graph" for
+    // this response, which names the ambiguity exactly: the graph is empty, OR
+    // this member has not synced it yet. Without the curator present there is
+    // nothing to resolve it against, and combining it with an unrelated peer's
+    // empty answer would settle a 40-KA graph as `done` with zero.
+    const memberWithMetaOnly = {
+      ...cleanEmptyRound,
+      emptyResponses: 1,
+      metaOnlyResponses: 1,
+      fetchedMetaTriples: 9,
+    };
+
+    it('cannot be combined with a stranger\'s empty answer to prove the plane', () => {
+      expect(catchupPlaneProvenByUnanimousEmpty(
+        { ...noEvidence, emptyPeers: 1 },
+        memberWithMetaOnly,
+        { isPrivate: false },
+      )).toBe(false);
+      expect(catchupPlaneReady(
+        { ...noEvidence, emptyPeers: 1 },
+        memberWithMetaOnly,
+        { isPrivate: false },
+      )).toBe(false);
+    });
+
+    it('costs the legitimately empty graph nothing once its CURATOR answers', () => {
+      // The positive half. Voiding on `metaOnlyResponses` would be a bad trade
+      // if it also blocked the real empty-public-graph case — it does not,
+      // because the curator's own round settles that through the other proof
+      // mode, which is evaluated independently.
+      expect(catchupPlaneReady(
+        { ...noEvidence, emptyPeers: 1, authorityEmptyPeers: 1 },
+        memberWithMetaOnly,
+        { isPrivate: false },
+      )).toBe(true);
+    });
+
+    it('leaves the all-strangers round provable, so the rule is not vacuous', () => {
+      // A tightened clause that can never be satisfied is worse than no clause,
+      // because nothing reveals it. Pin that the unanimous rule still fires
+      // when every responder answered wire-empty and nobody returned metadata.
+      expect(catchupPlaneProvenByUnanimousEmpty(
+        { ...noEvidence, emptyPeers: 2 },
+        { ...cleanEmptyRound, metaOnlyResponses: 0 },
+        { isPrivate: false },
+      )).toBe(true);
     });
   });
 

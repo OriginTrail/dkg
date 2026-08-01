@@ -525,6 +525,8 @@ export interface CatchupPlaneRoundDiagnostics {
   fetchedMetaTriples?: number;
   fetchedDataTriples?: number;
   emptyResponses?: number;
+  /** Peers that returned `_meta` and no data; durable-only. */
+  metaOnlyResponses?: number;
   failedPeers?: number;
   failedPhases?: number;
   timedOutPhases?: number;
@@ -608,7 +610,59 @@ export function catchupPlaneProvenByData(
 }
 
 /**
- * Whole-round proof that a public plane really is empty.
+ * Does any signal in this round rule out an empty verdict outright?
+ *
+ * Shared by BOTH empty-proof modes below, because these are not "a peer that
+ * failed" — they are evidence about the graph's contents that no peer's silence
+ * can outrank.
+ */
+function emptyVerdictContradicted(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+  diagnostics: CatchupPlaneRoundDiagnostics | undefined,
+): boolean {
+  // Verified content, obviously.
+  if (catchupPlaneProvenByData(completion)) return true;
+  // Data that arrived and was rejected. A peer SERVED CONTENT for this graph
+  // which then failed verification, so content exists even though we could not
+  // keep it. `classifyDurableProgress` already treats these as blocking
+  // failures per peer; this is the same rule applied to the round.
+  if ((diagnostics?.dataRejectedMissingMeta ?? 0) > 0
+    || (diagnostics?.rejectedKcs ?? 0) > 0) return true;
+  // Data fetched anywhere in the round, whoever fetched it.
+  return (diagnostics?.fetchedDataTriples ?? 0) > 0;
+}
+
+/**
+ * Proof mode 1 — the CURATOR hosts the graph and it holds nothing.
+ *
+ * A registered public graph that really is empty still carries definition
+ * triples in its own `<cg>/_meta`, so the peer hosting it answers
+ * metadata-only, never wire-empty, and could never satisfy the whole-round rule
+ * below. Its curator saying so is the only evidence such a graph can produce.
+ *
+ * Scoped to the metadata-resolved curator and nothing else. Any OTHER peer's
+ * metadata-only round is the commonest state on the network — a member that has
+ * `_meta` but has not synced the data yet — and accepting it would resettle
+ * issue #2006's exact failure as `done` with zero Knowledge Assets.
+ *
+ * Another peer merely failing part-way cannot contradict the curator; another
+ * peer producing CONTENT can, and that is what {@link emptyVerdictContradicted}
+ * checks — it means the curator's view is behind the network's.
+ */
+export function catchupPlaneProvenByAuthorityHostedEmpty(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+  diagnostics: CatchupPlaneRoundDiagnostics | undefined,
+  options: { isPrivate: boolean },
+): boolean {
+  // Private planes stay proof-by-content only: an authorized-but-filtered
+  // response is indistinguishable from an empty one on this side of the wire.
+  if (options.isPrivate) return false;
+  if ((completion?.authorityEmptyPeers ?? 0) === 0) return false;
+  return !emptyVerdictContradicted(completion, diagnostics);
+}
+
+/**
+ * Proof mode 2 — a whole round in which nobody had anything.
  *
  * A peer that has never heard of a Context Graph and a peer that hosts an empty
  * one are byte-identical on the wire: an unknown CG has no access policy, so the
@@ -624,22 +678,20 @@ export function catchupPlaneProvenByData(
  * settled issue #2006's run as `done` with 1 KA out of 40, and either clause
  * kills it on its own.
  *
- * A registered public graph that really is empty is therefore proven by its
- * CURATOR instead — `authorityEmptyPeers`. Such a graph still carries
- * definition triples in its own `<cg>/_meta`, so the peer hosting it answers
- * metadata-only rather than wire-empty and could never satisfy the round rule
- * above. Only the metadata-resolved curator counts: any OTHER peer's
- * metadata-only round is the commonest state on the network — a member that
- * has `_meta` but has not synced the data yet — and accepting it would resettle
- * issue #2006's exact failure as `done` with zero Knowledge Assets.
+ * `metaOnlyResponses` also kills it. A non-curator that returned `_meta` and no
+ * data is the ambiguous case this rule cannot resolve — the requester itself
+ * logs "peer may have empty or pruned data graph" — and without the curator
+ * present there is nothing to resolve it against. When the curator IS present,
+ * proof mode 1 has already settled the plane, so voiding here costs the
+ * legitimately-empty graph nothing.
  *
  * Two counters are deliberately NOT consulted:
  *
- * - `fetchedMetaTriples`. Every registered Context Graph carries definition
- *   triples in its own `<cg>/_meta`, so any peer that hosts the graph at all
- *   returns metadata even when the graph holds zero Knowledge Assets. Treating
- *   metadata as content would make a legitimately empty public graph
- *   permanently unreadable rather than merely unproven.
+ * - `fetchedMetaTriples`. A raw triple count, not a per-peer verdict: a delta
+ *   sync legitimately carries the whole metadata phase with nothing newer than
+ *   the watermark, and the requester deliberately does NOT flag that as
+ *   metadata-only. Voiding on the raw count would make a legitimately empty
+ *   public graph permanently unreadable rather than merely unproven.
  * - `failedPeers`. That is a transport failure to a peer we never heard from —
  *   on a live testnet a majority of connected peers can be unreachable — and an
  *   unreachable stranger is evidence of nothing. A peer that DID engage and
@@ -658,26 +710,13 @@ export function catchupPlaneProvenByUnanimousEmpty(
   // Empty or metadata-only responses have never been able to prove that a
   // private graph is fully synchronized; that stays unchanged.
   if (options.isPrivate) return false;
-  if (catchupPlaneProvenByData(completion)) return false;
-  // An integrity rejection is not "a peer that failed" — it is a peer that
-  // SERVED CONTENT for this graph which then failed verification. That is
-  // positive evidence the graph is not empty, so it voids an empty verdict
-  // outright, ahead of even the curator's own word. `classifyDurableProgress`
-  // already treats these as blocking failures per peer; this is the same rule
-  // applied to the round.
-  if ((diagnostics?.dataRejectedMissingMeta ?? 0) > 0
-    || (diagnostics?.rejectedKcs ?? 0) > 0) return false;
-  // The curator hosting the graph and carrying no data settles it on its own —
-  // it is the reference for the whole graph, so another peer merely failing
-  // part-way cannot contradict it. Another peer DELIVERING data can, which is
-  // the guard kept here: that means the curator's view is behind the network's.
-  if ((completion?.authorityEmptyPeers ?? 0) > 0) {
-    return (diagnostics?.fetchedDataTriples ?? 0) === 0;
-  }
+  if (emptyVerdictContradicted(completion, diagnostics)) return false;
+  // A non-curator that has `_meta` and no data cannot tell "the graph is empty"
+  // from "I have not synced it yet". See the note above.
+  if ((diagnostics?.metaOnlyResponses ?? 0) > 0) return false;
   const cleanEmptyObserved = (completion?.emptyPeers ?? 0) > 0
     || (diagnostics?.emptyResponses ?? 0) > 0;
   if (!cleanEmptyObserved) return false;
-  if ((diagnostics?.fetchedDataTriples ?? 0) > 0) return false;
   return (diagnostics?.failedPhases ?? 0) === 0
     && (diagnostics?.timedOutPhases ?? 0) === 0
     && (diagnostics?.deniedPhases ?? 0) === 0
@@ -685,10 +724,14 @@ export function catchupPlaneProvenByUnanimousEmpty(
 }
 
 /**
- * Canonical readiness proof for one catch-up plane. The peer walk stops early
- * only on {@link catchupPlaneProvenByData}, so whenever this function falls
- * through to the unanimous-empty branch the full peer set really was walked and
- * the "nobody saw anything" denominator is meaningful.
+ * Canonical readiness proof for one catch-up plane: verified content, the
+ * curator's hosted-empty word, or a whole round in which nobody had anything —
+ * in that order of strength.
+ *
+ * The peer walk stops early only on {@link catchupPlaneProvenByData} or the
+ * curator's own round, so whenever this falls through to the unanimous-empty
+ * branch the full peer set really was walked and the "nobody saw anything"
+ * denominator is meaningful.
  */
 export function catchupPlaneReady(
   completion: CatchupPlaneCompletionEvidence | undefined,
@@ -696,6 +739,7 @@ export function catchupPlaneReady(
   options: { isPrivate: boolean },
 ): boolean {
   return catchupPlaneProvenByData(completion)
+    || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options)
     || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
 }
 
