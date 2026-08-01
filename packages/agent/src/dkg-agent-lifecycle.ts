@@ -315,6 +315,7 @@ import {
   countSyncPriorityClasses,
   orderContextGraphIdsByPriority,
   syncPriorityClass,
+  type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
 import {
@@ -939,6 +940,12 @@ export type DurableSyncOptions = {
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
   priority?: number;
+  /**
+   * Which trigger asked for this sync. Recorded as a bounded dimension on
+   * node-wide scheduler diagnostics so queue pressure can be attributed to an
+   * origin; clamped to the closed `SyncAdmissionSource` set before use.
+   */
+  source?: string;
 };
 
 type LegacyDurableContextGraphOptions = {
@@ -1154,6 +1161,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     work: () => Promise<T>,
     priorityOverride?: number,
     operationSignal?: AbortSignal,
+    source?: string,
   ): Promise<T> {
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
@@ -1171,6 +1179,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lane,
           priority,
           priorityClass: syncPriorityClass(priority),
+          source,
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
         },
@@ -3616,6 +3625,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     probe: SyncReconcilerProbe,
+    source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
@@ -3623,7 +3633,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       const outcome = await this.trySyncFromPeer(remotePeer, () => {
         syncAccountingClearedBackoff = true;
-      });
+      }, source);
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
@@ -3671,6 +3681,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
+    source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started) {
       return 'not-started';
@@ -3708,12 +3719,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         undefined,
         undefined,
         undefined,
-        { stopOnBackoffWorthyFailure: true },
+        { stopOnBackoffWorthyFailure: true, source },
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
       syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
         stopOnBackoffWorthyFailure: true,
+        source,
         sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
       }),
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
@@ -3991,7 +4003,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler'))) continue;
       const shortPeer = peerId.slice(-8);
       this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
-      this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe)
+      this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile')
         .then(() => undefined)
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -4361,6 +4373,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphIds,
           onAccessDenied,
           options?.priority,
+          options?.source,
         );
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
@@ -4460,6 +4473,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               work,
               options?.priority,
               operationBoundary.signal,
+              options?.source,
             ),
             operationBoundary.signal,
           );
@@ -4539,6 +4553,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         exactAssetUals: assetUals,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
+        source: 'vm-recovery',
       },
     );
   }
@@ -4736,6 +4751,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[],
     onAccessDenied?: (contextGraphId: string) => void,
     priority?: number,
+    source?: string,
   ): Promise<{ result?: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
@@ -4777,6 +4793,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         item.operationId,
         run,
         priority,
+        undefined,
+        source,
       ),
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
@@ -5212,6 +5230,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
       /** Admission override for foreground catch-up. */
       priority?: number;
+      /** Bounded admission origin for node-wide scheduler diagnostics. */
+      source?: string;
     },
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
@@ -5437,6 +5457,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.operationId,
           run,
           options?.priority,
+          undefined,
+          options?.source,
         ),
         merge: mergeSharedMemorySyncResults,
         markDeferred: (summary) => ({
@@ -5520,6 +5542,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeerId,
         contextGraphId,
       ),
+      undefined,
+      undefined,
+      'swm-recovery',
     );
   }
 
@@ -5865,18 +5890,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return runCatchupPlanesWithPolicy({
           mode,
           includeSharedMemory,
-          syncDurable: ({ priority }) => this.syncFromPeerDetailed(
+          syncDurable: ({ priority, source }) => this.syncFromPeerDetailed(
             remotePeerId,
             [contextGraphId],
             undefined,
             undefined,
             undefined,
-            priority === undefined ? undefined : { priority },
+            { ...(priority === undefined ? {} : { priority }), source },
           ).catch(() => createFailedPeerDurableSyncResult()),
-          syncSharedMemory: ({ priority }) => this.syncSharedMemoryFromPeerDetailed(
+          syncSharedMemory: ({ priority, source }) => this.syncSharedMemoryFromPeerDetailed(
             remotePeerId,
             [contextGraphId],
-            priority === undefined ? undefined : { priority },
+            { ...(priority === undefined ? {} : { priority }), source },
           ).catch(emptyShared),
         });
       },

@@ -69,6 +69,32 @@ The first registered sources are:
   `normal`, and `background` lanes;
 - `sync-global`: the process-wide sync admission queue and its sync lanes.
 
+### Attributing `sync-global` pressure to a trigger
+
+The `lane` of a `sync-global` entry says *what kind of work* is queued
+(`durable`, `changelog`, `shared_memory`, `swm_recovery`), but every trigger
+funnels into the same few lanes. Its `operation` label therefore pairs the
+collapsed work class with the **admission source** — the trigger that enqueued
+it — as `<work class>:<source>`:
+
+| Source | Trigger |
+| --- | --- |
+| `catchup-foreground` | explicit Context Graph catch-up (`POST /api/context-graph/subscribe`) |
+| `catchup-background` | automatic post-approval / reconcile catch-up |
+| `on-connect` | sync-on-connect after a peer dial |
+| `reconcile` | the periodic sync reconciler |
+| `vm-recovery` | foreground repair of specific missing Knowledge Assets |
+| `swm-recovery` | curator-targeted shared-memory recovery |
+| `unspecified` | a caller that did not declare an origin |
+
+So `{"operation":"durable:catchup-foreground","count":4,"oldestAgeMs":109000}`
+in a `queuedOperations` summary reads as "four explicit catch-up durable
+admissions are queued, the oldest for 109 seconds", and the matching
+`activeOperations` entry gives the same view for admitted work. Both halves are
+closed sets, so the label space stays bounded (5 × 7) and, as before, no Context
+Graph id or peer id ever reaches a metric, log line, or diagnostics response —
+an unrecognized source is clamped to `unspecified`.
+
 Other schedulers can extend `ObservableScheduler` and call its protected
 lifecycle methods at their existing admission boundaries. They keep complete
 ownership of policy.

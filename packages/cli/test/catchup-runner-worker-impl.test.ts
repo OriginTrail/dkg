@@ -1,20 +1,33 @@
 // catchup-runner-worker-impl.test.ts
 //
-// Drives the daemon-side Worker catch-up implementation — the
-// `/api/context-graph/subscribe` path that fans a full durable+SWM sync out
-// over every sync-capable peer — over a mocked `parentPort`, and pins the
-// 2026-07-07 sync-storm mitigation (C-1) at THIS call site: no more than
-// CATCHUP_MAX_CONCURRENT_PEER_SYNCS per-peer sync rounds (or protocol probes)
-// may ever be in flight, while every peer still gets synced exactly once, the
-// aggregation keeps its one-result-per-peer input-order shape, and one peer's
-// failure stays isolated instead of failing the whole run.
+// Drives the daemon-side Worker catch-up implementation — the production
+// `/api/context-graph/subscribe` path — over a mocked `parentPort`, and pins
+// two guarantees at THIS call site:
+//
+//   * the 2026-07-07 sync-storm mitigation (C-1): no more than
+//     CATCHUP_MAX_CONCURRENT_PEER_SYNCS per-peer sync rounds (or protocol
+//     probes) may ever be in flight, per-peer failures stay isolated, and the
+//     aggregation keeps its one-result-per-peer input-order shape;
+//   * the issue #2006 progressive walk: peers are contacted in escalating
+//     waves over the authority-ranked list and the walk STOPS as soon as every
+//     requested plane is proven by verified data, so the happy path transfers
+//     one payload instead of one per peer. An empty response proves nothing on
+//     its own and can never stop the walk.
 import { describe, expect, it, vi } from 'vitest';
 import {
-  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  catchupWaveSizes,
 } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
+
+// The foreground backpressure budget is wall-clock (default 60s). Shrink it for
+// this file so the persistently-deferred case settles quickly; the exact
+// deadline arithmetic is pinned deterministically in
+// packages/agent/test/catchup-policy.test.ts with an injected clock.
+vi.hoisted(() => {
+  process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = '250';
+});
 
 // The worker impl wires itself to `parentPort` at module load, so a
 // controllable port has to be in place BEFORE the module is imported.
@@ -121,7 +134,74 @@ async function runWorkerCatchup(request: CatchupRunRequest, handler: InvokeHandl
 }
 
 describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)', () => {
-  it('caps in-flight peer syncs and protocol probes at the shared limit while still syncing every peer in input order', async () => {
+  it('stops the walk at the first peer that proves every requested plane', async () => {
+    const peerIds = Array.from({ length: 20 }, (_, i) => `peer-${i}`);
+    const durableOrder: string[] = [];
+    const sharedSeen: string[] = [];
+    const probeOrder: string[] = [];
+    const syncPriorities: Array<number | undefined> = [];
+    const syncSources: Array<string | undefined> = [];
+    const finalizeCalls: unknown[][] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-one-payload', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          probeOrder.push(args[0] as string);
+          return true;
+        case 'syncDurable':
+          durableOrder.push(args[0] as string);
+          syncPriorities.push(args[2] as number | undefined);
+          syncSources.push(args[3] as string | undefined);
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedSeen.push(args[0] as string);
+          syncPriorities.push(args[2] as number | undefined);
+          syncSources.push(args[3] as string | undefined);
+          return sharedResult();
+        case 'finalizeCatchup':
+          finalizeCalls.push(args);
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // The whole point of issue #2006: one authoritative payload, not twenty.
+    // Before the progressive walk this was `toEqual(peerIds)` on both planes —
+    // 20 full durable pulls and 20 full SWM pulls for a single graph.
+    expect(durableOrder).toEqual(['peer-0']);
+    expect(sharedSeen).toEqual(['peer-0']);
+    expect(syncPriorities).toEqual([
+      FOREGROUND_CATCHUP_SYNC_PRIORITY,
+      FOREGROUND_CATCHUP_SYNC_PRIORITY,
+    ]);
+    expect(syncSources).toEqual(['catchup-foreground', 'catchup-foreground']);
+
+    // Probing stays eager over the whole connected set: `syncCapablePeers` and
+    // `noProtocolPeers` are read by daemon status mapping as counts over every
+    // connected peer, not over the walked prefix.
+    expect(probeOrder.sort()).toEqual([...peerIds].sort());
+    expect(result.syncCapablePeers).toBe(peerIds.length);
+    expect(result.selectedPeers).toBe(peerIds.length);
+
+    // Peers the walk deliberately skipped are neither tried nor failed.
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(peerIds.length - 1);
+    expect(result.peersResponded).toBe(1);
+    expect(result.peersSucceeded).toBe(1);
+    expect(result.diagnostics?.durable.failedPeers).toBe(0);
+    expect(result.diagnostics?.durable.timedOutPhases).toBe(0);
+
+    expect(result.deferredBackpressure).toBe(0);
+    expect(result.dataSynced).toBe(1);
+    expect(result.sharedMemorySynced).toBe(1);
+    expect(result.denied).toBe(false);
+    expect(finalizeCalls).toEqual([['cg-one-payload', 1, 1]]);
+  });
+
+  it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {
     const peerIds = Array.from({ length: 20 }, (_, i) => `peer-${i}`);
     // The bound is only observable when the peer set exceeds the cap.
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeLessThan(peerIds.length);
@@ -131,11 +211,13 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     let inFlightSyncs = 0;
     let peakSyncs = 0;
     const durableOrder: string[] = [];
-    const sharedSeen: string[] = [];
-    const syncPriorities: Array<number | undefined> = [];
-    const finalizeCalls: unknown[][] = [];
+    const startOrder: string[] = [];
 
-    const result = await runWorkerCatchup({ contextGraphId: 'cg-storm', includeSharedMemory: true }, async (method, args) => {
+    // Nobody completes, so nothing is ever proven and the walk must cover the
+    // whole peer set — the fallback path.
+    const unprovenDurable = () => ({ ...durableResult(), complete: false });
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-storm', includeSharedMemory: false }, async (method, args) => {
       switch (method) {
         case 'prepareCatchup':
           return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
@@ -148,56 +230,81 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
         }
         case 'syncDurable': {
           durableOrder.push(args[0] as string);
-          syncPriorities.push(args[2] as number | undefined);
+          startOrder.push(args[0] as string);
           inFlightSyncs += 1;
           peakSyncs = Math.max(peakSyncs, inFlightSyncs);
           await delay(4);
           inFlightSyncs -= 1;
-          return durableResult();
-        }
-        case 'syncSharedMemory': {
-          sharedSeen.push(args[0] as string);
-          syncPriorities.push(args[2] as number | undefined);
-          inFlightSyncs += 1;
-          peakSyncs = Math.max(peakSyncs, inFlightSyncs);
-          await delay(2);
-          inFlightSyncs -= 1;
-          return sharedResult();
+          return unprovenDurable();
         }
         case 'finalizeCatchup':
-          finalizeCalls.push(args);
           return null;
         default:
           throw new Error(`unexpected invoke: ${method}`);
       }
     });
 
-    // The storm guard: neither fan-out phase ever exceeds the cap…
+    // The storm guard: neither phase ever exceeds the cap…
     expect(peakSyncs).toBeLessThanOrEqual(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
     expect(peakProbes).toBeLessThanOrEqual(CATCHUP_MAX_CONCURRENT_PEER_SYNCS);
-    // …but the fan-out is still actually parallel, not accidentally serialised.
+    // …but later waves are still actually parallel, not accidentally serialised.
     expect(peakSyncs).toBeGreaterThan(1);
+    // The first wave is a single peer, so a proving authority costs one payload.
+    expect(catchupWaveSizes(peerIds.length, CATCHUP_MAX_CONCURRENT_PEER_SYNCS)[0]).toBe(1);
+    expect(startOrder[0]).toBe('peer-0');
 
-    // Coverage preserved: every peer synced exactly once, started in input
-    // order (the bounded mapper's shared cursor hands out work in order).
+    // Coverage preserved when nothing proves: every peer walked, in rank order.
     expect(durableOrder).toEqual(peerIds);
-    expect([...sharedSeen].sort()).toEqual([...peerIds].sort());
-    expect(syncPriorities).toEqual(
-      Array.from({ length: peerIds.length * 2 }, () => FOREGROUND_CATCHUP_SYNC_PRIORITY),
-    );
-
-    // Aggregation unchanged from the unbounded Promise.all shape.
-    expect(result.selectedPeers).toBe(peerIds.length);
-    expect(result.syncCapablePeers).toBe(peerIds.length);
     expect(result.peersTried).toBe(peerIds.length);
-    expect(result.peersResponded).toBe(peerIds.length);
-    expect(result.peersSucceeded).toBe(peerIds.length);
-    expect(result.deferredBackpressure).toBe(0);
+    expect(result.peersNotAttempted).toBe(0);
     expect(result.dataSynced).toBe(peerIds.length);
-    expect(result.sharedMemorySynced).toBe(peerIds.length);
-    expect(result.denied).toBe(false);
-    expect(result.diagnostics?.durable.failedPeers).toBe(0);
-    expect(finalizeCalls).toEqual([['cg-storm', peerIds.length, peerIds.length]]);
+  });
+
+  it('narrows fallback peers to the planes still in question', async () => {
+    // A Context Graph whose public durable data is empty can never prove its
+    // durable plane by verified data, so the walk must cover every peer to
+    // establish the whole-round empty verdict. Without per-plane narrowing that
+    // would drag a full re-pull of the ALREADY PROVEN shared-memory plane out of
+    // every remaining peer — the exact amplification this fix removes.
+    const peerIds = Array.from({ length: 8 }, (_, i) => `peer-${i}`);
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-swm-only', includeSharedMemory: true }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: 'peer-0', isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return {
+            ...durableResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            completedPhases: 2,
+            emptyResponses: 1,
+          };
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          return sharedResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // Shared memory is proven by the first peer and never pulled again…
+    expect(sharedCalls).toEqual(['peer-0']);
+    // …while the (cheap, empty) durable plane still walks everyone, because a
+    // clean empty answer only proves emptiness as a whole-round verdict.
+    expect(durableCalls).toEqual(peerIds);
+    expect(result.sharedMemorySynced).toBe(1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(1);
+    expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBe(peerIds.length);
   });
 
   it('keeps per-peer failure isolation and probe filtering under the bounded fan-out', async () => {
@@ -218,7 +325,10 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           durableCalls.push(args[0] as string);
           await delay(2);
           if (args[0] === 'peer-3') throw new Error('peer 3 exploded');
-          return durableResult();
+          // `complete: false` keeps every peer unproven, so the walk covers the
+          // whole set and the isolation claim below is actually exercised
+          // instead of being skipped by an early stop.
+          return { ...durableResult(), complete: false };
         }
         case 'syncSharedMemory':
           sharedCalls += 1;
@@ -235,12 +345,68 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(sharedCalls).toBe(0);
     expect(result.syncCapablePeers).toBe(11);
     expect(result.peersTried).toBe(11);
+    expect(result.peersNotAttempted).toBe(0);
     expect(result.peersResponded).toBe(10);
     expect(result.peersSucceeded).toBe(10);
     expect(result.dataSynced).toBe(10);
     expect(result.sharedMemorySynced).toBe(0);
     expect(result.diagnostics?.noProtocolPeers).toBe(1);
     expect(result.diagnostics?.durable.failedPeers).toBe(1);
+  });
+
+  it('does not let an unrelated peer\'s clean empty response stop the walk or prove readiness', async () => {
+    // The reported #2006 shape: a data-bearing peer fails part-way, an
+    // unrelated peer that has never heard of the graph answers empty. On the
+    // wire those two peers are indistinguishable, so the empty answer must not
+    // stop the walk and must not settle the job as `done`.
+    const peerIds = ['peer-empty', 'peer-data-failed', 'peer-quiet'];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-empty-mask', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable': {
+          durableCalls.push(args[0] as string);
+          if (args[0] === 'peer-data-failed') {
+            return {
+              ...durableResult(),
+              complete: false,
+              fetchedDataTriples: 5_000,
+              insertedTriples: 0,
+              insertedDataTriples: 0,
+              completedPhases: 0,
+              timedOutPhases: 1,
+              failedPhases: 1,
+            };
+          }
+          return {
+            ...durableResult(),
+            insertedTriples: 0,
+            fetchedDataTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            completedPhases: 2,
+            emptyResponses: 1,
+          };
+        }
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    // Emptiness is never a stop condition, so every peer is still contacted.
+    expect(durableCalls).toEqual(peerIds);
+    expect(result.cleanPlaneCompletions?.durable.verifiedDataPeers).toBe(0);
+    // The clean-empty peers are still recorded as clean empty completions…
+    expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBe(2);
+    // …but the round fetched data and failed, so readiness must not follow.
+    expect(result.diagnostics?.durable.fetchedDataTriples).toBe(5_000);
+    expect(result.diagnostics?.durable.failedPhases).toBe(1);
   });
 
   it('retries only SWM after durable progress and finalizes when local pressure clears', async () => {
@@ -332,7 +498,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(callOrder).toEqual(['durable-1', 'durable-2', 'shared']);
   });
 
-  it('returns deferred after a bounded durable retry budget and never starts dependent SWM', async () => {
+  it('returns deferred after the wall-clock durable retry budget and never starts dependent SWM', async () => {
     let durableCalls = 0;
     let sharedCalls = 0;
     const finalizeCalls: unknown[][] = [];
@@ -368,7 +534,12 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       },
     );
 
-    expect(durableCalls).toBe(CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS.length + 1);
+    // The retry loop is wired and bounded: at least one retry happened (the
+    // pre-#2006 policy also retried, but on a fixed 850 ms ladder), and the run
+    // settled at the wall-clock budget instead of spinning forever. The exact
+    // deadline arithmetic — that attempts are governed by the clock, not by a
+    // fixed attempt count — is pinned in packages/agent/test/catchup-policy.test.ts.
+    expect(durableCalls).toBeGreaterThanOrEqual(2);
     expect(sharedCalls).toBe(0);
     expect(result.deferredBackpressure).toBe(1);
     expect(result.peersResponded).toBe(0);
@@ -425,10 +596,14 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       async (method, args) => {
         switch (method) {
           case 'prepareCatchup':
+            // The denying/timing-out peer is ranked FIRST so the walk reaches
+            // the clean peer in a later wave: the claim under test is that a
+            // clean per-peer completion survives another peer's denial in the
+            // aggregate, which an early stop on wave 1 would never exercise.
             return {
               preferredPeerId: undefined,
               isPrivateContextGraph: true,
-              peerIds: ['peer-clean', 'peer-partial'],
+              peerIds: ['peer-partial', 'peer-clean'],
               connectedPeers: 2,
             };
           case 'waitForSyncProtocol':
@@ -585,6 +760,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     });
   });
 
+  // A clean empty round is never a stop condition — it cannot distinguish an
+  // empty host from a peer that never heard of the graph — so every peer is
+  // still walked and emptiness stays a whole-round verdict.
   it('records each distinct responder that cleanly completes both planes empty', async () => {
     const peerIds = ['peer-empty-1', 'peer-empty-2', 'peer-empty-3', 'peer-empty-4'];
     const result = await runWorkerCatchup(
@@ -631,6 +809,8 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result).toMatchObject({
       peersResponded: peerIds.length,
       peersSucceeded: peerIds.length,
+      peersTried: peerIds.length,
+      peersNotAttempted: 0,
       dataSynced: 0,
       sharedMemorySynced: 0,
     });

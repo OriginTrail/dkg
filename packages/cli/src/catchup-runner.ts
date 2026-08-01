@@ -37,6 +37,13 @@ export interface CatchupJobResult {
    * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
+  /**
+   * Sync-capable peers this run deliberately never contacted because an earlier
+   * wave already proved every requested plane. These are neither failures nor
+   * successes; they exist so status mapping and operators can tell an
+   * early-stopped run from a run where peers were unreachable.
+   */
+  peersNotAttempted?: number;
   /** Context Graph phases deferred by this node's local sync scheduler. */
   deferredBackpressure: number;
   dataSynced: number;
@@ -504,8 +511,94 @@ export function catchupPlaneCompletedWithoutFailure(
   return classifyDurableProgress(progress, { complete }).completedWithoutFailure;
 }
 
+/** Per-plane clean-completion evidence accumulated across the peers this run contacted. */
+export interface CatchupPlaneCompletionEvidence {
+  verifiedDataPeers: number;
+  /** Peers that cleanly verified one or more V2 KAs with no public triples. */
+  verifiedPrivateOnlyPeers?: number;
+  emptyPeers: number;
+}
+
+/** The aggregate per-plane counters a whole-round verdict is allowed to consult. */
+export interface CatchupPlaneRoundDiagnostics {
+  fetchedMetaTriples?: number;
+  fetchedDataTriples?: number;
+  emptyResponses?: number;
+  failedPeers?: number;
+  failedPhases?: number;
+  timedOutPhases?: number;
+  deniedPhases?: number;
+  deferredBackpressure?: number;
+}
+
+/**
+ * Positive proof: some peer cleanly completed this plane while carrying
+ * cryptographically verified content. This is the only evidence strong enough
+ * to stop contacting further peers mid-run, because it is the only evidence a
+ * single peer can produce on its own.
+ */
+export function catchupPlaneProvenByData(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+): boolean {
+  return (completion?.verifiedDataPeers ?? 0) > 0
+    || (completion?.verifiedPrivateOnlyPeers ?? 0) > 0;
+}
+
+/**
+ * Whole-round proof that a public plane really is empty.
+ *
+ * A peer that has never heard of a Context Graph and a peer that hosts an empty
+ * one are byte-identical on the wire: an unknown CG has no access policy, so the
+ * responder authorizes the request and its CG-scoped queries simply return zero
+ * rows. The requester only reports `emptyResponses` when BOTH phase payloads are
+ * empty (`sync-verify-worker-impl.ts`), so an empty response can never carry
+ * hosting evidence — there is no per-peer signal that could distinguish the two.
+ *
+ * Emptiness is therefore only provable as a verdict over the whole round:
+ * at least one peer completed cleanly empty, nobody delivered any content, and
+ * nothing failed, timed out, was denied, or was deferred. One data-bearing peer
+ * that fails is enough to void it — that exact shape (122,705 triples fetched,
+ * five failed phases, five unrelated peers answering empty) is what settled
+ * issue #2006's run as `done` with 1 KA out of 40.
+ */
+export function catchupPlaneProvenByUnanimousEmpty(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+  diagnostics: CatchupPlaneRoundDiagnostics | undefined,
+  options: { isPrivate: boolean },
+): boolean {
+  // Empty or metadata-only responses have never been able to prove that a
+  // private graph is fully synchronized; that stays unchanged.
+  if (options.isPrivate) return false;
+  if (catchupPlaneProvenByData(completion)) return false;
+  const cleanEmptyObserved = (completion?.emptyPeers ?? 0) > 0
+    || (diagnostics?.emptyResponses ?? 0) > 0;
+  if (!cleanEmptyObserved) return false;
+  if ((diagnostics?.fetchedDataTriples ?? 0) > 0) return false;
+  if ((diagnostics?.fetchedMetaTriples ?? 0) > 0) return false;
+  return (diagnostics?.failedPeers ?? 0) === 0
+    && (diagnostics?.failedPhases ?? 0) === 0
+    && (diagnostics?.timedOutPhases ?? 0) === 0
+    && (diagnostics?.deniedPhases ?? 0) === 0
+    && (diagnostics?.deferredBackpressure ?? 0) === 0;
+}
+
+/**
+ * Canonical readiness proof for one catch-up plane. The peer walk stops early
+ * only on {@link catchupPlaneProvenByData}, so whenever this function falls
+ * through to the unanimous-empty branch the full peer set really was walked and
+ * the "nobody saw anything" denominator is meaningful.
+ */
+export function catchupPlaneReady(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+  diagnostics: CatchupPlaneRoundDiagnostics | undefined,
+  options: { isPrivate: boolean },
+): boolean {
+  return catchupPlaneProvenByData(completion)
+    || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
+}
+
 export function catchupPeerSucceeded(
-  durable: CatchupPhaseProgress,
+  durable: CatchupPhaseProgress | null | undefined,
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
   durableComplete?: boolean,
@@ -533,10 +626,13 @@ export function catchupPeerSucceeded(
 }
 
 export function catchupPeerResponded(
-  durable: CatchupPhaseProgress,
+  durable: CatchupPhaseProgress | null | undefined,
   shared: CatchupPhaseProgress | null | undefined,
 ): boolean {
-  const phaseResponded = (phase: CatchupPhaseProgress): boolean => {
+  // A plane the walk deliberately skipped (already proven by an earlier peer)
+  // is absent, not silent: it must not be read as this peer having answered.
+  const phaseResponded = (phase: CatchupPhaseProgress | null | undefined): boolean => {
+    if (!phase) return false;
     const progress = classifyDurableProgress(phase);
     if (progress.transportFailed) return false;
     if (!progress.deferredByBackpressure) return true;
@@ -546,7 +642,7 @@ export function catchupPeerResponded(
       || (phase.insertedMetaTriples ?? 0) > 0
       || (phase.insertedDataTriples ?? phase.insertedTriples ?? 0) > 0;
   };
-  return phaseResponded(durable) || Boolean(shared && phaseResponded(shared));
+  return phaseResponded(durable) || phaseResponded(shared);
 }
 
 export interface CatchupRunner {
@@ -616,9 +712,23 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
     });
     this.worker.on('error', (error) => {
-      for (const [, pending] of this.pendingRuns) pending.reject(error);
-      this.pendingRuns.clear();
+      this.rejectPendingRuns(error);
     });
+    // `close()` terminates the worker, which emits 'exit' — never 'error'.
+    // Without this handler every in-flight `run()` promise stays pending
+    // forever, so the daemon's fire-and-forget subscribe job is pinned at
+    // `running` with no `finishedAt` for the rest of the process's life.
+    this.worker.on('exit', (code) => {
+      this.rejectPendingRuns(
+        new Error(`Catch-up worker exited (code ${code}) before the run completed`),
+      );
+    });
+  }
+
+  private rejectPendingRuns(error: Error): void {
+    const pending = [...this.pendingRuns.values()];
+    this.pendingRuns.clear();
+    for (const run of pending) run.reject(error);
   }
 
   run(request: CatchupRunRequest): Promise<CatchupJobResult> {
@@ -681,22 +791,26 @@ class WorkerCatchupRunner implements CatchupRunner {
         return agent.waitForSyncProtocol({ toString: () => peerId });
       }
       case 'syncDurable': {
-        const [peerId, contextGraphId, priority] = args as [string, string, number | undefined];
+        const [peerId, contextGraphId, priority, source] = args as [
+          string, string, number | undefined, string | undefined,
+        ];
         return agent.syncFromPeerDetailed(
           peerId,
           [contextGraphId],
           undefined,
           undefined,
           undefined,
-          priority === undefined ? undefined : { priority },
+          { ...(priority === undefined ? {} : { priority }), source },
         );
       }
       case 'syncSharedMemory': {
-        const [peerId, contextGraphId, priority] = args as [string, string, number | undefined];
+        const [peerId, contextGraphId, priority, source] = args as [
+          string, string, number | undefined, string | undefined,
+        ];
         return agent.syncSharedMemoryFromPeerDetailed(
           peerId,
           [contextGraphId],
-          priority === undefined ? undefined : { priority },
+          { ...(priority === undefined ? {} : { priority }), source },
         );
       }
       case 'finalizeCatchup': {

@@ -1,14 +1,18 @@
 import { parentPort } from 'node:worker_threads';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  CATCHUP_STOP_ON_PROOF,
+  catchupWaveSizes,
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
+  runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
 } from '@origintrail-official/dkg-agent';
 import {
   catchupPeerResponded,
   catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByData,
   type CatchupJobResult,
   type CatchupRunRequest,
 } from './catchup-runner.js';
@@ -49,6 +53,33 @@ parentPort!.on('message', async (message: any) => {
     else pending.resolve(message.result);
   }
 });
+
+/** A per-peer sync round; `durable` is absent when the walk skipped that plane. */
+interface PeerRound {
+  durable: any | null;
+  shared: any | null;
+}
+
+function emptyShared() {
+  return {
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    droppedDataTriples: 0,
+    failedPeers: 1,
+    failedPhases: 0,
+    deniedPhases: 0,
+    deferredBackpressure: 0,
+  };
+}
 
 async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult> {
   const prepared = await invoke<{
@@ -114,20 +145,11 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     },
   };
 
-  // Run per-peer syncs in parallel, but BOUNDED. The sequential version here
-  // used to walk the peer set one at a time, which meant a curated-CG denial
-  // from a 10-peer pool took 10 × (syncDurable timeout + syncSharedMemory
-  // timeout) to report back — often minutes. Codex N18 then parallelised this
-  // Worker path (the daemon `/api/context-graph/subscribe` route) with an
-  // unbounded `Promise.all` — which made it the 2026-07-07 mainnet sync-storm
-  // engine: one subscribe on a high-degree node fired a full durable+SWM pull
-  // at EVERY sync-capable peer at once, saturating the triple store. Mirror
-  // the agent-side `syncContextGraphFromConnectedPeers` fix: run the fan-out
-  // through `mapWithConcurrency` under the shared cap
-  // (CATCHUP_MAX_CONCURRENT_PEER_SYNCS, env DKG_CATCHUP_MAX_CONCURRENT_PEERS)
-  // so both runners have the same latency AND the same load ceiling. The
-  // protocol probe below is lighter but fans out over the full post-prime-dial
-  // peer list, so it gets the same bound.
+  // Probe every connected peer for PROTOCOL_SYNC up front, bounded by the shared
+  // catch-up cap. This stays eager on purpose: `syncCapablePeers` and
+  // `noProtocolPeers` are read by daemon status mapping as counts over the whole
+  // connected set ("no sync-capable peers found — the curator may be offline"),
+  // and the probe is a peerStore lookup, not a transfer.
   const checked = await mapWithConcurrency(
     prepared.peerIds,
     CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
@@ -145,96 +167,88 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     syncCapable.push(peerId);
   }
   syncCapablePeers = syncCapable.length;
-  peersTried = syncCapable.length;
 
-  // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we can
-  // from the other peers instead of failing the entire subscribe/catch-up immediately.
-  const emptyShared = () => ({
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers: 1,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-  });
-  // Bounded fan-out (sync-storm mitigation C-1): at most
-  // CATCHUP_MAX_CONCURRENT_PEER_SYNCS full per-peer sync rounds in flight.
-  // Every sync-capable peer is still synced and the result array is unchanged
-  // (input order, one entry per peer, per-peer failures isolated by the
-  // `.catch`es inside the callback) — the load is just staggered into waves.
-  const perPeerResults = await mapWithConcurrency(
-    syncCapable,
-    CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
-    async (peerId) => {
-      return runCatchupPlanesWithPolicy({
-        mode: 'foreground',
-        includeSharedMemory: request.includeSharedMemory,
-        syncDurable: async ({ priority }) => {
-          const rawDurable = await invoke<any>(
-            'syncDurable',
-            peerId,
-            request.contextGraphId,
-            priority,
-          ).catch(() => createFailedPeerDurableSyncResult());
-          return {
-            ...rawDurable,
-            verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
-          };
-        },
-        syncSharedMemory: ({ priority }) => invoke<any>(
-          'syncSharedMemory',
-          peerId,
-          request.contextGraphId,
-          priority,
-        ).catch(() => emptyShared()),
-      });
-    },
-  );
-  for (const { durable, shared } of perPeerResults) {
+  const durableProven = (): boolean => catchupPlaneProvenByData(cleanPlaneCompletions.durable);
+  const sharedMemoryProven = (): boolean =>
+    catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory);
+
+  // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
+  // can from the other peers instead of failing the entire subscribe/catch-up.
+  const syncPeer = async (peerId: string): Promise<PeerRound> => {
+    const syncDurable = ({ priority, source }: { priority?: number; source?: string }) =>
+      invoke<any>('syncDurable', peerId, request.contextGraphId, priority, source)
+        .catch(() => createFailedPeerDurableSyncResult())
+        .then((rawDurable: any) => ({
+          ...rawDurable,
+          verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
+        }));
+    const syncSharedMemory = ({ priority, source }: { priority?: number; source?: string }) =>
+      invoke<any>('syncSharedMemory', peerId, request.contextGraphId, priority, source)
+        .catch(() => emptyShared());
+
+    // Narrow each fallback peer to the planes still in question. The walk only
+    // continues while some requested plane is unproven, and one plane is often
+    // proven long before the other — a Context Graph whose public VM data is
+    // empty can never prove its durable plane by data, so without this a single
+    // unproven plane would drag a full re-pull of the ALREADY PROVEN plane out
+    // of every remaining peer, which is the amplification this fix exists to
+    // remove.
+    // The kill-switch restores the previous fan-out faithfully: every peer, both
+    // requested planes, no early stop.
+    const needDurable = !CATCHUP_STOP_ON_PROOF || !durableProven();
+    const needSharedMemory = request.includeSharedMemory
+      && (!CATCHUP_STOP_ON_PROOF || !sharedMemoryProven());
+    if (!needDurable) {
+      const shared = needSharedMemory
+        ? await runCatchupPlaneWithPolicy('foreground', syncSharedMemory)
+        : null;
+      return { durable: null, shared };
+    }
+    return runCatchupPlanesWithPolicy({
+      mode: 'foreground',
+      includeSharedMemory: needSharedMemory,
+      syncDurable,
+      syncSharedMemory,
+    });
+  };
+
+  const accumulate = ({ durable, shared }: PeerRound): void => {
     let peerDenied = false;
-    dataSynced += durable.insertedDataTriples ?? 0;
-    diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
-    diagnostics.durable.fetchedDataTriples += durable.fetchedDataTriples;
-    diagnostics.durable.insertedMetaTriples += durable.insertedMetaTriples;
-    diagnostics.durable.insertedDataTriples += durable.insertedDataTriples;
-    diagnostics.durable.bytesReceived += durable.bytesReceived;
-    diagnostics.durable.resumedPhases += durable.resumedPhases;
-    diagnostics.durable.timedOutPhases += durable.timedOutPhases ?? 0;
-    diagnostics.durable.completedPhases += durable.completedPhases ?? 0;
-    diagnostics.durable.checkpointAdvances += durable.checkpointAdvances ?? 0;
-    diagnostics.durable.emptyResponses += durable.emptyResponses;
-    diagnostics.durable.metaOnlyResponses += durable.metaOnlyResponses;
-    diagnostics.durable.verifiedPrivateOnlyResponses +=
-      durable.verifiedPrivateOnlyResponses;
-    diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
-    diagnostics.durable.rejectedKcs += durable.rejectedKcs;
-    diagnostics.durable.failedPeers += durable.failedPeers;
-    diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
-    diagnostics.durable.deferredBackpressure += durable.deferredBackpressure ?? 0;
-    deferredBackpressure += durable.deferredBackpressure ?? 0;
-    diagnostics.durable.deniedPhases =
-      (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
-    peerDenied = peerDenied || durable.deniedPhases > 0;
+    if (durable) {
+      dataSynced += durable.insertedDataTriples ?? 0;
+      diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
+      diagnostics.durable.fetchedDataTriples += durable.fetchedDataTriples;
+      diagnostics.durable.insertedMetaTriples += durable.insertedMetaTriples;
+      diagnostics.durable.insertedDataTriples += durable.insertedDataTriples;
+      diagnostics.durable.bytesReceived += durable.bytesReceived;
+      diagnostics.durable.resumedPhases += durable.resumedPhases;
+      diagnostics.durable.timedOutPhases += durable.timedOutPhases ?? 0;
+      diagnostics.durable.completedPhases += durable.completedPhases ?? 0;
+      diagnostics.durable.checkpointAdvances += durable.checkpointAdvances ?? 0;
+      diagnostics.durable.emptyResponses += durable.emptyResponses;
+      diagnostics.durable.metaOnlyResponses += durable.metaOnlyResponses;
+      diagnostics.durable.verifiedPrivateOnlyResponses +=
+        durable.verifiedPrivateOnlyResponses;
+      diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
+      diagnostics.durable.rejectedKcs += durable.rejectedKcs;
+      diagnostics.durable.failedPeers += durable.failedPeers;
+      diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
+      diagnostics.durable.deferredBackpressure += durable.deferredBackpressure ?? 0;
+      deferredBackpressure += durable.deferredBackpressure ?? 0;
+      diagnostics.durable.deniedPhases =
+        (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
+      peerDenied = peerDenied || durable.deniedPhases > 0;
 
-    if (catchupPlaneCompletedWithoutFailure(durable, durable.complete)) {
-      if ((durable.insertedDataTriples ?? 0) > 0) {
-        cleanPlaneCompletions.durable.verifiedDataPeers += 1;
-      }
-      if (durable.verifiedPrivateOnlyResponses > 0) {
-        cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers += 1;
-      }
-      if ((durable.emptyResponses ?? 0) > 0) {
-        cleanPlaneCompletions.durable.emptyPeers += 1;
+      if (catchupPlaneCompletedWithoutFailure(durable, durable.complete)) {
+        if ((durable.insertedDataTriples ?? 0) > 0) {
+          cleanPlaneCompletions.durable.verifiedDataPeers += 1;
+        }
+        if (durable.verifiedPrivateOnlyResponses > 0) {
+          cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers += 1;
+        }
+        if ((durable.emptyResponses ?? 0) > 0) {
+          cleanPlaneCompletions.durable.emptyPeers += 1;
+        }
       }
     }
 
@@ -282,9 +296,54 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // completed with no timeout. Mirrors the inline
     // `syncContextGraphFromConnectedPeers` path so both runners report the
     // same shape.
-    if (catchupPeerSucceeded(durable, shared, peerDenied, durable.complete)) {
+    if (catchupPeerSucceeded(durable, shared, peerDenied, durable?.complete)) {
       peersSucceeded += 1;
     }
+  };
+
+  // Progressive peer walk (issue #2006). The peer list arrives ranked
+  // authority-first (preferred/curator, then known cores, then the rest), but
+  // that ordering used never to become *selection*: every sync-capable peer got
+  // a full durable+SWM pull, so a 14-peer testnet downloaded the same graph 5-6
+  // times (147,246 fetched triples for a 24,541-triple graph, ~278MB) and the
+  // node-wide sync-global queue (2 inflight / 4 queued) saturated against
+  // itself.
+  //
+  // Instead, walk escalating waves (1, 2, 4, ...) and stop as soon as every
+  // requested plane is proven by real verified data. Wave 1 is the curator when
+  // one is resolvable, so the happy path transfers exactly one payload.
+  //
+  // The stop condition is deliberately POSITIVE-only: an empty round proves
+  // nothing on its own (an unrelated peer and an empty host are byte-identical
+  // on the wire), so emptiness stays a whole-round verdict evaluated by
+  // `catchupPlaneProvenByUnanimousEmpty` after every peer has been walked.
+  //
+  // Tradeoff, stated deliberately: a peer's `complete` flag proves it served its
+  // own manifest, not that the manifest was network-complete. Foreground
+  // catch-up therefore optimises for one fast authoritative payload; breadth and
+  // eventual convergence remain the background reconcile lane's job.
+  // DKG_CATCHUP_STOP_ON_PROOF=0 restores the previous full fan-out.
+  const waveSizes = CATCHUP_STOP_ON_PROOF
+    ? catchupWaveSizes(syncCapable.length, CATCHUP_MAX_CONCURRENT_PEER_SYNCS)
+    : [syncCapable.length];
+  let cursor = 0;
+  for (const waveSize of waveSizes) {
+    const wave = syncCapable.slice(cursor, cursor + waveSize);
+    if (wave.length === 0) break;
+    cursor += wave.length;
+    peersTried += wave.length;
+    // Never cancel a wave member mid-stream: an aborted resumed session is
+    // indistinguishable from a responder supersede. Let the wave finish, then
+    // stop before dispatching the next one.
+    const rounds = await mapWithConcurrency(
+      wave,
+      Math.min(CATCHUP_MAX_CONCURRENT_PEER_SYNCS, wave.length),
+      syncPeer,
+    );
+    for (const round of rounds) accumulate(round);
+    const allRequestedPlanesProven = durableProven()
+      && (!request.includeSharedMemory || sharedMemoryProven());
+    if (CATCHUP_STOP_ON_PROOF && allRequestedPlanesProven) break;
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;
@@ -300,6 +359,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried,
     peersResponded,
     peersSucceeded,
+    peersNotAttempted: syncCapable.length - peersTried,
     deferredBackpressure,
     dataSynced,
     sharedMemorySynced,

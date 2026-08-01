@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SYNC_ADMISSION_SOURCES,
   contextGraphPriority,
   countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
   normalizeSyncContextGraphPriorities,
   orderContextGraphIdsByPriority,
   syncPriorityClass,
@@ -54,5 +56,35 @@ describe('sync responder snapshot config validation', () => {
   ])('reports the exact invalid leaf path %s', (path, config) => {
     expect(() => validateSyncResponderSnapshotLimitsConfig(config))
       .toThrow(`syncResponderSnapshotLimits.${path}`);
+  });
+});
+
+describe('normalizeSyncAdmissionSource', () => {
+  it('passes through every declared admission origin', () => {
+    for (const source of SYNC_ADMISSION_SOURCES) {
+      expect(normalizeSyncAdmissionSource(source)).toBe(source);
+    }
+  });
+
+  it('clamps unknown, absent, and identifier-bearing origins to `unspecified`', () => {
+    // These values become metric and log dimensions on the node-wide
+    // `sync-global` scheduler, so the label space is a contract: an unbounded
+    // or identifier-bearing origin would re-open the correlation-identifier
+    // leak that collapsing the operation label was added to close, and would
+    // multiply the diagnostic cardinality.
+    expect(normalizeSyncAdmissionSource(undefined)).toBe('unspecified');
+    expect(normalizeSyncAdmissionSource('')).toBe('unspecified');
+    expect(normalizeSyncAdmissionSource('Catchup-Foreground')).toBe('unspecified');
+    expect(normalizeSyncAdmissionSource('durable:urn:cg:private:abc')).toBe('unspecified');
+    expect(normalizeSyncAdmissionSource('__proto__')).toBe('unspecified');
+    expect(normalizeSyncAdmissionSource('toString')).toBe('unspecified');
+  });
+
+  it('keeps the declared origin set small and free of punctuation', () => {
+    expect(new Set(SYNC_ADMISSION_SOURCES).size).toBe(SYNC_ADMISSION_SOURCES.length);
+    expect(SYNC_ADMISSION_SOURCES.length).toBeLessThanOrEqual(12);
+    for (const source of SYNC_ADMISSION_SOURCES) {
+      expect(source).toMatch(/^[a-z][a-z-]*$/);
+    }
   });
 });

@@ -1,5 +1,10 @@
 import { getMetrics, type OperationContext } from '@origintrail-official/dkg-core';
-import type { SyncPriorityClass, SyncSchedulerLane } from './policy.js';
+import {
+  normalizeSyncAdmissionSource,
+  type SyncAdmissionSource,
+  type SyncPriorityClass,
+  type SyncSchedulerLane,
+} from './policy.js';
 import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
@@ -31,6 +36,7 @@ interface GlobalQueuePayload {
   limit: number;
   label: string;
   contextGraphId?: string;
+  source: SyncAdmissionSource;
 }
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
@@ -48,6 +54,19 @@ function syncOperationClass(label: string): string {
     default:
       return 'sync';
   }
+}
+
+/**
+ * `<work class>:<trigger>` — the operation dimension of node-wide pressure
+ * diagnostics. The work class alone duplicates `lane`; pairing it with the
+ * admission source is what lets an operator attribute a saturated `sync-global`
+ * queue to explicit catch-up versus sync-on-connect versus reconcile, and read
+ * per-trigger queue/active ages straight off the snapshot. Both halves are
+ * closed sets (5 × 7), so the label space stays bounded and free of Context
+ * Graph and peer identifiers.
+ */
+function syncAdmissionOperation(payload: GlobalQueuePayload): string {
+  return `${syncOperationClass(payload.label)}:${normalizeSyncAdmissionSource(payload.source)}`;
 }
 
 let inflight = 0;
@@ -68,8 +87,9 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   observability: {
     scheduler: 'sync-global',
     // Admission labels also carry CG/peer correlation identifiers. Collapse
-    // them to a fixed operation class before node-wide diagnostics/logging.
-    operation: (entry) => syncOperationClass(entry.payload.label),
+    // them to a fixed operation class, paired with the bounded admission
+    // source, before node-wide diagnostics/logging.
+    operation: (entry) => syncAdmissionOperation(entry.payload),
     inflightLimit: (entry) => entry.payload.limit,
     thresholds: {
       degradedQueueAgeMs: DEFAULT_SYNC_PRIORITY_AGING_MS / 2,
@@ -113,6 +133,7 @@ function acquire(
     lane: SyncSchedulerLane;
     priority: number;
     priorityClass: SyncPriorityClass;
+    source: SyncAdmissionSource;
     signal?: AbortSignal;
     agingThresholdMs: number;
     now: () => number;
@@ -129,6 +150,7 @@ function acquire(
       limit,
       label: options.label,
       contextGraphId: options.contextGraphId,
+      source: options.source,
     },
     ownerKey: 'global',
     lane: options.lane,
@@ -251,6 +273,8 @@ export async function withGlobalSyncBackpressure<T>(
     lane?: SyncSchedulerLane;
     priority?: number;
     priorityClass?: SyncPriorityClass;
+    /** Which trigger enqueued this admission; clamped to the closed set. */
+    source?: string;
     signal?: AbortSignal;
     /** Deterministic scheduler injection; not operator configuration. */
     agingThresholdMs?: number;
@@ -281,6 +305,7 @@ export async function withGlobalSyncBackpressure<T>(
       lane,
       priority,
       priorityClass,
+      source: normalizeSyncAdmissionSource(options.source),
       signal: options.signal,
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
       now: options.now ?? Date.now,

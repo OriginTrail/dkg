@@ -67,6 +67,7 @@ export default defineConfig({
           'test/random-sampling-status.test.ts',
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
+          'test/catchup-runner-worker-lifecycle.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',

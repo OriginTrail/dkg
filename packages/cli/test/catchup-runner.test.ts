@@ -3,6 +3,9 @@ import {
   catchupPeerResponded,
   catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByData,
+  catchupPlaneProvenByUnanimousEmpty,
+  catchupPlaneReady,
   classifyDurableCatchupRequest,
   runDurableCatchupLeg,
 } from '../src/catchup-runner.js';
@@ -633,5 +636,102 @@ describe('route-level durable catchup orchestration', () => {
       responseStatus: 503,
       errorBody: { errorCode: 'DURABLE_CATCHUP_ALL_PEERS_FAILED' },
     });
+  });
+});
+
+// Issue #2006. On the wire, a peer that hosts an empty Context Graph and a peer
+// that has never heard of it are byte-identical: an unknown CG has no access
+// policy, so the responder authorizes the request and its CG-scoped queries
+// simply return zero rows. The requester emits `emptyResponses` only when BOTH
+// phase payloads are empty, so an empty response can never carry hosting
+// evidence. Emptiness is therefore only provable as a whole-round verdict.
+describe('catch-up plane proof predicates', () => {
+  const noEvidence = { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 };
+  const cleanEmptyRound = {
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    emptyResponses: 2,
+    failedPeers: 0,
+    failedPhases: 0,
+    timedOutPhases: 0,
+    deniedPhases: 0,
+    deferredBackpressure: 0,
+  };
+  const emptyPeers = { ...noEvidence, emptyPeers: 2 };
+
+  it('treats verified data and verified private-only completions as positive proof', () => {
+    expect(catchupPlaneProvenByData({ ...noEvidence, verifiedDataPeers: 1 })).toBe(true);
+    expect(catchupPlaneProvenByData({ ...noEvidence, verifiedPrivateOnlyPeers: 1 })).toBe(true);
+    expect(catchupPlaneProvenByData(noEvidence)).toBe(false);
+    expect(catchupPlaneProvenByData(undefined)).toBe(false);
+    // A clean empty response is NOT positive proof — it can never stop the walk.
+    expect(catchupPlaneProvenByData(emptyPeers)).toBe(false);
+  });
+
+  it('accepts a unanimously clean, content-free public round as proof of emptiness', () => {
+    expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, cleanEmptyRound, { isPrivate: false }))
+      .toBe(true);
+    expect(catchupPlaneReady(emptyPeers, cleanEmptyRound, { isPrivate: false })).toBe(true);
+  });
+
+  it('never proves a private plane from an empty round', () => {
+    expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, cleanEmptyRound, { isPrivate: true }))
+      .toBe(false);
+    expect(catchupPlaneReady(emptyPeers, cleanEmptyRound, { isPrivate: true })).toBe(false);
+  });
+
+  it.each([
+    ['a data-bearing peer that failed', { fetchedDataTriples: 122_705, failedPhases: 5 }],
+    ['fetched data with no verified completion', { fetchedDataTriples: 5_000 }],
+    ['a peer that returned metadata', { fetchedMetaTriples: 12 }],
+    ['a transport failure', { failedPeers: 1 }],
+    ['a failed phase', { failedPhases: 1 }],
+    ['a timed-out phase', { timedOutPhases: 1 }],
+    ['a denial', { deniedPhases: 1 }],
+    ['a local admission deferral', { deferredBackpressure: 1 }],
+  ])('voids the empty proof when the round contains %s', (_label, overrides) => {
+    const diagnostics = { ...cleanEmptyRound, ...overrides };
+    expect(catchupPlaneProvenByUnanimousEmpty(emptyPeers, diagnostics, { isPrivate: false }))
+      .toBe(false);
+    expect(catchupPlaneReady(emptyPeers, diagnostics, { isPrivate: false })).toBe(false);
+  });
+
+  it('still reports ready when a peer delivered verified data despite other failures', () => {
+    const diagnostics = { ...cleanEmptyRound, fetchedDataTriples: 24_541, failedPhases: 1 };
+    const completion = { ...emptyPeers, verifiedDataPeers: 1 };
+    expect(catchupPlaneReady(completion, diagnostics, { isPrivate: false })).toBe(true);
+    expect(catchupPlaneReady(completion, diagnostics, { isPrivate: true })).toBe(true);
+  });
+
+  it('requires at least one clean empty completion before an empty verdict', () => {
+    expect(catchupPlaneProvenByUnanimousEmpty(
+      noEvidence,
+      { ...cleanEmptyRound, emptyResponses: 0 },
+      { isPrivate: false },
+    )).toBe(false);
+  });
+});
+
+describe('catch-up peer accounting with a skipped plane', () => {
+  const cleanShared = {
+    insertedTriples: 3,
+    insertedDataTriples: 3,
+    completedPhases: 1,
+    bytesReceived: 30,
+  };
+
+  it('does not read a skipped durable plane as a peer response', () => {
+    // The walk omits the durable plane for peers contacted purely as a
+    // shared-memory fallback. An absent plane is not a silent one: it must not
+    // manufacture a response for a peer whose only requested plane failed.
+    expect(catchupPeerResponded(null, { failedPeers: 1 })).toBe(false);
+    expect(catchupPeerResponded(null, undefined)).toBe(false);
+    expect(catchupPeerResponded(null, cleanShared)).toBe(true);
+  });
+
+  it('judges a skipped durable plane purely on the shared-memory outcome', () => {
+    expect(catchupPeerSucceeded(null, cleanShared, false)).toBe(true);
+    expect(catchupPeerSucceeded(null, { ...cleanShared, timedOutPhases: 1 }, false)).toBe(false);
+    expect(catchupPeerSucceeded(null, { failedPeers: 1 }, false)).toBe(false);
   });
 });

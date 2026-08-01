@@ -127,12 +127,15 @@ export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
 export {
+  SYNC_ADMISSION_SOURCES,
   contextGraphPriority,
   countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
   normalizeSyncContextGraphPriorities,
   orderContextGraphIdsByPriority,
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
+  type SyncAdmissionSource,
   type SyncContextGraphPriorityConfig,
   type SyncPriorityClass,
   type SyncResponderSnapshotLimitsConfig,
@@ -304,14 +307,27 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
-export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
-  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  CATCHUP_STOP_ON_PROOF,
+  catchupWaveSizes,
+} from './sync/catchup-concurrency.js';
+export {
+  CATCHUP_BACKPRESSURE_BASE_DELAY_MS,
+  CATCHUP_BACKPRESSURE_JITTER_RATIO,
+  CATCHUP_BACKPRESSURE_MAX_DELAY_MS,
+  CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
   catchupPriorityForMode,
+  catchupSourceForMode,
+  nextCatchupBackpressureDelayMs,
+  runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
+  type CatchupAdmissionSource,
+  type CatchupBackpressureRetryPolicy,
   type CatchupMode,
   type CatchupPlaneContext,
+  type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlanePolicyResult,
   type CatchupPlaneResult,

@@ -6,6 +6,7 @@ import type {
 } from '@origintrail-official/dkg-node-ui';
 import {
   catchupPlaneCompletedWithoutFailure,
+  catchupPlaneReady,
   type CatchupJobResult,
 } from './catchup-runner.js';
 
@@ -180,26 +181,28 @@ function catchupPlaneReadyThisRun(input: {
   plane: 'durable' | 'sharedMemory';
   isPrivate: boolean;
 }): boolean {
+  const diagnostics = input.result.diagnostics?.[input.plane];
   const completion = input.result.cleanPlaneCompletions?.[input.plane];
   if (completion) {
-    const verifiedPrivateOnly = input.plane === 'durable' &&
-      (input.result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers ?? 0) > 0;
-    return completion.verifiedDataPeers > 0 ||
-      verifiedPrivateOnly ||
-      (!input.isPrivate && completion.emptyPeers > 0);
+    return catchupPlaneReady(completion, diagnostics, { isPrivate: input.isPrivate });
   }
 
   // Backward compatibility for callers that construct a legacy result (for
   // example, an older in-process runner during a rolling upgrade). New worker
   // results always carry cleanPlaneCompletions, so aggregate failures are not
-  // used as readiness evidence on the production path.
-  const diagnostics = input.result.diagnostics?.[input.plane];
+  // used as readiness evidence on the production path. The same fail-closed
+  // rule applies: aggregate counters can show that SOMEBODY answered empty, but
+  // only a content-free, failure-free round proves the plane really is empty.
   const dataProgress = input.plane === 'durable'
     ? input.result.dataSynced > 0 ||
       (input.result.diagnostics?.durable.verifiedPrivateOnlyResponses ?? 0) > 0
     : input.result.sharedMemorySynced > 0;
-  return catchupPlaneCompletedWithoutFailure(diagnostics) &&
-    (dataProgress || (!input.isPrivate && (diagnostics?.emptyResponses ?? 0) > 0));
+  if (catchupPlaneCompletedWithoutFailure(diagnostics) && dataProgress) return true;
+  return catchupPlaneReady(
+    { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
+    diagnostics,
+    { isPrivate: input.isPrivate },
+  );
 }
 
 export interface ContextGraphCatchupReadinessClassification {

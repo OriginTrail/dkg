@@ -186,20 +186,32 @@ describe('context graph catch-up readiness classification', () => {
     expect(classification.eventPayload).toBeUndefined();
   });
 
-  it('accepts a public clean-empty peer when another peer denies', () => {
+  // Emptiness is only provable as a whole-round verdict: an empty response is
+  // byte-identical whether the peer hosts an empty graph or has never heard of
+  // it, so a clean-empty peer proves the plane only when NOBODY in the round
+  // delivered content and nothing failed.
+  function publicEmptyRoundResult(): CatchupJobResult {
     const result = mixedPeerResult(0);
     result.dataSynced = 0;
-    result.peersSucceeded = 1;
+    result.peersSucceeded = 2;
+    result.denied = false;
+    result.deniedPeers = 0;
     if (!result.cleanPlaneCompletions || !result.diagnostics?.durable) {
       throw new Error('durable completion evidence missing');
     }
-    result.cleanPlaneCompletions.durable.emptyPeers = 1;
+    result.cleanPlaneCompletions.durable.emptyPeers = 2;
     result.diagnostics.durable.fetchedDataTriples = 0;
     result.diagnostics.durable.insertedDataTriples = 0;
-    result.diagnostics.durable.emptyResponses = 1;
+    result.diagnostics.durable.emptyResponses = 2;
+    result.diagnostics.durable.timedOutPhases = 0;
+    result.diagnostics.durable.deniedPhases = 0;
+    result.diagnostics.durable.completedPhases = 4;
+    return result;
+  }
 
+  it('accepts a unanimously clean-empty public round as proof the plane is empty', () => {
     const classification = classifyContextGraphCatchupReadiness({
-      result,
+      result: publicEmptyRoundResult(),
       includeSharedMemory: false,
       hasConfirmedMeta: true,
       isPrivate: false,
@@ -217,5 +229,64 @@ describe('context graph catch-up readiness classification', () => {
         sharedMemoryVerified: false,
       },
     });
+  });
+
+  it('does not accept a public clean-empty peer when another peer denies', () => {
+    // A denial means we did not hear from every peer, so "nobody has anything"
+    // is not established. Before #2006 this returned `done`.
+    const result = publicEmptyRoundResult();
+    result.denied = true;
+    result.deniedPeers = 1;
+    result.cleanPlaneCompletions!.durable.emptyPeers = 1;
+    result.diagnostics!.durable.emptyResponses = 1;
+    result.diagnostics!.durable.deniedPhases = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification.jobStatus).not.toBe('done');
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    });
+  });
+
+  it('does not let a clean-empty peer mask a data-bearing peer that failed', () => {
+    // The exact reported #2006 shape: 122,705 triples fetched, five phases
+    // failed, no verified data completion, and unrelated peers answering empty.
+    const result = publicEmptyRoundResult();
+    result.cleanPlaneCompletions!.durable.emptyPeers = 1;
+    result.diagnostics!.durable.emptyResponses = 1;
+    result.diagnostics!.durable.fetchedDataTriples = 122_705;
+    result.diagnostics!.durable.failedPhases = 5;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification.jobStatus).not.toBe('done');
+    expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
+  });
+
+  it('never proves a private plane from an empty round', () => {
+    const classification = classifyContextGraphCatchupReadiness({
+      result: publicEmptyRoundResult(),
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification.jobStatus).toBe('unreachable');
+    expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
   });
 });

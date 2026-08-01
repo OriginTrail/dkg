@@ -1,0 +1,46 @@
+import { describe, expect, it } from 'vitest';
+import {
+  CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  catchupWaveSizes,
+} from '../src/sync/catchup-concurrency.js';
+
+describe('catchupWaveSizes', () => {
+  it('starts with a single peer so a proving authority costs one payload', () => {
+    // The peer list arrives ranked authority-first, so wave 1 is the curator
+    // whenever one is resolvable. Issue #2006: the pre-fix fan-out pulled the
+    // whole graph from every sync-capable peer instead.
+    expect(catchupWaveSizes(14, 4)[0]).toBe(1);
+    expect(catchupWaveSizes(1, 4)).toEqual([1]);
+  });
+
+  it('escalates by doubling up to the concurrency cap', () => {
+    expect(catchupWaveSizes(14, 4)).toEqual([1, 2, 4, 4, 3]);
+    expect(catchupWaveSizes(20, 4)).toEqual([1, 2, 4, 4, 4, 4, 1]);
+    expect(catchupWaveSizes(7, 8)).toEqual([1, 2, 4]);
+  });
+
+  it('never exceeds the cap or the peer count', () => {
+    for (const cap of [1, 2, 3, 4, 8]) {
+      for (const peerCount of [0, 1, 3, 5, 13, 40]) {
+        const sizes = catchupWaveSizes(peerCount, cap);
+        expect(sizes.reduce((sum, size) => sum + size, 0)).toBe(peerCount);
+        for (const size of sizes) {
+          expect(size).toBeGreaterThan(0);
+          expect(size).toBeLessThanOrEqual(cap);
+        }
+      }
+    }
+  });
+
+  it('degrades to serial waves for a non-positive cap instead of looping forever', () => {
+    expect(catchupWaveSizes(3, 0)).toEqual([1, 1, 1]);
+    expect(catchupWaveSizes(3, Number.NaN)).toEqual([1, 1, 1]);
+    expect(catchupWaveSizes(0, 4)).toEqual([]);
+    expect(catchupWaveSizes(-2, 4)).toEqual([]);
+  });
+
+  it('keeps the shared fan-out cap a small positive number', () => {
+    expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeGreaterThan(0);
+    expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeLessThanOrEqual(16);
+  });
+});

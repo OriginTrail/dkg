@@ -228,6 +228,7 @@ describe('sync global backpressure', () => {
         policy,
         ctx,
         label: 'durable:urn:cg:private:peer-a',
+        source: 'catchup-foreground',
       },
       async () => new Promise<void>((resolve) => {
         releaseRunning = resolve;
@@ -239,6 +240,7 @@ describe('sync global backpressure', () => {
         policy,
         ctx,
         label: 'swm-recovery:urn:cg:private:peer-b',
+        source: 'reconcile',
       },
       async () => undefined,
     );
@@ -247,10 +249,14 @@ describe('sync global backpressure', () => {
     const snapshot = backpressureRegistry.capture().schedulers.find(
       (scheduler) => scheduler.scheduler === 'sync-global',
     );
+    // The operation dimension pairs the collapsed work class with the bounded
+    // admission origin, so a saturated queue can be attributed to a trigger
+    // (issue #2006 had to reconstruct that from daemon logs) without any
+    // Context Graph or peer identifier reaching node-wide diagnostics.
     expect(snapshot).toMatchObject({
       lanes: [expect.objectContaining({
-        activeOperations: [expect.objectContaining({ operation: 'durable' })],
-        queuedOperations: [expect.objectContaining({ operation: 'swm-recovery' })],
+        activeOperations: [expect.objectContaining({ operation: 'durable:catchup-foreground' })],
+        queuedOperations: [expect.objectContaining({ operation: 'swm-recovery:reconcile' })],
       })],
     });
     expect(JSON.stringify(snapshot)).not.toContain('urn:cg:private');
@@ -259,6 +265,44 @@ describe('sync global backpressure', () => {
 
     releaseRunning();
     await Promise.all([running, queued]);
+  });
+
+  it('clamps an unknown admission origin instead of widening the diagnostic label space', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 1,
+    });
+    let releaseRunning!: () => void;
+    // The union is compile-time only; a value crossing the worker RPC boundary
+    // (or an outright cast) must not be able to smuggle an identifier into a
+    // metric/log dimension or blow up its cardinality.
+    const running = withGlobalSyncBackpressure(
+      {
+        policy,
+        ctx,
+        label: 'durable:cg-x:peer-x',
+        source: 'leak-urn:cg:private:xyz',
+      },
+      async () => new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      }),
+    );
+    await tick();
+
+    const snapshot = backpressureRegistry.capture().schedulers.find(
+      (scheduler) => scheduler.scheduler === 'sync-global',
+    );
+    expect(snapshot).toMatchObject({
+      lanes: [expect.objectContaining({
+        activeOperations: [expect.objectContaining({ operation: 'durable:unspecified' })],
+      })],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain('leak-');
+    expect(JSON.stringify(snapshot)).not.toContain('urn:cg:private');
+
+    releaseRunning();
+    await running;
   });
 
   it('starts a later elevated CG before an earlier deprioritized queued CG', async () => {
