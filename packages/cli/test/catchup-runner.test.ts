@@ -809,18 +809,19 @@ describe('catch-up plane proof predicates', () => {
 
     it('counts the curator, and ONLY the curator, as hosted-empty evidence', () => {
       expect(catchupPeerPlaneEvidence(hostedEmptyRound, {
+        plane: 'durable',
         complete: true,
         fromAuthority: true,
       })).toMatchObject({ verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 1 });
       // The identical round from any other peer is the commonest state on the
       // network — a member holding `_meta` that has not synced the data yet —
       // and counting it would resettle #2006 as `done` with zero KAs.
-      expect(catchupPeerPlaneEvidence(hostedEmptyRound, { complete: true }))
+      expect(catchupPeerPlaneEvidence(hostedEmptyRound, { plane: 'durable', complete: true }))
         .toMatchObject({ authorityEmptyPeers: 0 });
       // Neither does a curator round that fetched data but inserted none.
       expect(catchupPeerPlaneEvidence(
         { ...hostedEmptyRound, fetchedDataTriples: 4_000 },
-        { complete: true, fromAuthority: true },
+        { plane: 'durable', complete: true, fromAuthority: true },
       )).toMatchObject({ authorityEmptyPeers: 0 });
     });
 

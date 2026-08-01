@@ -555,14 +555,19 @@ export function catchupPeerPlaneEvidence(
     | null
     | undefined,
   options: {
+    /**
+     * Which plane this result came from. REQUIRED, and deliberately not
+     * defaulted: the strongest thing this function can say — hosted-empty
+     * evidence — is true on the durable plane and false on shared memory, so a
+     * defaulted `plane` would let a shared-memory call site silently take the
+     * durable branch. Only a test would notice, and the whole point is that a
+     * mistake here settles a plane nobody proved.
+     */
+    plane: 'durable' | 'shared-memory';
+    /** Durable-only lifecycle state; the shared plane has no `complete` concept. */
     complete?: boolean;
     fromAuthority?: boolean;
-    /**
-     * Which plane this result came from. Required for authority evidence
-     * because "metadata proves the peer hosts the graph" is a DURABLE fact.
-     */
-    plane?: 'durable' | 'shared-memory';
-  } = {},
+  },
 ): CatchupPlaneCompletionEvidence {
   const none = {
     verifiedDataPeers: 0,
