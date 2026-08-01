@@ -273,7 +273,13 @@ export async function withGlobalSyncBackpressure<T>(
     lane?: SyncSchedulerLane;
     priority?: number;
     priorityClass?: SyncPriorityClass;
-    /** Which trigger enqueued this admission; clamped to the closed set. */
+    /**
+     * Which trigger enqueued this admission. This is the untrusted edge of the
+     * label space — the value can originate across the catch-up Worker RPC
+     * boundary — so it is `string` here and clamped exactly once, below, by
+     * `normalizeSyncAdmissionSource`. Everything from the queue payload onward
+     * is typed `SyncAdmissionSource`.
+     */
     source?: string;
     signal?: AbortSignal;
     /** Deterministic scheduler injection; not operator configuration. */

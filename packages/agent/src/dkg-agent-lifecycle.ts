@@ -943,7 +943,14 @@ export type DurableSyncOptions = {
   /**
    * Which trigger asked for this sync. Recorded as a bounded dimension on
    * node-wide scheduler diagnostics so queue pressure can be attributed to an
-   * origin; clamped to the closed `SyncAdmissionSource` set before use.
+   * origin.
+   *
+   * Typed `string`, not `SyncAdmissionSource`, on purpose: these options are
+   * reconstructed from a `postMessage` payload after crossing the catch-up
+   * Worker RPC boundary, where the compile-time union guarantees nothing. This
+   * is the untrusted edge; `normalizeSyncAdmissionSource` clamps it to the
+   * closed set once, in `acquire`, and every layer past that clamp is typed
+   * `SyncAdmissionSource`.
    */
   source?: string;
 };
@@ -5235,7 +5242,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
       /** Admission override for foreground catch-up. */
       priority?: number;
-      /** Bounded admission origin for node-wide scheduler diagnostics. */
+      /**
+       * Bounded admission origin for node-wide scheduler diagnostics. `string`
+       * because it can arrive across the catch-up Worker RPC boundary; clamped
+       * to the closed `SyncAdmissionSource` set in `acquire`.
+       */
       source?: string;
     },
   ): Promise<SharedMemorySyncResult> {
