@@ -739,7 +739,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     ));
   }, 60_000);
 
-  it('automatically cold-joins a published public catalog and recovers it after restart', async () => {
+  it('[M0_RECOVERY_COLD_RESTART] automatically cold-joins a published public catalog and recovers it after restart', async () => {
     const author = await startNativeAgent(
       'bootstrap-author',
       NATIVE_DEPLOYMENT,
@@ -848,7 +848,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     });
   }, 60_000);
 
-  it('retries an initial miss and fails over to the later provider', async () => {
+  it('[M0_RECOVERY_PROVIDER_FAILOVER] retries an initial miss and fails over to the later provider', async () => {
     const emptyProvider = await startNativeAgent('bootstrap-empty-provider');
     const author = await startNativeAgent(
       'bootstrap-retry-author',
@@ -1707,7 +1707,7 @@ describe('RFC-64 DKGAgent production native catalog wiring', () => {
     expect(finalizedCallTargets).not.toContain(KAV10);
   }, 60_000);
 
-  it('keeps warm and cold public-curated receivers at one exact finalized head across restart', async () => {
+  it('[M0_RECOVERY_CURATED_PARITY] keeps warm and cold public-curated receivers at one exact finalized head across restart', async () => {
     const kaNumbers = [41n] as const;
     const assets = kaNumbers.map((kaNumber) => Object.freeze({
       assertionRoot: ASSERTION_ROOT,

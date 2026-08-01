@@ -12,8 +12,8 @@ Run from a clean repository root:
 pnpm test:m0:rfc64-public-baseline
 ```
 
-The command fails closed unless every row below passes on the exact checked-out
-commit.
+The workspace-owned runner fails closed unless every row below passes on the
+exact checked-out commit. The root command is only an alias for this suite.
 
 | M0 acceptance row | Product boundary exercised |
 | --- | --- |
@@ -31,9 +31,13 @@ The runtime sub-gates write their existing commit-bound artifacts under:
 - `devnet/rfc64-cp1-public-swm-parity/artifacts/`
 - `devnet/rfc64-gate2-multi-asset-completeness/artifacts/`
 
-The recovery and bounded-work rows are focused product tests. Their process
-exit status is part of the composed gate; they do not substitute fixture data
-for runtime observations.
+The three recovery rows have stable scenario IDs and run as independent child
+commands. The runner validates each Vitest report and requires exactly one
+matching scenario to pass, so a removed, renamed, duplicated, skipped, or
+failed scenario cannot be hidden by another recovery test. The bounded-work
+row selects stable test files rather than English test titles. Every child
+process exit status is part of the composed gate; focused tests do not
+substitute fixture data for runtime observations.
 
 ## What M0 does not prove
 
