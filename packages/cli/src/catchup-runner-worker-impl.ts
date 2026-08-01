@@ -9,9 +9,11 @@ import {
   runCatchupPlanesWithPolicy,
 } from '@origintrail-official/dkg-agent';
 import {
+  addCatchupPlaneEvidence,
+  catchupPeerPlaneEvidence,
   catchupPeerResponded,
   catchupPeerSucceeded,
-  catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByData,
   type CatchupJobResult,
   type CatchupRunRequest,
 } from './catchup-runner.js';
@@ -250,25 +252,21 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
       peerDenied = peerDenied || durable.deniedPhases > 0;
 
-      if (catchupPlaneCompletedWithoutFailure(durable, durable.complete)) {
-        const provenByData = (durable.insertedDataTriples ?? 0) > 0
-          || durable.verifiedPrivateOnlyResponses > 0;
-        if ((durable.insertedDataTriples ?? 0) > 0) {
-          cleanPlaneCompletions.durable.verifiedDataPeers += 1;
-        }
-        if (durable.verifiedPrivateOnlyResponses > 0) {
-          cleanPlaneCompletions.durable.verifiedPrivateOnlyPeers += 1;
-        }
-        if ((durable.emptyResponses ?? 0) > 0) {
-          cleanPlaneCompletions.durable.emptyPeers += 1;
-        }
-        // The curator answering cleanly settles this plane whether it carried
-        // data or was legitimately empty: "the host says there is nothing here"
-        // is the authoritative empty proof, and without it a graph with no
-        // public data on one plane could never stop the walk.
-        if (fromAuthority && (provenByData || (durable.emptyResponses ?? 0) > 0)) {
-          authorityProven.durable = true;
-        }
+      const durableEvidence = catchupPeerPlaneEvidence(durable, { complete: durable.complete });
+      addCatchupPlaneEvidence(cleanPlaneCompletions.durable, durableEvidence);
+      // The curator answering cleanly settles this plane whether it carried
+      // data or was legitimately empty: "the host says there is nothing here"
+      // is the authoritative empty proof, and without it a graph with no
+      // public data on one plane could never stop the walk.
+      //
+      // The positive half runs through the SAME predicate the readiness
+      // classifier uses, just applied to one peer's evidence rather than the
+      // round's, so the stop condition cannot drift from the readiness rule.
+      if (
+        fromAuthority
+        && (catchupPlaneProvenByData(durableEvidence) || durableEvidence.emptyPeers > 0)
+      ) {
+        authorityProven.durable = true;
       }
     }
 
@@ -293,21 +291,20 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         (diagnostics.sharedMemory.deniedPhases ?? 0) + (shared.deniedPhases ?? 0);
       peerDenied = peerDenied || shared.deniedPhases > 0;
 
-      if (catchupPlaneCompletedWithoutFailure(shared)) {
-        if ((shared.insertedDataTriples ?? 0) > 0) {
-          cleanPlaneCompletions.sharedMemory.verifiedDataPeers += 1;
-        }
-        if ((shared.emptyResponses ?? 0) > 0) {
-          cleanPlaneCompletions.sharedMemory.emptyPeers += 1;
-        }
-        // Same rule as durable: the curator settles the plane by answering
-        // cleanly, with data or empty. Shared memory is frequently empty for a
-        // graph that has durable data, and `includeSharedMemory` defaults to
-        // true on subscribe, so without this the early stop would almost never
-        // fire in the shape the fix targets.
-        if (fromAuthority && ((shared.insertedDataTriples ?? 0) > 0 || (shared.emptyResponses ?? 0) > 0)) {
-          authorityProven.sharedMemory = true;
-        }
+      // Shared memory carries no verified-private-only signal, so the shared
+      // evidence only ever has data/empty set — the same reducer still applies.
+      const sharedEvidence = catchupPeerPlaneEvidence(shared);
+      addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
+      // Same rule as durable: the curator settles the plane by answering
+      // cleanly, with data or empty. Shared memory is frequently empty for a
+      // graph that has durable data, and `includeSharedMemory` defaults to
+      // true on subscribe, so without this the early stop would almost never
+      // fire in the shape the fix targets.
+      if (
+        fromAuthority
+        && (catchupPlaneProvenByData(sharedEvidence) || sharedEvidence.emptyPeers > 0)
+      ) {
+        authorityProven.sharedMemory = true;
       }
     }
 

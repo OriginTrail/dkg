@@ -402,6 +402,8 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     const peerIds = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
     const durableCalls: string[] = [];
     const sharedCalls: string[] = [];
+    const sharedPriorities: Array<number | undefined> = [];
+    const sharedSources: Array<string | undefined> = [];
 
     const result = await runWorkerCatchup({ contextGraphId: 'cg-swm-fallback', includeSharedMemory: true }, async (method, args) => {
       switch (method) {
@@ -414,6 +416,8 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           return durableResult();
         case 'syncSharedMemory':
           sharedCalls.push(args[0] as string);
+          sharedPriorities.push(args[2] as number | undefined);
+          sharedSources.push(args[3] as string | undefined);
           // The curator engages and fails (so SWM is never settled); every
           // fallback peer transport-fails, delivering nothing at all.
           return args[0] === 'peer-0'
@@ -443,6 +447,12 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     // Durable pulled once, from the curator; shared memory from everyone.
     expect(durableCalls).toEqual(['peer-0']);
     expect([...sharedCalls].sort()).toEqual([...peerIds].sort());
+    // The shared-only fallback goes through a different call path than the
+    // both-planes one, so it has to carry foreground admission itself.
+    expect(sharedPriorities).toEqual(
+      peerIds.map(() => FOREGROUND_CATCHUP_SYNC_PRIORITY),
+    );
+    expect(sharedSources).toEqual(peerIds.map(() => 'catchup-foreground'));
     expect(result.peersTried).toBe(peerIds.length);
     expect(result.peersNotAttempted).toBe(0);
     // The skipped durable plane must not manufacture a response for peers whose

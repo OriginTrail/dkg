@@ -532,6 +532,43 @@ export interface CatchupPlaneRoundDiagnostics {
 }
 
 /**
+ * Reduce ONE peer's plane result to the evidence a round accumulates from it.
+ *
+ * This is the single definition of what a peer's round contributes, so the
+ * walk's stop condition and the readiness classifier cannot drift: the walk
+ * feeds one peer's evidence to {@link catchupPlaneProvenByData}, and readiness
+ * feeds the summed evidence to the same predicate. Adding a new verified-content
+ * signal therefore has exactly one place to change.
+ *
+ * A plane that did not complete cleanly contributes nothing at all.
+ */
+export function catchupPeerPlaneEvidence(
+  plane: (CatchupPhaseProgress & { emptyResponses?: number }) | null | undefined,
+  options: { complete?: boolean } = {},
+): CatchupPlaneCompletionEvidence {
+  const none = { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 };
+  if (!plane || !catchupPlaneCompletedWithoutFailure(plane, options.complete)) return none;
+  return {
+    verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
+    verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,
+    emptyPeers: (plane.emptyResponses ?? 0) > 0 ? 1 : 0,
+  };
+}
+
+/** Fold one peer's evidence into the running per-plane totals. */
+export function addCatchupPlaneEvidence(
+  total: CatchupPlaneCompletionEvidence,
+  peer: CatchupPlaneCompletionEvidence,
+): void {
+  total.verifiedDataPeers += peer.verifiedDataPeers;
+  if (peer.verifiedPrivateOnlyPeers) {
+    total.verifiedPrivateOnlyPeers = (total.verifiedPrivateOnlyPeers ?? 0)
+      + peer.verifiedPrivateOnlyPeers;
+  }
+  total.emptyPeers += peer.emptyPeers;
+}
+
+/**
  * Positive proof: some peer cleanly completed this plane while carrying
  * cryptographically verified content. This is the only evidence strong enough
  * to stop contacting further peers mid-run, because it is the only evidence a
