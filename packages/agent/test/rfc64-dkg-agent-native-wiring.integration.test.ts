@@ -57,6 +57,7 @@ import {
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
 } from './support/rfc64-finalized-vm-loopback-fixture.js';
+import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../scripts/rfc64-m0-recovery-manifest.mjs';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
@@ -91,19 +92,13 @@ const NATIVE_DEPLOYMENT = Object.freeze({
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
 const rpcHarness = createLoopbackJsonRpcTestHarness();
-const RFC64_M0_RECOVERY_SCENARIOS = [
-  'cold-restart',
-  'provider-failover',
-  'curated-parity',
-] as const;
-const RFC64_M0_RECOVERY_TEST_TITLES = {
-  'cold-restart':
-    'automatically cold-joins a published public catalog and recovers it after restart',
-  'provider-failover': 'retries an initial miss and fails over to the later provider',
-  'curated-parity':
-    'keeps warm and cold public-curated receivers at one exact finalized head across restart',
-} as const;
-type Rfc64M0RecoveryScenario = typeof RFC64_M0_RECOVERY_SCENARIOS[number];
+const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze(
+  RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ id }) => id),
+);
+const rfc64M0RecoveryScenarioById = new Map(
+  RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => [scenario.id, scenario]),
+);
+type Rfc64M0RecoveryScenario = string;
 interface Rfc64M0RecoveryScenarioSpec {
   readonly title: string;
   readonly handler: () => void | Promise<void>;
@@ -137,6 +132,14 @@ function registerM0RecoveryScenario(
     throw new Error(`Duplicate RFC-64 M0 recovery scenario registration: ${scenario}`);
   }
   registeredRfc64M0RecoveryScenarios.set(scenario, { title, handler, timeout });
+}
+
+function rfc64M0RecoveryTitle(scenario: Rfc64M0RecoveryScenario): string {
+  const metadata = rfc64M0RecoveryScenarioById.get(scenario);
+  if (metadata === undefined) {
+    throw new Error(`Missing RFC-64 M0 recovery scenario metadata: ${scenario}`);
+  }
+  return metadata.title;
 }
 
 afterEach(async () => {
@@ -786,7 +789,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     ));
   }, 60_000);
 
-  registerM0RecoveryScenario('cold-restart', RFC64_M0_RECOVERY_TEST_TITLES['cold-restart'], async () => {
+  registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
     const author = await startNativeAgent(
       'bootstrap-author',
       NATIVE_DEPLOYMENT,
@@ -895,7 +898,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   }, 60_000);
 
-  registerM0RecoveryScenario('provider-failover', RFC64_M0_RECOVERY_TEST_TITLES['provider-failover'], async () => {
+  registerM0RecoveryScenario('provider-failover', rfc64M0RecoveryTitle('provider-failover'), async () => {
     const emptyProvider = await startNativeAgent('bootstrap-empty-provider');
     const author = await startNativeAgent(
       'bootstrap-retry-author',
@@ -1754,7 +1757,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(finalizedCallTargets).not.toContain(KAV10);
   }, 60_000);
 
-  registerM0RecoveryScenario('curated-parity', RFC64_M0_RECOVERY_TEST_TITLES['curated-parity'], async () => {
+  registerM0RecoveryScenario('curated-parity', rfc64M0RecoveryTitle('curated-parity'), async () => {
     const kaNumbers = [41n] as const;
     const assets = kaNumbers.map((kaNumber) => Object.freeze({
       assertionRoot: ASSERTION_ROOT,

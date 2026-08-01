@@ -2,17 +2,17 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runProcess } from '../../../scripts/lib/run-process.mjs';
+import {
+  RFC64_M0_RECOVERY_SCENARIOS,
+  getRfc64M0RecoveryScenario,
+} from './rfc64-m0-recovery-manifest.mjs';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 const recoveryTestFile = 'test/rfc64-dkg-agent-native-wiring.integration.test.ts';
 
 export const RFC64_M0_RECOVERY_SCENARIO_ENV = 'DKG_RFC64_M0_RECOVERY_SCENARIO';
-export const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze([
-  'cold-restart',
-  'provider-failover',
-  'curated-parity',
-]);
+export { RFC64_M0_RECOVERY_SCENARIOS };
 
 function runVitest(args, env) {
   return runProcess({
@@ -25,7 +25,7 @@ function runVitest(args, env) {
 }
 
 export async function runRecoveryScenario(scenarioName, { run = runVitest } = {}) {
-  if (!RFC64_M0_RECOVERY_SCENARIOS.includes(scenarioName)) {
+  if (getRfc64M0RecoveryScenario(scenarioName) === null) {
     throw new Error(`Unknown RFC-64 M0 recovery scenario: ${String(scenarioName)}`);
   }
 

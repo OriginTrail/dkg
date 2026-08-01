@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../../packages/agent/scripts/rfc64-m0-recovery-manifest.mjs';
 import {
   M0_ACCEPTANCE_ROWS,
   runM0Rows,
@@ -30,36 +31,16 @@ const expectedRows = Object.freeze([
       'live:public-vm',
     ],
   },
-  {
-    id: 'automatic-cold-start-and-restart',
-    label: 'Automatic cold start and restart',
+  ...RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => ({
+    id: scenario.rowId,
+    label: scenario.label,
     kind: 'command',
     args: [
       '--filter',
       '@origintrail-official/dkg-agent',
-      'test:rfc64-m0-recovery:cold-restart',
+      scenario.packageScript,
     ],
-  },
-  {
-    id: 'source-recovery',
-    label: 'Source recovery',
-    kind: 'command',
-    args: [
-      '--filter',
-      '@origintrail-official/dkg-agent',
-      'test:rfc64-m0-recovery:provider-failover',
-    ],
-  },
-  {
-    id: 'public-curated-cold-warm-parity',
-    label: 'Public-curated cold/warm parity',
-    kind: 'command',
-    args: [
-      '--filter',
-      '@origintrail-official/dkg-agent',
-      'test:rfc64-m0-recovery:curated-parity',
-    ],
-  },
+  })),
   {
     id: 'bounded-work',
     label: 'Bounded work',
@@ -94,15 +75,17 @@ test('locks every declared M0 acceptance command and invokes each row in order',
 });
 
 test('delegates recovery rows to stable agent-package proof scripts', () => {
-  const recoveryScripts = M0_ACCEPTANCE_ROWS.slice(3, 6).map(
-    ({ args }) => args.at(-1),
+  assert.deepEqual(
+    M0_ACCEPTANCE_ROWS.slice(3, 6).map(({ id, args }) => ({ id, args })),
+    RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => ({
+      id: scenario.rowId,
+      args: [
+        '--filter',
+        '@origintrail-official/dkg-agent',
+        scenario.packageScript,
+      ],
+    })),
   );
-
-  assert.deepEqual(recoveryScripts, [
-    'test:rfc64-m0-recovery:cold-restart',
-    'test:rfc64-m0-recovery:provider-failover',
-    'test:rfc64-m0-recovery:curated-parity',
-  ]);
 });
 
 test('fails the composed gate immediately when a child row fails', async () => {

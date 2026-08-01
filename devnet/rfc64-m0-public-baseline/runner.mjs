@@ -1,6 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../../packages/agent/scripts/rfc64-m0-recovery-manifest.mjs';
 import { runProcess as runChildProcess } from '../../scripts/lib/run-process.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,33 +24,15 @@ export const M0_ACCEPTANCE_ROWS = Object.freeze([
     '@devnet/rfc64-gate2-multi-asset-completeness',
     'live:public-vm',
   ]),
-  commandRow(
-    'automatic-cold-start-and-restart',
-    'Automatic cold start and restart',
+  ...RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => commandRow(
+    scenario.rowId,
+    scenario.label,
     [
       '--filter',
       '@origintrail-official/dkg-agent',
-      'test:rfc64-m0-recovery:cold-restart',
+      scenario.packageScript,
     ],
-  ),
-  commandRow(
-    'source-recovery',
-    'Source recovery',
-    [
-      '--filter',
-      '@origintrail-official/dkg-agent',
-      'test:rfc64-m0-recovery:provider-failover',
-    ],
-  ),
-  commandRow(
-    'public-curated-cold-warm-parity',
-    'Public-curated cold/warm parity',
-    [
-      '--filter',
-      '@origintrail-official/dkg-agent',
-      'test:rfc64-m0-recovery:curated-parity',
-    ],
-  ),
+  )),
   commandRow('bounded-work', 'Bounded work', [
     '--filter',
     '@origintrail-official/dkg-agent',

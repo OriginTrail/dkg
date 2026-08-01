@@ -31,15 +31,15 @@ The runtime sub-gates write their existing commit-bound artifacts under:
 - `devnet/rfc64-cp1-public-swm-parity/artifacts/`
 - `devnet/rfc64-gate2-multi-asset-completeness/artifacts/`
 
-The three recovery rows call stable proof scripts owned by the agent package
-and run as independent child commands. A focused agent-local recovery describe
-owns the structural registry and selects one scenario without title filters or
-reporter parsing. The ordinary native-wiring suite is skipped as one unit in
-focused mode, and discovery fails if any required scenario is missing or duplicated.
-Display-text changes therefore do not affect selection. The bounded-work row
-selects stable test files rather than English test titles. Every child process
-exit status is part of the composed gate; focused tests do not substitute
-fixture data for runtime observations.
+The agent-owned `rfc64-m0-recovery-manifest.mjs` is the canonical source for
+the three recovery ids, row labels, package scripts, and test titles. The M0
+runner, dispatcher, and focused recovery describe all derive from it. Each row
+runs as an independent child command without title filters or reporter parsing.
+The ordinary native-wiring suite is skipped as one unit in focused mode, and
+discovery fails if any required scenario is missing or duplicated. The
+bounded-work row selects stable test files rather than English test titles.
+Every child process exit status is part of the composed gate; focused tests do
+not substitute fixture data for runtime observations.
 
 ## What M0 does not prove
 
