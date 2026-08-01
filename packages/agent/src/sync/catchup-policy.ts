@@ -169,6 +169,21 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   run: (context: CatchupPlaneContext) => Promise<T>,
   options: CatchupPlanePolicyClock = {},
 ): Promise<T> {
+  // `retryDelaysMs` configured the fixed [100, 250, 500] ladder that #2006 replaced
+  // with a wall-clock budget. Retaining it as `?: never` makes a TypeScript caller
+  // fail to compile — but a JS caller compiled against the old shape still passes it
+  // and would have it IGNORED, silently turning an intended 10 ms schedule into a wait
+  // of up to CATCHUP_BACKPRESSURE_MAX_WAIT_MS. Checked before the mode branch so a
+  // background caller is not exempt.
+  if ((options as { retryDelaysMs?: unknown }).retryDelaysMs !== undefined) {
+    throw new TypeError(
+      'retryDelaysMs was removed in issue #2006; catch-up retries are now bounded by '
+      + 'an absolute wall-clock budget. Use `retry.maxWaitMs` (operators: '
+      + 'DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS). It is rejected rather than ignored '
+      + 'because ignoring it would silently extend the wait to the full budget.',
+    );
+  }
+
   const context: CatchupPlaneContext = {
     priority: catchupPriorityForMode(mode),
     source: catchupSourceForMode(mode),

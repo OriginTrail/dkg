@@ -241,6 +241,33 @@ describe('runCatchupPlanesWithPolicy', () => {
   });
 });
 
+describe('the removed retryDelaysMs ladder', () => {
+  // Retaining it as `?: never` makes a TypeScript caller fail to compile, which the
+  // enforced type test pins. But TypeScript is not the runtime: a JS caller compiled
+  // against the pre-#2006 shape still passes it, and ignoring it would silently turn
+  // an intended 10 ms schedule into a wait of up to the full budget. So it is
+  // REJECTED, not ignored.
+  it.each(['foreground', 'background'] as const)('is rejected at runtime in %s mode', async (mode) => {
+    await expect(
+      runCatchupPlaneWithPolicy(mode, async () => ({ deferredBackpressure: 1 }), {
+        retryDelaysMs: [10, 20],
+        retry: { maxWaitMs: 50 },
+      } as never),
+    ).rejects.toThrow(/retryDelaysMs was removed/);
+  });
+
+  it('leaves the supported replacement working', async () => {
+    const clock = virtualClock();
+    const result = await runCatchupPlaneWithPolicy(
+      'foreground',
+      async () => ({ deferredBackpressure: 1 }),
+      { retry: { maxWaitMs: 300 }, now: clock.now, wait: clock.wait, random: () => 0 },
+    );
+    expect(result.deferredBackpressure).toBe(1);
+    expect(clock.elapsed()).toBeLessThanOrEqual(300);
+  });
+});
+
 describe('nextCatchupBackpressureDelayMs', () => {
   it('grows exponentially and clamps at the per-step ceiling', () => {
     const delays = Array.from({ length: 8 }, (_, attempt) => nextCatchupBackpressureDelayMs({

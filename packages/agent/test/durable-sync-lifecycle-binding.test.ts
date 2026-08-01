@@ -345,14 +345,22 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   it.each([
-    ['a positional priority override', 2000],
-    ['a positional AbortSignal', 'SIGNAL'],
-  ])('rejects the pre-#2006 positional admission shape: %s', async (_label, sixth) => {
+    ['a positional priority override', [2000]],
+    ['a positional AbortSignal', ['SIGNAL']],
+    // The shape the 6th-argument check alone cannot see: the 6th is absent-looking
+    // and defaults to `{}`, so only the PRESENCE of a 7th reveals that the caller
+    // still believes it is passing a cancellation signal. Before the rest-parameter
+    // guard this returned normally and dropped the signal.
+    ['a cancellation-only legacy call', [undefined, 'SIGNAL']],
+    ['both legacy positionals', [2000, 'SIGNAL']],
+  ])('rejects the pre-#2006 positional admission shape: %s', async (_label, tail) => {
     // The old signature was (ctx, cg, lane, label, work, priorityOverride?, signal?).
     // A JS caller compiled against it would destructure to undefined and silently
     // lose its priority AND its cancellation — an operation that ignores its abort
     // signal keeps running after the caller gave up. That must fail loudly.
-    const sixthArg = sixth === 'SIGNAL' ? new AbortController().signal : sixth;
+    const legacyArgs = (tail as unknown[]).map(
+      (a) => (a === 'SIGNAL' ? new AbortController().signal : a),
+    );
     const agentLike = {
       config: {},
       log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -368,7 +376,7 @@ describe('durable sync lifecycle chain binding', () => {
         'durable',
         'label',
         async () => 'done',
-        sixthArg,
+        ...legacyArgs,
       ),
     ).rejects.toThrow(/takes a single .admission. object/);
   });

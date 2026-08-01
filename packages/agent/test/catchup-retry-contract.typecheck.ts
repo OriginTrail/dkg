@@ -1,5 +1,6 @@
 import {
   CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
+  DKGAgent,
   runCatchupPlaneWithPolicy,
   type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
@@ -71,3 +72,28 @@ export declare const pinned: [
   typeof CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
   typeof runCatchupPlaneWithPolicy,
 ];
+
+// The admission parameters of `runContextGraphSyncWithBackpressure` collapsed from
+// positional `(priorityOverride?: number, operationSignal?: AbortSignal)` into a single
+// object, so the new `source` dimension did not become a fourth positional argument.
+//
+// The runtime guard rejects the old shape (see durable-sync-lifecycle-binding.test.ts).
+// This pins the COMPILE-TIME half, and specifically the seventh-argument case: without
+// the `...legacyPositionalArgs: never[]` rest parameter a stale caller passing a
+// trailing AbortSignal type-checks, and TypeScript would say nothing about a caller
+// that is quietly losing its cancellation.
+declare const staleAdmissionCaller: DKGAgent;
+declare const staleSignal: AbortSignal;
+
+const staleAdmissionCall = () => staleAdmissionCaller.runContextGraphSyncWithBackpressure(
+  {} as never,
+  'cg',
+  'durable' as never,
+  'label',
+  async () => 1,
+  {},
+  // @ts-expect-error nothing may follow `admission`; this is the pre-#2006 positional signal.
+  staleSignal,
+);
+
+export declare const pinnedAdmission: typeof staleAdmissionCall;

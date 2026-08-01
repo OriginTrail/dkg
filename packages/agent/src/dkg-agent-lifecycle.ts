@@ -1184,6 +1184,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
        */
       source?: SyncAdmissionSource;
     } = {},
+    /**
+     * Nothing may follow `admission`. Typed `never[]` so a TypeScript caller passing
+     * the old 7th positional `operationSignal` fails to compile, and captured at
+     * runtime so a JS one fails too — see the guard below.
+     */
+    ...legacyPositionalArgs: never[]
   ): Promise<T> {
     // Before #2006 this took `(…, priorityOverride?: number, operationSignal?: AbortSignal)`
     // positionally. Those collapsed into one `admission` object so the new `source`
@@ -1198,7 +1204,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Deliberately NOT a compatibility shim translating the old arguments: this is an
     // internal admission helper with no caller outside `packages/agent`, and a
     // translated second shape would have to be carried and tested forever.
-    if (typeof admission !== 'object' || admission === null
+    // `legacyPositionalArgs` catches the shape the 6th-argument test below cannot:
+    // `(…, work, undefined, signal)`. There the 6th is absent-looking and defaults to
+    // `{}`, so only the presence of a 7th argument reveals that a caller still thinks
+    // it is passing a cancellation signal.
+    if (legacyPositionalArgs.length > 0
+      || typeof admission !== 'object' || admission === null
       || typeof (admission as { aborted?: unknown }).aborted === 'boolean') {
       throw new TypeError(
         'runContextGraphSyncWithBackpressure takes a single `admission` object '
