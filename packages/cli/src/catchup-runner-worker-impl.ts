@@ -12,7 +12,6 @@ import {
   catchupPeerResponded,
   catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
-  catchupPlaneProvenByData,
   type CatchupJobResult,
   type CatchupRunRequest,
 } from './catchup-runner.js';
@@ -54,8 +53,11 @@ parentPort!.on('message', async (message: any) => {
   }
 });
 
-/** A per-peer sync round; `durable` is absent when the walk skipped that plane. */
+/** A per-peer sync round; a plane is absent when the walk skipped it. */
 interface PeerRound {
+  peerId: string;
+  /** The resolved curator for this Context Graph produced this round. */
+  fromAuthority: boolean;
   durable: any | null;
   shared: any | null;
 }
@@ -168,9 +170,17 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   }
   syncCapablePeers = syncCapable.length;
 
-  const durableProven = (): boolean => catchupPlaneProvenByData(cleanPlaneCompletions.durable);
-  const sharedMemoryProven = (): boolean =>
-    catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory);
+  // Only the resolved curator's snapshot is a reference for the WHOLE graph: a
+  // peer's `complete` flag proves it served its own manifest, so a
+  // non-authoritative peer carrying a subset would otherwise be able to cut the
+  // walk short and strand another peer's Knowledge Assets. Both optimisations
+  // below — skipping remaining peers, and skipping an already-proven plane on
+  // the peers we do contact — are therefore gated on AUTHORITY proof. With no
+  // resolvable curator the walk degrades to the previous full bounded fan-out
+  // and keeps unioning every peer's data.
+  const authorityProven = { durable: false, sharedMemory: false };
+  const authorityProvedEverything = (): boolean => authorityProven.durable
+    && (!request.includeSharedMemory || authorityProven.sharedMemory);
 
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
@@ -186,33 +196,34 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       invoke<any>('syncSharedMemory', peerId, request.contextGraphId, priority, source)
         .catch(() => emptyShared());
 
-    // Narrow each fallback peer to the planes still in question. The walk only
-    // continues while some requested plane is unproven, and one plane is often
-    // proven long before the other — a Context Graph whose public VM data is
-    // empty can never prove its durable plane by data, so without this a single
-    // unproven plane would drag a full re-pull of the ALREADY PROVEN plane out
-    // of every remaining peer, which is the amplification this fix exists to
-    // remove.
-    // The kill-switch restores the previous fan-out faithfully: every peer, both
-    // requested planes, no early stop.
-    const needDurable = !CATCHUP_STOP_ON_PROOF || !durableProven();
+    // Narrow each fallback peer to the planes the AUTHORITY has not already
+    // settled. One plane is often settled long before the other — a Context
+    // Graph whose public VM data is empty can never prove its durable plane by
+    // data — so without this a single unproven plane would drag a full re-pull
+    // of the already-settled plane out of every remaining peer, which is the
+    // amplification this fix exists to remove. The kill-switch restores the
+    // previous fan-out faithfully: every peer, both requested planes.
+    const optimize = CATCHUP_STOP_ON_PROOF;
+    const needDurable = !optimize || !authorityProven.durable;
     const needSharedMemory = request.includeSharedMemory
-      && (!CATCHUP_STOP_ON_PROOF || !sharedMemoryProven());
+      && (!optimize || !authorityProven.sharedMemory);
+    const fromAuthority = peerId === prepared.preferredPeerId;
     if (!needDurable) {
       const shared = needSharedMemory
         ? await runCatchupPlaneWithPolicy('foreground', syncSharedMemory)
         : null;
-      return { durable: null, shared };
+      return { peerId, fromAuthority, durable: null, shared };
     }
-    return runCatchupPlanesWithPolicy({
+    const round = await runCatchupPlanesWithPolicy({
       mode: 'foreground',
       includeSharedMemory: needSharedMemory,
       syncDurable,
       syncSharedMemory,
     });
+    return { peerId, fromAuthority, ...round };
   };
 
-  const accumulate = ({ durable, shared }: PeerRound): void => {
+  const accumulate = ({ durable, shared, fromAuthority }: PeerRound): void => {
     let peerDenied = false;
     if (durable) {
       dataSynced += durable.insertedDataTriples ?? 0;
@@ -240,6 +251,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       peerDenied = peerDenied || durable.deniedPhases > 0;
 
       if (catchupPlaneCompletedWithoutFailure(durable, durable.complete)) {
+        const provenByData = (durable.insertedDataTriples ?? 0) > 0
+          || durable.verifiedPrivateOnlyResponses > 0;
         if ((durable.insertedDataTriples ?? 0) > 0) {
           cleanPlaneCompletions.durable.verifiedDataPeers += 1;
         }
@@ -249,6 +262,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         if ((durable.emptyResponses ?? 0) > 0) {
           cleanPlaneCompletions.durable.emptyPeers += 1;
         }
+        if (fromAuthority && provenByData) authorityProven.durable = true;
       }
     }
 
@@ -276,6 +290,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       if (catchupPlaneCompletedWithoutFailure(shared)) {
         if ((shared.insertedDataTriples ?? 0) > 0) {
           cleanPlaneCompletions.sharedMemory.verifiedDataPeers += 1;
+          if (fromAuthority) authorityProven.sharedMemory = true;
         }
         if ((shared.emptyResponses ?? 0) > 0) {
           cleanPlaneCompletions.sharedMemory.emptyPeers += 1;
@@ -354,9 +369,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       syncPeer,
     );
     for (const round of rounds) accumulate(round);
-    const allRequestedPlanesProven = durableProven()
-      && (!request.includeSharedMemory || sharedMemoryProven());
-    if (CATCHUP_STOP_ON_PROOF && allRequestedPlanesProven) break;
+    if (CATCHUP_STOP_ON_PROOF && authorityProvedEverything()) break;
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;

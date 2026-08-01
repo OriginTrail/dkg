@@ -1159,10 +1159,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     lane: SyncSchedulerLane,
     label: string,
     work: () => Promise<T>,
-    priorityOverride?: number,
-    operationSignal?: AbortSignal,
-    source?: string,
+    admission: {
+      /** Admission override for foreground catch-up / VM recovery. */
+      priorityOverride?: number;
+      operationSignal?: AbortSignal;
+      /** Which trigger enqueued this admission; clamped to the closed set. */
+      source?: string;
+    } = {},
   ): Promise<T> {
+    const { priorityOverride, operationSignal, source } = admission;
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
     const admissionBoundary = combineSyncAdmissionSignals(
@@ -4471,9 +4476,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               item.lane,
               item.operationId,
               work,
-              options?.priority,
-              operationBoundary.signal,
-              options?.source,
+              {
+                priorityOverride: options?.priority,
+                operationSignal: operationBoundary.signal,
+                source: options?.source,
+              },
             ),
             operationBoundary.signal,
           );
@@ -4792,9 +4799,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         item.lane,
         item.operationId,
         run,
-        priority,
-        undefined,
-        source,
+        { priorityOverride: priority, source },
       ),
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
@@ -5456,9 +5461,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.lane,
           item.operationId,
           run,
-          options?.priority,
-          undefined,
-          options?.source,
+          { priorityOverride: options?.priority, source: options?.source },
         ),
         merge: mergeSharedMemorySyncResults,
         markDeferred: (summary) => ({
@@ -5542,9 +5545,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeerId,
         contextGraphId,
       ),
-      undefined,
-      undefined,
-      'swm-recovery',
+      { source: 'swm-recovery' },
     );
   }
 

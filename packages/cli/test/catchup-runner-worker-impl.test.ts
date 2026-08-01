@@ -260,6 +260,36 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.dataSynced).toBe(peerIds.length);
   });
 
+  it('keeps walking past a non-authoritative peer that returned verified data', async () => {
+    // A peer's `complete` flag proves it served ITS OWN manifest, not the union
+    // of what the network holds: peer-a can cleanly return KA-1 while peer-b
+    // holds KA-2 for the same graph. Without a resolved curator there is no
+    // reference snapshot, so a clean data-bearing round must NOT cut the walk
+    // short and strand peer-b's Knowledge Asset.
+    const peerIds = ['peer-a', 'peer-b', 'peer-c'];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({ contextGraphId: 'cg-disjoint', includeSharedMemory: false }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { preferredPeerId: undefined, isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls.sort()).toEqual([...peerIds].sort());
+    expect(result.peersNotAttempted).toBe(0);
+    expect(result.dataSynced).toBe(peerIds.length);
+  });
+
   it('opens at the full concurrency cap when no curator resolved', async () => {
     // A single-peer opening wave buys "one payload from the curator". Without a
     // resolvable curator it buys nothing, so the walk must not serialise the

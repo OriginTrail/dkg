@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_BACKPRESSURE_BASE_DELAY_MS,
   CATCHUP_BACKPRESSURE_MAX_DELAY_MS,
+  CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
   nextCatchupBackpressureDelayMs,
   runCatchupPlaneWithPolicy,
@@ -233,5 +234,36 @@ describe('nextCatchupBackpressureDelayMs', () => {
     expect(nextCatchupBackpressureDelayMs({ attempt: 10, remainingMs: 40, random: () => 1 })).toBe(40);
     expect(nextCatchupBackpressureDelayMs({ attempt: 0, remainingMs: 0 })).toBeUndefined();
     expect(nextCatchupBackpressureDelayMs({ attempt: 0, remainingMs: -5 })).toBeUndefined();
+  });
+});
+
+describe('CATCHUP_BACKPRESSURE_MAX_WAIT_MS', () => {
+  it('outlasts one head-of-line round plus the queue waits it exists to survive', () => {
+    // Issue #2006 measured `sync-global` queue waits of 87-109 s, and an
+    // admitted round is itself bounded by SYNC_TOTAL_TIMEOUT_MS (120 s). A
+    // budget below those numbers gives up in exactly the saturation case it was
+    // introduced for — which is what the old fixed 850 ms ladder did.
+    expect(CATCHUP_BACKPRESSURE_MAX_WAIT_MS).toBeGreaterThan(120_000);
+    expect(CATCHUP_BACKPRESSURE_MAX_WAIT_MS).toBeGreaterThan(109_000);
+  });
+
+  it('keeps retrying past a 90-second capacity clear under the default budget', async () => {
+    // Virtual clock: admission stays refused until 90 s have elapsed, i.e. a
+    // realistic head-of-line drain. The default policy must still be retrying
+    // then, and must succeed rather than return deferred.
+    const clock = virtualClock(0);
+    const syncDurable = vi.fn(async () => (
+      clock.now() >= 90_000 ? { deferredBackpressure: 0 } : { deferredBackpressure: 1 }
+    ));
+
+    const result = await runCatchupPlaneWithPolicy('foreground', syncDurable, {
+      now: clock.now,
+      wait: clock.wait,
+      random: () => 0,
+    });
+
+    expect(result.deferredBackpressure).toBe(0);
+    expect(clock.now()).toBeGreaterThanOrEqual(90_000);
+    expect(clock.now()).toBeLessThanOrEqual(CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
   });
 });

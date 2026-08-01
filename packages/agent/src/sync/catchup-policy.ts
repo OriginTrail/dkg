@@ -16,14 +16,18 @@ export const CATCHUP_BACKPRESSURE_JITTER_RATIO = 0.25;
  * while an admitted `sync-global` round is bounded by `SYNC_TOTAL_TIMEOUT_MS`
  * (120 s) per plane, and issue #2006 measured queue waits of 87–109 s. A refused
  * foreground admission therefore always exhausted its budget long before the
- * head of the queue could possibly have cleared. Waiting costs a timer and no
- * work, so the budget is now wall-clock and generous — but still bounded, so a
- * permanently saturated node fails the catch-up job instead of pinning it at
- * `running` forever.
+ * head of the queue could possibly have cleared.
+ *
+ * The default is deliberately set ABOVE both of those numbers: the wait has to
+ * outlast one full head-of-line round (120 s) plus the observed backlog, or the
+ * budget still gives up in exactly the saturation case it exists to survive.
+ * Waiting costs a timer and no work. It stays bounded, so a permanently
+ * saturated node fails the catch-up job with a retryable status instead of
+ * pinning it at `running` forever.
  */
 export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number = (() => {
   const raw = Number(process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
-  return Number.isInteger(raw) && raw >= 0 ? raw : 60_000;
+  return Number.isInteger(raw) && raw >= 0 ? raw : 180_000;
 })();
 
 /** Bounded admission origin recorded on node-wide scheduler diagnostics. */
