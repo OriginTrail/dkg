@@ -378,6 +378,29 @@ describe('context graph catch-up readiness classification', () => {
     });
   });
 
+  it('is not discarded by the denial gate before readiness is evaluated', () => {
+    // `cleanCompletionHasResponse` gates the denial and no-response branches
+    // that run BEFORE `catchupPlaneReady` is consulted. A new evidence carrier
+    // missing from that gate is silently unreachable: the durable plane would
+    // be provably ready and the job would still return `denied`, because a
+    // shared-memory phase from some other peer was refused.
+    const result = curatorHostedEmptyResult();
+    result.denied = true;
+    result.deniedPeers = 1;
+    result.diagnostics!.sharedMemory.deniedPhases = 1;
+
+    expect(classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    })).toMatchObject({
+      jobStatus: 'done',
+      readinessPatch: { durableVerified: true },
+    });
+  });
+
   it('never settles a PRIVATE plane on a curator hosted-empty round', () => {
     // Private planes stay proof-by-content only: an authorized-but-filtered
     // response is indistinguishable from an empty one on this side of the wire.

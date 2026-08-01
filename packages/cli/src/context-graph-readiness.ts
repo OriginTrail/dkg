@@ -8,6 +8,7 @@ import {
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneReady,
   type CatchupJobResult,
+  type CatchupPlaneCompletionEvidence,
 } from './catchup-runner.js';
 
 export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
@@ -137,16 +138,23 @@ function catchupServedUsableData(result: CatchupJobResult): boolean {
   return result.dataSynced > 0 || result.sharedMemorySynced > 0;
 }
 
+/**
+ * Did ANY peer complete this plane cleanly, whatever it carried?
+ *
+ * Every carrier of clean-completion evidence must be listed here, not just the
+ * ones that prove readiness: this predicate gates the denial and no-response
+ * branches that run BEFORE `catchupPlaneReady` is ever consulted, so a form of
+ * evidence missing from it is silently unreachable. The curator's hosted-empty
+ * round is the newest carrier and is exactly that shape — no data, no wire-empty
+ * response, and still a clean answer from the one peer that speaks for the graph.
+ */
 function cleanCompletionHasResponse(
-  completion: {
-    verifiedDataPeers: number;
-    verifiedPrivateOnlyPeers?: number;
-    emptyPeers: number;
-  } | undefined,
+  completion: CatchupPlaneCompletionEvidence | undefined,
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0 ||
     (completion?.verifiedPrivateOnlyPeers ?? 0) > 0 ||
-    (completion?.emptyPeers ?? 0) > 0;
+    (completion?.emptyPeers ?? 0) > 0 ||
+    (completion?.authorityEmptyPeers ?? 0) > 0;
 }
 
 function catchupHasRequestedCleanPeerResponse(
