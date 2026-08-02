@@ -19,6 +19,7 @@ import {
   parseBooleanEnv,
   resolveExplicitSyncGlobalLimit,
   resolveSyncGlobalBackpressure,
+  type SyncBackpressureSnapshot,
   type SyncGlobalBackpressureConfig,
   type SyncGlobalBackpressurePolicy,
 } from './backpressure.js';
@@ -60,6 +61,11 @@ export interface SyncCapacitySamplingOptions {
   onError?: (error: unknown) => void;
 }
 
+export interface SyncCapacityPolicyStatus {
+  inflightLimit: number | null;
+  queueLimit: number | null;
+}
+
 function readStorePressure(store: TripleStore) {
   try {
     return store.getPressureSnapshot?.();
@@ -96,7 +102,7 @@ export class SyncCapacityRuntime {
   private samplingTimer: ReturnType<typeof setInterval> | undefined;
 
   private constructor(
-    readonly policy: SyncGlobalBackpressurePolicy,
+    private readonly policy: SyncGlobalBackpressurePolicy,
     private readonly configuredCoverageBatch: number,
     controller?: AdaptiveCapacityController,
     sampler?: AdaptiveCapacitySampler,
@@ -179,6 +185,19 @@ export class SyncCapacityRuntime {
     return { policy: this.policy };
   }
 
+  /** Runtime-owned requester-pressure view for lifecycle diagnostics and sampling. */
+  getBackpressureSnapshot(): SyncBackpressureSnapshot {
+    return getSyncBackpressureSnapshot(this.policy);
+  }
+
+  /** Stable resolved ceilings without exposing the branded admission policy. */
+  getResolvedPolicyStatus(): SyncCapacityPolicyStatus {
+    return {
+      inflightLimit: this.policy.limit ?? null,
+      queueLimit: this.policy.queueLimit ?? null,
+    };
+  }
+
   getEffectiveCoverageBatch(): number {
     return this.controller?.getEffectiveCoverageBatch() ?? this.configuredCoverageBatch;
   }
@@ -204,7 +223,7 @@ export class SyncCapacityRuntime {
     );
     this.samplingTimer = setInterval(() => {
       try {
-        const pressure = getSyncBackpressureSnapshot(this.policy);
+        const pressure = this.getBackpressureSnapshot();
         const demand = pressure.inflight > 0
           || pressure.queued > 0
           || (options.hasSupplementalDemand?.() ?? false);

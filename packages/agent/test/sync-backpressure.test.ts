@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   backpressureRegistry,
   createOperationContext,
@@ -435,6 +435,52 @@ describe('sync global backpressure', () => {
     } finally {
       releaseWork();
       await admitted;
+    }
+  });
+
+  it('uses the runtime-owned live admission policy at the lifecycle boundary', async () => {
+    const config = { syncGlobalMaxInflight: 2, syncGlobalQueueLimit: 2 };
+    const runtimePolicy = resolveSyncGlobalBackpressure(config, () => 1);
+    const getAdmissionOptions = vi.fn(() => ({ policy: runtimePolicy }));
+    const agentLike = {
+      config,
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      syncCapacityRuntime: { getAdmissionOptions },
+    };
+    let releaseFirst!: () => void;
+    const first = LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agentLike as never,
+      createOperationContext('sync'),
+      'runtime-policy-first',
+      'durable' as never,
+      'durable:runtime-policy-first',
+      () => new Promise<void>((resolve) => { releaseFirst = resolve; }),
+    );
+    await tick();
+
+    let secondRan = false;
+    const second = LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agentLike as never,
+      createOperationContext('sync'),
+      'runtime-policy-second',
+      'durable' as never,
+      'durable:runtime-policy-second',
+      async () => { secondRan = true; },
+    );
+    await tick();
+
+    try {
+      expect(getAdmissionOptions).toHaveBeenCalledTimes(2);
+      expect(secondRan).toBe(false);
+      expect(getSyncBackpressureSnapshot(runtimePolicy)).toMatchObject({
+        inflight: 1,
+        queued: 1,
+        limit: 1,
+      });
+    } finally {
+      releaseFirst();
+      await Promise.all([first, second]);
     }
   });
 

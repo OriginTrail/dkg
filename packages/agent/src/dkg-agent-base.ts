@@ -1725,19 +1725,12 @@ export class DKGAgentBase {
     const selected = [...(this.config.syncContextGraphs ?? [])];
     let automaticContextGraphIds: string[] = [];
     if ((this.config.nodeRole ?? 'edge') === 'core') {
-      // Keep the established positional boundary exact for static callers;
-      // only adaptive activation crosses the named options seam.
-      automaticContextGraphIds = this.syncCapacityRuntime.isAdaptive()
-        ? this.corePublicSyncCoverageScheduler.planAutomaticCoverageWithOptions(selected, {
+      automaticContextGraphIds = this.corePublicSyncCoverageScheduler
+        .planAutomaticCoverageWithOptions(selected, {
           priorities: this.config.syncContextGraphPriorities,
           planningLane: remotePeer,
           effectiveBatchSize: this.syncCapacityRuntime.getEffectiveCoverageBatch(),
-        })
-        : this.corePublicSyncCoverageScheduler.planAutomaticCoverage(
-          selected,
-          this.config.syncContextGraphPriorities,
-          remotePeer,
-        );
+        });
     }
     const initialDurableContextGraphIds = [...new Set([
       ...selected,

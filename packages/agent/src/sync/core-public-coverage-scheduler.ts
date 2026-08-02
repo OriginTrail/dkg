@@ -135,7 +135,7 @@ export class CorePublicSyncCoverageScheduler {
     });
   }
 
-  /** Named adaptive planning boundary; existing static callers keep their exact call shape. */
+  /** Canonical named planning boundary; the positional wrapper preserves outside call shapes. */
   planAutomaticCoverageWithOptions(
     selectedContextGraphIds: readonly string[],
     options: Readonly<CorePublicSyncCoveragePlanOptions> = {},

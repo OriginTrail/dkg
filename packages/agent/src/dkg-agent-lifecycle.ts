@@ -303,7 +303,6 @@ import {
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
 import {
-  getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
@@ -2021,7 +2020,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
-                const syncPressure = getSyncBackpressureSnapshot(this.syncCapacityRuntime.policy);
+                const syncPressure = this.syncCapacityRuntime.getBackpressureSnapshot();
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +
@@ -2544,7 +2543,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       process.env,
       (message) => this.log.warn(ctx, message),
     );
-    const syncGlobalPolicy = this.syncCapacityRuntime.policy;
+    const syncGlobalPolicy = this.syncCapacityRuntime.getResolvedPolicyStatus();
     const syncCapacity = this.syncCapacityRuntime.getStatus();
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
@@ -2552,7 +2551,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,
       snapshotLocalRows: snapshotPolicy.budget.maxSnapshotRows,
       snapshotLocalBytesEstimate: snapshotPolicy.budget.maxSnapshotBytesEstimate,
-      syncGlobalInflightLimit: syncGlobalPolicy.limit ?? 0,
+      syncGlobalInflightLimit: syncGlobalPolicy.inflightLimit ?? 0,
       syncGlobalQueueLimit: syncGlobalPolicy.queueLimit ?? 0,
       syncCapacityMode: syncCapacity.mode,
       syncCapacityCurrentInflight: syncCapacity.currentInflight ?? 0,

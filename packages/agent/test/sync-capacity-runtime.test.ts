@@ -39,8 +39,8 @@ describe('sync capacity runtime resolution', () => {
     }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
 
     expect(runtime.isAdaptive()).toBe(false);
-    expect(runtime.policy.limit).toBe(4);
-    expect(runtime.getAdmissionOptions()).toEqual({ policy: runtime.policy });
+    expect(runtime.getResolvedPolicyStatus()).toMatchObject({ inflightLimit: 4 });
+    expect(runtime.getAdmissionOptions()).toHaveProperty('policy');
     expect(runtime.getStatus()).toMatchObject({ mode: 'static', currentInflight: 4 });
   });
 
@@ -51,7 +51,10 @@ describe('sync capacity runtime resolution', () => {
     }, fakeStore(STORE_PRESSURE), { parallelism: 16, now: () => 100 });
 
     expect(runtime.isAdaptive()).toBe(true);
-    expect(runtime.policy.limit).toBe(3);
+    expect(runtime.getResolvedPolicyStatus()).toMatchObject({
+      inflightLimit: 3,
+      queueLimit: 6,
+    });
     expect(runtime.getStatus()).toMatchObject({
       mode: 'adaptive',
       currentInflight: 2,
@@ -60,8 +63,8 @@ describe('sync capacity runtime resolution', () => {
       currentCoverageBatch: 7,
       configuredCoverageBatch: 7,
     });
-    expect(runtime.getAdmissionOptions()).toEqual({ policy: runtime.policy });
-    expect(runtime.policy.currentLimit?.()).toBe(2);
+    expect(runtime.getAdmissionOptions()).toHaveProperty('policy');
+    expect(runtime.getBackpressureSnapshot().limit).toBe(2);
   });
 
   it('owns sampling and restores constrained coverage from supplemental Core demand', () => {
@@ -194,9 +197,12 @@ describe('sync capacity runtime resolution', () => {
     }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
 
     expect(staticRuntime.isAdaptive()).toBe(false);
-    expect(staticRuntime.policy.limit).toBe(6);
+    expect(staticRuntime.getResolvedPolicyStatus().inflightLimit).toBe(6);
     expect(adaptiveRuntime.isAdaptive()).toBe(true);
-    expect(adaptiveRuntime.policy).toMatchObject({ limit: 3, queueLimit: 6 });
+    expect(adaptiveRuntime.getResolvedPolicyStatus()).toEqual({
+      inflightLimit: 3,
+      queueLimit: 6,
+    });
     expect(adaptiveRuntime.getStatus().maxInflight).toBe(3);
   });
 
@@ -207,7 +213,10 @@ describe('sync capacity runtime resolution', () => {
       syncAdaptiveCapacity: { enabled: true },
     }, fakeStore(STORE_PRESSURE), { parallelism: 64 });
 
-    expect(runtime.policy).toMatchObject({ limit: 3, queueLimit: 6 });
+    expect(runtime.getResolvedPolicyStatus()).toEqual({
+      inflightLimit: 3,
+      queueLimit: 6,
+    });
     expect(runtime.getStatus()).toMatchObject({
       mode: 'adaptive',
       currentInflight: 2,
@@ -222,7 +231,10 @@ describe('sync capacity runtime resolution', () => {
       syncAdaptiveCapacity: { enabled: true },
     }, fakeStore(STORE_PRESSURE), { parallelism: 64 });
 
-    expect(runtime.policy).toMatchObject({ limit: 3, queueLimit: 6 });
+    expect(runtime.getResolvedPolicyStatus()).toEqual({
+      inflightLimit: 3,
+      queueLimit: 6,
+    });
     expect(runtime.getStatus()).toMatchObject({
       mode: 'adaptive',
       currentInflight: 2,
@@ -247,7 +259,10 @@ describe('sync capacity runtime resolution', () => {
     }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
 
     expect(runtime.isAdaptive()).toBe(true);
-    expect(runtime.policy).toMatchObject({ limit: 2, queueLimit: 4 });
+    expect(runtime.getResolvedPolicyStatus()).toEqual({
+      inflightLimit: 2,
+      queueLimit: 4,
+    });
     expect(runtime.getStatus()).toMatchObject({
       mode: 'adaptive',
       currentInflight: 2,
@@ -265,7 +280,7 @@ describe('sync capacity runtime resolution', () => {
     }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
 
     expect(runtime.isAdaptive()).toBe(true);
-    expect(runtime.policy.limit).toBe(1);
+    expect(runtime.getResolvedPolicyStatus().inflightLimit).toBe(1);
     expect(runtime.getStatus()).toMatchObject({
       mode: 'adaptive',
       currentInflight: 1,
@@ -310,7 +325,7 @@ describe('sync capacity runtime resolution', () => {
     }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
 
     expect(runtime.isAdaptive()).toBe(false);
-    expect(runtime.policy.limit).toBeUndefined();
+    expect(runtime.getResolvedPolicyStatus().inflightLimit).toBeNull();
     expect(runtime.getStatus().currentInflight).toBeNull();
   });
 
