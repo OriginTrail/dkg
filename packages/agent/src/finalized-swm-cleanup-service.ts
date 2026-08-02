@@ -641,9 +641,12 @@ export class FinalizedSwmCleanupService {
       if (outcome === 'cleared') cleared += 1;
     }
     // `ORDER BY ?task` makes the last row the keyset position. A short page means
-    // the ordered set is exhausted, so the caller wraps instead of advancing —
-    // without that, skipping a stuck prefix would trade it for a permanently
-    // skipped suffix, the same starvation with the opposite sign.
+    // the ordered set is exhausted, so the caller wraps instead of advancing.
+    // This is an optimisation, NOT a safety property: an empty page carries no
+    // last subject and therefore clears the cursor anyway, so dropping the
+    // short-page wrap costs one wasted empty query per cycle rather than
+    // stranding the suffix. Established by mutation — a wrap-only mutant is not
+    // killed, and this fallback is why.
     const lastRow = result.bindings[result.bindings.length - 1];
     const lastTaskSubject = typeof lastRow?.['task'] === 'string' ? lastRow['task'] : undefined;
     return {
