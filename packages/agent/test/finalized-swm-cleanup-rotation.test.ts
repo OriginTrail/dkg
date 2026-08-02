@@ -14,6 +14,20 @@
  * context graphs each slice actually entered. Asserting only that the cursor
  * advanced is much weaker: it passes with the accumulator committed in the
  * wrong place, which is the mutation that silently inflates the SLO surface.
+ *
+ * VERIFYING THIS SUITE STILL BITES. Neutralise the cursor at its DECLARATION,
+ * not at its assignment sites:
+ *
+ *   private rotationPendingDiscarded: string[] | null = null;
+ *   private get rotationPending(): string[] | null { return null; }
+ *   private set rotationPending(_v: string[] | null) {}
+ *
+ * The sweep loop has repeatedly grown new persist sites — a fault path, then a
+ * task cursor — and a mutant that enumerates them silently weakens each time
+ * one is added: the enumeration was complete when written, the code grew
+ * underneath it, and nothing fails to announce that. Mutating the single
+ * declaration cannot be outgrown by new call sites, so it stays valid across
+ * restructures of the loop.
  */
 
 import { describe, expect, it, vi } from 'vitest';
