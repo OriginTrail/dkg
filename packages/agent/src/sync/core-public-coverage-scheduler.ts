@@ -19,6 +19,12 @@ export interface CorePublicSyncCoverageStatus {
   };
 }
 
+export interface CorePublicSyncCoveragePlanOptions {
+  priorities?: Readonly<SyncContextGraphPriorityConfig>;
+  planningLane?: string;
+  effectiveBatchSize?: number;
+}
+
 function normalizeBatchSize(value: number | undefined): number {
   if (value === undefined) return DEFAULT_CORE_PUBLIC_SYNC_BATCH_SIZE;
   if (!Number.isInteger(value) || value < 0) {
@@ -122,8 +128,23 @@ export class CorePublicSyncCoverageScheduler {
     selectedContextGraphIds: readonly string[],
     priorities?: Readonly<SyncContextGraphPriorityConfig>,
     planningLane = 'default',
-    effectiveBatchSize?: number,
   ): string[] {
+    return this.planAutomaticCoverageWithOptions(selectedContextGraphIds, {
+      priorities,
+      planningLane,
+    });
+  }
+
+  /** Named adaptive planning boundary; existing static callers keep their exact call shape. */
+  planAutomaticCoverageWithOptions(
+    selectedContextGraphIds: readonly string[],
+    options: Readonly<CorePublicSyncCoveragePlanOptions> = {},
+  ): string[] {
+    const {
+      priorities,
+      planningLane = 'default',
+      effectiveBatchSize,
+    } = options;
     const selected = [...new Set(
       selectedContextGraphIds.map((id) => id.trim()).filter(Boolean),
     )];

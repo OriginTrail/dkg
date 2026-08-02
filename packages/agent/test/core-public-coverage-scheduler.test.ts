@@ -151,20 +151,16 @@ describe('Core public Context Graph coverage scheduler', () => {
       scheduler.register(contextGraphId);
     }
 
-    const constrained = scheduler.planAutomaticCoverage(
-      ['cg:selected'],
-      undefined,
-      'peer-a',
-      1,
-    );
+    const constrained = scheduler.planAutomaticCoverageWithOptions(['cg:selected'], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 1,
+    });
     expect(constrained).toHaveLength(1);
 
-    const recovered = scheduler.planAutomaticCoverage(
-      ['cg:selected'],
-      undefined,
-      'peer-a',
-      20,
-    );
+    const recovered = scheduler.planAutomaticCoverageWithOptions(['cg:selected'], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 20,
+    });
     expect(recovered).toHaveLength(4);
     expect(recovered).not.toContain('cg:selected');
   });
@@ -175,9 +171,18 @@ describe('Core public Context Graph coverage scheduler', () => {
       scheduler.register(contextGraphId);
     }
 
-    const first = scheduler.planAutomaticCoverage([], undefined, 'peer-a', 1);
-    const second = scheduler.planAutomaticCoverage([], undefined, 'peer-a', 2);
-    const third = scheduler.planAutomaticCoverage([], undefined, 'peer-a', 1);
+    const first = scheduler.planAutomaticCoverageWithOptions([], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 1,
+    });
+    const second = scheduler.planAutomaticCoverageWithOptions([], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 2,
+    });
+    const third = scheduler.planAutomaticCoverageWithOptions([], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 1,
+    });
 
     expect(first).toEqual(['cg:a']);
     expect(second).toEqual(['cg:c', 'cg:d']);
@@ -188,10 +193,16 @@ describe('Core public Context Graph coverage scheduler', () => {
     const scheduler = new CorePublicSyncCoverageScheduler(3);
     scheduler.register('cg:a');
 
-    expect(() => scheduler.planAutomaticCoverage([], undefined, 'peer-a', -1)).toThrow(
+    expect(() => scheduler.planAutomaticCoverageWithOptions([], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: -1,
+    })).toThrow(
       /effective Core public sync batch size/,
     );
-    expect(() => scheduler.planAutomaticCoverage([], undefined, 'peer-a', 1.5)).toThrow(
+    expect(() => scheduler.planAutomaticCoverageWithOptions([], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 1.5,
+    })).toThrow(
       /effective Core public sync batch size/,
     );
   });
