@@ -5,7 +5,7 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
-    "rootDir": ".",
+    "rootDir": "../..",
     "skipLibCheck": true,
     "sourceMap": false,
     "types": ["node"]
