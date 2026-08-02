@@ -3,6 +3,46 @@ import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAge
 
 
 let _fileSnapshot: string;
+
+function createContextGraphPersistenceFixture() {
+  const persisted = new Map<string, any>();
+  const persistedMembers = new Map<string, any>();
+  const subscriptionStore = {
+    loadAll: async () => [...persisted.values()],
+    save: async (record: any) => {
+      persisted.set(record.id, { ...record });
+    },
+    delete: async (contextGraphId: string) => {
+      persisted.delete(contextGraphId);
+    },
+  };
+  const membershipStore = {
+    upsert: async (record: any) => {
+      persistedMembers.set(
+        `${record.contextGraphId}|${record.principalType}|${record.principalId}`,
+        { ...record },
+      );
+    },
+    delete: async (contextGraphId: string, principalType: string, principalId: string) => {
+      persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
+    },
+  };
+  return { persisted, persistedMembers, subscriptionStore, membershipStore };
+}
+
+async function createAgentWithContextGraphPersistence(
+  name: string,
+  fixture: ReturnType<typeof createContextGraphPersistenceFixture>,
+) {
+  return DKGAgent.create({
+    name,
+    listenHost: '127.0.0.1',
+    chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    contextGraphSubscriptionStore: fixture.subscriptionStore,
+    contextGraphMembershipStore: fixture.membershipStore,
+  });
+}
+
 beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
   const { hubAddress } = getSharedContext();
@@ -68,33 +108,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
 
     it('persists runtime subscriptions and rehydrates them on restart', async () => {
-      const persisted = new Map<string, any>();
-      const persistedMembers = new Map<string, any>();
-      const subscriptionStore = {
-        loadAll: async () => [...persisted.values()],
-        save: async (record: any) => {
-          persisted.set(record.id, { ...record });
-        },
-        delete: async (contextGraphId: string) => {
-          persisted.delete(contextGraphId);
-        },
-      };
-      const membershipStore = {
-        upsert: async (record: any) => {
-          persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
-        },
-        delete: async (contextGraphId: string, principalType: string, principalId: string) => {
-          persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
-        },
-      };
-
-      const agentA = await DKGAgent.create({
-        name: 'PersistedSubscriptionsA',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const agentA = await createAgentWithContextGraphPersistence('PersistedSubscriptionsA', fixture);
 
       let agentAPeerId = '';
       try {
@@ -130,13 +146,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         source: 'subscription',
       });
 
-      const agentB = await DKGAgent.create({
-        name: 'PersistedSubscriptionsB',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const agentB = await createAgentWithContextGraphPersistence('PersistedSubscriptionsB', fixture);
 
       try {
         await agentB.start();
@@ -164,32 +174,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
 
     it('keeps on-demand subscriptions process-local until explicitly promoted', async () => {
-      const persisted = new Map<string, any>();
-      const persistedMembers = new Map<string, any>();
-      const subscriptionStore = {
-        loadAll: async () => [...persisted.values()],
-        save: async (record: any) => {
-          persisted.set(record.id, { ...record });
-        },
-        delete: async (contextGraphId: string) => {
-          persisted.delete(contextGraphId);
-        },
-      };
-      const membershipStore = {
-        upsert: async (record: any) => {
-          persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
-        },
-        delete: async (contextGraphId: string, principalType: string, principalId: string) => {
-          persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
-        },
-      };
-      const agentA = await DKGAgent.create({
-        name: 'OnDemandSubscriptionLifetimeA',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const agentA = await createAgentWithContextGraphPersistence('OnDemandSubscriptionLifetimeA', fixture);
 
       try {
         await agentA.start();
@@ -213,13 +200,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         await agentA.stop().catch(() => {});
       }
 
-      const agentB = await DKGAgent.create({
-        name: 'OnDemandSubscriptionLifetimeB',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const agentB = await createAgentWithContextGraphPersistence('OnDemandSubscriptionLifetimeB', fixture);
       try {
         await agentB.start();
         expect(agentB.getSubscribedContextGraphs().get('selected-cg')).toBeUndefined();
@@ -255,33 +236,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
 
     it('promotes an existing on-demand selection when the node creates the graph', async () => {
-      const persisted = new Map<string, any>();
-      const persistedMembers = new Map<string, any>();
-      const subscriptionStore = {
-        loadAll: async () => [...persisted.values()],
-        save: async (record: any) => {
-          persisted.set(record.id, { ...record });
-        },
-        delete: async (contextGraphId: string) => {
-          persisted.delete(contextGraphId);
-        },
-      };
-      const membershipStore = {
-        upsert: async (record: any) => {
-          persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
-        },
-        delete: async (contextGraphId: string, principalType: string, principalId: string) => {
-          persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
-        },
-      };
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
       const contextGraphId = 'selected-then-created-cg';
-      const agent = await DKGAgent.create({
-        name: 'OnDemandCreatePromotion',
-        listenHost: '127.0.0.1',
-        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-        contextGraphSubscriptionStore: subscriptionStore,
-        contextGraphMembershipStore: membershipStore,
-      });
+      const agent = await createAgentWithContextGraphPersistence('OnDemandCreatePromotion', fixture);
 
       try {
         await agent.start();
