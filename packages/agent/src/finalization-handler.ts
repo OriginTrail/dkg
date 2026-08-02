@@ -211,18 +211,6 @@ type GraphScopedMaterializationEnvelope = Pick<
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
 type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
 
-/**
- * How many immutable operation snapshots one receipt may verify in full.
- *
- * Discovery is allowed to surface more candidates than this — it is a cheap
- * bounded metadata read — but each verification costs a whole payload read
- * plus digest plus Merkle root, on the latency-sensitive receipt path. Bound
- * the expensive half so that a KA re-shared many times cannot turn one late
- * receipt into a multiple of that work. See
- * `FinalizationHandler.verifyImmutableGraphScopedSnapshot`.
- */
-const MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS = 4;
-
 function resolveGraphScopedAccessEnvelope(
   head: GraphScopedMaterializationEnvelope,
   requestedAccessPolicy?: GraphScopedAccessPolicy,
@@ -304,7 +292,6 @@ export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
   resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
-  writeLocks?: Map<string, Promise<void>>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   wakeFinalizedSwmCleanup?: () => void;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
@@ -376,7 +363,6 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
-  private readonly writeLocks: Map<string, Promise<void>> | undefined;
   private readonly publicSnapshotStore: WorkspacePublicSnapshotStore | undefined;
   private readonly wakeFinalizedSwmCleanup: (() => void) | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
@@ -438,7 +424,6 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
-    this.writeLocks = options.writeLocks;
     this.publicSnapshotStore = options.publicSnapshotStore;
     this.wakeFinalizedSwmCleanup = options.wakeFinalizedSwmCleanup;
     this.lifecycle = new FinalizationLifecycleLogger(
@@ -1376,23 +1361,23 @@ export class FinalizationHandler {
    * recovery independent from retaining a second live copy of the payload.
    *
    * Once the idle GC has done its job this is the NORMAL path for a late
-   * receipt, not an exception, so its cost has to be bounded rather than
-   * merely correct. Two rules hold it down:
+   * receipt, not an exception, so its cost has to be held down — but this is a
+   * SEARCH, and the only sound way to make a search cheaper is to remove work
+   * that provably cannot change its answer:
    *
    * - Discovery stays a bounded metadata read (one bound `kaUal`, LIMIT 16)
    *   and keeps the receipt lane's default priority. Receipts are
    *   latency-sensitive; demoting them to the background lane would trade a
    *   CPU spike for receipt starvation under load, which is the worse failure.
    * - Payload verification is the expensive half — a full snapshot read plus
-   *   digest plus Merkle root PER CANDIDATE — so it is capped at
-   *   {@link MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS} instead of running once per
-   *   discovered row. The cap is inert whenever `expectedPublicQuadsDigest` is
-   *   known, because candidates are then already content-identical and the
-   *   first match wins; it only bites when the evidence carried no digest
-   *   (`VerifiedGraphScopedFinalizationEvidence.publicQuadsDigest` is
-   *   optional), which is exactly the case that could otherwise do 16 full
-   *   payload verifications on one receipt. Truncation is logged, never
-   *   silent.
+   *   digest plus Merkle root per candidate — and it is deduplicated BY
+   *   CONTENT (see the memo below), not truncated by candidate count. When the
+   *   evidence carries a digest, every candidate advertises that same digest,
+   *   so the memo collapses the whole list to one payload read. When it does
+   *   not (`VerifiedGraphScopedFinalizationEvidence.publicQuadsDigest` is
+   *   optional), the candidates genuinely differ and each one has to be
+   *   checked; that residue is inherent to the search and stays bounded by the
+   *   discovery LIMIT.
    */
   private async verifyImmutableGraphScopedSnapshot(input: {
     contextGraphId: string;
@@ -1406,9 +1391,9 @@ export class FinalizationHandler {
     ctx: OperationContext;
   }): Promise<Extract<ExactGraphScopedLayerVerification, { status: 'verified' }> | undefined> {
     const graphManager = new GraphManager(this.store);
-    const shareOperationIds: string[] = [];
+    const shareOperationIds: Array<{ shareOperationId: string; digest?: string }> = [];
     if (input.expectedHead) {
-      shareOperationIds.push(input.expectedHead.shareOperationId);
+      shareOperationIds.push({ shareOperationId: input.expectedHead.shareOperationId });
     } else {
       const metaGraph = graphManager.sharedMemoryMetaUri(
         input.contextGraphId,
@@ -1441,21 +1426,38 @@ export class FinalizationHandler {
               || digest === input.expectedPublicQuadsDigest
             )
           ) {
-            shareOperationIds.push(shareId);
+            shareOperationIds.push({ shareOperationId: shareId, ...(digest ? { digest } : {}) });
           }
         }
       }
     }
 
-    const candidates = [...new Set(shareOperationIds)];
-    if (candidates.length > MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS) {
-      this.log.warn(
-        input.ctx,
-        `Finalization: ${candidates.length} immutable snapshot candidates for `
-          + `${input.scope.ual}; verifying the first ${MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS}`,
-      );
-    }
-    for (const shareOperationId of candidates.slice(0, MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS)) {
+    const seenShareOperationIds = new Set<string>();
+    const candidates = shareOperationIds.filter((candidate) => {
+      if (seenShareOperationIds.has(candidate.shareOperationId)) return false;
+      seenShareOperationIds.add(candidate.shareOperationId);
+      return true;
+    });
+    // Content-level memo. `resolveKnowledgeAssetOperationPublicQuads` throws
+    // unless the resolved payload hashes to the digest stored on that operation
+    // subject, so two candidates advertising the same digest resolve to the
+    // same quads and therefore to the same count and Merkle root. Once one of
+    // them has been fully resolved and rejected, every other candidate with
+    // that digest is provably a repeat of work already done — skipping it
+    // cannot change the answer. A THROW must not memo: that means we could not
+    // read THAT operation's snapshot, not that the content is wrong, and a
+    // sibling operation may still hold a readable copy.
+    //
+    // This bounds the repeated work without bounding the SEARCH. A cap on the
+    // candidate count would do the opposite: with `ORDER BY ?shareId` the order
+    // is unrelated to which candidate matches, so truncating it does not do
+    // less work, it returns a different answer — `undefined`, which decays into
+    // 'no-swm'. That outcome leaves the cursor for a sweep retry, but the
+    // candidate list is deterministic, so every retry re-derives the identical
+    // truncation and the receipt is stranded rather than delayed.
+    const rejectedDigests = new Set<string>();
+    for (const { shareOperationId, digest: candidateDigest } of candidates) {
+      if (candidateDigest !== undefined && rejectedDigests.has(candidateDigest)) continue;
       let quads: Quad[];
       try {
         const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
@@ -1481,13 +1483,17 @@ export class FinalizationHandler {
           && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
         )
       ) {
+        if (candidateDigest !== undefined) rejectedDigests.add(candidateDigest);
         continue;
       }
       const merkleRoot = computeFlatKCRoot(
         quads,
         input.privateMerkleRoot ? [input.privateMerkleRoot] : [],
       );
-      if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) continue;
+      if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
+        if (candidateDigest !== undefined) rejectedDigests.add(candidateDigest);
+        continue;
+      }
       return {
         status: 'verified',
         graphUri: knowledgeAssetLayerGraphUri(
