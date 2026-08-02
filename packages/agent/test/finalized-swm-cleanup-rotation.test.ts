@@ -28,6 +28,20 @@
  * underneath it, and nothing fails to announce that. Mutating the single
  * declaration cannot be outgrown by new call sites, so it stays valid across
  * restructures of the loop.
+ *
+ * This is NOT the same as a blanket mutant, and the difference decides whether
+ * a result means anything:
+ *
+ *   - A BLANKET mutant stands in for many PROPERTIES. That is the failure to
+ *     avoid — four conversion sites killed by one test, three predicates
+ *     asserted in one case. Its kill tells you something broke, not what.
+ *   - A SITE-PROOF mutant covers ONE property and is merely robust to that
+ *     property gaining implementation sites.
+ *
+ * The check is whether the kill set stays narrow and specific: the mutation
+ * above kills the resume test and nothing else. If a site-proof mutant starts
+ * reddening half the suite it has become blanket, and that is the signal to
+ * split it rather than to celebrate the kill.
  */
 
 import { describe, expect, it, vi } from 'vitest';
