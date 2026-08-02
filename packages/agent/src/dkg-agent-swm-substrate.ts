@@ -1697,6 +1697,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           runtime: this.finalizationRuntime,
+          writeLocks: this.writeLocks,
         },
       );
     }

@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  DKG_SWM_FINALIZED_PREDICATE,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
@@ -1277,6 +1278,45 @@ describe('DKGQueryEngine', () => {
       { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
     );
     expect(result.bindings).toHaveLength(0);
+  });
+
+  it('view=shared-working-memory hides finalized recovery snapshots and re-exposes a newer head', async () => {
+    const finalizedGraph = `${GRAPH}/_shared_memory/0x1111111111111111111111111111111111111111/1`;
+    const activeGraph = `${GRAPH}/_shared_memory/0x2222222222222222222222222222222222222222/2`;
+    const swmMeta = `${GRAPH}/_shared_memory_meta`;
+    const head = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/1#dkg-swm-head';
+    await store.insert([
+      q('urn:swm:finalized', SCHEMA_NAME, '"finalized-recovery"', finalizedGraph),
+      q('urn:swm:active', SCHEMA_NAME, '"active-draft"', activeGraph),
+      q(head, `${DKG}assertionGraph`, finalizedGraph, swmMeta),
+      q(
+        head,
+        DKG_SWM_FINALIZED_PREDICATE,
+        '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>',
+        swmMeta,
+      ),
+    ]);
+
+    const hidden = await engine.query(
+      `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
+    );
+    expect(hidden.bindings.map((row) => row['name'])).toEqual(['"active-draft"']);
+
+    // A newer SWM head replaces the complete head subject, clearing the marker.
+    await store.deleteByPattern({
+      graph: swmMeta,
+      subject: head,
+      predicate: DKG_SWM_FINALIZED_PREDICATE,
+    });
+    const visibleAgain = await engine.query(
+      `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
+    );
+    expect(visibleAgain.bindings.map((row) => row['name'])).toEqual([
+      '"active-draft"',
+      '"finalized-recovery"',
+    ]);
   });
 
   it('view requires contextGraphId', async () => {

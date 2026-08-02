@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CanonicalFinalizationReceipt, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -2680,7 +2680,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
+    registration?: {
+      txHash: string;
+      blockNumber: number;
+      txIndex?: number;
+    },
   ): Promise<string | null> {
+    if (
+      registration
+      && ethers.isHexString(registration.txHash, 32)
+      && Number.isSafeInteger(registration.blockNumber)
+      && registration.blockNumber > 0
+      && (registration.txIndex === undefined
+        || (Number.isSafeInteger(registration.txIndex) && registration.txIndex >= 0))
+    ) {
+      const key = `${onChainId}:${kaId.toString()}`;
+      this.vmReconcileRegistrationHints.delete(key);
+      this.vmReconcileRegistrationHints.set(key, registration);
+      while (this.vmReconcileRegistrationHints.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
+        const oldest = this.vmReconcileRegistrationHints.keys().next().value;
+        if (oldest === undefined) break;
+        this.vmReconcileRegistrationHints.delete(oldest);
+      }
+    }
     let targetOnChain: bigint | null = null;
     try { targetOnChain = BigInt(onChainId); } catch { targetOnChain = null; }
 
@@ -3950,6 +3972,39 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (options.isTargetCurrent && !options.isTargetCurrent()) {
       return { status: 'skip' };
     }
+
+    const registrationHintKey = `${onChainCgId.toString()}:${kaId.toString()}`;
+    const registrationHint = this.vmReconcileRegistrationHints.get(registrationHintKey);
+    let canonicalReceipt: CanonicalFinalizationReceipt | undefined;
+    if (registrationHint && this.chain.resolveCanonicalFinalizationReceipt) {
+      try {
+        const resolution = await this.chain.resolveCanonicalFinalizationReceipt(
+          registrationHint.txHash,
+          { expectedBlockNumber: registrationHint.blockNumber },
+        );
+        if (resolution.status === 'confirmed') {
+          const receipt = resolution.receipt;
+          const receiptMatches = receipt.txHash.toLowerCase() === registrationHint.txHash.toLowerCase()
+            && receipt.blockNumber === registrationHint.blockNumber
+            && receipt.kaId === kaId
+            && ethers.hexlify(receipt.merkleRoot).toLowerCase()
+              === ethers.hexlify(merkleRoot).toLowerCase()
+            && receipt.publisherAddress.toLowerCase() === publisherAddress.toLowerCase()
+            && (registrationHint.txIndex === undefined
+              || receipt.txIndex === registrationHint.txIndex);
+          if (receiptMatches) canonicalReceipt = receipt;
+          else this.vmReconcileRegistrationHints.delete(registrationHintKey);
+        } else if (resolution.status !== 'pending' && resolution.status !== 'not-found') {
+          this.vmReconcileRegistrationHints.delete(registrationHintKey);
+        }
+      } catch (err) {
+        this.log.info(
+          ctx,
+          `Phase B: canonical receipt lookup for ka ${kaId} deferred: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     const fh = this.getOrCreateFinalizationHandler();
     const reconcileInput = {
       contextGraphId: localCgId,
@@ -3959,6 +4014,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       publisherAddress,
       kaId,
       versionBlock,
+      ...(canonicalReceipt ? { canonicalReceipt } : {}),
     };
 
     let swmState: VmReconcileSwmCandidateState | undefined;
@@ -4064,6 +4120,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     switch (outcome) {
       case 'promoted':
+        this.vmReconcileRegistrationHints.delete(registrationHintKey);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.recentReconciledUals.add(cacheKey);
@@ -4073,6 +4130,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         });
         return { status: 'reconciled', blockNumber: versionBlock };
       case 'already-confirmed':
+        this.vmReconcileRegistrationHints.delete(registrationHintKey);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({
@@ -4082,6 +4140,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: versionBlock };
       case 'stale-target':
+        this.vmReconcileRegistrationHints.delete(registrationHintKey);
         // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({

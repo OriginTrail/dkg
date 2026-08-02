@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  DKG_SWM_FINALIZED_PREDICATE,
   MemoryLayer,
   createOperationContext,
   createGraphKnowledgeAssetScope,
@@ -2170,6 +2171,46 @@ describe('graph-scoped finalization handler', () => {
     expect(outcome).toBe('verified-vm-metadata-pending');
     expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
+  });
+
+  it('uses canonical registration provenance to materialize VM and retire the matching SWM head', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+      canonicalReceipt: canonicalReceipt(message).receipt,
+    }, createOperationContext('system'))).resolves.toBe('promoted');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    // Kept physically as bounded reorg evidence, but retired from the SWM view.
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> {
+        <${UAL}#dkg-swm-head> <${DKG_SWM_FINALIZED_PREDICATE}>
+          "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}>
+        <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
+        <http://dkg.io/ontology/materializedVersion> "123:4" .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {

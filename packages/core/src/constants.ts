@@ -323,6 +323,15 @@ export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraph
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
 }
 
+/**
+ * Boolean marker on a graph-scoped SWM head whose exact assertion has reached
+ * confirmed VM. The physical SWM snapshot remains available to receipt/reorg
+ * recovery, while strict shared-working-memory queries omit it. A newer SWM
+ * writer replaces the complete head subject and therefore clears the marker.
+ */
+export const DKG_SWM_FINALIZED_PREDICATE =
+  'http://dkg.io/ontology/sharedMemoryFinalized';
+
 export function contextGraphVerifiableMemoryUri(contextGraphId: string, verifiableMemoryId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/${verifiableMemoryId}`;
 }

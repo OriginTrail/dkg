@@ -31,6 +31,7 @@ import {
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  DKG_SWM_FINALIZED_PREDICATE,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
@@ -692,6 +693,24 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       }
     }
 
+    // A finalized graph-scoped assertion remains physically present in SWM as
+    // bounded receipt/reorg recovery evidence. It is no longer part of the
+    // user-facing shared-working-memory plane. Filter only graphs whose CURRENT
+    // head carries the local finalization marker; a newer SWM write replaces the
+    // complete head subject and clears that marker atomically with respect to
+    // in-process per-KA writers.
+    if (view === 'shared-working-memory') {
+      const finalizedGraphs = await this.discoverFinalizedSharedMemoryGraphs(
+        allGraphs,
+        reads,
+      );
+      if (finalizedGraphs.size > 0) {
+        const visible = allGraphs.filter((graph) => !finalizedGraphs.has(graph));
+        allGraphs.length = 0;
+        allGraphs.push(...visible);
+      }
+    }
+
     // GH #1098 — include the per-cgId VM data graph(s) `<cg>/context/<onChainId>`.
     // Chain-driven VM reconcile (and any per-cgId-only materialisation — e.g. a
     // peer that subscribed BEFORE publish and recovered via the reconcile sweep,
@@ -900,6 +919,37 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
+  }
+
+  /** Resolve exact per-KA SWM graphs whose current head is already finalized. */
+  private async discoverFinalizedSharedMemoryGraphs(
+    graphs: readonly string[],
+    reads: StoreReadLane,
+  ): Promise<Set<string>> {
+    const marker = '/_shared_memory';
+    const metaGraphs = new Set<string>();
+    for (const graph of graphs) {
+      const markerIndex = graph.lastIndexOf(marker);
+      if (markerIndex < 0) continue;
+      const bucketEnd = markerIndex + marker.length;
+      metaGraphs.add(`${graph.slice(0, bucketEnd)}_meta`);
+    }
+    if (metaGraphs.size === 0) return new Set();
+
+    const result = await reads.query(
+      `SELECT DISTINCT ?graph WHERE {
+        VALUES ?metaGraph { ${[...metaGraphs].map((graph) => `<${assertSafeIri(graph)}>`).join(' ')} }
+        GRAPH ?metaGraph {
+          ?head <${DKG_SWM_FINALIZED_PREDICATE}>
+            "true"^^<http://www.w3.org/2001/XMLSchema#boolean> ;
+            <http://dkg.io/ontology/assertionGraph> ?graph .
+        }
+      }`,
+    );
+    if (result.type !== 'bindings') return new Set();
+    return new Set(result.bindings
+      .map((binding) => binding['graph']?.replace(/^<|>$/g, ''))
+      .filter((graph): graph is string => Boolean(graph)));
   }
 
   /**
