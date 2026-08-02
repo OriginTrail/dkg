@@ -346,6 +346,30 @@ test('accepts exact Edge selection and bounded Core public convergence evidence'
   }
 });
 
+test('rejects Edge payload, subscription, or job evidence before selection', () => {
+  const payloadLeak = clone();
+  payloadLeak.edge.beforeSelection[0] = {
+    ...exact(graphs[0]!, graphs[0]!.selectedSnapshot),
+    runtimeSyncMode: null,
+    producingJobId: null,
+  };
+  let verdict = verifySelectiveCoverage(payloadLeak);
+  assert.equal(verdict.checks.edgePassiveBeforeSelection, false);
+  assert.equal(verdict.pass, false);
+
+  const subscriptionLeak = clone();
+  subscriptionLeak.edge.beforeSelection[0].runtimeSyncMode = 'on-demand';
+  verdict = verifySelectiveCoverage(subscriptionLeak);
+  assert.equal(verdict.checks.edgePassiveBeforeSelection, false);
+  assert.equal(verdict.pass, false);
+
+  const jobLeak = clone();
+  jobLeak.edge.beforeSelection[0].producingJobId = 'premature-edge-job';
+  verdict = verifySelectiveCoverage(jobLeak);
+  assert.equal(verdict.checks.edgePassiveBeforeSelection, false);
+  assert.equal(verdict.pass, false);
+});
+
 test('published artifact must retain matching automatic journal proof', () => {
   const missing = clone();
   delete missing.automaticJournalEvidence;
