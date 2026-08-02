@@ -126,6 +126,19 @@ substitutes. The admin subscriptions response supplies the effective Edge
 `syncMode`; omission retains the legacy `always-on` interpretation only inside
 the node, never as evidence for a requested on-demand selection.
 
+The exact bounded journal snapshots and selected sequence numbers are retained
+in the canonical artifact alongside the Edge/Core process-start and wave
+identities. `verify-live` parses and revalidates those raw records, so an artifact
+with relabeled automatic fields, synthetic job IDs, missing journal proof, or a
+mismatched process wave is rejected independently of the collection process.
+
+Every adapter response is decoded through a closed per-command schema at the
+process boundary before orchestration can consume it. Wrong session/protocol,
+unknown sequences, malformed JSON, oversized lines, unexpected keys, and
+malformed command values all fail closed. The launcher also has a direct
+regression test proving that corpus, trust-anchor, and artifact paths are absent
+from the spawned adapter environment.
+
 This repository supplies the fail-closed orchestrator and framed adapter
 protocol, not a deployment-specific adapter executable. The live command is
 therefore intentionally blocked unless `DKG_RFC64_M1_ADAPTER_COMMAND` names an

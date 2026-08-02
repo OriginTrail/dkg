@@ -16,6 +16,17 @@ import {
   type GraphObservationV1,
 } from './manifest.ts';
 import type { SyncCoverageJournalReferenceV1 } from './sync-coverage-journal.ts';
+import {
+  decodeCoreFinalObservations,
+  decodeCoreRoundResult,
+  decodeEdgeObservations,
+  decodeEdgeReconcilerResult,
+  decodeEdgeSyncResult,
+  decodeGraphObservations,
+  decodeNull,
+  decodeRestartReceipt,
+  decodeRuntimeReady,
+} from './runtime-wire.ts';
 
 export const SELECTIVE_COVERAGE_RUNTIME_COMMAND_SCHEMA =
   'dkg-rfc64-m1-selective-coverage-runtime-command-v1' as const;
@@ -88,22 +99,22 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
   private readonly timeoutMs: number;
 
   async start(role: SelectiveCoverageRuntimeRole): Promise<SelectiveCoverageRuntimeReadyV1> {
-    return await this.request('start', { role }) as SelectiveCoverageRuntimeReadyV1;
+    return await this.request('start', { role }, decodeRuntimeReady);
   }
 
   async stop(role: SelectiveCoverageRuntimeRole): Promise<void> {
-    await this.request('stop', { role });
+    await this.request('stop', { role }, decodeNull);
   }
 
   async publishWave(wave: 'selected' | 'final'): Promise<readonly GraphObservationV1[]> {
-    return await this.request('publish-wave', { wave }) as readonly GraphObservationV1[];
+    return await this.request('publish-wave', { wave }, decodeGraphObservations);
   }
 
   async observeEdge(
     checkpoint: 'before-selection' | 'after-selection' | 'after-restart'
       | 'after-second-on-demand',
   ): Promise<readonly EdgeGraphObservationV1[]> {
-    return (await this.request('observe-edge', { checkpoint })) as readonly EdgeGraphObservationV1[];
+    return await this.request('observe-edge', { checkpoint }, decodeEdgeObservations);
   }
 
   async synchronizeEdge(input: {
@@ -115,14 +126,11 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
     readonly journal?: SyncCoverageJournalReferenceV1;
   }> {
-    return (await this.request('synchronize-edge', input)) as {
-      readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
-      readonly journal?: SyncCoverageJournalReferenceV1;
-    };
+    return await this.request('synchronize-edge', input, decodeEdgeSyncResult);
   }
 
   async restartEdge(): Promise<SelectiveCoverageEdgeRestartReceiptV1> {
-    return await this.request('restart-edge', {}) as SelectiveCoverageEdgeRestartReceiptV1;
+    return await this.request('restart-edge', {}, decodeRestartReceipt);
   }
 
   async waitForEdgeReconciler(input: {
@@ -131,24 +139,18 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
     readonly journal: SyncCoverageJournalReferenceV1;
   }> {
-    return await this.request('wait-edge-reconciler', input) as {
-      readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
-      readonly journal: SyncCoverageJournalReferenceV1;
-    };
+    return await this.request('wait-edge-reconciler', input, decodeEdgeReconcilerResult);
   }
 
   async runCoreAutomaticRound(round: number): Promise<{
     readonly round: CoreAutomaticRoundV1;
     readonly journal: SyncCoverageJournalReferenceV1;
   }> {
-    return await this.request('core-automatic-round', { round }) as {
-      readonly round: CoreAutomaticRoundV1;
-      readonly journal: SyncCoverageJournalReferenceV1;
-    };
+    return await this.request('core-automatic-round', { round }, decodeCoreRoundResult);
   }
 
   async observeCoreFinal(): Promise<readonly CoreFinalObservationV1[]> {
-    return await this.request('observe-core-final', {}) as readonly CoreFinalObservationV1[];
+    return await this.request('observe-core-final', {}, decodeCoreFinalObservations);
   }
 
   async close(): Promise<void> {
@@ -156,7 +158,7 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     this.closing = true;
     let shutdownFailure: unknown;
     try {
-      await this.request('shutdown', {});
+      await this.request('shutdown', {}, decodeNull);
     } catch (error) {
       shutdownFailure = error;
     }
@@ -172,7 +174,11 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     if (shutdownFailure !== undefined) throw shutdownFailure;
   }
 
-  private request(command: string, payload: unknown): Promise<unknown> {
+  private request<T>(
+    command: string,
+    payload: unknown,
+    decode: (input: unknown) => T,
+  ): Promise<T> {
     if (this.closed) return Promise.reject(new Error('M1 runtime adapter is closed'));
     if (this.exitError) return Promise.reject(this.exitError);
     const sequence = this.sequence;
@@ -183,7 +189,19 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
         reject(new Error(`M1 runtime adapter command timed out: ${command}`));
       }, this.timeoutMs);
       timer.unref();
-      this.pending.set(sequence, { resolve, reject, timer });
+      this.pending.set(sequence, {
+        resolve: (value) => {
+          try {
+            resolve(decode(value));
+          } catch (error) {
+            reject(new Error(`M1 runtime adapter response failed decoding: ${command}`, {
+              cause: error,
+            }));
+          }
+        },
+        reject,
+        timer,
+      });
       const envelope = JSON.stringify({
         schema: SELECTIVE_COVERAGE_RUNTIME_COMMAND_SCHEMA,
         protocol: SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,

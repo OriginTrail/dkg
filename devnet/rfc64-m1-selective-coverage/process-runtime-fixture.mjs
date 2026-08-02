@@ -27,13 +27,40 @@ lines.on('line', (line) => {
       evidenceWaveId: `${role}-wave`,
     };
   }
-  process.stdout.write(`${prefix}${JSON.stringify({
+  const result = {
     schema: resultSchema,
     protocol,
     sessionNonce: input.sessionNonce,
     sequence: input.sequence,
     ok: true,
     value,
-  })}\n`);
+  };
+  const mode = process.env.FIXTURE_MODE;
+  if (input.command === 'publish-wave' && mode === 'malformed-publish') {
+    process.stdout.write(`${prefix}${JSON.stringify(result)}\n`, () => process.exit(0));
+    return;
+  }
+  if (input.command === 'start' && mode) {
+    if (mode === 'malformed-publish') {
+      process.stdout.write(`${prefix}${JSON.stringify(result)}\n`);
+      return;
+    }
+    if (mode === 'malformed-value') result.value = { role: input.payload.role };
+    if (mode === 'wrong-nonce') result.sessionNonce = 'wrong-session';
+    if (mode === 'wrong-protocol') result.protocol = 'wrong-protocol';
+    if (mode === 'wrong-schema') result.schema = 'wrong-schema';
+    if (mode === 'unknown-sequence') result.sequence += 1;
+    if (mode === 'malformed-json') {
+      process.stdout.write(`${prefix}{not-json\n`, () => process.exit(0));
+      return;
+    }
+    if (mode === 'oversized-line') {
+      process.stdout.write(`${'x'.repeat(1024 * 1024 + 1)}\n`, () => process.exit(0));
+      return;
+    }
+    process.stdout.write(`${prefix}${JSON.stringify(result)}\n`, () => process.exit(0));
+    return;
+  }
+  process.stdout.write(`${prefix}${JSON.stringify(result)}\n`);
   if (input.command === 'shutdown') process.exit(0);
 });

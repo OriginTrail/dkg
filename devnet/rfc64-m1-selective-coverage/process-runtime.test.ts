@@ -61,3 +61,51 @@ test('exchanges sequence-bound JSON without sending the trust anchor to the adap
     await runtime.close();
   }
 });
+
+for (const [mode, message] of [
+  ['malformed-value', /response failed decoding/],
+  ['wrong-nonce', /invalid result envelope/],
+  ['wrong-protocol', /invalid result envelope/],
+  ['wrong-schema', /invalid result envelope/],
+  ['unknown-sequence', /unknown result sequence/],
+  ['malformed-json', /malformed result JSON/],
+  ['oversized-line', /exceeds 1 MiB/],
+] as const) {
+  test(`rejects fail-closed adapter output: ${mode}`, async () => {
+    const runtime = fixtureRuntime(mode);
+    try {
+      await assert.rejects(runtime.start('publisher'), message);
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+}
+
+test('decodes non-start command results at the adapter boundary', async () => {
+  const runtime = fixtureRuntime('malformed-publish');
+  try {
+    await runtime.start('publisher');
+    await assert.rejects(
+      runtime.publishWave('selected'),
+      /response failed decoding: publish-wave/,
+    );
+  } finally {
+    await runtime.close().catch(() => undefined);
+  }
+});
+
+function fixtureRuntime(mode?: string): ProcessSelectiveCoverageRuntimeV1 {
+  return new ProcessSelectiveCoverageRuntimeV1({
+    command: process.execPath,
+    args: [resolve(import.meta.dirname, 'process-runtime-fixture.mjs')],
+    cwd: resolve(import.meta.dirname, '../..'),
+    timeoutMs: 5_000,
+    env: {
+      ...process.env,
+      ...(mode ? { FIXTURE_MODE: mode } : {}),
+      FIXTURE_NETWORK_ID: 'otp:20430',
+      FIXTURE_SOURCE_COMMIT: 'a'.repeat(40),
+      FIXTURE_RUNTIME_MANIFEST: `sha256:${'b'.repeat(64)}`,
+    },
+  });
+}

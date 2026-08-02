@@ -17,6 +17,7 @@ import {
 import { ProcessSelectiveCoverageRuntimeV1 } from './process-runtime.ts';
 import { collectSelectiveCoverageEvidenceV1 } from './runtime.ts';
 import { runSelectiveCoverageLiveV1 } from './live-runner.ts';
+import { buildSelectiveCoverageAdapterEnvironment } from './adapter-environment.ts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const corpusPath = resolveRequiredPath('DKG_RFC64_M1_CORPUS_FILE');
@@ -53,7 +54,7 @@ const runtime = new ProcessSelectiveCoverageRuntimeV1({
   args: adapterArgs,
   cwd: adapterCwd,
   timeoutMs,
-  env: adapterEnvironment(),
+  env: buildSelectiveCoverageAdapterEnvironment(process.env),
 });
 await runSelectiveCoverageLiveV1({
   collect: () => collectSelectiveCoverageEvidenceV1({
@@ -109,14 +110,4 @@ function parseTimeout(value: string | undefined): number | undefined {
     throw new TypeError('DKG_RFC64_M1_ADAPTER_TIMEOUT_MS must be an integer');
   }
   return parsed;
-}
-
-function adapterEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'production' };
-  for (const name of [
-    'DKG_RFC64_M1_CORPUS_FILE',
-    'DKG_RFC64_M1_TRUST_ANCHOR_FILE',
-    'DKG_RFC64_M1_ARTIFACT',
-  ]) delete env[name];
-  return env;
 }

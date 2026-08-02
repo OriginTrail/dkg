@@ -1,0 +1,305 @@
+import {
+  MAX_SELECTIVE_COVERAGE_GRAPHS,
+  MAX_SELECTIVE_COVERAGE_ROUNDS,
+  type CoreAutomaticRoundV1,
+  type CoreFinalObservationV1,
+  type EdgeGraphObservationV1,
+  type EdgeSyncOperationV1,
+  type GraphObservationV1,
+  type GraphSnapshotExpectationV1,
+} from './manifest.ts';
+import {
+  SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
+  type SelectiveCoverageEdgeRestartReceiptV1,
+  type SelectiveCoverageRuntimeReadyV1,
+} from './runtime.ts';
+import {
+  parseSyncCoverageJournalReferenceV1,
+  type SyncCoverageJournalReferenceV1,
+} from './sync-coverage-journal.ts';
+
+type Decoder<T> = (input: unknown) => T;
+
+export function decodeRuntimeReady(input: unknown): SelectiveCoverageRuntimeReadyV1 {
+  const row = record(input, [
+    'protocol', 'role', 'pid', 'peerId', 'networkId', 'testedHeadCommit',
+    'runtimeManifestDigest', 'processStartedAt', 'processInstanceId',
+    'dataDirectoryIdentity', 'evidenceWaveId',
+  ]);
+  const role = row.role;
+  if (row.protocol !== SELECTIVE_COVERAGE_RUNTIME_PROTOCOL
+    || (role !== 'publisher' && role !== 'edge' && role !== 'core')
+    || !positiveInteger(row.pid)
+    || !nonNegativeInteger(row.processStartedAt)) fail('runtime ready');
+  return {
+    protocol: SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
+    role,
+    pid: row.pid as number,
+    peerId: text(row.peerId, 'peerId'),
+    networkId: text(row.networkId, 'networkId'),
+    testedHeadCommit: text(row.testedHeadCommit, 'testedHeadCommit'),
+    runtimeManifestDigest: text(row.runtimeManifestDigest, 'runtimeManifestDigest'),
+    processStartedAt: row.processStartedAt as number,
+    processInstanceId: text(row.processInstanceId, 'processInstanceId'),
+    dataDirectoryIdentity: text(row.dataDirectoryIdentity, 'dataDirectoryIdentity'),
+    evidenceWaveId: text(row.evidenceWaveId, 'evidenceWaveId'),
+  };
+}
+
+export function decodeRestartReceipt(input: unknown): SelectiveCoverageEdgeRestartReceiptV1 {
+  const row = record(input, ['previous', 'current']);
+  const previous = record(row.previous, ['pid', 'processInstanceId', 'exitedAt']);
+  if (!positiveInteger(previous.pid) || !nonNegativeInteger(previous.exitedAt)) {
+    fail('restart receipt');
+  }
+  return {
+    previous: {
+      pid: previous.pid as number,
+      processInstanceId: text(previous.processInstanceId, 'processInstanceId'),
+      exitedAt: previous.exitedAt as number,
+    },
+    current: decodeRuntimeReady(row.current),
+  };
+}
+
+export function decodeGraphObservations(input: unknown): readonly GraphObservationV1[] {
+  return array(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS, decodeGraphObservation);
+}
+
+export function decodeEdgeObservations(input: unknown): readonly EdgeGraphObservationV1[] {
+  return array(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS, decodeEdgeObservation);
+}
+
+export function decodeCoreFinalObservations(input: unknown): readonly CoreFinalObservationV1[] {
+  return array(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS, (value) => {
+    const row = record(value, ['contextGraphId', 'automaticJobIds', 'vm', 'swm']);
+    return {
+      contextGraphId: text(row.contextGraphId, 'contextGraphId'),
+      vm: decodePlaneObservation(row.vm),
+      swm: decodePlaneObservation(row.swm),
+      automaticJobIds: array(row.automaticJobIds, 0, MAX_SELECTIVE_COVERAGE_ROUNDS,
+        (entry) => text(entry, 'automaticJobId')),
+    };
+  });
+}
+
+export function decodeEdgeSyncResult(input: unknown): {
+  readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
+  readonly journal?: SyncCoverageJournalReferenceV1;
+} {
+  const row = optionalRecord(input, ['operation'], ['journal']);
+  const journal = Object.hasOwn(row, 'journal')
+    ? requiredJournal(row.journal)
+    : undefined;
+  return { operation: decodeEdgeOperation(row.operation), ...(journal ? { journal } : {}) };
+}
+
+export function decodeEdgeReconcilerResult(input: unknown): {
+  readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
+  readonly journal: SyncCoverageJournalReferenceV1;
+} {
+  const row = record(input, ['operation', 'journal']);
+  return {
+    operation: decodeEdgeOperation(row.operation),
+    journal: requiredJournal(row.journal),
+  };
+}
+
+export function decodeCoreRoundResult(input: unknown): {
+  readonly round: CoreAutomaticRoundV1;
+  readonly journal: SyncCoverageJournalReferenceV1;
+} {
+  const row = record(input, ['round', 'journal']);
+  return { round: decodeCoreRound(row.round), journal: requiredJournal(row.journal) };
+}
+
+export function decodeNull(input: unknown): null {
+  if (input !== null) fail('null acknowledgement');
+  return null;
+}
+
+function decodeGraphObservation(input: unknown): GraphObservationV1 {
+  const row = record(input, ['contextGraphId', 'vm', 'swm']);
+  return {
+    contextGraphId: text(row.contextGraphId, 'contextGraphId'),
+    vm: decodePlaneObservation(row.vm),
+    swm: decodePlaneObservation(row.swm),
+  };
+}
+
+function decodeEdgeObservation(input: unknown): EdgeGraphObservationV1 {
+  const row = record(input, [
+    'contextGraphId', 'runtimeSyncMode', 'producingJobId', 'vm', 'swm',
+  ]);
+  const runtimeSyncMode = row.runtimeSyncMode;
+  if (runtimeSyncMode !== null
+    && runtimeSyncMode !== 'always-on'
+    && runtimeSyncMode !== 'on-demand') fail('Edge runtime sync mode');
+  return {
+    contextGraphId: text(row.contextGraphId, 'contextGraphId'),
+    runtimeSyncMode,
+    producingJobId: row.producingJobId === null
+      ? null
+      : text(row.producingJobId, 'producingJobId'),
+    vm: decodePlaneObservation(row.vm),
+    swm: decodePlaneObservation(row.swm),
+  };
+}
+
+function decodePlaneObservation(input: unknown) {
+  const row = record(input, [
+    'reportedComplete', 'headDigest', 'inventoryDigest', 'assetCount',
+    'metadataTripleCount', 'dataTripleCount',
+  ]);
+  if (typeof row.reportedComplete !== 'boolean'
+    || (row.headDigest !== null && typeof row.headDigest !== 'string')
+    || (row.inventoryDigest !== null && typeof row.inventoryDigest !== 'string')
+    || !nonNegativeInteger(row.assetCount)
+    || !nonNegativeInteger(row.metadataTripleCount)
+    || !nonNegativeInteger(row.dataTripleCount)) fail('plane observation');
+  return {
+    reportedComplete: row.reportedComplete,
+    headDigest: row.headDigest,
+    inventoryDigest: row.inventoryDigest,
+    assetCount: row.assetCount as number,
+    metadataTripleCount: row.metadataTripleCount as number,
+    dataTripleCount: row.dataTripleCount as number,
+  };
+}
+
+function decodeEdgeOperation(input: unknown): Omit<EdgeSyncOperationV1, 'sequence'> {
+  const row = record(input, [
+    'phase', 'source', 'syncMode', 'contextGraphId', 'jobId',
+    'completedWave', 'completedSnapshot',
+  ]);
+  if ((row.phase !== 'selection' && row.phase !== 'post-restart-auto'
+      && row.phase !== 'post-restart-explicit')
+    || (row.source !== 'user' && row.source !== 'reconciler')
+    || (row.syncMode !== 'always-on' && row.syncMode !== 'on-demand')
+    || (row.completedWave !== 'selected' && row.completedWave !== 'final')) {
+    fail('Edge operation');
+  }
+  return {
+    phase: row.phase,
+    source: row.source,
+    syncMode: row.syncMode,
+    contextGraphId: text(row.contextGraphId, 'contextGraphId'),
+    jobId: text(row.jobId, 'jobId'),
+    completedWave: row.completedWave,
+    completedSnapshot: decodeSnapshot(row.completedSnapshot),
+  };
+}
+
+function decodeCoreRound(input: unknown): CoreAutomaticRoundV1 {
+  const row = record(input, [
+    'round', 'jobId', 'planningLane', 'source', 'configuredBatchSize',
+    'explicitSelectedContextGraphIds', 'contextGraphIds', 'completions',
+  ]);
+  if (!nonNegativeInteger(row.round)
+    || row.source !== 'automatic-core-public'
+    || !positiveInteger(row.configuredBatchSize)) fail('Core round');
+  return {
+    round: row.round as number,
+    jobId: text(row.jobId, 'jobId'),
+    planningLane: text(row.planningLane, 'planningLane'),
+    source: 'automatic-core-public',
+    configuredBatchSize: row.configuredBatchSize as number,
+    explicitSelectedContextGraphIds: array(
+      row.explicitSelectedContextGraphIds,
+      0,
+      MAX_SELECTIVE_COVERAGE_GRAPHS,
+      (entry) => text(entry, 'contextGraphId'),
+    ),
+    contextGraphIds: array(row.contextGraphIds, 0, MAX_SELECTIVE_COVERAGE_GRAPHS,
+      (entry) => text(entry, 'contextGraphId')),
+    completions: array(row.completions, 0, MAX_SELECTIVE_COVERAGE_GRAPHS, (entry) => {
+      const completion = record(entry, [
+        'contextGraphId', 'completedWave', 'completedSnapshot',
+      ]);
+      if (completion.completedWave !== 'final') fail('Core completion');
+      return {
+        contextGraphId: text(completion.contextGraphId, 'contextGraphId'),
+        completedWave: 'final' as const,
+        completedSnapshot: decodeSnapshot(completion.completedSnapshot),
+      };
+    }),
+  };
+}
+
+function decodeSnapshot(input: unknown): GraphSnapshotExpectationV1 {
+  const row = record(input, ['vm', 'swm']);
+  const plane = (value: unknown) => {
+    const item = record(value, [
+      'headDigest', 'inventoryDigest', 'assetCount', 'dataTripleCount',
+    ]);
+    if (!positiveInteger(item.assetCount) || !positiveInteger(item.dataTripleCount)) {
+      fail('snapshot plane');
+    }
+    return {
+      headDigest: text(item.headDigest, 'headDigest'),
+      inventoryDigest: text(item.inventoryDigest, 'inventoryDigest'),
+      assetCount: item.assetCount as number,
+      dataTripleCount: item.dataTripleCount as number,
+    };
+  };
+  return { vm: plane(row.vm), swm: plane(row.swm) };
+}
+
+function requiredJournal(input: unknown): SyncCoverageJournalReferenceV1 {
+  const parsed = parseSyncCoverageJournalReferenceV1(input);
+  if (!parsed) fail('journal reference');
+  return parsed;
+}
+
+function array<T>(
+  input: unknown,
+  minimum: number,
+  maximum: number,
+  decode: Decoder<T>,
+): readonly T[] {
+  if (!Array.isArray(input)
+    || Object.getPrototypeOf(input) !== Array.prototype
+    || input.length < minimum
+    || input.length > maximum) fail('array');
+  return Object.freeze(input.map(decode));
+}
+
+function record(input: unknown, keys: readonly string[]): Record<string, unknown> {
+  return optionalRecord(input, keys, []);
+}
+
+function optionalRecord(
+  input: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+): Record<string, unknown> {
+  if (!isPlainRecord(input)) fail('record');
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
+  if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))
+    || requiredKeys.some((key) => !Object.hasOwn(input, key))) fail('record');
+  return input;
+}
+
+function text(input: unknown, label: string): string {
+  if (typeof input !== 'string' || input.length < 1 || input.length > 4_096) fail(label);
+  return input;
+}
+
+function positiveInteger(input: unknown): boolean {
+  return Number.isSafeInteger(input) && (input as number) > 0;
+}
+
+function nonNegativeInteger(input: unknown): boolean {
+  return Number.isSafeInteger(input) && (input as number) >= 0;
+}
+
+function isPlainRecord(input: unknown): input is Record<string, unknown> {
+  return input !== null
+    && typeof input === 'object'
+    && !Array.isArray(input)
+    && Object.getPrototypeOf(input) === Object.prototype;
+}
+
+function fail(label: string): never {
+  throw new TypeError(`M1 runtime adapter returned invalid ${label}`);
+}
