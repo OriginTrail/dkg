@@ -167,6 +167,23 @@ describe('automatic sync coverage runtime evidence', () => {
     expect(agent.getSyncCoverageEvidence().entries).toEqual([]);
   });
 
+  it('does not record an automatic job when peer admission reports already syncing', async () => {
+    const automatic = 'cg-automatic-already-syncing';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    (agent as any).syncingPeers.add(PEER);
+
+    const errors = await runConnectionOpenSyncWithErrors(agent);
+
+    expect(errors).toEqual([]);
+    expect(agent.getSyncCoverageEvidence().entries).toEqual([]);
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER)).toBe(false);
+  });
+
   it('records actual terminal Core automatic-round work with per-CG job evidence', async () => {
     const selected = 'cg-selected';
     const automatic = 'cg-automatic';
@@ -288,6 +305,73 @@ describe('automatic sync coverage runtime evidence', () => {
       }));
     }
   });
+
+  it('keeps automatic sync successful when legacy metadata refresh returns void', async () => {
+    const automatic = 'cg-automatic-legacy-metadata';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+
+    const errors = await runConnectionOpenSyncWithErrors(agent);
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect(errors).toEqual([]);
+    expect((agent as any).lastSuccessfulSyncAt.get(PEER)).toEqual(expect.any(Number));
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      kind: 'core-automatic-round',
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+      completions: [{
+        contextGraphId: automatic,
+        state: 'failed',
+        verified: { metadata: false, durable: true, sharedMemory: true },
+      }],
+    });
+  });
+
+  it.each(['stop-policy', 'continuation-stopped'] as const)(
+    'fails shared-memory evidence closed for a %s terminal',
+    async (reason) => {
+      const automatic = `cg-automatic-${reason}`;
+      const agent = await createEvidenceAgent('core', []);
+      (agent as any).subscribedContextGraphs.set(automatic, {
+        subscribed: false,
+        metaSynced: false,
+      });
+      (agent as any).registerCorePublicSyncContextGraph(automatic);
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+        ...cleanSharedMemorySyncResult(),
+        contextGraphTerminals: [{
+          contextGraphId: automatic,
+          lane: 'shared_memory',
+          disposition: 'skipped',
+          reason,
+        }],
+      });
+
+      const errors = await runConnectionOpenSyncWithErrors(agent);
+      const entries = agent.getSyncCoverageEvidence().entries;
+
+      expect(errors).toEqual([]);
+      expect((agent as any).lastSuccessfulSyncAt.get(PEER)).toEqual(expect.any(Number));
+      expect(entries).toHaveLength(2);
+      expect(entries[1]).toMatchObject({
+        kind: 'core-automatic-round',
+        jobId: entries[0]!.jobId,
+        state: 'failed',
+        completions: [{
+          contextGraphId: automatic,
+          state: 'failed',
+          verified: { metadata: true, durable: true, sharedMemory: false },
+        }],
+      });
+    },
+  );
 
   it('keeps Core automatic sync successful when a legacy result omits terminals', async () => {
     const automatic = 'cg-automatic-legacy-result';

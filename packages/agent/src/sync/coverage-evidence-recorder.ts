@@ -78,9 +78,11 @@ export class SyncCoverageEvidenceRecorder {
     return this.coreRunning !== undefined || this.edgeRunning.length > 0;
   }
 
-  markMetadata(contextGraphIds: Iterable<string>): void {
+  markMetadata(contextGraphIds: unknown): void {
     if (!this.hasActiveEvidence()) return;
-    for (const contextGraphId of contextGraphIds) {
+    const verifiedContextGraphIds = iterableStringValues(contextGraphIds);
+    if (!verifiedContextGraphIds) return;
+    for (const contextGraphId of verifiedContextGraphIds) {
       this.metadataVerified.add(contextGraphId);
     }
   }
@@ -138,6 +140,28 @@ export class SyncCoverageEvidenceRecorder {
         finishedAt,
       });
     }
+  }
+}
+
+function iterableStringValues(value: unknown): string[] | undefined {
+  try {
+    if (
+      (typeof value !== 'object' && typeof value !== 'function')
+      || value === null
+      || typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function'
+    ) {
+      return undefined;
+    }
+    const strings: string[] = [];
+    for (const candidate of value as Iterable<unknown>) {
+      if (typeof candidate !== 'string') return undefined;
+      strings.push(candidate);
+    }
+    return strings;
+  } catch {
+    // Legacy JavaScript overrides may return void or hostile iterables. Evidence
+    // remains unverified, but observer parsing must never alter sync control flow.
+    return undefined;
   }
 }
 

@@ -400,6 +400,79 @@ describe('requester per-CG priority admission', () => {
     expect(summary.backoffWorthyFailures).toBe(0);
   });
 
+  it('emits a stop-policy terminal for the untouched shared-memory tail', async () => {
+    const admissions: string[] = [];
+    const contextGraphIds = ['stop', 'tail'];
+    const stopResult = {
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      emptyResponses: 0,
+      droppedDataTriples: 0,
+      failedPeers: 1,
+      failedPhases: 1,
+      deniedPhases: 0,
+      backoffWorthyFailures: 1,
+      deferredBackpressure: 0,
+    };
+    const agent = {
+      config: { syncContextGraphPriorities: {} },
+      store: {},
+      listSubGraphs: async () => [],
+      createContextGraphSyncDeadline: () => Date.now() + 1_000,
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        contextGraphId: string,
+        _lane: string,
+        _label: string,
+        work: () => Promise<unknown>,
+      ) => {
+        admissions.push(contextGraphId);
+        if (contextGraphId === 'stop') return stopResult;
+        return work();
+      },
+      syncCheckpoints: new Map(),
+      workspaceOwnedEntities: new Map(),
+      log: { info: noop, warn: noop, debug: noop },
+    };
+
+    const result = await (
+      LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
+    ).call(agent, 'peer', contextGraphIds, {
+      stopOnBackoffWorthyFailure: true,
+      sharedMemorySyncPlan: {
+        publicContextGraphIds: contextGraphIds,
+        privateRecoverFromCurator: [],
+        eligibleContextGraphIds: contextGraphIds,
+      },
+    });
+
+    expect(admissions).toEqual(['stop']);
+    expect(result.contextGraphTerminals).toEqual([
+      {
+        contextGraphId: 'stop',
+        lane: 'shared_memory',
+        disposition: 'settled',
+        result: stopResult,
+      },
+      {
+        contextGraphId: 'tail',
+        lane: 'shared_memory',
+        disposition: 'skipped',
+        reason: 'stop-policy',
+      },
+    ]);
+    expect(Object.isFrozen(result.contextGraphTerminals)).toBe(true);
+    expect(result.contextGraphTerminals.every(Object.isFrozen)).toBe(true);
+  });
+
   it('counts several failed Context Graphs from one remote as one failed peer', async () => {
     const contextGraphIds = ['private-a', 'private-b'];
     const agent = {
@@ -431,6 +504,20 @@ describe('requester per-CG priority admission', () => {
 
     expect(summary.failedPeers).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(2);
+    expect(summary.contextGraphTerminals).toHaveLength(2);
+    for (const [index, terminal] of summary.contextGraphTerminals.entries()) {
+      expect(terminal).toMatchObject({
+        contextGraphId: contextGraphIds[index],
+        lane: 'swm_recovery',
+        disposition: 'settled',
+        result: {
+          failedPeers: 1,
+          backoffWorthyFailures: 1,
+        },
+      });
+      expect(Object.isFrozen(terminal)).toBe(true);
+      expect(Object.isFrozen(terminal.result)).toBe(true);
+    }
   });
 
   it('runs a mixed durable list in the supplied stable priority order', async () => {
