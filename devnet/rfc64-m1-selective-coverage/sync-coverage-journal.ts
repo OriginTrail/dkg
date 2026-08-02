@@ -3,8 +3,9 @@ import type {
   EdgeSyncOperationV1,
 } from './manifest.ts';
 
-const MAX_JOURNAL_CAPACITY = 4_096;
-const MAX_CONTEXT_GRAPH_IDS = 256;
+const JOURNAL_CAPACITY = 256;
+const MAX_CONTEXT_GRAPH_IDS = 32;
+const MAX_CONTEXT_GRAPH_ID_LENGTH = 256;
 
 export interface SyncCoverageJournalReferenceV1 {
   /** Raw node-admin response from /api/diagnostics/sync-coverage-evidence. */
@@ -87,8 +88,7 @@ function terminalEntry(
     || snapshot['schemaVersion'] !== 1
     || snapshot['processStartedAt'] !== process.processStartedAt
     || snapshot['waveId'] !== process.evidenceWaveId
-    || !positiveInteger(snapshot['capacity'])
-    || (snapshot['capacity'] as number) > MAX_JOURNAL_CAPACITY
+    || snapshot['capacity'] !== JOURNAL_CAPACITY
     || !nonNegativeInteger(snapshot['nextSequence'])
     || !nonNegativeInteger(snapshot['droppedBeforeSequence'])) {
     throw new Error('Sync coverage journal snapshot is malformed');
@@ -125,7 +125,9 @@ function verifiedPlanes(value: unknown): boolean {
 function stringArray(value: unknown): string[] {
   const values = plainArray(value);
   if (values.length > MAX_CONTEXT_GRAPH_IDS
-    || values.some((entry) => typeof entry !== 'string' || entry.length === 0)
+    || values.some((entry) => typeof entry !== 'string'
+      || entry.length === 0
+      || entry.length > MAX_CONTEXT_GRAPH_ID_LENGTH)
     || new Set(values).size !== values.length) {
     throw new Error('Sync coverage journal contains invalid context graph IDs');
   }

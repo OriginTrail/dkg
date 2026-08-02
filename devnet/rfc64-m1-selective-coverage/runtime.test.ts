@@ -508,6 +508,32 @@ test('rejects a Core journal entry overwritten before collection', async () => {
   );
 });
 
+test('binds every Core completion to the actual scheduler round job ID', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.coreJournalMutation = (journal) => {
+    const copy = structuredClone(journal) as any;
+    copy.snapshot.entries[0].completions[0].jobId = 'unbound-child-job';
+    return copy;
+  };
+  await assert.rejects(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+    /lacks a terminal verified completion/,
+  );
+});
+
+test('requires the exact runtime journal capacity from the node-admin contract', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.coreJournalMutation = (journal) => {
+    const copy = structuredClone(journal) as any;
+    copy.snapshot.capacity = 257;
+    return copy;
+  };
+  await assert.rejects(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+    /journal snapshot is malformed/,
+  );
+});
+
 test('requires restart to cross an OS process boundary', async () => {
   const runtime = new ScriptedRuntime();
   runtime.readyMutation = (ready) => ready.role === 'edge' && ready.pid === 103

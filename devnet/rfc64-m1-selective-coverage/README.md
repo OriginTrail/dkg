@@ -107,7 +107,8 @@ Commands are:
 
 The adapter reads automatic provenance from the node-admin-only endpoint
 `GET /api/diagnostics/sync-coverage-evidence?afterSequence=N`. The launcher
-requires schema version 1, an in-window terminal entry, `evidenceTruncated=false`,
+requires schema version 1, the exact 256-entry journal capacity, an in-window
+terminal entry, `evidenceTruncated=false`,
 and all metadata/durable/shared-memory verification bits. It binds:
 
 - `edge-reconciler-job` entries to the actual job ID, context graph,
@@ -115,7 +116,8 @@ and all metadata/durable/shared-memory verification bits. It binds:
   `syncMode=always-on`;
 - `core-automatic-round` entries to the actual job ID, planning lane,
   configured batch, frozen explicit/automatic ID lists, and every terminal
-  per-CG completion.
+  per-CG completion. Every completion carries the same real scheduler-round
+  job ID; a detached or synthetic per-CG ID is rejected.
 
 `droppedBeforeSequence` and `nextSequence` prove the selected entry was not
 overwritten. Any truncated, missing, nonterminal, or mismatched record fails the
