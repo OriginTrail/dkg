@@ -202,11 +202,18 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         options?: { syncMode?: 'on-demand' | 'always-on' },
       ) => {
         subscribeCalls.push({ id, options });
-        state.set(id, {
-          ...state.get(id),
+        const previous = state.get(id);
+        const effectiveSyncMode = previous?.subscribed && previous.syncMode === 'always-on'
+          ? 'always-on'
+          : options?.syncMode ?? previous?.syncMode ?? 'always-on';
+        const applied = {
+          ...previous,
           subscribed: true,
-          syncMode: options?.syncMode,
-        });
+          synced: previous?.synced ?? false,
+          syncMode: effectiveSyncMode,
+        };
+        state.set(id, applied);
+        return applied;
       },
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
         patches.push({ ...patch });
@@ -332,6 +339,24 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       { id: expect.any(String), options: { syncMode: 'on-demand' } },
     ]);
     expect(result.state.syncMode).toBe('on-demand');
+  });
+
+  it('reports the agent-applied mode when an on-demand open cannot downgrade always-on', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      syncMode: 'on-demand',
+      initial: {
+        subscribed: true,
+        syncMode: 'always-on',
+        synced: false,
+      },
+    });
+
+    expect(result.subscribeCalls).toEqual([
+      { id: expect.any(String), options: { syncMode: 'on-demand' } },
+    ]);
+    expect(result.response.syncMode).toBe('always-on');
+    expect(result.state.syncMode).toBe('always-on');
   });
 
   it('rejects unknown sync modes before changing subscription state', async () => {

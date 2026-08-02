@@ -488,6 +488,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -2881,6 +2882,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
             const approvedSubscription: ContextGraphSub = {
               ...this.subscribedContextGraphs.get(contextGraphId),
+              syncMode: 'always-on',
               subscribed: true,
               pendingMeta: true,
               metaSynced: false,
@@ -7123,7 +7125,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
@@ -7139,10 +7141,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphWireId(next.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
-    const inheritedSyncMode = next.syncMode ?? previous?.syncMode;
-    const canonicalNext = {
+    const canonicalNext: ContextGraphSub = {
       ...next,
-      ...(inheritedSyncMode ? { syncMode: inheritedSyncMode } : {}),
+      syncMode: next.syncMode ?? previous?.syncMode ?? 'always-on',
       ...(next.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
     if (
@@ -7156,11 +7157,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
-    // On-demand subscriptions deliberately keep their live state and
-    // readiness process-local. This guard also covers later state patches
-    // (for example catch-up completion), so they cannot accidentally create a
-    // durable row after the initial subscribe call opted out.
-    if (options?.persist !== false && canonicalNext.syncMode !== 'on-demand') {
+    // On-demand member subscriptions deliberately keep their live state and
+    // readiness process-local. A Core's independent hosting obligation is
+    // still durable, though: persistContextGraphSubscription writes a
+    // host-only snapshot without converting the member intent to always-on.
+    if (
+      options?.persist !== false &&
+      (canonicalNext.syncMode !== 'on-demand' || canonicalNext.coreHosted === true)
+    ) {
       if (this.config.contextGraphSubscriptionStore) {
         const revision = this.nextContextGraphSubscriptionPersistRevision(contextGraphId);
         this.persistContextGraphSubscription(
@@ -7171,9 +7175,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      if (canonicalNext.subscribed) {
+      if (canonicalNext.syncMode !== 'on-demand' && canonicalNext.subscribed) {
         this.persistLocalNodeMembership(contextGraphId);
-      } else {
+      } else if (canonicalNext.syncMode !== 'on-demand') {
         this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
       }
     }
@@ -7410,7 +7414,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return Promise.resolve();
     }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
-    if (sub?.syncMode === 'on-demand') {
+    if (sub?.syncMode === 'on-demand' && sub.coreHosted !== true) {
       // Some lifecycle paths persist reconciliation watermarks directly
       // instead of going through setContextGraphSubscription. Preserve the
       // process-local lifetime at this lowest shared write boundary too.
@@ -7442,18 +7446,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
         });
     }
+    const persistMemberIntent = sub.syncMode !== 'on-demand';
+    const persistedSnapshot: ContextGraphSub = persistMemberIntent
+      ? sub
+      : {
+        ...sub,
+        // Preserve only the independent Core-hosting contract. Member
+        // activation/readiness stays process-local with the on-demand intent.
+        syncMode: 'always-on',
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+      };
     const record = {
       id: contextGraphId,
-      name: sub.name,
-      subscribed: sub.subscribed,
-      synced: sub.synced,
-      sharedMemorySynced: sub.sharedMemorySynced,
-      metaSynced: sub.metaSynced,
-      onChainId: sub.onChainId,
-      onChainHash: sub.onChainHash,
-      lastReconciledOrdinal: sub.lastReconciledOrdinal,
-      coreHosted: sub.coreHosted,
-      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      name: persistedSnapshot.name,
+      subscribed: persistedSnapshot.subscribed,
+      synced: persistedSnapshot.synced,
+      sharedMemorySynced: persistedSnapshot.sharedMemorySynced,
+      metaSynced: persistedSnapshot.metaSynced,
+      onChainId: persistedSnapshot.onChainId,
+      onChainHash: persistedSnapshot.onChainHash,
+      lastReconciledOrdinal: persistedSnapshot.lastReconciledOrdinal,
+      coreHosted: persistedSnapshot.coreHosted,
+      syncScoped:
+        persistMemberIntent && (this.config.syncContextGraphs ?? []).includes(contextGraphId),
     };
     return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
       .then(() => {
@@ -7461,7 +7479,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           options?.updateRehydrationStatus === true &&
           this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
         ) {
-          this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, sub);
+          this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, persistedSnapshot);
         }
       }).catch((err) => {
         this.log.warn(

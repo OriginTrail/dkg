@@ -31,7 +31,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
-import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from './dkg-agent-types.js';
+import type {
+  ContextGraphDiscoveryMetadata,
+  ContextGraphSub,
+  ContextGraphSubInput,
+} from './dkg-agent-types.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -132,7 +136,7 @@ function resolveGraphScopedPublishRequest(
 export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
-  setContextGraphSubscription?: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
+  setContextGraphSubscription?: (id: string, next: ContextGraphSubInput, options?: { persist?: boolean }) => void;
   /**
    * Record a Context Graph learned from ontology gossip. Agent-backed callers
    * apply the node-role policy centrally (edge=catalogue-only, core=activate);
@@ -195,7 +199,7 @@ export class GossipPublishHandler {
 
   private setContextGraphSubscription(
     id: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean },
   ): void {
     const setter = this.callbacks.setContextGraphSubscription;
@@ -203,7 +207,11 @@ export class GossipPublishHandler {
       setter(id, next, options);
       return;
     }
-    this.subscribedContextGraphs.set(id, next);
+    const previous = this.subscribedContextGraphs.get(id);
+    this.subscribedContextGraphs.set(id, {
+      ...next,
+      syncMode: next.syncMode ?? previous?.syncMode ?? 'always-on',
+    });
   }
 
   private recordDiscoveredContextGraph(id: string, metadata: ContextGraphDiscoveryMetadata): void {

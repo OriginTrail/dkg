@@ -618,8 +618,8 @@ export type ContextGraphSyncMode = 'on-demand' | 'always-on';
 /** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
-  /** Requested synchronization lifetime; omission retains legacy always-on semantics. */
-  syncMode?: ContextGraphSyncMode;
+  /** Requested synchronization lifetime, normalized before entering live state. */
+  syncMode: ContextGraphSyncMode;
   /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
@@ -696,6 +696,17 @@ export interface ContextGraphSub {
    */
   pendingMeta?: boolean;
 }
+
+/**
+ * Compatibility input accepted at subscription-update boundaries.
+ *
+ * Historical call sites and persisted records predate synchronization modes,
+ * so they may omit the field. The agent normalizes this shape exactly once
+ * before storing it in the live {@link ContextGraphSub} registry.
+ */
+export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
+  syncMode?: ContextGraphSyncMode;
+};
 
 /**
  * Metadata that passive discovery is allowed to contribute to the local

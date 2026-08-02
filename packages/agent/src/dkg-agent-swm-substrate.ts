@@ -389,7 +389,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     persist?: boolean;
     deferSharedMemoryGossipSubscribe?: boolean;
     syncMode?: 'on-demand' | 'always-on';
-  }): void {
+  }): ContextGraphSub {
     if (options?.trackSyncScope !== false) {
       this.trackSyncContextGraph(contextGraphId);
     }
@@ -400,7 +400,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // existing on-demand subscription, while an omitted mode preserves the
     // current lifetime (or the legacy always-on default for a new graph).
     const requestedSyncMode = options?.syncMode ?? existing?.syncMode ?? 'always-on';
-    const syncMode = existing?.subscribed && (existing.syncMode ?? 'always-on') === 'always-on'
+    const syncMode = existing?.subscribed && existing.syncMode === 'always-on'
       ? 'always-on'
       : requestedSyncMode;
     const persist = syncMode === 'on-demand' ? false : options?.persist;
@@ -424,7 +424,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
       if (!existing?.subscribed || existing.syncMode !== syncMode) {
-        this.setContextGraphSubscription(
+        return this.setContextGraphSubscription(
           contextGraphId,
           {
             ...existing,
@@ -435,7 +435,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           { persist },
         );
       }
-      return;
+      return existing;
     }
     this.gossipRegistered.add(contextGraphId);
 
@@ -445,7 +445,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.gossip.subscribe(publishTopic);
     this.gossip.subscribe(appTopic);
 
-    this.setContextGraphSubscription(
+    const subscription = this.setContextGraphSubscription(
       contextGraphId,
       {
         ...existing,
@@ -478,6 +478,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const fh = this.getOrCreateFinalizationHandler();
       await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
+
+    return subscription;
   }
 
   /**
