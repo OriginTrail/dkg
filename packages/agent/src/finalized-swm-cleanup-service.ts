@@ -181,6 +181,15 @@ export class FinalizedSwmCleanupService {
       contextGraphIds = await this.listContextGraphIds(discoveryOptions);
     } catch (error) {
       if (deadlineSignal.aborted) return deferredResult(0, 'budget');
+      // A scheduler rejection IS store pressure — the background lane reporting
+      // that it is saturated — it just arrives as a throw instead of through the
+      // point-in-time snapshot gate, which cannot see load that lands between the
+      // gate and the query. Classifying it keeps the sweep on the retry path and
+      // counted in `pressureSkips`; letting it escape strands the backlog until
+      // the periodic backstop for a transient, retryable reason. Every other
+      // error still throws: an unknown fault must not hot-retry every few
+      // seconds, and the backstop is the right cadence for it.
+      if (error instanceof StoreSchedulerBusyError) return deferredResult(0, 'pressure');
       throw error;
     }
     const pending = this.resumeRotation(contextGraphIds);
@@ -200,6 +209,7 @@ export class FinalizedSwmCleanupService {
         metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
       } catch (error) {
         if (deadlineSignal.aborted) return yieldRotation('budget');
+        if (error instanceof StoreSchedulerBusyError) return yieldRotation('pressure');
         throw error;
       }
       // A context graph contributes to the rotation total only once every one of
@@ -221,6 +231,7 @@ export class FinalizedSwmCleanupService {
             });
           } catch (error) {
             if (deadlineSignal.aborted) return yieldRotation('budget');
+            if (error instanceof StoreSchedulerBusyError) return yieldRotation('pressure');
             throw error;
           }
           deletedItems += cleanup.deletedItems;
@@ -238,6 +249,9 @@ export class FinalizedSwmCleanupService {
           backlog = await this.inspectBacklog(swmMetaGraph, deadlineSignal);
         } catch (error) {
           if (deadlineSignal.aborted) return yieldRotation('budget');
+          // Also covers this method's own defensive pressure throw, which the
+          // snapshot gate above races with rather than prevents.
+          if (error instanceof StoreSchedulerBusyError) return yieldRotation('pressure');
           throw error;
         }
         contextGraphBacklogDepth += backlog.depth;
