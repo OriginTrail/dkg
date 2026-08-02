@@ -2,6 +2,7 @@ import {
   backpressureRegistry,
   getMetrics,
   ObservableScheduler,
+  type SchedulerPressureCapacity,
   type SchedulerPressureThresholds,
   type SchedulerPressureTicket,
 } from '@origintrail-official/dkg-core';
@@ -139,6 +140,11 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   oldestAgeMs(now = Date.now()): number {
     if (this.queue.length === 0) return 0;
     return Math.max(0, now - Math.min(...this.queue.map((entry) => entry.enqueuedAt)));
+  }
+
+  /** Refresh reported capacity after a caller-owned dynamic limit changes. */
+  refreshPressureCapacity(capacity: SchedulerPressureCapacity): void {
+    this.updatePressureCapacity(capacity);
   }
 
   acquire(options: PriorityAdmissionAcquireOptions<Payload>): PriorityAdmission<Payload> {

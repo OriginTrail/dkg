@@ -5,6 +5,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   getSyncBackpressureSnapshot,
+  notifyGlobalSyncBackpressureCapacityChanged,
   resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
   resolveSyncGlobalBackpressure,
@@ -215,6 +216,175 @@ describe('sync global backpressure', () => {
       'second-start',
       'third-start',
     ]);
+  });
+
+  it('preserves the static admission API and configured concurrency when no resolver is supplied', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 1,
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+
+    const first = withGlobalSyncBackpressure({ policy, ctx, label: 'static-first' }, async () => {
+      events.push('first-start');
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    });
+    const second = withGlobalSyncBackpressure({ policy, ctx, label: 'static-second' }, async () => {
+      events.push('second-start');
+      await new Promise<void>((resolve) => { releaseSecond = resolve; });
+    });
+    await tick();
+
+    expect(events).toEqual(['first-start', 'second-start']);
+    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({
+      inflight: 2,
+      queued: 0,
+      limit: 2,
+      queueLimit: 1,
+    });
+
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([first, second]);
+  });
+
+  it('lets a lower effective limit drain without cancelling already-running work', async () => {
+    const ctx = createOperationContext('sync');
+    let currentLimit = 2;
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 1,
+    }, () => currentLimit);
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const options = (label: string) => ({ policy, ctx, label });
+
+    const first = withGlobalSyncBackpressure(options('dynamic-first'), async () => {
+      events.push('first-start');
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      events.push('first-end');
+    });
+    const second = withGlobalSyncBackpressure(options('dynamic-second'), async () => {
+      events.push('second-start');
+      await new Promise<void>((resolve) => { releaseSecond = resolve; });
+      events.push('second-end');
+    });
+    await tick();
+    expect(events).toEqual(['first-start', 'second-start']);
+
+    currentLimit = 1;
+    notifyGlobalSyncBackpressureCapacityChanged();
+    const third = withGlobalSyncBackpressure(options('dynamic-third'), async () => {
+      events.push('third-start');
+    });
+    await tick();
+    expect(events).toEqual(['first-start', 'second-start']);
+
+    releaseFirst();
+    await first;
+    await tick();
+    expect(events).toEqual(['first-start', 'second-start', 'first-end']);
+
+    releaseSecond();
+    await Promise.all([second, third]);
+    expect(events).toEqual([
+      'first-start',
+      'second-start',
+      'first-end',
+      'second-end',
+      'third-start',
+    ]);
+  });
+
+  it('pumps already-queued work immediately when the effective limit increases', async () => {
+    const ctx = createOperationContext('sync');
+    let currentLimit = 1;
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 1,
+    }, () => currentLimit);
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const options = (label: string) => ({ policy, ctx, label });
+
+    const first = withGlobalSyncBackpressure(options('dynamic-first'), async () => {
+      events.push('first-start');
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    });
+    await tick();
+    const second = withGlobalSyncBackpressure(options('dynamic-second'), async () => {
+      events.push('second-start');
+      await new Promise<void>((resolve) => { releaseSecond = resolve; });
+    });
+    await tick();
+    expect(events).toEqual(['first-start']);
+    expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 1, queued: 1, limit: 1 });
+
+    currentLimit = 2;
+    notifyGlobalSyncBackpressureCapacityChanged();
+    await tick();
+    expect(events).toEqual(['first-start', 'second-start']);
+    expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 2, queued: 0, limit: 2 });
+
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([first, second]);
+  });
+
+  it('retains the last valid shared capacity when the policy resolver fails', async () => {
+    const ctx = createOperationContext('sync');
+    let currentLimit = 1;
+    let resolverFails = false;
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 1,
+    }, () => {
+      if (resolverFails) throw new Error('capacity sample unavailable');
+      return currentLimit;
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+
+    const first = withGlobalSyncBackpressure({ policy, ctx, label: 'dynamic-first' }, async () => {
+      events.push('first-start');
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    });
+    await tick();
+    const second = withGlobalSyncBackpressure({ policy, ctx, label: 'dynamic-second' }, async () => {
+      events.push('second-start');
+      await new Promise<void>((resolve) => { releaseSecond = resolve; });
+    });
+    await tick();
+    expect(events).toEqual(['first-start']);
+
+    currentLimit = 2;
+    resolverFails = true;
+    notifyGlobalSyncBackpressureCapacityChanged();
+    await tick();
+    expect(events).toEqual(['first-start']);
+    expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 1, queued: 1, limit: 1 });
+
+    resolverFails = false;
+    currentLimit = 0;
+    notifyGlobalSyncBackpressureCapacityChanged();
+    await tick();
+    expect(events).toEqual(['first-start']);
+    expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 1, queued: 1, limit: 1 });
+
+    currentLimit = 2;
+    notifyGlobalSyncBackpressureCapacityChanged();
+    await tick();
+    expect(events).toEqual(['first-start', 'second-start']);
+
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([first, second]);
   });
 
   it('carries the admission source from the production helper through to the scheduler', async () => {

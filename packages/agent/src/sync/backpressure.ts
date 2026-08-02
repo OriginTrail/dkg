@@ -28,16 +28,22 @@ export interface SyncGlobalBackpressureConfig {
 declare const syncGlobalBackpressurePolicyBrand: unique symbol;
 
 export type SyncGlobalBackpressurePolicy = Readonly<(
-  | { limit: number; queueLimit: number }
+  | {
+      limit: number;
+      queueLimit: number;
+      currentLimit?: SyncBackpressureCurrentLimit;
+    }
   | { limit: undefined; queueLimit: undefined }
 ) & { [syncGlobalBackpressurePolicyBrand]: true }>;
 
 interface GlobalQueuePayload {
-  limit: number;
   label: string;
   contextGraphId?: string;
   source: SyncAdmissionSource;
 }
+
+/** Resolve the current requester-sync capacity. The static policy remains the hard ceiling. */
+export type SyncBackpressureCurrentLimit = () => number;
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
 export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
@@ -70,13 +76,91 @@ function syncAdmissionOperation(payload: GlobalQueuePayload): string {
 }
 
 let inflight = 0;
-let lastLimit: number | null = null;
-let lastQueueLimit: number | null = null;
+const globalCapacity: {
+  hardLimit: number | null;
+  queueLimit: number | null;
+  currentLimit?: SyncBackpressureCurrentLimit;
+  effectiveLimit: number | null;
+} = {
+  hardLimit: null,
+  queueLimit: null,
+  effectiveLimit: null,
+};
+
+function clampEffectiveLimit(hardLimit: number, currentLimit: number): number {
+  return Math.min(hardLimit, currentLimit);
+}
+
+function refreshGlobalCapacity(): number | null {
+  const { hardLimit, currentLimit } = globalCapacity;
+  if (hardLimit === null) return null;
+  if (!currentLimit) {
+    globalCapacity.effectiveLimit = hardLimit;
+    return hardLimit;
+  }
+  try {
+    const current = positiveInteger(currentLimit());
+    if (current !== undefined) {
+      globalCapacity.effectiveLimit = clampEffectiveLimit(hardLimit, current);
+    }
+  } catch {
+    // Runtime capacity sampling is advisory. Retain the last valid shared value.
+  }
+  return globalCapacity.effectiveLimit ?? hardLimit;
+}
+
+function activateGlobalCapacity(policy: SyncGlobalBackpressurePolicy): number | null {
+  if (policy.limit === undefined) {
+    globalCapacity.hardLimit = null;
+    globalCapacity.queueLimit = null;
+    globalCapacity.currentLimit = undefined;
+    globalCapacity.effectiveLimit = null;
+    return null;
+  }
+
+  const providerChanged = globalCapacity.currentLimit !== policy.currentLimit;
+  const hardLimitChanged = globalCapacity.hardLimit !== policy.limit;
+  globalCapacity.hardLimit = policy.limit;
+  globalCapacity.queueLimit = policy.queueLimit;
+  globalCapacity.currentLimit = policy.currentLimit;
+  if (!policy.currentLimit) {
+    globalCapacity.effectiveLimit = policy.limit;
+  } else if (providerChanged || hardLimitChanged) {
+    // A new provider starts from the safest valid value already in force. If
+    // its first sample fails, never increase concurrency because of the error.
+    globalCapacity.effectiveLimit = Math.min(
+      policy.limit,
+      globalCapacity.effectiveLimit ?? policy.limit,
+    );
+  }
+  return refreshGlobalCapacity();
+}
+
+function snapshotPolicyLimit(policy: SyncGlobalBackpressurePolicy): number | null {
+  if (policy.limit === undefined) return null;
+  if (
+    globalCapacity.hardLimit === policy.limit
+    && globalCapacity.queueLimit === policy.queueLimit
+    && globalCapacity.currentLimit === policy.currentLimit
+  ) {
+    return refreshGlobalCapacity();
+  }
+  if (!policy.currentLimit) return policy.limit;
+  try {
+    const current = positiveInteger(policy.currentLimit());
+    return current === undefined
+      ? policy.limit
+      : clampEffectiveLimit(policy.limit, current);
+  } catch {
+    return policy.limit;
+  }
+}
+
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
-  canRun: (entry) => inflight < entry.payload.limit,
-  onStart: (entry) => {
+  canRun: () => inflight < (refreshGlobalCapacity() ?? 0),
+  onStart: () => {
     inflight += 1;
-    lastLimit = entry.payload.limit;
+    refreshGlobalCapacity();
     getMetrics().syncGlobalInflight.record(inflight);
     return () => {
       inflight = Math.max(0, inflight - 1);
@@ -90,7 +174,7 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     // them to a fixed operation class, paired with the bounded admission
     // source, before node-wide diagnostics/logging.
     operation: (entry) => syncAdmissionOperation(entry.payload),
-    inflightLimit: (entry) => entry.payload.limit,
+    inflightLimit: () => refreshGlobalCapacity(),
     thresholds: {
       degradedQueueAgeMs: DEFAULT_SYNC_PRIORITY_AGING_MS / 2,
       stalledActiveAgeMs: 120_000,
@@ -142,16 +226,15 @@ function acquire(
   const { limit } = policy;
   if (limit === undefined) throw new Error('disabled sync backpressure policy cannot acquire');
   const { queueLimit } = policy;
-  lastLimit = limit;
-  lastQueueLimit = queueLimit;
+  const payload: GlobalQueuePayload = {
+    label: options.label,
+    contextGraphId: options.contextGraphId,
+    source: options.source,
+  };
+  const currentLimit = activateGlobalCapacity(policy) ?? limit;
   const queuedBefore = queue.length;
   return queue.acquire({
-    payload: {
-      limit,
-      label: options.label,
-      contextGraphId: options.contextGraphId,
-      source: options.source,
-    },
+    payload,
     ownerKey: 'global',
     lane: options.lane,
     priority: options.priority,
@@ -162,7 +245,7 @@ function acquire(
     queueLimit,
     createBusyError: () => new SyncBackpressureBusyError(
       `Sync backpressure rejected ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${queuedBefore}/${queueLimit})`,
+        + `(global inflight=${inflight}/${currentLimit}, queued=${queuedBefore}/${queueLimit})`,
     ),
     createDisplacedError: (victim) => new SyncBackpressureBusyError(
         `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
@@ -220,13 +303,22 @@ export function resolveNonNegativeIntegerSwitch(
   return nonNegativeInteger(value);
 }
 
-export function resolveSyncGlobalBackpressure(
+/** Resolve only an explicitly configured global limit, using runtime policy precedence. */
+export function resolveExplicitSyncGlobalLimit(
   config: SyncGlobalBackpressureConfig,
-): SyncGlobalBackpressurePolicy {
-  const limit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
+): number | undefined {
+  return nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
     ?? nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_LIMIT'))
     ?? nonNegativeInteger(config.syncGlobalMaxInflight)
-    ?? nonNegativeInteger(config.syncGlobalLimit)
+    ?? nonNegativeInteger(config.syncGlobalLimit);
+}
+
+/** Resolve one node-wide policy; the optional live limit is shared by every admission. */
+export function resolveSyncGlobalBackpressure(
+  config: SyncGlobalBackpressureConfig,
+  currentLimit?: SyncBackpressureCurrentLimit,
+): SyncGlobalBackpressurePolicy {
+  const limit = resolveExplicitSyncGlobalLimit(config)
     ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
   if (limit === 0) {
     return Object.freeze({
@@ -241,6 +333,7 @@ export function resolveSyncGlobalBackpressure(
   return Object.freeze({
     limit,
     queueLimit,
+    ...(currentLimit ? { currentLimit } : {}),
   }) as SyncGlobalBackpressurePolicy;
 }
 
@@ -257,11 +350,26 @@ export function getSyncBackpressureSnapshot(
   return {
     inflight,
     queued: queue.length,
-    limit: policy ? policy.limit ?? null : lastLimit,
-    queueLimit: policy ? policy.queueLimit ?? null : lastQueueLimit,
+    limit: policy ? snapshotPolicyLimit(policy) : globalCapacity.effectiveLimit,
+    queueLimit: policy ? policy.queueLimit ?? null : globalCapacity.queueLimit,
     queuedByPriorityClass,
     oldestQueuedAgeMs: queue.oldestAgeMs(now),
   };
+}
+
+/**
+ * Re-evaluate dynamic requester capacity and start newly admissible queued work.
+ * Downshifts are drain-only because the queue never revokes running admissions.
+ */
+export function notifyGlobalSyncBackpressureCapacityChanged(): void {
+  const effectiveLimit = refreshGlobalCapacity();
+  if (effectiveLimit !== null && globalCapacity.queueLimit !== null) {
+    queue.refreshPressureCapacity({
+      inflightLimit: effectiveLimit,
+      queueLimit: globalCapacity.queueLimit,
+    });
+  }
+  queue.pump();
 }
 
 export async function withGlobalSyncBackpressure<T>(
@@ -291,8 +399,7 @@ export async function withGlobalSyncBackpressure<T>(
 ): Promise<T> {
   const { limit, queueLimit } = options.policy;
   if (limit === undefined) {
-    lastLimit = null;
-    lastQueueLimit = null;
+    if (inflight === 0 && queue.length === 0) activateGlobalCapacity(options.policy);
     if (options.signal?.aborted) {
       throw options.signal.reason instanceof Error
         ? options.signal.reason
@@ -324,18 +431,20 @@ export async function withGlobalSyncBackpressure<T>(
   }
 
   if (admission.status === 'queued') {
+    const currentLimit = refreshGlobalCapacity() ?? limit;
     options.logInfo?.(
       options.ctx,
       `Sync backpressure queued ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
+        + `(global inflight=${inflight}/${currentLimit}, queued=${admission.queuedBefore}/${queueLimit})`,
     );
   }
   const release = await admission.release;
   try {
+    const currentLimit = refreshGlobalCapacity() ?? limit;
     options.logInfo?.(
       options.ctx,
       `Sync backpressure running ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
+        + `(global inflight=${inflight}/${currentLimit}, queued=${queue.length}/${queueLimit})`,
     );
     return await work();
   } finally {
