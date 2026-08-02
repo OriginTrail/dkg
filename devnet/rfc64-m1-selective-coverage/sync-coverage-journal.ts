@@ -74,6 +74,7 @@ export function assertCoreAutomaticRoundJournalV1(
   if (entry['jobId'] !== round.jobId
     || entry['planningLane'] !== round.planningLane
     || entry['source'] !== 'automatic-core-public'
+    || !isCoreAutomaticTriggerV1(entry['trigger'])
     || entry['configuredBatchSize'] !== round.configuredBatchSize
     || !nonNegativeInteger(effectiveBatchSize)
     || effectiveBatchSize > round.configuredBatchSize
@@ -100,6 +101,12 @@ export function assertCoreAutomaticRoundJournalV1(
       throw new Error('Core round lacks a terminal verified completion for a planned graph');
     }
   }
+}
+
+function isCoreAutomaticTriggerV1(value: unknown): boolean {
+  return value === 'connection-open'
+    || value === 'peer-update'
+    || value === 'periodic-reconciler';
 }
 
 function terminalEntry(

@@ -157,7 +157,7 @@ function coreJournal(
     jobId,
     planningLane: 'publisher-peer',
     source: 'automatic-core-public',
-    trigger: 'peer-sync',
+    trigger: 'connection-open',
     configuredBatchSize,
     effectiveBatchSize: configuredBatchSize,
     explicitSelectedContextGraphIds: [],
@@ -404,6 +404,16 @@ test('published artifact must retain matching automatic journal proof', () => {
     verifySelectiveCoverage(exceedsConfiguredCapacity).checks.coreAutomaticProvenance,
     false,
   );
+});
+
+test('manual catch-up cannot satisfy Core automatic provenance', () => {
+  const manualCatchup = clone();
+  manualCatchup.automaticJournalEvidence.coreRounds[0]
+    .snapshot.entries[0].trigger = 'manual-catchup';
+
+  const verdict = verifySelectiveCoverage(manualCatchup);
+  assert.equal(verdict.checks.coreAutomaticProvenance, false);
+  assert.equal(verdict.pass, false);
 });
 
 test('supports 33 public graphs through multiple bounded journal rounds', () => {
