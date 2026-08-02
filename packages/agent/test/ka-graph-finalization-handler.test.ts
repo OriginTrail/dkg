@@ -2546,6 +2546,205 @@ describe('graph-scoped finalization handler', () => {
     })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
   });
 
+  /**
+   * `retireStaleTask` is the ONLY path that removes a cleanup task whose head
+   * has moved on, and no test reached it — including its call site. Its
+   * lifecycle transitions are asserted here.
+   *
+   * Retirement is deliberately NOT observable through the drain's return value:
+   * that counts reclaimed SWM lifecycles only, so a retiring sweep reports 0.
+   * These assert task presence directly for that reason.
+   */
+  async function countCleanupTasks(subGraphName?: string): Promise<number> {
+    const result = await store.query(
+      `SELECT (COUNT(DISTINCT ?task) AS ?count) WHERE { GRAPH `
+        + `<${graphManager.sharedMemoryMetaUri(CG, subGraphName)}> { ?task `
+        + `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> `
+        + `<${FINALIZED_SWM_CLEANUP_TASK_TYPE}> } }`,
+    );
+    if (result.type !== 'bindings') throw new Error('expected cleanup task count bindings');
+    const raw = result.bindings[0]?.['count'] ?? '0';
+    return Number.parseInt(raw.replace(/^"|"\^\^.*$/g, ''), 10);
+  }
+
+  async function deleteWorkspaceHeadSubject(): Promise<void> {
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+  }
+
+  it('retires a superseded task without disturbing the newer assertion', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // The head moves to v2 while the task still names v1.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+
+    await drainFinalizedSwm();
+
+    expect(await countCleanupTasks()).toBe(0);
+    // Asserting only that the stale task went is half a test: a change that
+    // retires v1 AND damages v2 would pass it. The newer lifecycle must survive
+    // intact, which is what makes this a lifecycle assertion.
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+        + `<urn:predicate:value> "newer" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('retires a headless task once its payload is gone', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    await deleteWorkspaceHeadSubject();
+    await store.dropGraph(swmGraph);
+
+    await drainFinalizedSwm();
+
+    expect(await countCleanupTasks()).toBe(0);
+  });
+
+  /**
+   * The guard this whole suite exists for. An absent head with the payload
+   * still present is NOT a finished lifecycle — it is a resurrected SWM copy
+   * whose head has not been rebuilt yet. Retiring its task strands that copy
+   * with nothing left to collect it, which is the resurrection #1996 exists to
+   * prevent, reached through the retirement path instead of the deletion path.
+   */
+  it('does not retire a headless task while its payload is still present', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Head gone, payload deliberately left behind.
+    await deleteWorkspaceHeadSubject();
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    await drainFinalizedSwm();
+
+    expect(await countCleanupTasks()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+  });
+
+  /**
+   * Retirement of a headless task is silently inert when the store cannot
+   * report write generations — `asGraphWriteGenSource` returns null and the
+   * absent-head branch returns before its payload check. Blazegraph ships no
+   * tracker, so this is production behaviour there, and it is indistinguishable
+   * from "nothing needed retiring" without a test saying otherwise.
+   *
+   * Pinning the inertness itself is deliberate: if a later change decides
+   * retiring on non-write-gen evidence is safe, this goes red and forces that
+   * to be a considered decision rather than a silent one.
+   */
+  it('leaves a headless task untouched when the store cannot track write generations', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Exactly the shape that retires in the test above.
+    await deleteWorkspaceHeadSubject();
+    await store.dropGraph(swmGraph);
+
+    const untrackedStore = withoutWriteGenTracking(store);
+    expect(asGraphWriteGenSource(untrackedStore)).toBeNull();
+    await new FinalizedSwmCleanupService({
+      store: untrackedStore,
+      writeLocks,
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [graphManager.sharedMemoryMetaUri(CG)],
+    }).cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    });
+
+    expect(await countCleanupTasks()).toBe(1);
+  });
+
+  /**
+   * `retireStaleTask`'s own in-lock TOCTOU re-check — the twin of the guard in
+   * `clearIfStillExact`. The pre-lock triage found a stale head, but by the
+   * time the writer lock is held the head has moved BACK to matching, so the
+   * task is live again and must not be retired. Retiring it strands a finalized
+   * SWM copy with nothing left to collect it.
+   *
+   * Narrower than the deletion-path twin — this removes a marker rather than
+   * payload, so the damage is a stranded copy rather than destroyed data — but
+   * the same class, and unpinned for the same reason: reaching it needs the
+   * head to change BETWEEN the two reads, which no static fixture produces.
+   *
+   * THE SEAM IS POSITIONAL, NOT BY SOURCE. Both head resolutions on this path
+   * carry `source: 'agent.finalizedSwmCleanup.discover'`, so the fixture counts
+   * occurrences: 1st = the pre-lock triage in `cleanupMetaGraph`, 2nd = the
+   * in-lock re-read. Adding a third query with that source ahead of these
+   * silently retargets the seam — the test would keep passing while no longer
+   * exercising the guard.
+   */
+  it('does not retire a task whose head becomes current again inside the lock', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Pre-lock triage must see a stale head, so advance it to v2.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+
+    const originalQuery = store.query.bind(store);
+    let headReads = 0;
+    let restoredInsideLock = false;
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (query.startsWith(WORKSPACE_HEAD_READ_PREFIX)) {
+        headReads += 1;
+        if (headReads === 2 && !restoredInsideLock) {
+          restoredInsideLock = true;
+          // Drop the seam first so the restore and the rest of the commit path
+          // run against the real store.
+          querySpy.mockRestore();
+          // The lifecycle this task names is current again.
+          await storeKnowledgeAssetWorkspaceHead({
+            store,
+            graphManager,
+            contextGraphId: CG,
+            shareOperationId: SHARE_ID,
+            kaUal: UAL,
+            assertionVersion: '1',
+          });
+        }
+      }
+      return originalQuery(query, options);
+    });
+
+    await drainFinalizedSwm();
+
+    expect(restoredInsideLock).toBe(true);
+    // Still armed: the task describes a lifecycle that is live again.
+    expect(await countCleanupTasks()).toBe(1);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '1', shareOperationId: SHARE_ID });
+  });
+
   it('defers durable cleanup while the store is busy and resumes after restart when idle', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);

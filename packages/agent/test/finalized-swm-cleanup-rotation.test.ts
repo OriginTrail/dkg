@@ -14,6 +14,34 @@
  * context graphs each slice actually entered. Asserting only that the cursor
  * advanced is much weaker: it passes with the accumulator committed in the
  * wrong place, which is the mutation that silently inflates the SLO surface.
+ *
+ * VERIFYING THIS SUITE STILL BITES. Neutralise the cursor at its DECLARATION,
+ * not at its assignment sites:
+ *
+ *   private rotationPendingDiscarded: string[] | null = null;
+ *   private get rotationPending(): string[] | null { return null; }
+ *   private set rotationPending(_v: string[] | null) {}
+ *
+ * The sweep loop has repeatedly grown new persist sites — a fault path, then a
+ * task cursor — and a mutant that enumerates them silently weakens each time
+ * one is added: the enumeration was complete when written, the code grew
+ * underneath it, and nothing fails to announce that. Mutating the single
+ * declaration cannot be outgrown by new call sites, so it stays valid across
+ * restructures of the loop.
+ *
+ * This is NOT the same as a blanket mutant, and the difference decides whether
+ * a result means anything:
+ *
+ *   - A BLANKET mutant stands in for many PROPERTIES. That is the failure to
+ *     avoid — four conversion sites killed by one test, three predicates
+ *     asserted in one case. Its kill tells you something broke, not what.
+ *   - A SITE-PROOF mutant covers ONE property and is merely robust to that
+ *     property gaining implementation sites.
+ *
+ * The check is whether the kill set stays narrow and specific: the mutation
+ * above kills the resume test and nothing else. If a site-proof mutant starts
+ * reddening half the suite it has become blanket, and that is the signal to
+ * split it rather than to celebrate the kill.
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -29,6 +57,26 @@ import {
   FINALIZED_SWM_CLEANUP_TASK_TYPE,
 } from '../src/dkg-agent-constants.js';
 import { FinalizedSwmCleanupService } from '../src/finalized-swm-cleanup-service.js';
+
+/**
+ * `runSweep` derives TWO deadlines from `wallClockBudgetMs`: one from the
+ * injected `now`, and one from `AbortSignal.timeout(...)` on REAL wall time.
+ * The second is threaded into the store and aborts its queries, and nothing in
+ * a test can control it.
+ *
+ * The budget must therefore exceed any plausible real slice duration. With a
+ * small budget, a slow machine, a loaded CI box or a neighbouring worktree
+ * makes the real timer fire first and the sweep yields at a boundary the
+ * injected clock never chose — reddening these tests for reasons unrelated to
+ * the code they pin. Measured directly: with the injected clock frozen and a
+ * 100 ms budget, a 150 ms store query still returns `budgetExhausted: true`.
+ *
+ * The injected clock alone must decide every deadline yield here, so the tick
+ * is expressed as a fraction of the budget: two ticks overrun one slice, one
+ * does not. Do not shrink these to make the arithmetic look tidier.
+ */
+const SLICE_BUDGET_MS = 60_000;
+const SLICE_TICK_MS = Math.ceil(SLICE_BUDGET_MS * 0.6);
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
@@ -144,10 +192,11 @@ describe('finalized SWM cleanup rotation cursor', () => {
    * every retry re-walked the same prefix, so markers in later context graphs
    * were never discovered no matter how many times the worker woke.
    *
-   * Four context graphs, 10 markers each, enumeration costing 60ms against a
-   * 100ms slice. Context graphs legitimately repeat across slices — a graph
-   * entered but not finished is re-measured whole — so the assertion is on the
-   * entry sequence and on the single published total, not on disjoint sets.
+   * Four context graphs, 10 markers each, enumeration costing one tick against
+   * a slice that fits fewer than two. Context graphs legitimately repeat across
+   * slices — a graph entered but not finished is re-measured whole — so the
+   * assertion is on the entry sequence and on the single published total, not
+   * on disjoint sets.
    */
   it('resumes at the unvisited tail and publishes a whole-node total only when the rotation closes', async () => {
     const store = new OxigraphStore();
@@ -168,11 +217,11 @@ describe('finalized SWM cleanup rotation cursor', () => {
       store,
       writeLocks: new Map<string, Promise<void>>(),
       now: () => clock.now,
-      wallClockBudgetMs: 100,
+      wallClockBudgetMs: SLICE_BUDGET_MS,
       listContextGraphIds: async () => [...contextGraphIds],
       listSharedMemoryMetaGraphs: async (contextGraphId) => {
         currentSweep.push(contextGraphId);
-        clock.now += 60;
+        clock.now += SLICE_TICK_MS;
         return [metaByContextGraph.get(contextGraphId)!];
       },
     });
@@ -233,12 +282,12 @@ describe('finalized SWM cleanup rotation cursor', () => {
       store,
       writeLocks: new Map<string, Promise<void>>(),
       now: () => clock.now,
-      wallClockBudgetMs: 100,
+      wallClockBudgetMs: SLICE_BUDGET_MS,
       listContextGraphIds: async () => ['cg-slow', 'cg-b', 'cg-c'],
       listSharedMemoryMetaGraphs: async (contextGraphId) => {
         currentSweep.push(contextGraphId);
         // The head alone costs more than a whole slice, so it can never finish.
-        clock.now += contextGraphId === 'cg-slow' ? 200 : 10;
+        clock.now += contextGraphId === 'cg-slow' ? SLICE_BUDGET_MS * 2 : Math.ceil(SLICE_BUDGET_MS * 0.1);
         if (contextGraphId === 'cg-slow') return [slowMeta];
         return [contextGraphId === 'cg-b' ? metaB : metaC];
       },
@@ -323,10 +372,10 @@ describe('finalized SWM cleanup rotation cursor', () => {
       store,
       writeLocks: new Map<string, Promise<void>>(),
       now: () => clock.now,
-      wallClockBudgetMs: 100,
+      wallClockBudgetMs: SLICE_BUDGET_MS,
       listContextGraphIds: async () => [...live],
       listSharedMemoryMetaGraphs: async (contextGraphId) => {
-        clock.now += 60;
+        clock.now += SLICE_TICK_MS;
         return [contextGraphId === 'cg-a' ? metaA : metaB];
       },
     });
