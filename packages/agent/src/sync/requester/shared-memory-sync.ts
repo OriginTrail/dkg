@@ -394,6 +394,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // rows from the append-style metadata insert below. Otherwise
                 // a live write could land between the swap and the append and
                 // leave an arbitrary multi-version head.
+                //
+                // The finalized-cleanup task is armed BY this swap, i.e. after
+                // the payload and head are both in place, never before the
+                // payload. Arming first was safe only because arm-and-write
+                // shared one hold of this writer lock, so the GC would block
+                // and then bail on a changed write generation
+                // (`retireStaleTask`). That ratchet is optional — it refuses to
+                // retire when the write-gen capability is absent — so ordering
+                // the arm after the write removes the dependency on it instead
+                // of relying on it, and leaves the task armed only once the
+                // head matches on every field `clearIfStillExact` checks.
                 await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
                 for (const quad of descriptor.metadataQuads) {
                   replacedGraphScopedMetaKeys.add(quadKey(quad));
