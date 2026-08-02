@@ -158,18 +158,16 @@ describe('curator sync-peer provenance', () => {
     };
   }
 
-  it('reports a metadata curator as authoritative EVEN when it equals the bootstrap hint', async () => {
+  it('prefers a declared curator over the bootstrap hint, and consumes the hint', async () => {
     // The ordinary case on a healthy network: the join approval came from the
-    // curator, so both routes name the same peer. Deriving provenance by
-    // comparing the resolved id against the hint therefore reads the normal
-    // case as "unconfirmed hint" and never lets the catch-up walk stop —
-    // exactly where the early-stop optimisation is worth the most.
+    // curator, so both routes name the same peer. The declared route wins and
+    // the hint is spent — but the result RANKS the walk, it does not end it.
     const hints = new Map([[CG, CURATOR]]);
     const agent = agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` });
 
-    expect(await resolveCuratorSyncPeer(agent as never, hints, CG))
-      .toEqual({ peerId: CURATOR, provenance: 'metadata' });
-    // …and the resolver consumed the hint now that metadata has confirmed it.
+    const resolved = await resolveCuratorSyncPeer(agent as never, hints, CG);
+    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'projection' });
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
     expect(hints.has(CG)).toBe(false);
   });
 
@@ -217,21 +215,25 @@ describe('curator sync-peer provenance', () => {
     expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
   });
 
-  it('authorises a wallet curator the graph binds to a peer in its OWN _meta', async () => {
-    // The route that keeps the early stop for V10 wallet-address curators: the
-    // Context Graph itself declares both the curator DID and the creator peer.
+  it('resolves a wallet curator from a declared creator WITHOUT granting authority', async () => {
+    // The graph's own `<cg>/_meta` declaring both the curator DID and the
+    // creator peer is the strongest statement available locally — and it is
+    // still not enough. Ordinary durable-meta catch-up admits descriptive rows
+    // for the Context Graph's entity subject and writes them into that very
+    // graph, so a contacted peer can supply these exact rows. Reading one graph
+    // instead of the merged projection identifies the GRAPH, never the WRITER.
     const hints = new Map([[CG, HINT]]);
     const declared = {
       curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
       creator: `did:dkg:agent:${CURATOR}`,
     };
     const agent = agentWithMeta(declared, async () => {
-      throw new Error('an own-_meta binding must not need the registry');
+      throw new Error('a declared creator must not need the registry');
     }, declared);
 
     const resolved = await resolveCuratorSyncPeer(agent as never, hints, CG);
-    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'metadata' });
-    expect(authoritativeSyncPeerId(resolved)).toBe(CURATOR);
+    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'projection' });
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
   });
 
   it('demotes a creator the MERGED projection supplied but the graph did not', async () => {
@@ -402,27 +404,37 @@ describe('curator sync-peer provenance', () => {
     expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
   });
 
-  it('keeps the deterministic metadata routes authoritative', async () => {
-    // The positive complement, so the guard cannot be widened into something
-    // that disables the early stop wholesale. Neither of these routes touches
-    // the registry: a bare peer-id DID, and the projected DKG_CREATOR triple.
-    const bareDid = agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` }, async () => {
-      throw new Error('a bare peer-id DID must not need the registry');
-    });
-    expect(authoritativeSyncPeerId(
-      await resolveCuratorSyncPeer(bareDid as never, new Map(), CG),
-    )).toBe(CURATOR);
-
-    const declared = {
+  it('grants authority to NO route, however well the graph declares itself', async () => {
+    // The invariant, stated once over every shape that has ever been proposed
+    // as sufficient. Each of these ranks the walk correctly; none may end it,
+    // because none is attributable to a writer a peer cannot impersonate.
+    //
+    // If a future change introduces a real trust anchor — a curator-signed
+    // snapshot, an on-chain curator→peer edge, or the locally persisted
+    // join-approval record — this test is where the new positive case belongs,
+    // NOT a relaxation of the shapes below.
+    const declaredWallet = {
       curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
       creator: `did:dkg:agent:${CURATOR}`,
     };
-    const viaCreator = agentWithMeta(declared, async () => {
-      throw new Error('the DKG_CREATOR route must not need the registry');
-    }, declared);
-    expect(authoritativeSyncPeerId(
-      await resolveCuratorSyncPeer(viaCreator as never, new Map(), CG),
-    )).toBe(CURATOR);
+    const shapes = [
+      // A bare peer-id DID curator: the DID IS the peer, nothing to reconcile.
+      agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` }),
+      // A wallet curator with the creator peer declared alongside it.
+      agentWithMeta(declaredWallet, async () => [], declaredWallet),
+      // The same, resolved through the local Agent Registry instead.
+      agentWithMeta(
+        { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
+        async () => [{ agentAddress: '0x00000000000000000000000000000000000000AB', peerId: CURATOR }],
+      ),
+    ];
+
+    for (const agent of shapes) {
+      const resolved = await resolveCuratorSyncPeer(agent as never, new Map(), CG);
+      expect(resolved.peerId).toBe(CURATOR);
+      expect(resolved.provenance).not.toBe('metadata');
+      expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+    }
   });
 
   it('answers ranking and authority from ONE resolution', async () => {
@@ -455,19 +467,19 @@ describe('curator sync-peer provenance', () => {
     const resolved = await LifecycleSyncMethods.prototype.resolveSyncPeerWithProvenance
       .call(agent as never, CG);
 
-    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'metadata' });
+    expect(resolved).toEqual({ peerId: CURATOR, provenance: 'projection' });
     expect(metaReads).toBe(1);
     // Both narrow notions are derivable from it, matching the wrappers exactly.
     expect(resolved.peerId).toBe(CURATOR);
-    expect(authoritativeSyncPeerId(resolved)).toBe(CURATOR);
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
     expect(authoritativeSyncPeerId({ peerId: CURATOR, provenance: 'bootstrap-hint' }))
       .toBeUndefined();
     expect(authoritativeSyncPeerId({ provenance: 'none' })).toBeUndefined();
   });
 
-  it('ranks on any provenance but only lets metadata settle the walk', async () => {
+  it('ranks on any provenance and settles the walk on none', async () => {
     // The two lifecycle entry points, on their real prototypes: ranking takes
-    // whatever peer is available, authority takes it only from metadata.
+    // whatever peer is available; authority takes nothing at all.
     const confirmedCurator = {
       preferredSyncPeers: new Map([[CG, CURATOR]]),
       ...agentWithMeta({ curator: `did:dkg:agent:${CURATOR}` }),
@@ -480,7 +492,7 @@ describe('curator sync-peer provenance', () => {
     const authority = LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId;
 
     expect(await rank.call(confirmedCurator as never, CG)).toBe(CURATOR);
-    expect(await authority.call(confirmedCurator as never, CG)).toBe(CURATOR);
+    expect(await authority.call(confirmedCurator as never, CG)).toBeUndefined();
 
     expect(await rank.call(hintOnly as never, CG)).toBe(HINT);
     expect(await authority.call(hintOnly as never, CG)).toBeUndefined();

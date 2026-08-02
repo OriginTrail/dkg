@@ -1043,6 +1043,60 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(startOrder).toEqual(peerIds);
   });
 
+  it('walks a no-authority round as ONE pass, with no barrier between waves', async () => {
+    // Waves exist only so an authority can cut the walk short. With no
+    // authoritative curator nothing can break the loop, so splitting the peer
+    // set into waves saves no fetch and only adds a barrier — making the round
+    // slower than the single bounded pass it replaced.
+    //
+    // Barriers are invisible to a peak-concurrency assertion (both shapes peak
+    // at the cap), so this pins the property that actually differs: with a
+    // sliding window a LATER peer starts while an early slow peer is still in
+    // flight; behind a barrier it cannot.
+    const peerIds = Array.from({ length: 12 }, (_, i) => `peer-${i}`);
+    let slowPeerInFlight = false;
+    let startedDuringSlowPeer = 0;
+
+    await runWorkerCatchup(
+      { contextGraphId: 'cg-no-authority-single-pass', includeSharedMemory: false },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: undefined,
+              authoritativePeerId: undefined,
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable': {
+            const peerId = args[0] as string;
+            if (peerId === 'peer-0') {
+              slowPeerInFlight = true;
+              await delay(40);
+              slowPeerInFlight = false;
+              return { ...durableResult(), complete: false };
+            }
+            // Anything beyond the first wave-width proves the window slid.
+            if (slowPeerInFlight && Number(peerId.slice('peer-'.length)) >= CATCHUP_MAX_CONCURRENT_PEER_SYNCS) {
+              startedDuringSlowPeer += 1;
+            }
+            await delay(1);
+            return { ...durableResult(), complete: false };
+          }
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(startedDuringSlowPeer).toBeGreaterThan(0);
+  });
+
   it('spends the single-peer opening wave only on a sync-capable curator', async () => {
     // A REAL authority that is offline: metadata resolved a curator, so
     // `authoritativePeerId` is set, but the protocol probe filters it out. The

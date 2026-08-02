@@ -592,103 +592,6 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
  * was echoed back". Only the resolver knows which branch it took.
  */
 
-/**
- * Does the Context Graph's OWN `<cg>/_meta` graph declare this exact
- * curator→peer binding?
- *
- * The merged projection cannot answer this: it unions `_meta` with AGENTS,
- * `_catalog` and ONTOLOGY and drops the source of each fact, so a stale or
- * third-party creator declaration is indistinguishable from the graph's own.
- * Catch-up authority lets ONE peer stand for a whole graph, so it needs the
- * stronger statement.
- *
- * Returns false on any read failure — fail closed to ranking, never to authority.
- */
-async function ownMetaConfirmsCuratorBinding(
-  agent: DKGAgent,
-  contextGraphId: string,
-  curatorDid: string,
-  curatorPeerId: string,
-  options: { signal?: AbortSignal },
-): Promise<boolean> {
-  // Fail closed if the receiver cannot answer: an agent (or a hand-built test
-  // receiver) without the source-qualified reader ranks, never authorises.
-  if (typeof agent.getOwnCgMetaFacts !== 'function') return false;
-  let own;
-  try {
-    own = await agent.getOwnCgMetaFacts(contextGraphId, { signal: options.signal });
-  } catch {
-    throwIfSyncAuthAborted(options.signal);
-    return false;
-  }
-
-  // The graph must DECLARE itself here, not merely be mentioned.
-  //
-  // `<cg>/_meta` accumulates rows from several writers — durable-meta sync,
-  // curator refresh, gossip, per-node backfill — so the presence of a curator
-  // triple says only that some row arrived, not that this node holds the graph's
-  // canonical definition. Two stray triples were enough to earn authority.
-  //
-  // A complete definition is the cheapest honest proxy, and on a receiver it
-  // costs nothing: `curator-meta-refresh` REJECTS any curator snapshot missing
-  // type/access-policy/creator/curator before it will replace `_meta`, and the
-  // subscriber bootstrap writes type and policy but never a curator. So a
-  // curator row essentially cannot be present without them. Graphs predating
-  // that invariant lose the early stop and fall back to bounded fan-out.
-  if (!own.declared || own.accessPolicy === undefined) return false;
-
-  // The graph must name this curator, unambiguously.
-  //
-  // Deduplicate first: `applyFact` records the SAME triple twice — it pushes to
-  // `curators` and also sets the `curator` scalar — so a single declared curator
-  // arrives here as two entries. Counting the raw array would reject every real
-  // graph while passing any fixture that leaves `curators` empty.
-  const ownCurators = new Set([own.curator, ...own.curators].filter(Boolean));
-  if (ownCurators.size !== 1 || !ownCurators.has(curatorDid)) return false;
-
-  const didPrefix = 'did:dkg:agent:';
-  const curatorIdentifier = curatorDid.slice(didPrefix.length);
-  // …and for a bare peer-id DID that IS the binding, with nothing to reconcile.
-  if (!curatorDidNeedsRegistryResolution(curatorIdentifier)) {
-    return curatorPeerId === curatorIdentifier;
-  }
-
-  // For a wallet-address curator, the peer must come from a creator the graph
-  // declared in its OWN `_meta` — not one contributed by AGENTS, `_catalog`, or
-  // ONTOLOGY.
-  //
-  // ONTOLOGY is excluded even though a PUBLIC graph's definition lives there,
-  // and local uniqueness does not rescue it: ONTOLOGY is network-replicated, so
-  // a node can hold an injected `DKG_CREATOR` for a subject WITHOUT holding the
-  // real one, and "the only creator I can currently see" would then authorise
-  // the attacker. That is the same local-cardinality fallacy that already makes
-  // the Agent Registry route non-authoritative, one graph over.
-  //
-  // So a public graph with a wallet curator earns no authority here, and its
-  // catch-up degrades to the previous bounded fan-out. The resolved peer still
-  // ORDERS the walk, but ordering is all it may do: ending the walk means
-  // accepting one peer's snapshot as the whole graph, and an untrusted peer's
-  // `complete` flag says only that it served its own view.
-  //
-  // The binding must also be UNIQUE. Accepting "some declared creator matches
-  // the candidate" lets a stale or duplicated creator row — the shape
-  // `createContextGraph` calls out as "stray creator/curator triples (e.g. from
-  // a previous build that backfilled per node)" — decide which peer speaks for
-  // the graph, and the merged projection picks among creators in arbitrary
-  // order. Two candidate bindings mean no binding: rank, never settle.
-  const declaredPeerBindings = new Set(
-    [own.creator, ...own.creators]
-      .filter((value): value is string => Boolean(value))
-      .filter((creatorDid) => creatorDid.startsWith(didPrefix))
-      .map((creatorDid) => creatorDid.slice(didPrefix.length))
-      // A wallet-form creator is not a peer binding; it cannot name a peer and
-      // must not count toward the ambiguity it would otherwise manufacture.
-      .filter((creatorId) => !creatorId.startsWith('0x')),
-  );
-  if (declaredPeerBindings.size !== 1) return false;
-  return declaredPeerBindings.has(curatorPeerId);
-}
-
 export async function resolveCuratorSyncPeer(
   agent: DKGAgent,
   /**
@@ -774,14 +677,30 @@ export async function resolveCuratorSyncPeer(
     if (!resolved) return fromHint();
   }
 
-  // Earn `'metadata'`: re-derive the binding from the Context Graph's OWN `_meta`
-  // graph and require it to agree. This is what makes the label mean "the graph
-  // said so", rather than "something in the merged projection said so".
-  if (provenance === 'projection') {
-    provenance = await ownMetaConfirmsCuratorBinding(
-      agent, contextGraphId, curatorDid, curatorPeerId, options,
-    ) ? 'metadata' : 'projection';
-  }
+  // No route here earns `'metadata'`, so nothing this resolver returns may end a
+  // catch-up walk. That is deliberate, and it is a scope decision rather than an
+  // oversight — see #2006 and the follow-up issue.
+  //
+  // Earlier revisions re-derived the binding from the Context Graph's OWN
+  // `<cg>/_meta` graph, on the theory that reading one graph instead of the
+  // merged projection made the fact attributable to the graph itself. It does
+  // not. Source-qualifying by GRAPH establishes which graph holds the rows, not
+  // which WRITER supplied them: ordinary durable-meta catch-up admits
+  // IRI-subject descriptive metadata for the Context Graph's entity subject
+  // (`selectAdmittedMetadataIndexes` falls through for any predicate outside the
+  // control set) and inserts it verbatim into that exact `_meta` graph. A
+  // contacted peer can therefore supply the very rows the check reads —
+  // `rdf:type`, `accessPolicy`, `curator` — and manufacture its own authority.
+  // Tightening the SHAPE of the record (completeness, uniqueness) does not help:
+  // it only raises the number of rows the peer must send.
+  //
+  // Authority needs a binding from a source a peer cannot write: a
+  // curator-signed snapshot, an on-chain curator→peer edge, or the locally
+  // persisted join-approval record. None is available today — join approvals
+  // carry no curator signature, no chain record maps a wallet to a libp2p peer,
+  // and both metadata "proofs" are structural checks with no signature. Until
+  // one exists, every resolution ranks the walk and none ends it.
+  void curatorDid;
 
   bootstrapHints.delete(contextGraphId);
   return { peerId: curatorPeerId, provenance };

@@ -458,7 +458,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // peer that wave would contact.
   const authorityFirst = prepared.authoritativePeerId !== undefined
     && syncCapable[0] === prepared.authoritativePeerId;
-  const waveSizes = CATCHUP_STOP_ON_PROOF
+  // Waves exist ONLY so an authority can cut the walk short. With no authority
+  // resolvable nothing can ever break the loop, so splitting the peer set into
+  // waves cannot save a single fetch — it only adds a barrier between them,
+  // making the round SLOWER than the single bounded pass it replaced. Fall back
+  // to that pass rather than paying for a stop that cannot happen.
+  const canStopEarly = CATCHUP_STOP_ON_PROOF && prepared.authoritativePeerId !== undefined;
+  const waveSizes = canStopEarly
     ? catchupWaveSizes(
       syncCapable.length,
       CATCHUP_MAX_CONCURRENT_PEER_SYNCS,

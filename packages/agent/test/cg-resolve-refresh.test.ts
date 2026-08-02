@@ -1263,7 +1263,9 @@ describe('refreshMetaFromCurator', () => {
 
     // The same resolution through the lifecycle entry points, against the real
     // metadata rather than a stubbed curator: the join-approved peer ranks only
-    // until `_meta` names someone, and the metadata answer is authoritative.
+    // until `_meta` names someone. The declared answer then wins the RANKING —
+    // but it confers no authority, because `_meta` identifies the graph that
+    // holds the rows, not the writer that supplied them.
     const lifecycleAgent = {
       ...agent,
       preferredSyncPeers: new Map([[contextGraphId, bootstrapPeer]]),
@@ -1271,6 +1273,6 @@ describe('refreshMetaFromCurator', () => {
     expect(await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId
       .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
     expect(await LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId
-      .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
+      .call(lifecycleAgent as never, contextGraphId)).toBeUndefined();
   });
 });
