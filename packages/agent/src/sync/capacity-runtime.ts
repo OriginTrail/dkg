@@ -151,6 +151,7 @@ export class SyncCapacityRuntime {
       return new SyncCapacityRuntime(staticPolicy, configuredCoverageBatch);
     }
 
+    const controller = new AdaptiveCapacityController(bounds, { now: options.now });
     const adaptivePolicy = resolveSyncGlobalBackpressure({
       // The controller can never exceed hardMax, so use that same ceiling for
       // queue sizing and admission observability. Basing the queue on a larger
@@ -158,11 +159,11 @@ export class SyncCapacityRuntime {
       // can never drain at the advertised policy capacity.
       syncGlobalMaxInflight: hardMax,
       syncGlobalQueueLimit: config.syncGlobalQueueLimit,
-    });
+    }, () => controller.getCurrentInflight());
     return new SyncCapacityRuntime(
       adaptivePolicy,
       configuredCoverageBatch,
-      new AdaptiveCapacityController(bounds, { now: options.now }),
+      controller,
       new AdaptiveCapacitySampler(store, options.samplerDependencies),
     );
   }
@@ -172,14 +173,8 @@ export class SyncCapacityRuntime {
   }
 
   /** Stable admission contract; callers do not need to branch on capacity mode. */
-  getAdmissionOptions(): {
-    policy: SyncGlobalBackpressurePolicy;
-    currentLimit?: () => number;
-  } {
-    const controller = this.controller;
-    return controller
-      ? { policy: this.policy, currentLimit: () => controller.getCurrentInflight() }
-      : { policy: this.policy };
+  getAdmissionOptions(): { policy: SyncGlobalBackpressurePolicy } {
+    return { policy: this.policy };
   }
 
   getEffectiveCoverageBatch(): number {

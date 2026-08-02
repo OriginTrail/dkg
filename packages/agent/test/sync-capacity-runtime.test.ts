@@ -60,7 +60,8 @@ describe('sync capacity runtime resolution', () => {
       currentCoverageBatch: 7,
       configuredCoverageBatch: 7,
     });
-    expect(runtime.getAdmissionOptions().currentLimit?.()).toBe(2);
+    expect(runtime.getAdmissionOptions()).toEqual({ policy: runtime.policy });
+    expect(runtime.policy.currentLimit?.()).toBe(2);
   });
 
   it('owns sampling and restores constrained coverage from supplemental Core demand', () => {

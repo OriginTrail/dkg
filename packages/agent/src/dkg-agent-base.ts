@@ -1723,14 +1723,20 @@ export class DKGAgentBase {
   /** Build one canonical peer-round scope with named snapshot/live phases. */
   protected planCorePublicSyncPeerRound(remotePeer: string): PeerSyncScope {
     const selected = [...(this.config.syncContextGraphs ?? [])];
-    const automaticContextGraphIds = (this.config.nodeRole ?? 'edge') === 'core'
-      ? this.corePublicSyncCoverageScheduler.planAutomaticCoverage(
-        selected,
-        this.config.syncContextGraphPriorities,
-        remotePeer,
-        this.syncCapacityRuntime.getEffectiveCoverageBatch(),
-      )
-      : [];
+    let automaticContextGraphIds: string[] = [];
+    if ((this.config.nodeRole ?? 'edge') === 'core') {
+      automaticContextGraphIds = this.syncCapacityRuntime.isAdaptive()
+        ? this.corePublicSyncCoverageScheduler.planAutomaticCoverageWithOptions(selected, {
+          priorities: this.config.syncContextGraphPriorities,
+          planningLane: remotePeer,
+          effectiveBatchSize: this.syncCapacityRuntime.getEffectiveCoverageBatch(),
+        })
+        : this.corePublicSyncCoverageScheduler.planAutomaticCoverage(
+          selected,
+          this.config.syncContextGraphPriorities,
+          remotePeer,
+        );
+    }
     const initialDurableContextGraphIds = [...new Set([
       ...selected,
       ...automaticContextGraphIds,

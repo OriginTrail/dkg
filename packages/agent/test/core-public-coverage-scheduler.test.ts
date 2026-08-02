@@ -197,7 +197,10 @@ describe('Core public Context Graph coverage scheduler', () => {
     }
 
     expect(scheduler.hasAutomaticCoverageBacklog(2)).toBe(true);
-    scheduler.planAutomaticCoverage(['cg:a', 'cg:b'], undefined, 'peer-a', 2);
+    scheduler.planAutomaticCoverageWithOptions(['cg:a', 'cg:b'], {
+      planningLane: 'peer-a',
+      effectiveBatchSize: 2,
+    });
     expect(scheduler.hasAutomaticCoverageBacklog(2)).toBe(true);
     expect(scheduler.hasAutomaticCoverageBacklog(3)).toBe(false);
   });

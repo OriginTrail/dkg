@@ -396,10 +396,14 @@ describe('sync global backpressure', () => {
     // while every real admission reports `durable:unspecified` on
     // /api/diagnostics/backpressure, which is the attribution issue #2006 had to
     // reconstruct from daemon logs.
+    const config = { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 };
     const agentLike = {
-      config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 },
+      config,
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
+      syncCapacityRuntime: {
+        getAdmissionOptions: () => ({ policy: resolveSyncGlobalBackpressure(config) }),
+      },
     };
 
     let releaseWork!: () => void;
