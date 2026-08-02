@@ -1685,7 +1685,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { includeWorkspace, includeSharedMemory } = parsed;
-    const requestedSyncMode = parsed.syncMode ?? 'always-on';
+    // Omission preserves the legacy always-on default, but an explicit null is
+    // malformed input and must not silently opt the caller into durable sync.
+    const requestedSyncMode = parsed.syncMode === undefined
+      ? 'always-on'
+      : parsed.syncMode;
     if (requestedSyncMode !== 'on-demand' && requestedSyncMode !== 'always-on') {
       return jsonResponse(res, 400, {
         error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
