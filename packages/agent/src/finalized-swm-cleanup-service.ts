@@ -148,6 +148,22 @@ export class FinalizedSwmCleanupService {
    * successive slices.
    */
   private metaGraphResumeCursor: { contextGraphId: string; offset: number } | null = null;
+  /**
+   * Keyset position within the one meta graph whose candidate page is unfinished.
+   * Discovery is `ORDER BY ?task LIMIT n`, so without this the same prefix is
+   * re-selected every sweep and its successors are never examined — the third
+   * instance of the cursor-less re-walk this service has, after the context-graph
+   * rotation and the meta-graph walk. Tasks that can never be acted on (a head
+   * that no longer verifies) otherwise hold the whole node-wide deletion budget
+   * indefinitely.
+   *
+   * A single entry suffices, and is bounded by construction rather than by an
+   * eviction policy: charging `remaining` per examined candidate means a full page
+   * always spends the rest of the budget, so no other meta graph runs discovery
+   * in that slice, and a short page clears the cursor. At most one meta graph can
+   * hold an unfinished page at a time.
+   */
+  private taskCursor: { swmMetaGraph: string; afterTaskSubject: string } | null = null;
 
   constructor(options: FinalizedSwmCleanupServiceOptions) {
     this.store = options.store;
@@ -269,13 +285,16 @@ export class FinalizedSwmCleanupService {
           if (underPressure()) return yieldRotation('pressure');
           if (this.now() >= deadline) return yieldRotation('budget');
           if (remaining > 0) {
-            let cleanup: { deletedItems: number; examinedCandidates: number };
+            let cleanup: Awaited<ReturnType<typeof this.cleanupMetaGraph>>;
             try {
               cleanup = await this.cleanupMetaGraph({
                 contextGraphId,
                 swmMetaGraph,
                 maxCandidates: remaining,
                 signal: deadlineSignal,
+                ...(this.taskCursor?.swmMetaGraph === swmMetaGraph
+                  ? { afterTaskSubject: this.taskCursor.afterTaskSubject }
+                  : {}),
               });
             } catch (error) {
               if (deadlineSignal.aborted) return yieldRotation('budget');
@@ -284,6 +303,11 @@ export class FinalizedSwmCleanupService {
             }
             deletedItems += cleanup.deletedItems;
             remaining -= cleanup.examinedCandidates;
+            // Advance while the page is full; wrap when it is short so a stuck
+            // prefix is skipped without stranding the suffix behind it.
+            this.taskCursor = cleanup.pageWasFull && cleanup.lastTaskSubject !== undefined
+              ? { swmMetaGraph, afterTaskSubject: cleanup.lastTaskSubject }
+              : null;
           }
           if (underPressure()) return yieldRotation('pressure');
           if (this.now() >= deadline) return yieldRotation('budget');
@@ -487,9 +511,19 @@ export class FinalizedSwmCleanupService {
     swmMetaGraph: string;
     maxCandidates?: number;
     signal?: AbortSignal;
-  }): Promise<{ deletedItems: number; examinedCandidates: number }> {
+    /**
+     * Keyset position from a previous slice. Only `runSweep` supplies it, so the
+     * `cleanupKnownMetaGraph` seam keeps selecting from the top unchanged.
+     */
+    afterTaskSubject?: string;
+  }): Promise<{
+    deletedItems: number;
+    examinedCandidates: number;
+    lastTaskSubject?: string;
+    pageWasFull: boolean;
+  }> {
     if (!this.writeLocks || hasActiveStorePressure(this.store.getPressureSnapshot?.())) {
-      return { deletedItems: 0, examinedCandidates: 0 };
+      return { deletedItems: 0, examinedCandidates: 0, pageWasFull: false };
     }
     const limit = Math.min(16, Math.max(1, Math.floor(input.maxCandidates ?? 4)));
     const queryOptions: QueryOptions = {
@@ -508,11 +542,16 @@ export class FinalizedSwmCleanupService {
             <http://dkg.io/ontology/shareOperationId> ?shareId ;
             <http://dkg.io/ontology/assertionGraph> ?assertionGraph .
           OPTIONAL { ?task <http://dkg.io/ontology/subGraphName> ?subGraphName }
+          ${input.afterTaskSubject === undefined
+            ? ''
+            : `FILTER(STR(?task) > ${JSON.stringify(input.afterTaskSubject)})`}
         }
       } ORDER BY ?task LIMIT ${limit}`,
       queryOptions,
     );
-    if (result.type !== 'bindings') return { deletedItems: 0, examinedCandidates: 0 };
+    if (result.type !== 'bindings') {
+      return { deletedItems: 0, examinedCandidates: 0, pageWasFull: false };
+    }
 
     let cleared = 0;
     for (const row of result.bindings) {
@@ -601,7 +640,18 @@ export class FinalizedSwmCleanupService {
       });
       if (outcome === 'cleared') cleared += 1;
     }
-    return { deletedItems: cleared, examinedCandidates: result.bindings.length };
+    // `ORDER BY ?task` makes the last row the keyset position. A short page means
+    // the ordered set is exhausted, so the caller wraps instead of advancing —
+    // without that, skipping a stuck prefix would trade it for a permanently
+    // skipped suffix, the same starvation with the opposite sign.
+    const lastRow = result.bindings[result.bindings.length - 1];
+    const lastTaskSubject = typeof lastRow?.['task'] === 'string' ? lastRow['task'] : undefined;
+    return {
+      deletedItems: cleared,
+      examinedCandidates: result.bindings.length,
+      ...(lastTaskSubject === undefined ? {} : { lastTaskSubject }),
+      pageWasFull: result.bindings.length >= limit,
+    };
   }
 
   private async retireStaleTask(input: {
