@@ -287,13 +287,26 @@ export class ContextGraphCatchupCoordinatorService {
     const isPrivate = hasConfirmedMeta
       ? await this.effects.isPrivate(job.contextGraphId)
       : false;
-    return classifyContextGraphCatchupReadiness({
+    const classification = classifyContextGraphCatchupReadiness({
       result,
       includeSharedMemory: job.includeWorkspace,
       hasConfirmedMeta,
       isPrivate,
       readinessBeforeCatchup,
     });
+    // Denial can coexist with usable data from another peer. If local
+    // admission also deferred part of that mixed round, the clean data must
+    // not turn the attempt into success: finalizeCatchup deliberately leaves
+    // any backpressured round incomplete. Preserve a pure ACL denial, but
+    // downgrade an otherwise-successful mixed result before effects are
+    // applied so no readiness bit is frozen from partial work.
+    if (result.deferredBackpressure > 0 && classification.jobStatus === 'done') {
+      return {
+        jobStatus: 'deferred',
+        error: 'Sync deferred by local scheduler backpressure; retry when capacity is available.',
+      };
+    }
+    return classification;
   }
 
   private applyExecutionEffects(

@@ -1,9 +1,23 @@
-/** Per-plane clean-completion evidence safe to expose on the status wire. */
+/**
+ * Per-plane clean-completion evidence accumulated across the peers this run
+ * contacted and safe to expose on the status wire.
+ */
 export interface CatchupPlaneCompletionEvidence {
   verifiedDataPeers: number;
+  /** Peers that cleanly verified one or more V2 KAs with no public triples. */
   verifiedPrivateOnlyPeers?: number;
   emptyPeers: number;
+  /**
+   * The metadata-resolved curator cleanly completed this plane while hosting
+   * the graph and carrying no data at all.
+   */
   authorityEmptyPeers?: number;
+  /**
+   * Peers that answered this plane but whose round did not complete cleanly.
+   * This prevents one clean-empty response plus one incomplete-empty response
+   * from being misread as unanimous empty. Pure transport failures remain in
+   * the plane diagnostics rather than this counter.
+   */
   incompleteResponders?: number;
 }
 

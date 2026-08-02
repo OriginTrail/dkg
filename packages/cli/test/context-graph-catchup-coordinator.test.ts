@@ -1,5 +1,6 @@
 import type { ContextGraphReadinessProvenance } from '@origintrail-official/dkg-node-ui';
 import { describe, expect, it, vi } from 'vitest';
+import type { CatchupJobResult } from '../src/catchup-runner.js';
 import { ContextGraphCatchupCoordinatorService } from '../src/daemon/context-graph-catchup-coordinator.js';
 import type { CatchupJob, CatchupTracker } from '../src/daemon/types.js';
 import {
@@ -42,6 +43,7 @@ function coordinatorFixture(options: {
   failUpgrade?: boolean;
   baseOutcome?: 'success' | 'throw' | 'denied';
   blockBroadBase?: boolean;
+  result?: CatchupJobResult;
 } = {}) {
   const tracker: CatchupTracker = {
     jobs: new Map(),
@@ -60,6 +62,7 @@ function coordinatorFixture(options: {
   let runNumber = 0;
   const run = vi.fn(async (request: { includeSharedMemory: boolean }) => {
     runNumber += 1;
+    if (options.result) return options.result;
     if (runNumber === 1 && (!request.includeSharedMemory || options.blockBroadBase)) {
       firstRunStarted.resolve();
       await releaseFirstRun.promise;
@@ -73,15 +76,20 @@ function coordinatorFixture(options: {
       ? privateDataOnlyResult()
       : publicDurableAndSharedMemoryResult();
   });
+  const writeReadiness = vi.fn((_contextGraphId: string, patch: {
+    durableVerified: boolean;
+    sharedMemoryVerified: boolean;
+  }) => {
+    readiness = { ...readiness, ...patch, updatedAt: readiness.updatedAt + 1 };
+  });
+  const markSubscriptionState = vi.fn();
   const service = new ContextGraphCatchupCoordinatorService(tracker, {
     runner: { run },
     readReadiness: () => readiness,
     hasConfirmedMeta: async () => true,
     isPrivate: async () => false,
-    writeReadiness: (_contextGraphId, patch) => {
-      readiness = { ...readiness, ...patch, updatedAt: readiness.updatedAt + 1 };
-    },
-    markSubscriptionState: vi.fn(),
+    writeReadiness,
+    markSubscriptionState,
     emitProjectSynced: vi.fn(),
     createJobId: () => `job-${++sequence}`,
   });
@@ -91,10 +99,39 @@ function coordinatorFixture(options: {
     run,
     firstRunStarted,
     releaseFirstRun,
+    writeReadiness,
+    markSubscriptionState,
   };
 }
 
 describe('ContextGraphCatchupCoordinatorService', () => {
+  it('keeps denied mixed progress deferred when local backpressure left the round incomplete', async () => {
+    const result = publicDurableAndSharedMemoryResult();
+    result.denied = true;
+    result.deniedPeers = 1;
+    result.deferredBackpressure = 1;
+    const fixture = coordinatorFixture({ result });
+    const job = fixture.service.start({
+      contextGraphId: 'cg:denied-deferred',
+      includeSharedMemory: true,
+      readinessBeforeCatchup: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: false,
+        updatedAt: 1,
+      },
+    });
+
+    await waitForJob(job);
+
+    expect(job).toMatchObject({
+      status: 'deferred',
+      error: expect.stringContaining('local scheduler backpressure'),
+    });
+    expect(fixture.writeReadiness).not.toHaveBeenCalled();
+    expect(fixture.markSubscriptionState).not.toHaveBeenCalled();
+  });
+
   it('provisions orchestration state for the historical two-map tracker shape', () => {
     const tracker = {
       jobs: new Map(),

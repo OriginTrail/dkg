@@ -13,9 +13,15 @@ import {
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import type { CatchupJobResult } from './catchup-result-wire.js';
+import type {
+  CatchupJobResult,
+  CatchupPlaneCompletionEvidence,
+} from './catchup-result-wire.js';
 
-export type { CatchupJobResult } from './catchup-result-wire.js';
+export type {
+  CatchupJobResult,
+  CatchupPlaneCompletionEvidence,
+} from './catchup-result-wire.js';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -421,39 +427,6 @@ export function catchupPlaneCompletedWithoutFailure(
   complete?: boolean,
 ): boolean {
   return classifyDurableProgress(progress, { complete }).completedWithoutFailure;
-}
-
-/** Per-plane clean-completion evidence accumulated across the peers this run contacted. */
-export interface CatchupPlaneCompletionEvidence {
-  verifiedDataPeers: number;
-  /** Peers that cleanly verified one or more V2 KAs with no public triples. */
-  verifiedPrivateOnlyPeers?: number;
-  emptyPeers: number;
-  /**
-   * The metadata-resolved curator cleanly completed this plane while hosting
-   * the graph and carrying no data at all. See
-   * {@link catchupPlaneProvenByUnanimousEmpty}.
-   */
-  authorityEmptyPeers?: number;
-  /**
-   * Peers that ANSWERED this plane but whose round did not complete cleanly.
-   *
-   * Every other field here records what a peer proved. This one records what a
-   * peer left unresolved, and it exists because the absence of a peer from the
-   * positive counters is ambiguous: `catchupPeerPlaneEvidence` returns an
-   * all-zero record for an incomplete round, so a peer that answered EMPTY but
-   * did not finish paging is indistinguishable from a peer that was never
-   * contacted. That ambiguity is invisible to the round diagnostics too — an
-   * explicit `complete: false` is not a transport failure, so it never reaches
-   * `failedPeers`.
-   *
-   * Without it, a round of one clean-empty peer plus one incomplete-empty peer
-   * reads as unanimously empty. Pure transport failures are deliberately NOT
-   * counted here: an unreachable stranger is already `failedPeers`, and folding
-   * it in would pin legitimately empty graphs in a retry loop on a lossy
-   * network.
-   */
-  incompleteResponders?: number;
 }
 
 /** The aggregate per-plane counters a whole-round verdict is allowed to consult. */
