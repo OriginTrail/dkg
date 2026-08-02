@@ -15,8 +15,7 @@ import {
 import {
   notifyGlobalSyncBackpressureCapacityChanged,
   parseBooleanEnv,
-  resolveNonNegativeIntegerSwitch,
-  resolvePositiveIntegerSwitch,
+  resolveExplicitSyncGlobalLimit,
   resolveSyncGlobalBackpressure,
   type SyncGlobalBackpressureConfig,
   type SyncGlobalBackpressurePolicy,
@@ -52,24 +51,33 @@ export interface SyncCapacityRuntimeOptions {
   now?: () => number;
 }
 
-function resolvedExplicitGlobalLimit(
-  config: SyncGlobalBackpressureConfig,
-): number | undefined {
-  return resolveNonNegativeIntegerSwitch(
-    config.syncGlobalMaxInflight,
-    'DKG_SYNC_GLOBAL_MAX_INFLIGHT',
-  ) ?? resolveNonNegativeIntegerSwitch(
-    config.syncGlobalLimit,
-    'DKG_SYNC_GLOBAL_LIMIT',
-  );
-}
-
 function readStorePressure(store: TripleStore) {
   try {
     return store.getPressureSnapshot?.();
   } catch {
     return undefined;
   }
+}
+
+function requirePositiveInteger(value: unknown, label: string): number {
+  const parsed = typeof value === 'string' ? Number(value.trim()) : value;
+  if (typeof parsed !== 'number' || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function resolveAdaptivePositiveInteger(
+  configValue: number | undefined,
+  envName: string,
+  configName: string,
+): number | undefined {
+  const envValue = process.env[envName];
+  if (envValue !== undefined) return requirePositiveInteger(envValue, envName);
+  if (configValue !== undefined) {
+    return requirePositiveInteger(configValue, `syncAdaptiveCapacity.${configName}`);
+  }
+  return undefined;
 }
 
 /** One agent-owned capacity policy; static callers keep the exact old path. */
@@ -96,7 +104,7 @@ export class SyncCapacityRuntime {
       config.syncCorePublicBatchSize,
     );
     const staticPolicy = resolveSyncGlobalBackpressure(config);
-    const explicitGlobalLimit = resolvedExplicitGlobalLimit(config);
+    const explicitGlobalLimit = resolveExplicitSyncGlobalLimit(config);
     const explicitlyEnabled = parseBooleanEnv('DKG_SYNC_ADAPTIVE_CAPACITY_ENABLED')
       ?? config.syncAdaptiveCapacity?.enabled;
     const adaptive = (config.nodeRole ?? 'edge') === 'core'
@@ -106,13 +114,15 @@ export class SyncCapacityRuntime {
       return new SyncCapacityRuntime(staticPolicy, configuredCoverageBatch);
     }
 
-    const requestedMax = resolvePositiveIntegerSwitch(
+    const requestedMax = resolveAdaptivePositiveInteger(
       config.syncAdaptiveCapacity?.maxInflight,
       'DKG_SYNC_ADAPTIVE_MAX_INFLIGHT',
+      'maxInflight',
     );
-    const minInflight = resolvePositiveIntegerSwitch(
+    const minInflight = resolveAdaptivePositiveInteger(
       config.syncAdaptiveCapacity?.minInflight,
       'DKG_SYNC_ADAPTIVE_MIN_INFLIGHT',
+      'minInflight',
     );
     const hardMax = deriveAdaptiveInflightHardMax({
       operatorMax: Math.min(

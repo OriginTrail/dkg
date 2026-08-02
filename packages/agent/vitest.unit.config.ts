@@ -88,6 +88,7 @@ export default defineConfig({
       "test/core-public-coverage-scheduler.test.ts",
       "test/adaptive-capacity.test.ts",
       "test/adaptive-capacity-sampler.test.ts",
+      "test/sync-capacity-runtime.test.ts",
       "test/sync-requester-progress.test.ts",
       "test/rootless-durable-bounded-progress.test.ts",
       "test/rootless-durable-skips-legacy-partition.test.ts",
