@@ -196,21 +196,27 @@ interface CatchupPlaneReadinessThisRun {
    *
    * Readiness provenance is carried forward by an OR against
    * `readinessBeforeCatchup`, so anything recorded here is permanent for the
-   * subscription. Only positive evidence earns that: verified content, or the
-   * curator's own word that it hosts an empty graph.
+   * subscription. Verified content earns it outright, as does the curator's own
+   * word that it hosts an empty graph.
    *
-   * A unanimous-empty round does NOT. It is a verdict derived from ABSENCE of
-   * evidence over the peers that answered, and with no authoritative curator to
-   * anchor it a single unrelated empty response alongside transport-level peer
-   * failures can produce it. That is tolerable as a per-run verdict — it lets a
-   * genuinely empty public graph settle instead of retrying forever — but it
-   * must be re-derived every run rather than frozen, so a wrong verdict heals on
-   * the next catch-up instead of becoming permanent (issue #2006).
+   * A unanimous-empty round earns it only when the round was FULLY ACCOUNTED:
+   * every peer the walk attempted actually answered (`failedPeers === 0`).
+   * Emptiness is a verdict derived from ABSENCE of evidence, so it is only as
+   * good as the denominator it was taken over — with peers unaccounted for and
+   * no authoritative curator to anchor it, a single unrelated empty response
+   * produces the same verdict as a genuinely empty graph.
    *
-   * The alternative — failing closed on unaccounted peers whenever no authority
-   * resolves — was rejected: it makes the unanimous-empty mode unusable on any
-   * lossy network, leaving such graphs permanently `unreachable` and retried
-   * forever, which is the resource drain this issue set out to reduce.
+   * Splitting it this way keeps both properties that pulled against each other:
+   *
+   * - LIVENESS. The per-run verdict is unchanged, so a graph on a lossy network
+   *   still reports `done` instead of retrying forever. Failing the verdict
+   *   itself closed on unaccounted peers was rejected for exactly that reason.
+   * - NO FROZEN GUESS. Nothing derived from a partial round is written down, so
+   *   a wrong empty verdict cannot outlive the run that produced it.
+   *
+   * This bit is what `statePatch.synced` is built from, and `synced` gates
+   * write preflight (`contextGraphRowIsWritable`), so anything admitted here
+   * grants durable readiness to consumers that never see the job result.
    */
   persistable: boolean;
 }
@@ -223,13 +229,16 @@ function catchupPlaneReadinessThisRun(input: {
   const diagnostics = input.result.diagnostics?.[input.plane];
   const completion = input.result.cleanPlaneCompletions?.[input.plane];
   const options = { isPrivate: input.isPrivate };
+  // Every attempted peer answered, so the empty verdict was taken over the
+  // whole peer set rather than over whoever happened to reply.
+  const fullyAccounted = (diagnostics?.failedPeers ?? 0) === 0;
   if (completion) {
     const provenPositively = catchupPlaneProvenByData(completion)
       || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
+    const unanimousEmpty = catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
     return {
-      ready: provenPositively
-        || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options),
-      persistable: provenPositively,
+      ready: provenPositively || unanimousEmpty,
+      persistable: provenPositively || (unanimousEmpty && fullyAccounted),
     };
   }
 
@@ -250,11 +259,13 @@ function catchupPlaneReadinessThisRun(input: {
   // proof consults the raw aggregate counters only when completion evidence is
   // genuinely absent, and a synthetic `emptyPeers: 0` would read as "the
   // per-peer view saw no clean empty response" and suppress the legacy path.
+  const ready = catchupPlaneReady(undefined, diagnostics, options);
   return {
-    ready: catchupPlaneReady(undefined, diagnostics, options),
+    ready,
     // No completion evidence means neither positive proof mode can fire, so
-    // there is nothing here that may be frozen into provenance.
-    persistable: false,
+    // anything true here came from the aggregate empty counter and is subject
+    // to the same fully-accounted requirement.
+    persistable: ready && fullyAccounted,
   };
 }
 
@@ -340,6 +351,15 @@ export function classifyContextGraphCatchupReadiness(input: {
     const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
     const sharedMemoryVerifiedPersisted =
       sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
+    // `subscription.synced` is a SECOND persisted readiness bit, living outside
+    // the provenance store and consumed by callers that never see this job's
+    // result — `contextGraphRowIsWritable` treats `subscribed && synced` as
+    // writable. It must therefore carry the same verdict as `readinessPatch`,
+    // not the transient one. The pre-catch-up path already assumes they agree:
+    // it derives `synced` from the persisted provenance and patches the row
+    // back into line, so letting them diverge here would be corrected away on
+    // the next pass anyway — after a window in which the graph looked writable.
+    const overallVerifiedPersisted = durableVerifiedPersisted || sharedMemoryVerifiedPersisted;
     const overallVerified = durableVerified || sharedMemoryVerified;
     const missingGraphProof = !overallVerified;
     const missingRequestedSharedMemory =
@@ -367,8 +387,8 @@ export function classifyContextGraphCatchupReadiness(input: {
       jobStatus,
       error,
       statePatch: {
-        synced: overallVerified,
-        sharedMemorySynced: sharedMemoryVerified,
+        synced: overallVerifiedPersisted,
+        sharedMemorySynced: sharedMemoryVerifiedPersisted,
         metaSynced: true,
         pendingMeta: false,
       },

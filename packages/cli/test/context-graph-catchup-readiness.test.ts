@@ -212,7 +212,7 @@ describe('context graph catch-up readiness classification', () => {
     return result;
   }
 
-  it('settles a unanimously clean-empty public round WITHOUT freezing it', () => {
+  it('persists a unanimously clean-empty round only because it was FULLY accounted', () => {
     const classification = classifyContextGraphCatchupReadiness({
       result: publicEmptyRoundResult(),
       includeSharedMemory: false,
@@ -227,14 +227,19 @@ describe('context graph catch-up readiness classification', () => {
         synced: true,
         sharedMemorySynced: false,
       },
-      // Reported ready, but NOT persisted as provenance: readiness derived from
-      // the absence of evidence has to be re-derived every run. See the
-      // two-run regression below.
+      // Every attempted peer answered (`failedPeers: 0`), so the empty verdict
+      // was taken over the whole peer set and may be written down. The same
+      // round with a peer unaccounted for must NOT be — see the next case.
       readinessPatch: {
-        durableVerified: false,
+        durableVerified: true,
         sharedMemoryVerified: false,
       },
     });
+
+    // `synced` is a second persisted readiness bit and gates write preflight,
+    // so it has to carry the SAME verdict as the provenance patch.
+    expect(classification.statePatch?.synced)
+      .toBe(classification.readinessPatch?.durableVerified);
   });
 
   it('re-derives an empty verdict instead of carrying it into the next run', () => {
@@ -258,6 +263,10 @@ describe('context graph catch-up readiness classification', () => {
     });
     expect(first.jobStatus).toBe('done');
     expect(first.readinessPatch).toMatchObject({ durableVerified: false });
+    // …and the subscription must not be marked synced either, or write
+    // preflight (`contextGraphRowIsWritable`: `subscribed && synced`) would
+    // grant durable readiness the provenance store deliberately withheld.
+    expect(first.statePatch?.synced).toBe(false);
 
     // Second run: metadata only, nothing proven. Feed back exactly what run one
     // persisted. If the empty verdict had been frozen, this would still say
@@ -368,8 +377,25 @@ describe('context graph catch-up readiness classification', () => {
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'done',
-      // Same rule as the non-legacy path: settled for this run, not frozen.
+      // Same rule as the non-legacy path: a fully accounted empty round is
+      // written down, a partial one is not.
+      readinessPatch: { durableVerified: true },
+    });
+
+    // The partial-round half of that rule, on the legacy branch too.
+    const lossy = publicEmptyRoundResult();
+    delete lossy.cleanPlaneCompletions;
+    lossy.diagnostics!.durable.failedPeers = 1;
+    expect(classifyContextGraphCatchupReadiness({
+      result: lossy,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    })).toMatchObject({
+      jobStatus: 'done',
       readinessPatch: { durableVerified: false },
+      statePatch: { synced: false },
     });
   });
 
