@@ -49,6 +49,8 @@ import {
   KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
   workspaceOperationSubject,
   workspacePublicQuadsDigest,
   type MaterializedVersion,
@@ -292,6 +294,13 @@ export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
   resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
+  /**
+   * The SAME per-KA SWM writer lock map catch-up and the finalized-SWM GC use.
+   * Taken around the cleanup-marker write so it cannot land inside catch-up's
+   * read-delete-reinsert of the operation subject. Absent => that write is
+   * unserialized; see `markFinalizedGraphScopedSwmForCleanup`.
+   */
+  writeLocks?: Map<string, Promise<void>>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   wakeFinalizedSwmCleanup?: () => void;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
@@ -363,6 +372,7 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
+  private readonly writeLocks: Map<string, Promise<void>> | undefined;
   private readonly publicSnapshotStore: WorkspacePublicSnapshotStore | undefined;
   private readonly wakeFinalizedSwmCleanup: (() => void) | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
@@ -424,6 +434,7 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
+    this.writeLocks = options.writeLocks;
     this.publicSnapshotStore = options.publicSnapshotStore;
     this.wakeFinalizedSwmCleanup = options.wakeFinalizedSwmCleanup;
     this.lifecycle = new FinalizationLifecycleLogger(
@@ -1589,7 +1600,7 @@ export class FinalizationHandler {
     const cleanupRoot = JSON.stringify(cleanupRootHex);
     const markedAtIso = new Date().toISOString();
     const markedAt = `"${markedAtIso}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
-    await this.store.insert([
+    const writeMarker = () => this.store.insert([
       ...buildFinalizedSwmCleanupTaskQuads({
         contextGraphId: input.contextGraphId,
         subGraphName: input.subGraphName,
@@ -1611,6 +1622,38 @@ export class FinalizationHandler {
         graph: metaGraph,
       },
     ]);
+    // Serialize against the other writers of this operation subject. The
+    // tombstone lands on `operationSubject`, which catch-up REPLACES under this
+    // same lock: it reads the tombstone, then deletes the subject, then
+    // re-inserts from that snapshot. An unlocked marker write can land inside
+    // that window — the marker runs at default priority while the replace's
+    // reads and deletes are queued at background, so it is admitted ahead of
+    // them — and the re-insert then restores a snapshot taken before the marker
+    // existed. The tombstone is gone, the independent task survives, the GC
+    // cleans the lifecycle once and retires the task, and the next catch-up
+    // re-materializes the SWM copy with nothing left to re-arm cleanup. That is
+    // a PERMANENT resurrection of exactly what this component exists to remove.
+    //
+    // This is compatible with keeping finalization foreground work O(1): the
+    // constraint is on WORK, not on waiting. This path already read and hashed
+    // the entire SWM payload via `verifyExactGraphScopedLayer` before reaching
+    // here, so a bounded wait behind one KA's replace is smaller than what it
+    // has already done, and it adds no cleanup discovery, verification,
+    // deletion, or GC wait. The insert is a leaf operation, so taking the lock
+    // here cannot nest and cannot deadlock.
+    if (this.writeLocks) {
+      await withKeyedLocks(
+        this.writeLocks,
+        [swmKaWriteLockKey(input.contextGraphId, input.subGraphName, input.scope.ual)],
+        writeMarker,
+      );
+    } else {
+      // No shared lock map wired (test/embedded construction). Still mark —
+      // refusing would leave the finalized copy with no cleanup record at all,
+      // which is worse than an unserialized write — but this path is NOT
+      // protected against the interleaving above.
+      await writeMarker();
+    }
     this.wakeFinalizedSwmCleanup?.();
     return 'marked';
   }
