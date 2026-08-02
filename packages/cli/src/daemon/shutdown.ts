@@ -26,7 +26,35 @@
 import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
 
 /** Default deadline for graceful shutdown before we hard-exit. */
-export const SHUTDOWN_HARD_TIMEOUT_MS = 15_000;
+export const DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS = 15_000;
+export const MIN_SHUTDOWN_HARD_TIMEOUT_MS = 5_000;
+export const MAX_SHUTDOWN_HARD_TIMEOUT_MS = 300_000;
+
+/**
+ * Resolve the hard-stop guard without weakening the default fleet behavior.
+ *
+ * RPC-heavy publishers can legitimately spend more than 15 seconds draining
+ * an already-started chain-event callback. Operators may raise the bound for
+ * an isolated run, but malformed or unbounded values fail startup rather than
+ * silently disabling the anti-zombie guard.
+ */
+export function resolveShutdownHardTimeoutMs(
+  value = process.env['DKG_SHUTDOWN_HARD_TIMEOUT_MS'],
+): number {
+  if (value === undefined || value.trim() === '') return DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)
+    || parsed < MIN_SHUTDOWN_HARD_TIMEOUT_MS
+    || parsed > MAX_SHUTDOWN_HARD_TIMEOUT_MS) {
+    throw new TypeError(
+      `DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer from `
+        + `${MIN_SHUTDOWN_HARD_TIMEOUT_MS} to ${MAX_SHUTDOWN_HARD_TIMEOUT_MS}`,
+    );
+  }
+  return parsed;
+}
+
+export const SHUTDOWN_HARD_TIMEOUT_MS = resolveShutdownHardTimeoutMs();
 
 /**
  * Per-callsite budget for the best-effort forced-cleanup hook (state-file

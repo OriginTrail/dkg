@@ -3,6 +3,8 @@ import {
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
   SHUTDOWN_FORCED_OFFSET,
   SHUTDOWN_HARD_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS,
+  resolveShutdownHardTimeoutMs,
   decodeForcedExitCode,
   encodeForcedShutdownExitCode,
   isForcedShutdownExitCode,
@@ -21,12 +23,28 @@ describe('shutdown constants', () => {
   });
 
   it('uses a 15s default hard-timeout — generous enough to let normal shutdowns finish, tight enough to recover from a stuck Core in one update cycle', () => {
-    expect(SHUTDOWN_HARD_TIMEOUT_MS).toBe(15_000);
+    expect(SHUTDOWN_HARD_TIMEOUT_MS).toBe(DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS);
   });
 
   it('uses a 1s default forced-cleanup timeout — bounded separately from the wall-clock cutoff so a stalled FS op cannot recreate the zombie shape', () => {
     expect(SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS).toBe(1_000);
   });
+});
+
+describe('resolveShutdownHardTimeoutMs', () => {
+  it('preserves the 15 second fleet default and accepts a bounded override', () => {
+    expect(resolveShutdownHardTimeoutMs(undefined)).toBe(15_000);
+    expect(resolveShutdownHardTimeoutMs('60000')).toBe(60_000);
+  });
+
+  it.each(['4999', '300001', '1.5', 'not-a-number'])(
+    'rejects unsafe override %s',
+    (value) => {
+      expect(() => resolveShutdownHardTimeoutMs(value)).toThrow(
+        /DKG_SHUTDOWN_HARD_TIMEOUT_MS must be an integer/u,
+      );
+    },
+  );
 });
 
 describe('isForcedShutdownExitCode', () => {

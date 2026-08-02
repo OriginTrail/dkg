@@ -169,7 +169,7 @@ class TestnetOperatorController {
       }
       outcome = await withTimeout(
         running.exited,
-        30_000,
+        Math.min(90_000, this.cfg.operationTimeoutMs),
         `${roleName} process exit after shutdown`,
       );
     } finally {
