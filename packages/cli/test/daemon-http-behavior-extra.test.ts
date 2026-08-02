@@ -1254,20 +1254,24 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       latestByContextGraph: new Map<string, string>(),
     };
     let requestedMode: string | undefined;
+    let runnerCalls = 0;
     const previousCatchupRunner = daemonState.catchupRunner;
     daemonState.catchupRunner = {
-      run: async () => ({
-        connectedPeers: 0,
-        syncCapablePeers: 0,
-        peersTried: 0,
-        peersResponded: 0,
-        peersSucceeded: 0,
-        deferredBackpressure: 1,
-        dataSynced: 0,
-        sharedMemorySynced: 0,
-        denied: false,
-        deniedPeers: 0,
-      }),
+      run: async () => {
+        runnerCalls += 1;
+        return {
+          connectedPeers: 0,
+          syncCapablePeers: 0,
+          peersTried: 0,
+          peersResponded: 0,
+          peersSucceeded: 0,
+          deferredBackpressure: 1,
+          dataSynced: 0,
+          sharedMemorySynced: 0,
+          denied: false,
+          deniedPeers: 0,
+        };
+      },
       close: async () => {},
     } as any;
     let routeServer: Server | null = null;
@@ -1336,6 +1340,20 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       if (!address || typeof address === 'string') {
         throw new Error('legacy subscribe route test server did not bind to a TCP port');
       }
+
+      const invalidResponse = await fetch(`http://127.0.0.1:${address.port}/api/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, syncMode: null }),
+      });
+      expect(invalidResponse.status).toBe(400);
+      expect(await invalidResponse.json()).toMatchObject({
+        error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
+      });
+      expect(requestedMode).toBeUndefined();
+      expect(runnerCalls).toBe(0);
+      expect(catchupTracker.jobs.size).toBe(0);
+      expect(catchupTracker.latestByContextGraph.size).toBe(0);
 
       const response = await fetch(`http://127.0.0.1:${address.port}/api/subscribe`, {
         method: 'POST',

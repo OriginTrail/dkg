@@ -61,6 +61,7 @@ import {
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
   loadOpWallets,
+  type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
@@ -1734,7 +1735,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // `include_shared_memory` value; it depends only on the parsed body.
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
-    const requestedSyncMode = parsed.syncMode ?? 'always-on';
+    // Omission preserves the legacy always-on default, but an explicit null is
+    // malformed input and must not silently opt the caller into durable sync.
+    const requestedSyncMode = parsed.syncMode === undefined
+      ? 'always-on'
+      : parsed.syncMode;
     if (requestedSyncMode !== 'on-demand' && requestedSyncMode !== 'always-on') {
       recordCatchupRequest('bad_request', shouldSyncSharedMemory);
       return jsonResponse(res, 400, {
@@ -1780,21 +1785,32 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
-    // Lifetime policy belongs to the agent: it protects an existing
-    // always-on subscription from a later on-demand open and returns the
-    // normalized mode the route must report.
-    const appliedSubscription = agent.subscribeToContextGraph(contextGraphId, {
-      syncMode: requestedSyncMode,
-    });
-    const effectiveSyncMode = appliedSubscription.syncMode;
+    // Preview the only existing-live-state promotion rule without mutating the
+    // agent. The authoritative normalization still happens in
+    // subscribeToContextGraph below, after the shutdown admission guard and
+    // after the final readiness await.
+    let effectiveSyncMode: ContextGraphSyncMode =
+      existingSub?.subscribed === true && existingSub.syncMode === 'always-on'
+        ? 'always-on'
+        : requestedSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        const changesLifetime = existingSub.syncMode !== effectiveSyncMode;
+        if (changesLifetime && !daemonState.catchupAcceptingJobs) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        if (changesLifetime) {
+          effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode;
+        }
         // Dedupe: hands back a job that already exists and mints nothing, so
-        // it needs no admission guard and produces no I8 point.
+        // it needs no job-admission guard and produces no I8 point. A lifetime
+        // promotion above is independently guarded because it is a mutation.
         recordCatchupRequest('deduped', shouldSyncSharedMemory);
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
@@ -1821,6 +1837,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
       if (existingReadiness.alreadyReady) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
+        const changesLifetime = existingSub.syncMode !== effectiveSyncMode;
         // Second mint site. Guard the MINT, not the read: the guard sits AFTER
         // `reusableDoneJob` is computed, so a replay of an existing completed
         // job still answers 200 during shutdown, and BEFORE the id below is
@@ -1829,8 +1846,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         // the tracker. A 503 must therefore leave no id in existence at all —
         // suppressing only the tracker insert would ship a 200 naming a
         // resource that immediately 404s.
-        if (!reusableDoneJob && !daemonState.catchupAcceptingJobs) {
+        if ((changesLifetime || !reusableDoneJob) && !daemonState.catchupAcceptingJobs) {
           return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        if (changesLifetime) {
+          effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode;
         }
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         if (!reusableDoneJob) {
@@ -1900,10 +1922,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
     }
 
+    effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
+      syncMode: requestedSyncMode,
+    }).syncMode;
     console.log(
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode}`,
     );
-    agent.subscribeToContextGraph(contextGraphId, { syncMode: effectiveSyncMode });
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
