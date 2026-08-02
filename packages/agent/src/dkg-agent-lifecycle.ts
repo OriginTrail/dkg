@@ -3750,6 +3750,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       await this.attemptSyncFromPeerWithReconcilerAccounting(
         remotePeer,
         probe,
+        'on-connect',
         'connection-open',
       );
     } catch (err: unknown) {
@@ -4148,6 +4149,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.trySyncFromPeer(
           peerId,
           undefined,
+          'on-connect',
           automaticSyncInvocation('peer-update'),
         )
           .catch((err: unknown) => {

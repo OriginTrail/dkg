@@ -134,6 +134,19 @@ async function runConnectionOpenSync(agent: DKGAgent): Promise<void> {
   expect(errors).toEqual([]);
 }
 
+async function runConnectionOpenSyncWithErrors(agent: DKGAgent): Promise<unknown[]> {
+  (agent as any).getSyncReconcilerProbe = async () => ({
+    protocolsKey: PROTOCOL_SYNC,
+    connectionKey: PEER,
+  });
+  const errors: unknown[] = [];
+  await (agent as any).runSyncFromPeerOnConnect(
+    PEER,
+    (_peerId: string, error: unknown) => errors.push(error),
+  );
+  return errors;
+}
+
 describe('automatic sync coverage runtime evidence', () => {
   it('does not let direct library calls manufacture an internal trigger source', async () => {
     const agent = await createEvidenceAgent('core', []);
@@ -147,6 +160,7 @@ describe('automatic sync coverage runtime evidence', () => {
     await (agent as any).trySyncFromPeer(
       PEER,
       undefined,
+      'on-connect',
       { trigger: 'connection-open' },
     );
 
@@ -194,15 +208,50 @@ describe('automatic sync coverage runtime evidence', () => {
     expect(complete!.sequence).toBe(running!.sequence + 1);
   });
 
+  it('closes an admitted automatic evidence job when a sync phase throws', async () => {
+    const automatic = 'cg-automatic-throw';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    const failure = new Error('durable sync failed after admission');
+    (agent as any).syncFromPeerDetailed = async () => {
+      throw failure;
+    };
+
+    const errors = await runConnectionOpenSyncWithErrors(agent);
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect(errors).toEqual([failure]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      kind: 'core-automatic-round',
+      trigger: 'connection-open',
+      state: 'running',
+    });
+    expect(entries[1]).toMatchObject({
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+      completions: [{
+        contextGraphId: automatic,
+        state: 'failed',
+        verified: { metadata: false, durable: false, sharedMemory: false },
+      }],
+    });
+  });
+
   it('records only startup-rehydrated always-on Edge selections on periodic work', async () => {
     const rehydrated = 'cg-rehydrated';
     const runtimeSelected = 'cg-runtime-selected';
     const persisted = new Map<string, ContextGraphSubscriptionRecord>([[rehydrated, {
       id: rehydrated,
-      subscribed: false,
+      subscribed: true,
       synced: false,
       sharedMemorySynced: false,
       metaSynced: false,
+      syncAdmission: 'explicit',
       syncScoped: true,
     }]]);
     const subscriptionStore: ContextGraphSubscriptionStore = {
@@ -215,6 +264,15 @@ describe('automatic sync coverage runtime evidence', () => {
       },
     };
     const agent = await createEvidenceAgent('edge', [runtimeSelected], subscriptionStore);
+    (agent as any).gossip = {
+      subscribe: () => undefined,
+      unsubscribe: () => undefined,
+      onMessage: () => undefined,
+      offMessage: () => undefined,
+    };
+    (agent.node as any).node = {
+      peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
+    };
 
     await (agent as any).rehydrateContextGraphSubscriptions();
     (agent as any).subscribedContextGraphs.set(runtimeSelected, {

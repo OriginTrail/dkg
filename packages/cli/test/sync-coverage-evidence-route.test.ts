@@ -89,4 +89,15 @@ describe('sync coverage evidence diagnostics route', () => {
     expect(malformed.status).toBe(400);
     expect(getSyncCoverageEvidence).not.toHaveBeenCalled();
   });
+
+  it('rejects missing and unknown credentials without reading node evidence', async () => {
+    const missing = await fetch(`${baseUrl}/api/diagnostics/sync-coverage-evidence`);
+    expect(missing.status).toBe(403);
+
+    const unknown = await fetch(`${baseUrl}/api/diagnostics/sync-coverage-evidence`, {
+      headers: { authorization: 'Bearer unknown-token' },
+    });
+    expect(unknown.status).toBe(403);
+    expect(getSyncCoverageEvidence).not.toHaveBeenCalled();
+  });
 });

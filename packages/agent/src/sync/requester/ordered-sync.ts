@@ -55,6 +55,10 @@ export interface OrderedContextGraphSyncExecution<Result> {
   outcomes: readonly OrderedContextGraphSyncOutcome<Result>[];
 }
 
+type OrderedContextGraphSyncOutcomeCollector<Result> = (
+  outcome: OrderedContextGraphSyncOutcome<Result>,
+) => void;
+
 function orderWork<Result>(
   work: readonly ContextGraphSyncWork<Result>[],
   priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
@@ -83,26 +87,39 @@ function orderWork<Result>(
 export async function runOrderedContextGraphSyncs<Result>(
   options: OrderedContextGraphSyncOptions<Result>,
 ): Promise<Result> {
-  return (await runOrderedContextGraphSyncsWithOutcomes(options)).summary;
+  return runOrderedContextGraphSyncsInternal(options);
 }
 
 /** Same scheduler contract with an exact outcome for every planned work item. */
 export async function runOrderedContextGraphSyncsWithOutcomes<Result>(
   options: OrderedContextGraphSyncOptions<Result>,
 ): Promise<OrderedContextGraphSyncExecution<Result>> {
+  const outcomes: OrderedContextGraphSyncOutcome<Result>[] = [];
+  const summary = await runOrderedContextGraphSyncsInternal(
+    options,
+    (outcome) => outcomes.push(outcome),
+  );
+  return { summary, outcomes: Object.freeze(outcomes.map((outcome) => Object.freeze(outcome))) };
+}
+
+async function runOrderedContextGraphSyncsInternal<Result>(
+  options: OrderedContextGraphSyncOptions<Result>,
+  collectOutcome?: OrderedContextGraphSyncOutcomeCollector<Result>,
+): Promise<Result> {
   let summary = options.emptyResult();
   const orderedWork = orderWork(options.work, options.priorities);
-  const outcomes: OrderedContextGraphSyncOutcome<Result>[] = [];
   for (const [index, item] of orderedWork.entries()) {
     if (options.shouldContinue && !options.shouldContinue()) {
       const skipped = orderedWork.slice(index);
       summary = options.markSkipped?.(summary, skipped) ?? summary;
-      outcomes.push(...skipped.map((candidate) => ({
-        contextGraphId: candidate.contextGraphId,
-        lane: candidate.lane,
-        disposition: 'skipped' as const,
-        reason: 'continuation-stopped' as const,
-      })));
+      for (const candidate of skipped) {
+        collectOutcome?.({
+          contextGraphId: candidate.contextGraphId,
+          lane: candidate.lane,
+          disposition: 'skipped',
+          reason: 'continuation-stopped',
+        });
+      }
       break;
     }
     const remaining = orderedWork.length - index;
@@ -111,7 +128,7 @@ export async function runOrderedContextGraphSyncsWithOutcomes<Result>(
         item,
         () => item.run(remaining),
       );
-      outcomes.push({
+      collectOutcome?.({
         contextGraphId: item.contextGraphId,
         lane: item.lane,
         disposition: 'settled',
@@ -119,32 +136,36 @@ export async function runOrderedContextGraphSyncsWithOutcomes<Result>(
       });
       summary = options.merge(summary, part);
       if (options.shouldStop?.(part)) {
-        outcomes.push(...orderedWork.slice(index + 1).map((candidate) => ({
-          contextGraphId: candidate.contextGraphId,
-          lane: candidate.lane,
-          disposition: 'skipped' as const,
-          reason: 'stop-policy' as const,
-        })));
+        for (const candidate of orderedWork.slice(index + 1)) {
+          collectOutcome?.({
+            contextGraphId: candidate.contextGraphId,
+            lane: candidate.lane,
+            disposition: 'skipped',
+            reason: 'stop-policy',
+          });
+        }
         break;
       }
     } catch (error) {
       const backpressureError = getSyncBackpressureBusyError(error);
       if (!backpressureError) throw error;
-      outcomes.push({
+      collectOutcome?.({
         contextGraphId: item.contextGraphId,
         lane: item.lane,
         disposition: 'deferred',
       });
-      outcomes.push(...orderedWork.slice(index + 1).map((candidate) => ({
-        contextGraphId: candidate.contextGraphId,
-        lane: candidate.lane,
-        disposition: 'skipped' as const,
-        reason: 'prior-deferral' as const,
-      })));
+      for (const candidate of orderedWork.slice(index + 1)) {
+        collectOutcome?.({
+          contextGraphId: candidate.contextGraphId,
+          lane: candidate.lane,
+          disposition: 'skipped',
+          reason: 'prior-deferral',
+        });
+      }
       summary = options.markDeferred(summary);
       options.onDeferred?.(item, backpressureError);
       break;
     }
   }
-  return { summary, outcomes: Object.freeze(outcomes.map((outcome) => Object.freeze(outcome))) };
+  return summary;
 }
