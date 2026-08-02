@@ -96,6 +96,11 @@ export interface SharedMemorySnapshotMaterializer {
    * Re-arm a constant-size GC task when this exact operation carries a local
    * finalization tombstone. This is marker bookkeeping only: no graph scan,
    * VM verification, deletion, or GC wait occurs on the ingest path.
+   *
+   * Call this ONLY on the decision paths that do not go on to
+   * {@link replaceHeadMetadata} — that replacement re-arms the task from the
+   * tombstone read it already performs, so calling both duplicates a
+   * lock-held store read per KA for no added guarantee.
    */
   ensureFinalizedCleanupTask(
     contextGraphId: string,
@@ -115,6 +120,11 @@ export interface SharedMemorySnapshotMaterializer {
    * `replaceMetaForGraphAssets`: without it the append-style meta insert stacks
    * old and new head rows on one subject and the durable current head becomes
    * ambiguous.
+   *
+   * Also re-arms the finalized-SWM GC task for this operation: this call is
+   * what can resurrect a finalized copy, and the tombstone read it performs
+   * anyway answers that too. Callers therefore need no separate
+   * {@link ensureFinalizedCleanupTask} on any path that reaches this.
    */
   replaceHeadMetadata(
     contextGraphId: string,
@@ -124,7 +134,7 @@ export interface SharedMemorySnapshotMaterializer {
 
 /**
  * Replace one graph-scoped SWM lifecycle without losing its immutable local
- * finalization tombstone.
+ * finalization tombstone — and re-arm the GC task from the same read.
  *
  * Finalization markers are deliberately local-only and responders filter them
  * from synchronized metadata. A blind head/operation replacement therefore
@@ -133,9 +143,19 @@ export interface SharedMemorySnapshotMaterializer {
  * subject. The independent GC task is stored on its own subject and is not
  * touched by this replacement.
  *
- * The verified replacement metadata and any retained operation tombstone are
- * inserted in the same store call after the old lifecycle is removed. Callers
- * MUST hold the canonical per-KA SWM writer lock across this entire operation.
+ * Re-arming HERE rather than ahead of the caller's decisions is what keeps the
+ * ingest path at one tombstone read: this replacement is itself the act that
+ * can resurrect a finalized SWM copy, and the read it already performs answers
+ * both questions. Reading at the last possible moment before the delete also
+ * narrows — it cannot close — the window in which a concurrently written
+ * tombstone is destroyed, because `FinalizationHandler` writes markers without
+ * taking the per-KA SWM writer lock.
+ *
+ * The verified replacement metadata, any retained operation tombstone, and the
+ * constant-size GC task are inserted in the same store call after the old
+ * lifecycle is removed. The task's own subject is never in the delete set, so
+ * the insert is an idempotent re-arm. Callers MUST hold the canonical per-KA
+ * SWM writer lock across this entire operation.
  */
 export async function replaceGraphScopedSwmHeadMetadata(params: {
   store: TripleStore;
@@ -197,10 +217,40 @@ export async function replaceGraphScopedSwmHeadMetadata(params: {
   const replacementQuads = [
     ...descriptor.metadataQuads,
     ...preserved.tombstone,
+    ...preserved.cleanupTask,
   ];
   if (replacementQuads.length > 0) {
     await insertReplacementMetadata(replacementQuads);
   }
+}
+
+/**
+ * Cheap existence gate for {@link readExactFinalizedOperationTombstone}.
+ *
+ * This is the same bound (graph, subject, predicate) pattern the CONSTRUCT
+ * below matches on, reduced to an ASK: no `?root` binding means that CONSTRUCT
+ * has no solutions, returns no quads, and the reader already gives up on
+ * `roots.length !== 1`. So a false here is exactly the reader's empty result —
+ * a strictly weaker query over the identical pattern, not a policy gate, and
+ * therefore incapable of missing a finalized marker. It is a live store read,
+ * so nothing about it can go stale, and nothing the GC reads depends on it.
+ */
+async function hasFinalizedOperationTombstone(params: {
+  store: TripleStore;
+  descriptor: GraphScopedSwmRecoveryDescriptor;
+  sourcePrefix: string;
+}): Promise<boolean> {
+  const { store, descriptor, sourcePrefix } = params;
+  const result = await store.query(
+    `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+    + `<${assertSafeIri(descriptor.operationSubject)}> `
+    + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    {
+      priority: 'background',
+      source: `${sourcePrefix}.askFinalizedOperationTombstone`,
+    },
+  );
+  return result.type === 'boolean' && result.value;
 }
 
 async function readExactFinalizedOperationTombstone(params: {
@@ -348,6 +398,13 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     ensureFinalizedCleanupTask: async (contextGraphId, descriptor) => {
+      // Most descriptors were never finalized, so answer that with one bound
+      // ASK instead of materializing a CONSTRUCT result per KA.
+      if (!await hasFinalizedOperationTombstone({
+        store: deps.store,
+        descriptor,
+        sourcePrefix: 'agent.sharedMemorySync.snapshotMaterializer',
+      })) return;
       const preserved = await readExactFinalizedOperationTombstone({
         store: deps.store,
         contextGraphId,
