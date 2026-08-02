@@ -613,10 +613,10 @@ async function ownMetaConfirmsCuratorBinding(
 ): Promise<boolean> {
   // Fail closed if the receiver cannot answer: an agent (or a hand-built test
   // receiver) without the source-qualified reader ranks, never authorises.
-  if (typeof agent.getOwnCgDefinitionFacts !== 'function') return false;
+  if (typeof agent.getOwnCgMetaFacts !== 'function') return false;
   let own;
   try {
-    own = await agent.getOwnCgDefinitionFacts(contextGraphId, { signal: options.signal });
+    own = await agent.getOwnCgMetaFacts(contextGraphId, { signal: options.signal });
   } catch {
     throwIfSyncAuthAborted(options.signal);
     return false;
@@ -633,27 +633,26 @@ async function ownMetaConfirmsCuratorBinding(
     return curatorPeerId === curatorIdentifier;
   }
 
-  // For a wallet-address curator the peer must come from a creator the GRAPH
-  // declared, and that declaration must be unambiguous.
+  // For a wallet-address curator, the peer must come from a creator the graph
+  // declared in its OWN `_meta` — not one contributed by AGENTS, `_catalog`, or
+  // ONTOLOGY.
   //
-  // A public graph's definition lives in ONTOLOGY, which is network-replicated:
-  // its creator broadcasts it, so any node can assert a `DKG_CREATOR` for this
-  // subject. A curated graph's definition lives in `<cg>/_meta` and is never
-  // broadcast. `getOwnCgDefinitionFacts` reads both, so an injected ONTOLOGY
-  // creator shows up ALONGSIDE the real one rather than instead of it — and a
-  // second, conflicting creator is exactly what must not be resolved by
-  // picking whichever one happens to match. Requiring a unique creator turns
-  // that attack into a demotion to ranking, which costs fan-out and never
-  // costs correctness. Same discipline as the conflicting-creator guard in
-  // `context-graph-public-meta-repair.ts`.
-  const declaredCreators = new Set(
-    [own.creator, ...own.creators].filter((value): value is string => Boolean(value)),
-  );
-  if (declaredCreators.size !== 1) return false;
-
-  const [declaredCreator] = [...declaredCreators];
-  return declaredCreator.startsWith(didPrefix)
-    && declaredCreator.slice(didPrefix.length) === curatorPeerId;
+  // ONTOLOGY is excluded even though a PUBLIC graph's definition lives there,
+  // and local uniqueness does not rescue it: ONTOLOGY is network-replicated, so
+  // a node can hold an injected `DKG_CREATOR` for a subject WITHOUT holding the
+  // real one, and "the only creator I can currently see" would then authorise
+  // the attacker. That is the same local-cardinality fallacy that already makes
+  // the Agent Registry route non-authoritative, one graph over.
+  //
+  // So a public graph with a wallet curator earns no authority here, and its
+  // catch-up degrades to the previous bounded fan-out. The resolved peer still
+  // ORDERS the walk, but ordering is all it may do: ending the walk means
+  // accepting one peer's snapshot as the whole graph, and an untrusted peer's
+  // `complete` flag says only that it served its own view.
+  return [own.creator, ...own.creators]
+    .filter((value): value is string => Boolean(value))
+    .some((creatorDid) => creatorDid.startsWith(didPrefix)
+      && creatorDid.slice(didPrefix.length) === curatorPeerId);
 }
 
 export async function resolveCuratorSyncPeer(
@@ -764,17 +763,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * Facts the Context Graph declared about ITSELF — the source-qualified
-   * counterpart of {@link getCgMeta}, which merges four graphs and discards
-   * which one supplied each fact. Used where a fact has to be attributable to
+   * Facts from the Context Graph's OWN `<cg>/_meta` graph only — the
+   * source-qualified counterpart of {@link getCgMeta}, which merges four
+   * graphs and discards which one supplied each fact. Used where a fact has to be attributable to
    * the graph itself; see `resolveCuratorSyncPeer`.
    */
-  async getOwnCgDefinitionFacts(
+  async getOwnCgMetaFacts(
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetaRecord> {
-    return this.contextGraphMetaProjection.getOwnDefinitionFacts(contextGraphId, {
+    return this.contextGraphMetaProjection.getOwnMetaFacts(contextGraphId, {
       signal: options.signal,
     });
   }

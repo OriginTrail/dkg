@@ -112,7 +112,7 @@ describe('curator sync-peer provenance', () => {
 
   /**
    * `getCgMeta` is the MERGED projection (`_meta` + AGENTS + `_catalog` +
-   * ONTOLOGY); `getOwnCgDefinitionFacts` is what the Context Graph declared about
+   * ONTOLOGY); `getOwnCgMetaFacts` is what the Context Graph declared about
    * itself. `ownMeta` defaults to `meta` — the ordinary case where they agree —
    * so any test exercising the difference has to say so out loud.
    */
@@ -123,7 +123,7 @@ describe('curator sync-peer provenance', () => {
   ) {
     return {
       getCgMeta: async () => ({ curators: [], creators: [], ...meta }),
-      getOwnCgDefinitionFacts: async () => ({ curators: [], creators: [], ...ownMeta }),
+      getOwnCgMetaFacts: async () => ({ curators: [], creators: [], ...ownMeta }),
       discovery: { findAgents },
     };
   }
@@ -227,38 +227,15 @@ describe('curator sync-peer provenance', () => {
     expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
   });
 
-  it('authorises a PUBLIC graph whose creator binding lives in ONTOLOGY', async () => {
-    // A public Context Graph writes its definition to ONTOLOGY, not to
-    // `<cg>/_meta` (`defGraph = isCurated ? cgMetaGraph : ontologyGraph`), so a
-    // reader scoped to `_meta` alone finds no creator and every ordinary public
-    // graph loses its authority — and with it the early stop AND the per-plane
-    // narrowing this issue exists to gain. `getOwnCgDefinitionFacts` reads both
-    // definition graphs; here the curator comes from `_meta` and the creator
-    // from ONTOLOGY, which is the ordinary public layout.
-    const declared = {
-      curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
-      creator: `did:dkg:agent:${CURATOR}`,
-    };
-    const agent = agentWithMeta(declared, async () => {
-      throw new Error('a declared binding must not need the registry');
-    }, declared);
-
-    expect(authoritativeSyncPeerId(
-      await resolveCuratorSyncPeer(agent as never, new Map(), CG),
-    )).toBe(CURATOR);
-  });
-
-  it('refuses to pick a side when the declared creator is ambiguous', async () => {
-    // ONTOLOGY is network-replicated, so a hostile node can assert a second
-    // `DKG_CREATOR` for a graph that already declares one in `_meta`. Resolving
-    // that by accepting whichever creator happens to match the candidate peer
-    // would let the injected fact authorise the attacker. Two creators means no
-    // binding: rank, never settle.
+  it('ranks but never settles a graph whose creator is not in its own _meta', async () => {
+    // The public shape: the merged projection resolves a creator peer (from the
+    // network-replicated ONTOLOGY graph), but the graph's own `_meta` declares
+    // no creator. That peer is still the best one to walk FIRST — it is
+    // returned as the resolved peer — but it may not end the walk on a claim
+    // that the graph is empty. The fan-out reduction for this shape comes from
+    // the peer's verified DATA narrowing the rest, which needs no trust; see
+    // `preferredEvidence` in `catchup-runner-worker-impl.ts`.
     const agent = agentWithMeta(
-      // The MERGED projection resolves the peer, so the walk still reaches the
-      // own-declaration check rather than short-circuiting into the registry
-      // fallback — which demotes unconditionally and would make this pass for
-      // the wrong reason.
       {
         curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
         creator: `did:dkg:agent:${CURATOR}`,
@@ -266,16 +243,12 @@ describe('curator sync-peer provenance', () => {
       async () => {
         throw new Error('the registry fallback must not be reached here');
       },
-      {
-        curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
-        creators: [`did:dkg:agent:${CURATOR}`, 'did:dkg:agent:12D3KooWInjectedPeer'],
-      },
+      // The graph itself names the curator but binds no creator peer.
+      { curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab' },
     );
 
     const resolved = await resolveCuratorSyncPeer(agent as never, new Map(), CG);
     expect(resolved.peerId).toBe(CURATOR);
-    // The candidate peer DOES appear among the declared creators; accepting it
-    // on that basis is exactly the mutation this row exists to kill.
     expect(resolved.provenance).toBe('projection');
     expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
   });
@@ -306,7 +279,7 @@ describe('curator sync-peer provenance', () => {
 
     const throwingReader = {
       ...noReader,
-      getOwnCgDefinitionFacts: async () => { throw new Error('store unavailable'); },
+      getOwnCgMetaFacts: async () => { throw new Error('store unavailable'); },
     };
     expect(authoritativeSyncPeerId(
       await resolveCuratorSyncPeer(throwingReader as never, new Map(), CG),
@@ -376,7 +349,7 @@ describe('curator sync-peer provenance', () => {
         return declared;
       },
       // The graph declares this curator itself, so the binding is authoritative.
-      getOwnCgDefinitionFacts: async () => declared,
+      getOwnCgMetaFacts: async () => declared,
       discovery: { findAgents: async () => [] },
     };
 

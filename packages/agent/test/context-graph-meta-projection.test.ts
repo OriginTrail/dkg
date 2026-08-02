@@ -535,7 +535,7 @@ describe('ContextGraphMetaProjection', () => {
   });
 });
 
-describe('getOwnDefinitionFacts', () => {
+describe('getOwnMetaFacts', () => {
   const CURATOR_DID = 'did:dkg:agent:0x00000000000000000000000000000000000000ab';
   const CREATOR_DID = 'did:dkg:agent:12D3KooWCuratorPeer';
 
@@ -550,7 +550,13 @@ describe('getOwnDefinitionFacts', () => {
    * from — a stub cannot get that wrong, and a stub is what let an earlier
    * `_meta`-only version look correct while missing every public graph.
    */
-  it('reads a PUBLIC graph definition, which lives in ONTOLOGY', async () => {
+  it('does NOT read ONTOLOGY, even though a public graph defines itself there', async () => {
+    // A public Context Graph writes its definition to ONTOLOGY, so it is
+    // tempting to read it here. ONTOLOGY is network-replicated, though: this
+    // node can hold an injected `DKG_CREATOR` for a subject WITHOUT holding the
+    // real one, and then "the only creator I can see" is the attacker's. Local
+    // cardinality proves nothing about the network — the same reason the Agent
+    // Registry route is non-authoritative.
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
     const id = 'own-definition-public';
@@ -562,9 +568,12 @@ describe('getOwnDefinitionFacts', () => {
       { subject, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: CREATOR_DID, graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) },
     ]);
 
-    const own = await projection.getOwnDefinitionFacts(id);
-    expect(own.curators).toEqual([CURATOR_DID]);
-    expect(own.creators).toEqual([CREATOR_DID]);
+    const own = await projection.getOwnMetaFacts(id);
+    expect(own.curators).toEqual([]);
+    expect(own.creators).toEqual([]);
+    // The merged projection still sees them — that is the difference the
+    // authority decision turns on, and the reason this reader exists.
+    expect((await projection.get(id)).creators).toEqual([CREATOR_DID]);
   });
 
   it('reads a CURATED graph definition, which lives in the graph\'s own _meta', async () => {
@@ -579,7 +588,7 @@ describe('getOwnDefinitionFacts', () => {
       { subject, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: CREATOR_DID, graph: contextGraphMetaGraphUri(id) },
     ]);
 
-    const own = await projection.getOwnDefinitionFacts(id);
+    const own = await projection.getOwnMetaFacts(id);
     expect(own.curators).toEqual([CURATOR_DID]);
     expect(own.creators).toEqual([CREATOR_DID]);
   });
@@ -600,30 +609,30 @@ describe('getOwnDefinitionFacts', () => {
       { subject, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: 'did:dkg:agent:12D3KooWCatalogClaim', graph: contextGraphCatalogUri(id) },
     ]);
 
-    expect((await projection.getOwnDefinitionFacts(id)).creators).toEqual([]);
+    expect((await projection.getOwnMetaFacts(id)).creators).toEqual([]);
     // …while the merged projection does surface the AGENTS claim, which is the
     // precise difference the authority decision turns on.
     expect((await projection.get(id)).creators).toContain('did:dkg:agent:12D3KooWAgentsClaim');
   });
 
-  it('surfaces a conflicting ONTOLOGY creator rather than hiding it', async () => {
-    // ONTOLOGY is network-replicated, so any node can assert a creator for a
-    // subject. The reader must not silently prefer one: it returns BOTH so the
-    // authority decision can refuse an ambiguous binding.
+  it('ignores an injected ONTOLOGY creator even when it is the ONLY one visible', async () => {
+    // The attack this reader exists to stop: the graph's own `_meta` has not
+    // synced (or names only the curator), and the sole `DKG_CREATOR` this node
+    // can see for the subject was asserted by someone else. A reader that took
+    // ONTOLOGY would hand that peer the authority to settle the whole graph on
+    // an empty answer.
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
-    const id = '0x00000000000000000000000000000000000000ab/own-definition-conflict';
+    const id = '0x00000000000000000000000000000000000000ab/own-definition-injected';
     const subject = contextGraphDataUri(id);
 
     await store.insert([
       { subject, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: CURATOR_DID, graph: contextGraphMetaGraphUri(id) },
-      { subject, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: CREATOR_DID, graph: contextGraphMetaGraphUri(id) },
       { subject, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: 'did:dkg:agent:12D3KooWInjectedPeer', graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) },
     ]);
 
-    const own = await projection.getOwnDefinitionFacts(id);
-    expect(own.creators).toHaveLength(2);
-    expect(own.creators).toContain(CREATOR_DID);
-    expect(own.creators).toContain('did:dkg:agent:12D3KooWInjectedPeer');
+    const own = await projection.getOwnMetaFacts(id);
+    expect(own.curators).toEqual([CURATOR_DID]);
+    expect(own.creators).toEqual([]);
   });
 });

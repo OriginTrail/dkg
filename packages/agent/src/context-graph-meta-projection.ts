@@ -344,8 +344,7 @@ export class ContextGraphMetaProjection {
   }
 
   /**
-   * Facts the Context Graph declared about ITSELF, read from its definition
-   * graphs alone.
+   * Facts the Context Graph declared about ITSELF in its own `_meta` graph.
    *
    * `get()` deliberately unions `_meta`, AGENTS, `_catalog` and ONTOLOGY under
    * first-wins precedence, which is right for privacy and listing reads — an
@@ -356,39 +355,35 @@ export class ContextGraphMetaProjection {
    * self-declarations and peer-fetchable catalog records) is indistinguishable
    * from one the Context Graph declared about itself.
    *
-   * A Context Graph's definition is written to exactly one graph, chosen by
-   * access policy (`dkg-agent-context-graph.ts`):
+   * Only `<cg>/_meta` is read. ONTOLOGY is deliberately NOT included even
+   * though a PUBLIC graph writes its definition there
+   * (`defGraph = isCurated ? cgMetaGraph : ontologyGraph`): ONTOLOGY is
+   * network-replicated, so any node can assert a `DKG_CREATOR` for a subject,
+   * and a row being the only one currently visible LOCALLY proves nothing
+   * about what the network holds. Requiring local uniqueness there would
+   * repeat, one graph over, the same local-cardinality fallacy that makes the
+   * Agent Registry route non-authoritative.
    *
-   *     const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
-   *
-   * so a CURATED graph declares itself in `<cg>/_meta` and a PUBLIC one in
-   * ONTOLOGY. Reading only `_meta` would therefore find nothing for the
-   * ordinary public case. Both are read here, subject-scoped to this graph's
-   * URI; AGENTS and `_catalog` stay excluded.
-   *
-   * Because ONTOLOGY is network-replicated (a public graph's definition is
-   * broadcast by its creator), the two sources can disagree. Callers deciding
-   * authority must therefore require a UNIQUE creator across the union rather
-   * than accepting any match — see `ownMetaConfirmsCuratorBinding`. That
-   * mirrors the conflict discipline already applied in
-   * `context-graph-public-meta-repair.ts`.
+   * The consequence is deliberate, and is a real cost: a public graph whose
+   * identity facts live only in replicated ONTOLOGY has NO locally trustworthy
+   * binding, so it earns no authority and its catch-up degrades to the previous
+   * bounded fan-out. That is today's behaviour rather than a regression — the
+   * fan-out reduction is earned by graphs that declare their own binding, and
+   * settling a graph on an unverifiable claim is the worse trade.
    *
    * Catch-up authority needs this distinction (issue #2006).
    */
-  async getOwnDefinitionFacts(
+  async getOwnMetaFacts(
     contextGraphId: string,
     options: QueryOptions = {},
   ): Promise<ContextGraphMetaRecord> {
     const uri = contextGraphDataUri(contextGraphId);
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     assertSafeIri(uri);
     assertSafeIri(metaGraph);
-    assertSafeIri(ontologyGraph);
 
     const record = emptyContextGraphMetaRecord(contextGraphId, uri);
     await this.loadContextGraphFacts(metaGraph, uri, record, options);
-    await this.loadContextGraphFacts(ontologyGraph, uri, record, options);
     return record;
   }
 
