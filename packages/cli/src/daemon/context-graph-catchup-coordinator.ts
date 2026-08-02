@@ -67,7 +67,10 @@ export class ContextGraphCatchupCoordinatorService {
     this.now = effects.now ?? Date.now;
     this.createJobId = effects.createJobId ?? (() =>
       `${this.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
-    this.inFlightByContextGraph = tracker.inFlightByContextGraph;
+    // Preserve the historical two-map tracker shape used by embedded callers
+    // and older route fixtures. The coordinator owns the new orchestration
+    // index, so it can provision that index without changing those call sites.
+    this.inFlightByContextGraph = tracker.inFlightByContextGraph ??= new Map();
   }
 
   /** Reuse active work while preserving each caller's immutable plane scope. */

@@ -95,6 +95,28 @@ function coordinatorFixture(options: {
 }
 
 describe('ContextGraphCatchupCoordinatorService', () => {
+  it('provisions orchestration state for the historical two-map tracker shape', () => {
+    const tracker = {
+      jobs: new Map(),
+      latestByContextGraph: new Map(),
+    } as CatchupTracker;
+    const service = new ContextGraphCatchupCoordinatorService(tracker, {
+      runner: { run: vi.fn() },
+      readReadiness: vi.fn(),
+      hasConfirmedMeta: vi.fn(),
+      isPrivate: vi.fn(),
+      writeReadiness: vi.fn(),
+      markSubscriptionState: vi.fn(),
+      emitProjectSynced: vi.fn(),
+    });
+
+    expect(service.coalesceActive({
+      contextGraphId: 'cg:legacy-tracker',
+      includeSharedMemory: true,
+    })).toBeUndefined();
+    expect(tracker.inFlightByContextGraph).toBeInstanceOf(Map);
+  });
+
   it('refreshes latest status when broad, narrow, then broad reuses existing views', async () => {
     const fixture = coordinatorFixture({ blockBroadBase: true });
     const broad = fixture.service.start({
