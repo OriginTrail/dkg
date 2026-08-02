@@ -115,6 +115,7 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
   classifyExistingContextGraphReadiness,
+  hasAuthoritativeContextGraphMetadata,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
@@ -1774,7 +1775,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // `unregistered` marker and still store metaSynced=true. Validate the
       // live graph before taking the already-ready shortcut.
       const hasConfirmedExistingMeta = existingSub.metaSynced === true &&
-        await agent.hasConfirmedMetaState(contextGraphId).catch(() => false);
+        await hasAuthoritativeContextGraphMetadata({ agent, contextGraphId });
       const existingReadiness = classifyExistingContextGraphReadiness({
         subscription: existingSub,
         readiness: readinessBeforeCatchup,

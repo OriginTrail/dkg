@@ -124,7 +124,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
 
   it('revalidates a stale metaSynced=true bit before returning synthetic done', async () => {
     const result = await subscribe({
-      hasConfirmedMeta: false,
+      // The permissive legacy check sees a placeholder, but the canonical
+      // readiness boundary must reject it for a remotely curated graph.
+      hasConfirmedMeta: true,
+      strictHasConfirmedMeta: false,
       initial: {
         subscribed: true,
         synced: true,
@@ -142,6 +145,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       sharedMemorySynced: false,
       metaSynced: false,
       pendingMeta: true,
+    });
+    expect(result.metadataCheckOptions).toContainEqual({
+      rejectUnregisteredPlaceholder: true,
     });
   });
 
