@@ -54,6 +54,7 @@ test('exchanges sequence-bound JSON without sending the trust anchor to the adap
     const ready = await runtime.start('publisher');
     assert.equal(ready.protocol, SELECTIVE_COVERAGE_RUNTIME_PROTOCOL);
     assert.equal(ready.role, 'publisher');
+    assert.equal(ready.hostIdentity, 'fixture-host');
     assert.equal(ready.peerId, 'publisher-peer');
     assert.ok(ready.pid > 0);
     await runtime.stop('publisher');

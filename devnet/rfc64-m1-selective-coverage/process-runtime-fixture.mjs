@@ -16,6 +16,7 @@ lines.on('line', (line) => {
     value = {
       protocol,
       role,
+      hostIdentity: 'fixture-host',
       pid: process.pid,
       peerId: `${role}-peer`,
       networkId: process.env.FIXTURE_NETWORK_ID,

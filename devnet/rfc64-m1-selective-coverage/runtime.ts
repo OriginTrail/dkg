@@ -27,6 +27,8 @@ export type SelectiveCoverageRuntimeRole = 'publisher' | 'edge' | 'core';
 export interface SelectiveCoverageRuntimeReadyV1 {
   readonly protocol: typeof SELECTIVE_COVERAGE_RUNTIME_PROTOCOL;
   readonly role: SelectiveCoverageRuntimeRole;
+  /** Stable identity for the OS host that owns this process namespace. */
+  readonly hostIdentity: string;
   readonly pid: number;
   readonly peerId: string;
   readonly networkId: string;
@@ -44,6 +46,7 @@ export interface SelectiveCoverageRuntimeReadyV1 {
 
 export interface SelectiveCoverageEdgeRestartReceiptV1 {
   readonly previous: {
+    readonly hostIdentity: string;
     readonly pid: number;
     readonly processInstanceId: string;
     readonly exitedAt: number;
@@ -283,10 +286,12 @@ function assertEdgeRestartReceipt(
   previous: SelectiveCoverageRuntimeReadyV1,
 ): void {
   if (receipt.previous.pid !== previous.pid
+    || receipt.previous.hostIdentity !== previous.hostIdentity
     || receipt.previous.processInstanceId !== previous.processInstanceId
     || !Number.isSafeInteger(receipt.previous.exitedAt)
     || receipt.previous.exitedAt < previous.processStartedAt
     || receipt.current.processStartedAt < receipt.previous.exitedAt
+    || receipt.current.hostIdentity !== previous.hostIdentity
     || receipt.current.pid === previous.pid
     || receipt.current.processInstanceId === previous.processInstanceId
     || receipt.current.dataDirectoryIdentity !== previous.dataDirectoryIdentity) {
@@ -358,6 +363,7 @@ function assertReady(
     throw new Error(`${role} runtime identity differs from the external trust anchor`);
   }
   for (const [label, value] of [
+    ['hostIdentity', actual.hostIdentity],
     ['processInstanceId', actual.processInstanceId],
     ['dataDirectoryIdentity', actual.dataDirectoryIdentity],
     ['evidenceWaveId', actual.evidenceWaveId],
@@ -374,7 +380,9 @@ function assertReady(
 function assertDistinctProcesses(
   processes: readonly SelectiveCoverageRuntimeReadyV1[],
 ): void {
-  if (new Set(processes.map((entry) => entry.pid)).size !== processes.length) {
+  const osProcessIdentities = processes.map((entry) => `${entry.hostIdentity}\0${entry.pid}`);
+  if (new Set(osProcessIdentities).size !== processes.length
+    || new Set(processes.map((entry) => entry.processInstanceId)).size !== processes.length) {
     throw new Error('M1 roles did not cross distinct OS process boundaries');
   }
   const peerByRole = new Map<SelectiveCoverageRuntimeRole, string>();

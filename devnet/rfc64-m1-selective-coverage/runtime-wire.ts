@@ -50,6 +50,7 @@ type OptionalPropertyKeys<T> = {
 const RUNTIME_READY_KEYS = defineRecordKeys<SelectiveCoverageRuntimeReadyV1>()(
   'protocol',
   'role',
+  'hostIdentity',
   'pid',
   'peerId',
   'networkId',
@@ -65,6 +66,7 @@ const EDGE_RESTART_RECEIPT_KEYS = defineRecordKeys<SelectiveCoverageEdgeRestartR
   'current',
 );
 const EDGE_RESTART_PREVIOUS_KEYS = defineRecordKeys<EdgeRestartPreviousV1>()(
+  'hostIdentity',
   'pid',
   'processInstanceId',
   'exitedAt',
@@ -89,6 +91,7 @@ export function decodeRuntimeReady(input: unknown): SelectiveCoverageRuntimeRead
   return {
     protocol: SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
     role,
+    hostIdentity: text(row.hostIdentity, 'hostIdentity'),
     pid: row.pid as number,
     peerId: text(row.peerId, 'peerId'),
     networkId: text(row.networkId, 'networkId'),
@@ -109,6 +112,7 @@ export function decodeRestartReceipt(input: unknown): SelectiveCoverageEdgeResta
   }
   return {
     previous: {
+      hostIdentity: text(previous.hostIdentity, 'hostIdentity'),
       pid: previous.pid as number,
       processInstanceId: text(previous.processInstanceId, 'processInstanceId'),
       exitedAt: previous.exitedAt as number,

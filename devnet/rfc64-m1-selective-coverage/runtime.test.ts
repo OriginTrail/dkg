@@ -162,6 +162,7 @@ class ScriptedRuntime implements SelectiveCoverageRuntimeV1 {
     const ready: SelectiveCoverageRuntimeReadyV1 = {
       protocol: SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
       role,
+      hostIdentity: role === 'core' ? 'core-host' : 'local-host',
       pid,
       peerId,
       networkId: expected.networkId,
@@ -259,6 +260,7 @@ class ScriptedRuntime implements SelectiveCoverageRuntimeV1 {
     const ready: SelectiveCoverageRuntimeReadyV1 = {
       protocol: SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
       role: 'edge',
+      hostIdentity: 'local-host',
       pid: 103,
       peerId: expected.edgePeerId,
       networkId: expected.networkId,
@@ -271,6 +273,7 @@ class ScriptedRuntime implements SelectiveCoverageRuntimeV1 {
     };
     const receipt: SelectiveCoverageEdgeRestartReceiptV1 = {
       previous: {
+        hostIdentity: 'local-host',
         pid: 102,
         processInstanceId: 'edge-instance-before',
         exitedAt: 1,
@@ -463,6 +466,38 @@ test('collects the anchored three-process Edge/Core sequence and cleans up', asy
   );
 });
 
+test('allows different hosts to reuse the same numeric PID', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.readyMutation = (ready) => ready.role === 'core'
+    ? { ...ready, pid: 101 }
+    : ready;
+  await assert.doesNotReject(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+  );
+});
+
+test('rejects the same host and PID reused by two roles', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.readyMutation = (ready) => ready.role === 'core'
+    ? { ...ready, hostIdentity: 'local-host', pid: 101 }
+    : ready;
+  await assert.rejects(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+    /distinct OS process boundaries/,
+  );
+});
+
+test('rejects duplicate process-instance evidence across hosts', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.readyMutation = (ready) => ready.role === 'core'
+    ? { ...ready, processInstanceId: 'publisher-instance-before' }
+    : ready;
+  await assert.rejects(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+    /distinct OS process boundaries/,
+  );
+});
+
 test('rejects metadata-only runtime output and does not skip cleanup', async () => {
   const runtime = new ScriptedRuntime();
   runtime.selectedPublisherMutation = (rows) => {
@@ -591,6 +626,17 @@ test('requires restart to cross an OS process boundary', async () => {
   const runtime = new ScriptedRuntime();
   runtime.readyMutation = (ready) => ready.role === 'edge' && ready.pid === 103
     ? { ...ready, pid: 102 }
+    : ready;
+  await assert.rejects(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+    /does not prove old-process exit/,
+  );
+});
+
+test('requires an Edge restart to stay on the anchored host', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.readyMutation = (ready) => ready.role === 'edge' && ready.pid === 103
+    ? { ...ready, hostIdentity: 'replacement-host' }
     : ready;
   await assert.rejects(
     collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
