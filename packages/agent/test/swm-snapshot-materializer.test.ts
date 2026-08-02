@@ -33,15 +33,22 @@ import {
 import {
   generateKnowledgeAssetShareMetadata,
   resolveKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
   workspacePublicQuadsDigest,
+  type KnowledgeAssetWorkspaceHead,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import {
+  createSharedMemorySnapshotMaterializer,
+  replaceGraphScopedSwmHeadMetadata,
+} from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
+  FinalizationHandler,
   FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
   FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
   FINALIZED_SWM_CLEANUP_TASK_TYPE,
@@ -628,5 +635,91 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         });
       }
     });
+  });
+
+  /**
+   * The cleanup-marker write must serialize against catch-up's replacement of
+   * the SAME operation subject.
+   *
+   * `replaceGraphScopedSwmHeadMetadata` reads the tombstone, deletes the
+   * operation subject, then re-inserts from that snapshot. A marker written
+   * inside that window is destroyed by the delete and never restored, because
+   * the snapshot predates it. The independent task subject survives, so the GC
+   * cleans the lifecycle once and retires the task — and the next catch-up
+   * re-materializes the SWM copy with no tombstone left to re-arm cleanup from.
+   * The finalized copy is then resurrected permanently, which is the exact
+   * failure this component exists to prevent.
+   *
+   * The interleaving is injected rather than raced: a marker write that only
+   * *sometimes* lands in the window is not a proof, and this is precisely the
+   * race that passes ninety-nine runs in a hundred. The marker is started at
+   * the moment catch-up is about to delete the operation subject and given
+   * twenty event-loop turns to complete. Unlocked it finishes inside that
+   * window every time; correctly locked it CANNOT finish, because the lock is
+   * held by the replace itself — so the assertion turns on mutual exclusion,
+   * not on timing.
+   */
+  it('preserves the tombstone when a cleanup marker lands during a head replace', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...v1.meta]);
+    const writeLocks = new Map<string, Promise<void>>();
+    const handler = new FinalizationHandler(store, undefined as never, { writeLocks });
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const expectedHead = {
+      kaUal: UAL,
+      assertionVersion: '1',
+      assertionGraph: v1.assertionGraph,
+      publicQuadsDigest: v1.digest,
+      publicTripleCount: v1.payload.length,
+      privateTripleCount: 0,
+      shareOperationId: v1.operationId,
+      publisherPeerId: 'peer-source',
+      allowedPeers: [],
+    } as unknown as KnowledgeAssetWorkspaceHead;
+
+    let markerStarted = false;
+    let marker: Promise<unknown> | undefined;
+    const realDeleteByPattern = store.deleteByPattern.bind(store);
+    store.deleteByPattern = (async (pattern: Partial<Quad>, options?: unknown) => {
+      if (!markerStarted && pattern.subject === v1.operationSubject) {
+        markerStarted = true;
+        marker = (handler as unknown as {
+          markFinalizedGraphScopedSwmForCleanup(input: unknown): Promise<string>;
+        }).markFinalizedGraphScopedSwmForCleanup({
+          contextGraphId: CG,
+          scope,
+          expectedHead,
+          expectedMerkleRoot: new Uint8Array(32).fill(0xab),
+          ctx,
+        });
+        for (let turn = 0; turn < 20; turn += 1) {
+          await new Promise((resolve) => { setImmediate(resolve); });
+        }
+      }
+      return realDeleteByPattern(pattern, options as never);
+    }) as typeof store.deleteByPattern;
+
+    await withKeyedLocks(writeLocks, [swmKaWriteLockKey(CG, undefined, UAL)], () =>
+      replaceGraphScopedSwmHeadMetadata({
+        store,
+        contextGraphId: CG,
+        descriptor: descriptorFor(v1),
+        sourcePrefix: 'test.replaceHead',
+        insertReplacementMetadata: (quads) => store.insert([...quads]),
+      }));
+    await marker;
+
+    expect(markerStarted).toBe(true);
+    // The tombstone the GC re-arms from must have survived the replace.
+    expect(await distinctObjects(
+      store,
+      WS_META,
+      v1.operationSubject,
+      FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+    )).toHaveLength(1);
+    // And the lifecycle itself is still intact, so this is not passing because
+    // the replace silently did nothing.
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual([`"${v1.operationId}"`]);
   });
 });

@@ -1654,6 +1654,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           markContextGraphMetaDirtyFromQuads: (quads) => {
             this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
+          // The SAME map catch-up and the finalized-SWM GC take, so the cleanup
+          // marker write serializes against them on the per-KA key.
+          writeLocks: this.writeLocks,
           publicSnapshotStore: this.publicSnapshotStore,
           wakeFinalizedSwmCleanup: () => this.wakeFinalizedSwmCleanup(),
           runtime: this.finalizationRuntime,
