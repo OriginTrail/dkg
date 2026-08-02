@@ -66,11 +66,14 @@ export function assertCoreAutomaticRoundJournalV1(
     MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY,
     'Core completions',
   );
+  const effectiveBatchSize = entry['effectiveBatchSize'];
   if (entry['jobId'] !== round.jobId
     || entry['planningLane'] !== round.planningLane
     || entry['source'] !== 'automatic-core-public'
     || entry['configuredBatchSize'] !== round.configuredBatchSize
-    || !nonNegativeInteger(entry['effectiveBatchSize'])
+    || !nonNegativeInteger(effectiveBatchSize)
+    || effectiveBatchSize > round.configuredBatchSize
+    || automaticIds.length > effectiveBatchSize
     || entry['automaticContextGraphCount'] !== automaticIds.length
     || entry['explicitSelectedContextGraphCount'] !== explicitIds.length
     || !sameStrings(automaticIds, round.contextGraphIds)

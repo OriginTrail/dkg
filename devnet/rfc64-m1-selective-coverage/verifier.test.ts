@@ -364,6 +364,22 @@ test('published artifact must retain matching automatic journal proof', () => {
   syntheticCore.core.final[1].automaticJobIds = ['synthetic-core-round'];
   const coreVerdict = verifySelectiveCoverage(syntheticCore);
   assert.equal(coreVerdict.checks.coreAutomaticProvenance, false);
+
+  const exceedsPlannedCapacity = clone();
+  exceedsPlannedCapacity.automaticJournalEvidence.coreRounds[0]
+    .snapshot.entries[0].effectiveBatchSize = 1;
+  assert.equal(
+    verifySelectiveCoverage(exceedsPlannedCapacity).checks.coreAutomaticProvenance,
+    false,
+  );
+
+  const exceedsConfiguredCapacity = clone();
+  exceedsConfiguredCapacity.automaticJournalEvidence.coreRounds[0]
+    .snapshot.entries[0].effectiveBatchSize = 3;
+  assert.equal(
+    verifySelectiveCoverage(exceedsConfiguredCapacity).checks.coreAutomaticProvenance,
+    false,
+  );
 });
 
 test('supports 33 public graphs through multiple bounded journal rounds', () => {
