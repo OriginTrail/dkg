@@ -2318,7 +2318,20 @@ describe('graph-scoped finalization handler', () => {
     })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
   });
 
-  it('serializes finalized SWM cleanup with the shared per-KA writer lock', async () => {
+  /**
+   * Despite its previous name, this test does not observe cleanup serializing
+   * against a contended lock: the blocking writer is released before the drain
+   * ever runs. Pointing that writer at an unrelated lock key leaves the test
+   * green, which is the proof. What it does verify is still worth keeping —
+   * finalization commits the VM graph even while another writer holds the
+   * per-KA SWM lock, and it leaves SWM entirely to the independent drain.
+   *
+   * The serialization property itself is covered by
+   * `re-reads the head under the lock when the store cannot track write
+   * generations`, which queues the drain behind a held lock and asserts the
+   * ordering across it.
+   */
+  it('commits VM under a held per-KA SWM lock and leaves SWM to the later drain', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const writeLocks = new Map<string, Promise<void>>();
     const lockingHandler = new FinalizationHandler(store, legacyFinalizationChain(), {
@@ -2504,7 +2517,13 @@ describe('graph-scoped finalization handler', () => {
     })).resolves.toMatchObject({ assertionVersion: '2' });
   });
 
-  it('preserves finalized SWM when the handler has no shared writer lock', async () => {
+  /**
+   * The lock that matters here belongs to the cleanup SERVICE, not the handler:
+   * `cleanupService(null)` is what makes this fail closed. The uncoordinated
+   * handler is incidental — finalization no longer takes a per-KA SWM lock at
+   * all, and its `writeLocks` option has since been deleted as dead.
+   */
+  it('preserves finalized SWM when the cleanup service has no writer lock map', async () => {
     const { message, swmGraph } = await stageGraph();
     const uncoordinated = new FinalizationHandler(store, legacyFinalizationChain());
 
