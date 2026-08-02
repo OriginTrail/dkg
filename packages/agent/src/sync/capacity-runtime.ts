@@ -13,6 +13,7 @@ import {
   type AdaptiveCapacitySamplerDependencies,
 } from './adaptive-capacity-sampler.js';
 import {
+  getSyncBackpressureSnapshot,
   notifyGlobalSyncBackpressureCapacityChanged,
   parseBooleanEnv,
   resolveExplicitSyncGlobalLimit,
@@ -51,6 +52,13 @@ export interface SyncCapacityRuntimeOptions {
   now?: () => number;
 }
 
+export interface SyncCapacitySamplingOptions {
+  /** Additional Core work that does not currently occupy requester admission. */
+  hasSupplementalDemand?: () => boolean;
+  intervalMs?: number;
+  onError?: (error: unknown) => void;
+}
+
 function readStorePressure(store: TripleStore) {
   try {
     return store.getPressureSnapshot?.();
@@ -84,6 +92,7 @@ function resolveAdaptivePositiveInteger(
 export class SyncCapacityRuntime {
   private readonly controller?: AdaptiveCapacityController;
   private readonly sampler?: AdaptiveCapacitySampler;
+  private samplingTimer: ReturnType<typeof setInterval> | undefined;
 
   private constructor(
     readonly policy: SyncGlobalBackpressurePolicy,
@@ -162,8 +171,15 @@ export class SyncCapacityRuntime {
     return this.controller !== undefined;
   }
 
-  getCurrentInflight(): number | undefined {
-    return this.controller?.getCurrentInflight();
+  /** Stable admission contract; callers do not need to branch on capacity mode. */
+  getAdmissionOptions(): {
+    policy: SyncGlobalBackpressurePolicy;
+    currentLimit?: () => number;
+  } {
+    const controller = this.controller;
+    return controller
+      ? { policy: this.policy, currentLimit: () => controller.getCurrentInflight() }
+      : { policy: this.policy };
   }
 
   getEffectiveCoverageBatch(): number {
@@ -177,6 +193,38 @@ export class SyncCapacityRuntime {
     if (this.controller.getCurrentInflight() !== previousInflight) {
       notifyGlobalSyncBackpressureCapacityChanged();
     }
+  }
+
+  /**
+   * Own the adaptive sampling lifecycle and requester-demand calculation.
+   * Static runtimes deliberately no-op so lifecycle callers stay mode-agnostic.
+   */
+  startSampling(options: SyncCapacitySamplingOptions = {}): boolean {
+    if (!this.controller || !this.sampler || this.samplingTimer) return false;
+    const intervalMs = requirePositiveInteger(
+      options.intervalMs ?? DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS,
+      'sync capacity sample interval',
+    );
+    this.samplingTimer = setInterval(() => {
+      try {
+        const pressure = getSyncBackpressureSnapshot(this.policy);
+        const demand = pressure.inflight > 0
+          || pressure.queued > 0
+          || (options.hasSupplementalDemand?.() ?? false);
+        this.sample(demand);
+      } catch (error) {
+        options.onError?.(error);
+      }
+    }, intervalMs);
+    this.samplingTimer.unref?.();
+    return true;
+  }
+
+  stopSampling(): boolean {
+    if (!this.samplingTimer) return false;
+    clearInterval(this.samplingTimer);
+    this.samplingTimer = undefined;
+    return true;
   }
 
   getStatus(): SyncCapacityStatus {

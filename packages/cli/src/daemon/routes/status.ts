@@ -718,21 +718,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           trackedContextGraphs: 0,
           planningLanes: 0,
         };
-    const fallbackSyncLimit = config.syncGlobalMaxInflight ?? config.syncGlobalLimit ?? 2;
-    const fallbackCoverageBatch = config.syncCorePublicBatchSize ?? 8;
-    const syncCapacity = typeof agent.getSyncCapacityStatus === 'function'
-      ? agent.getSyncCapacityStatus()
-      : {
-          mode: 'static' as const,
-          state: 'healthy' as const,
-          currentInflight: fallbackSyncLimit === 0 ? null : fallbackSyncLimit,
-          minInflight: fallbackSyncLimit === 0 ? null : fallbackSyncLimit,
-          maxInflight: fallbackSyncLimit === 0 ? null : fallbackSyncLimit,
-          currentCoverageBatch: fallbackCoverageBatch,
-          configuredCoverageBatch: fallbackCoverageBatch,
-          storePressureTelemetryAvailable: false,
-          lastDecision: null,
-        };
+    const syncCapacity = agent.getSyncCapacityStatus();
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,

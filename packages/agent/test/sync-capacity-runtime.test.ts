@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { StorePressureSnapshot, TripleStore } from '@origintrail-official/dkg-storage';
 import { SyncCapacityRuntime } from '../src/sync/capacity-runtime.js';
+import { CorePublicSyncCoverageScheduler } from '../src/sync/core-public-coverage-scheduler.js';
+import { withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 
 function fakeStore(pressure?: StorePressureSnapshot): TripleStore {
   return {
@@ -22,7 +25,10 @@ const STORE_PRESSURE: StorePressureSnapshot = {
   healthReservedSlots: 1,
 };
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+});
 
 describe('sync capacity runtime resolution', () => {
   it('keeps Edge nodes on the exact static policy even if adaptive is requested', () => {
@@ -34,6 +40,7 @@ describe('sync capacity runtime resolution', () => {
 
     expect(runtime.isAdaptive()).toBe(false);
     expect(runtime.policy.limit).toBe(4);
+    expect(runtime.getAdmissionOptions()).toEqual({ policy: runtime.policy });
     expect(runtime.getStatus()).toMatchObject({ mode: 'static', currentInflight: 4 });
   });
 
@@ -53,6 +60,124 @@ describe('sync capacity runtime resolution', () => {
       currentCoverageBatch: 7,
       configuredCoverageBatch: 7,
     });
+    expect(runtime.getAdmissionOptions().currentLimit?.()).toBe(2);
+  });
+
+  it('owns sampling and restores constrained coverage from supplemental Core demand', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let heapRatio = 0.82;
+    let cpuIdle = 0;
+    let cpuTotal = 0;
+    const runtime = SyncCapacityRuntime.create({
+      nodeRole: 'core',
+      syncCorePublicBatchSize: 8,
+    }, fakeStore(STORE_PRESSURE), {
+      parallelism: 16,
+      samplerDependencies: {
+        readCpuTimes: () => {
+          cpuIdle += 80;
+          cpuTotal += 100;
+          return { idle: cpuIdle, total: cpuTotal };
+        },
+        readEventLoopUtilization: () => ({ idle: 1, active: 1, utilization: 0.5 }),
+        eventLoopUtilizationDelta: () => 0.2,
+        readHeapRatio: () => heapRatio,
+      },
+    });
+    const coverage = new CorePublicSyncCoverageScheduler(8);
+    for (const contextGraphId of ['cg:a', 'cg:b', 'cg:c', 'cg:d', 'cg:e']) {
+      coverage.register(contextGraphId);
+    }
+
+    runtime.sample(true);
+    expect(runtime.getStatus()).toMatchObject({
+      currentInflight: 1,
+      currentCoverageBatch: 4,
+      lastDecision: { action: 'halve', reason: 'critical_heap' },
+    });
+
+    heapRatio = 0.3;
+    expect(runtime.startSampling({
+      hasSupplementalDemand: () => coverage.hasAutomaticCoverageBacklog(
+        runtime.getEffectiveCoverageBatch(),
+      ),
+      intervalMs: 5_000,
+      onError: (error) => { throw error; },
+    })).toBe(true);
+    vi.advanceTimersByTime(30_000);
+
+    expect(runtime.getStatus()).toMatchObject({
+      currentInflight: 2,
+      currentCoverageBatch: 5,
+      lastDecision: { action: 'increase', reason: 'healthy_hysteresis' },
+    });
+    expect(runtime.stopSampling()).toBe(true);
+    expect(runtime.stopSampling()).toBe(false);
+  });
+
+  it('pumps queued requester work when a healthy sample raises live capacity', async () => {
+    let now = 0;
+    let heapRatio = 0.82;
+    let cpuIdle = 0;
+    let cpuTotal = 0;
+    const runtime = SyncCapacityRuntime.create({ nodeRole: 'core' }, fakeStore(STORE_PRESSURE), {
+      parallelism: 16,
+      now: () => now,
+      samplerDependencies: {
+        readCpuTimes: () => {
+          cpuIdle += 80;
+          cpuTotal += 100;
+          return { idle: cpuIdle, total: cpuTotal };
+        },
+        readEventLoopUtilization: () => ({ idle: 1, active: 1, utilization: 0.5 }),
+        eventLoopUtilizationDelta: () => 0.2,
+        readHeapRatio: () => heapRatio,
+      },
+    });
+    runtime.sample(true);
+    expect(runtime.getStatus().currentInflight).toBe(1);
+
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const ctx = createOperationContext('test');
+    const first = withGlobalSyncBackpressure({
+      ...runtime.getAdmissionOptions(),
+      ctx,
+      label: 'durable:first',
+    }, async () => {
+      markFirstStarted();
+      await firstBlock;
+    });
+    await firstStarted;
+
+    let markSecondStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+    let secondRan = false;
+    const second = withGlobalSyncBackpressure({
+      ...runtime.getAdmissionOptions(),
+      ctx,
+      label: 'durable:second',
+    }, async () => {
+      secondRan = true;
+      markSecondStarted();
+    });
+    await Promise.resolve();
+    expect(secondRan).toBe(false);
+
+    heapRatio = 0.3;
+    for (let sample = 1; sample <= 6; sample += 1) {
+      now = sample * 5_000;
+      runtime.sample(true);
+    }
+    await secondStarted;
+    expect(runtime.getStatus().currentInflight).toBe(2);
+    expect(secondRan).toBe(true);
+
+    releaseFirst();
+    await Promise.all([first, second]);
   });
 
   it('keeps an explicit Core limit static unless adaptation is explicitly enabled', () => {

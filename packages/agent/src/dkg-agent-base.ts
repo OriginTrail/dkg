@@ -1561,7 +1561,6 @@ export class DKGAgentBase {
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
-  protected syncAdaptiveCapacityTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can

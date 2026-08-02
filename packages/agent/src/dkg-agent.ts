@@ -1720,10 +1720,7 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    if (this.syncAdaptiveCapacityTimer) {
-      clearInterval(this.syncAdaptiveCapacityTimer);
-      this.syncAdaptiveCapacityTimer = null;
-    }
+    this.syncCapacityRuntime.stopSampling();
     if (this.chainPoller) {
       // Await so any in-flight poll (and its HTTP keep-alive socket) settles
       // BEFORE we tear down the chain adapter — otherwise the RPC connection

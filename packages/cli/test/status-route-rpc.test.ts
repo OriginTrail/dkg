@@ -49,6 +49,17 @@ const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
     operatorActionRequired: true,
   },
 };
+const STATIC_SYNC_CAPACITY = {
+  mode: 'static' as const,
+  state: 'healthy' as const,
+  currentInflight: 2,
+  minInflight: 2,
+  maxInflight: 2,
+  currentCoverageBatch: 8,
+  configuredCoverageBatch: 8,
+  storePressureTelemetryAvailable: false,
+  lastDecision: null,
+};
 
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
@@ -76,6 +87,7 @@ async function requestStatusWithAgent(
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        getSyncCapacityStatus: () => STATIC_SYNC_CAPACITY,
         ...agentOverrides,
       },
       nodeVersion: '0.0.0-test',
@@ -290,6 +302,7 @@ describe('/api/status selected overlay details', () => {
             getRelayStats: () => null,
           },
           publisher: { getIdentityId: () => 0n },
+          getSyncCapacityStatus: () => STATIC_SYNC_CAPACITY,
         },
         nodeVersion: '0.0.0-test',
         nodeCommit: '',
@@ -358,6 +371,7 @@ describe('/api/status selected overlay details', () => {
             multiaddrs: [],
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
+            getSyncCapacityStatus: () => STATIC_SYNC_CAPACITY,
           },
           nodeVersion: '0.0.0-test',
           nodeCommit: '',

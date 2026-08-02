@@ -309,7 +309,6 @@ import {
   resolveNonNegativeIntegerSwitch,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
-import { DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS } from './sync/capacity-runtime.js';
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -1233,9 +1232,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       operationSignal,
     );
     try {
+      const capacityAdmission = this.syncCapacityRuntime.getAdmissionOptions();
       return await withGlobalSyncBackpressure(
         {
-          policy: this.syncCapacityRuntime.policy,
+          ...capacityAdmission,
           ctx,
           label,
           contextGraphId,
@@ -1245,9 +1245,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           source,
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
-          ...(this.syncCapacityRuntime.isAdaptive()
-            ? { currentLimit: () => this.syncCapacityRuntime.getCurrentInflight()! }
-            : {}),
         },
         work,
       );
@@ -3256,18 +3253,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
     }
 
-    if (this.syncCapacityRuntime.isAdaptive()) {
-      this.syncAdaptiveCapacityTimer = setInterval(() => {
-        try {
-          const pressure = getSyncBackpressureSnapshot(this.syncCapacityRuntime.policy);
-          this.syncCapacityRuntime.sample(pressure.inflight > 0 || pressure.queued > 0);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.log.warn(ctx, `Adaptive sync capacity sample failed: ${message}`);
-        }
-      }, DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS);
-      if (this.syncAdaptiveCapacityTimer.unref) this.syncAdaptiveCapacityTimer.unref();
-    }
+    this.syncCapacityRuntime.startSampling({
+      hasSupplementalDemand: () => (
+        this.corePublicSyncCoverageScheduler.hasAutomaticCoverageBacklog(
+          this.syncCapacityRuntime.getEffectiveCoverageBatch(),
+        )
+      ),
+      onError: (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log.warn(ctx, `Adaptive sync capacity sample failed: ${message}`);
+      },
+    });
 
     // A.4-lite+: keep a small set of Core nodes warm (connection pinned +
     // auto-redialed by libp2p) so catch-up / chain reconciliation never pays
