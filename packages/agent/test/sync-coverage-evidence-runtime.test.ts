@@ -236,6 +236,44 @@ describe('automatic sync coverage runtime evidence', () => {
     });
   });
 
+  it.each([
+    ['a null terminal', [null]],
+    ['a settled terminal without a result', [{
+      contextGraphId: 'cg-automatic-malformed-result',
+      lane: 'shared_memory',
+      disposition: 'settled',
+    }]],
+  ])('keeps Core automatic sync successful with %s', async (_label, contextGraphTerminals) => {
+    const automatic = 'cg-automatic-malformed-result';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+      ...cleanSharedMemorySyncResult(),
+      contextGraphTerminals,
+    });
+
+    const errors = await runConnectionOpenSyncWithErrors(agent);
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect(errors).toEqual([]);
+    expect((agent as any).lastSuccessfulSyncAt.get(PEER)).toEqual(expect.any(Number));
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      kind: 'core-automatic-round',
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+      completions: [{
+        contextGraphId: automatic,
+        state: 'failed',
+        verified: { metadata: true, durable: true, sharedMemory: false },
+      }],
+    });
+  });
+
   it('records the exact adaptive batch snapshot used by Core planning', async () => {
     const automatic = ['cg-adaptive-a', 'cg-adaptive-b'];
     const agent = await createEvidenceAgent('core', []);
@@ -388,7 +426,7 @@ describe('automatic sync coverage runtime evidence', () => {
     });
   });
 
-  it('keeps Edge reconciler sync successful when terminals are malformed', async () => {
+  it('keeps Edge reconciler sync successful when terminal normalization throws', async () => {
     const rehydrated = 'cg-rehydrated-legacy-result';
     const persisted = new Map<string, ContextGraphSubscriptionRecord>([[rehydrated, {
       id: rehydrated,
@@ -419,9 +457,19 @@ describe('automatic sync coverage runtime evidence', () => {
       peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
     };
     await (agent as any).rehydrateContextGraphSubscriptions();
+    const terminalWithThrowingResult = {
+      contextGraphId: rehydrated,
+      lane: 'shared_memory',
+      disposition: 'settled',
+    };
+    Object.defineProperty(terminalWithThrowingResult, 'result', {
+      get: () => {
+        throw new Error('malformed terminal result getter');
+      },
+    });
     (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
       ...cleanSharedMemorySyncResult(),
-      contextGraphTerminals: null,
+      contextGraphTerminals: [terminalWithThrowingResult],
     });
     (agent.node as any).node = {
       getPeers: () => [{ toString: () => PEER }],

@@ -3988,12 +3988,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             },
           );
           // Existing JavaScript embedders can override the detailed method with
-          // the legacy aggregate-only shape. Missing or malformed terminals
-          // make evidence unverifiable, but must not turn successful sync into
-          // a runtime failure.
-          if (Array.isArray(result.contextGraphTerminals)) {
-            evidence.markSharedMemory(result.contextGraphTerminals);
-          }
+          // legacy or malformed runtime values. The recorder owns that untrusted
+          // observer boundary so evidence can fail closed without changing sync.
+          evidence.markSharedMemoryResult(result);
           return result;
         },
         syncSharedMemoryOnConnect:

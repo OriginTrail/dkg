@@ -92,17 +92,24 @@ export class SyncCoverageEvidenceRecorder {
     }
   }
 
-  markSharedMemory(
-    outcomes: readonly SharedMemoryContextGraphTerminal[],
-  ): void {
+  markSharedMemoryResult(result: unknown): void {
     if (!this.hasActiveEvidence()) return;
-    for (const outcome of outcomes) {
-      if (
-        outcome.disposition === 'settled'
-        && sharedMemoryTerminalCompletedCleanly(outcome.result)
-      ) {
-        this.sharedMemoryVerified.add(outcome.contextGraphId);
-      }
+    let outcomes: unknown;
+    try {
+      if (typeof result !== 'object' || result === null) return;
+      outcomes = (result as Record<string, unknown>).contextGraphTerminals;
+    } catch {
+      return;
+    }
+    this.markSharedMemory(outcomes);
+  }
+
+  markSharedMemory(outcomes: unknown): void {
+    if (!this.hasActiveEvidence()) return;
+    const verifiedContextGraphIds = verifiedSharedMemoryContextGraphIds(outcomes);
+    if (!verifiedContextGraphIds) return;
+    for (const contextGraphId of verifiedContextGraphIds) {
+      this.sharedMemoryVerified.add(contextGraphId);
     }
   }
 
@@ -132,6 +139,40 @@ export class SyncCoverageEvidenceRecorder {
       });
     }
   }
+}
+
+function verifiedSharedMemoryContextGraphIds(outcomes: unknown): string[] | undefined {
+  try {
+    if (!Array.isArray(outcomes)) return undefined;
+    const verifiedContextGraphIds: string[] = [];
+    for (const outcome of outcomes) {
+      const verifiedContextGraphId = verifiedSharedMemoryContextGraphId(outcome);
+      if (verifiedContextGraphId !== undefined) {
+        verifiedContextGraphIds.push(verifiedContextGraphId);
+      }
+    }
+    return verifiedContextGraphIds;
+  } catch {
+    // Evidence is an observer. Host-defined arrays/proxies that throw during
+    // inspection make the plane unverifiable, but never alter sync control flow.
+    return undefined;
+  }
+}
+
+function verifiedSharedMemoryContextGraphId(outcome: unknown): string | undefined {
+  if (typeof outcome !== 'object' || outcome === null) return undefined;
+  const terminal = outcome as Partial<SharedMemoryContextGraphTerminal>;
+  if (
+    terminal.disposition !== 'settled'
+    || typeof terminal.contextGraphId !== 'string'
+    || typeof terminal.result !== 'object'
+    || terminal.result === null
+  ) {
+    return undefined;
+  }
+  return sharedMemoryTerminalCompletedCleanly(terminal.result)
+    ? terminal.contextGraphId
+    : undefined;
 }
 
 function sharedMemoryTerminalCompletedCleanly(
