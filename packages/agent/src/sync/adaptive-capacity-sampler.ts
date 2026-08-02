@@ -145,7 +145,8 @@ export function deriveAdaptiveInflightHardMax(
         1,
         input.storePressure.maxConcurrent
           - input.storePressure.ackReservedSlots
-          - (input.storePressure.healthReservedSlots ?? 0),
+          - (input.storePressure.healthReservedSlots ?? 0)
+          - (input.storePressure.normalReservedSlots ?? 0),
       )
     : MAX_SYNC_ADAPTIVE_INFLIGHT;
   return Math.min(MAX_SYNC_ADAPTIVE_INFLIGHT, operatorMax, hardwareMax, storeMax);

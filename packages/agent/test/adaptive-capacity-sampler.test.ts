@@ -69,6 +69,24 @@ describe('adaptive capacity sampler', () => {
   it('caps the hard maximum by operator, hardware, and store capacity', () => {
     expect(deriveAdaptiveInflightHardMax({ operatorMax: 3, parallelism: 16 })).toBe(3);
     expect(deriveAdaptiveInflightHardMax({
+      operatorMax: 8,
+      parallelism: 16,
+      storePressure: {
+        ackInflight: 0,
+        healthInflight: 0,
+        normalInflight: 0,
+        backgroundInflight: 0,
+        ackQueued: 0,
+        healthQueued: 0,
+        normalQueued: 0,
+        backgroundQueued: 0,
+        maxConcurrent: 4,
+        ackReservedSlots: 1,
+        healthReservedSlots: 1,
+        normalReservedSlots: 1,
+      },
+    })).toBe(1);
+    expect(deriveAdaptiveInflightHardMax({
       operatorMax: 7,
       parallelism: 12,
       storePressure: {
