@@ -211,6 +211,18 @@ type GraphScopedMaterializationEnvelope = Pick<
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
 type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
 
+/**
+ * How many immutable operation snapshots one receipt may verify in full.
+ *
+ * Discovery is allowed to surface more candidates than this — it is a cheap
+ * bounded metadata read — but each verification costs a whole payload read
+ * plus digest plus Merkle root, on the latency-sensitive receipt path. Bound
+ * the expensive half so that a KA re-shared many times cannot turn one late
+ * receipt into a multiple of that work. See
+ * `FinalizationHandler.verifyImmutableGraphScopedSnapshot`.
+ */
+const MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS = 4;
+
 function resolveGraphScopedAccessEnvelope(
   head: GraphScopedMaterializationEnvelope,
   requestedAccessPolicy?: GraphScopedAccessPolicy,
@@ -1362,6 +1374,25 @@ export class FinalizationHandler {
    * Rebuild a finalized source from its immutable operation snapshot when the
    * active SWM graph has already been drained. This keeps durable receipt/reorg
    * recovery independent from retaining a second live copy of the payload.
+   *
+   * Once the idle GC has done its job this is the NORMAL path for a late
+   * receipt, not an exception, so its cost has to be bounded rather than
+   * merely correct. Two rules hold it down:
+   *
+   * - Discovery stays a bounded metadata read (one bound `kaUal`, LIMIT 16)
+   *   and keeps the receipt lane's default priority. Receipts are
+   *   latency-sensitive; demoting them to the background lane would trade a
+   *   CPU spike for receipt starvation under load, which is the worse failure.
+   * - Payload verification is the expensive half — a full snapshot read plus
+   *   digest plus Merkle root PER CANDIDATE — so it is capped at
+   *   {@link MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS} instead of running once per
+   *   discovered row. The cap is inert whenever `expectedPublicQuadsDigest` is
+   *   known, because candidates are then already content-identical and the
+   *   first match wins; it only bites when the evidence carried no digest
+   *   (`VerifiedGraphScopedFinalizationEvidence.publicQuadsDigest` is
+   *   optional), which is exactly the case that could otherwise do 16 full
+   *   payload verifications on one receipt. Truncation is logged, never
+   *   silent.
    */
   private async verifyImmutableGraphScopedSnapshot(input: {
     contextGraphId: string;
@@ -1416,7 +1447,15 @@ export class FinalizationHandler {
       }
     }
 
-    for (const shareOperationId of [...new Set(shareOperationIds)]) {
+    const candidates = [...new Set(shareOperationIds)];
+    if (candidates.length > MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS) {
+      this.log.warn(
+        input.ctx,
+        `Finalization: ${candidates.length} immutable snapshot candidates for `
+          + `${input.scope.ual}; verifying the first ${MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS}`,
+      );
+    }
+    for (const shareOperationId of candidates.slice(0, MAX_IMMUTABLE_SNAPSHOT_VERIFICATIONS)) {
       let quads: Quad[];
       try {
         const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
@@ -1428,6 +1467,7 @@ export class FinalizationHandler {
           assertionVersion: input.scope.assertionVersion,
           subGraphName: input.subGraphName,
           publicSnapshotStore: this.publicSnapshotStore,
+          queryOptions: { source: 'agent.finalization.resolveImmutableSnapshotPayload' },
         });
         quads = snapshot.quads.map((quad) => ({ ...quad, graph: '' }));
       } catch (error) {
