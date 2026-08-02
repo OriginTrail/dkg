@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { handleRequest } from '../src/daemon/handle-request.js';
 import { handleSyncCoverageEvidenceRoutes } from '../src/daemon/routes/sync-coverage-evidence.js';
 
 describe('sync coverage evidence diagnostics route', () => {
@@ -75,6 +76,55 @@ describe('sync coverage evidence diagnostics route', () => {
       entries: [{ sequence: 7, afterSequence: 6 }],
     });
     expect(getSyncCoverageEvidence).toHaveBeenCalledWith(6);
+  });
+
+  it('is reachable through the top-level daemon dispatcher only for node admins', async () => {
+    getSyncCoverageEvidence.mockClear();
+    const dispatcherAgent = {
+      getSyncCoverageEvidence,
+      resolveAgentAddress: () => undefined,
+      resolveAgentByToken: (token?: string) => token === 'agent-token'
+        ? '0x1111111111111111111111111111111111111111'
+        : undefined,
+    };
+    const dispatcher = createServer(async (req, res) => {
+      await handleRequest({
+        req,
+        res,
+        agent: dispatcherAgent,
+        config: { auth: { enabled: true } },
+        validTokens: new Set(['admin-token', 'agent-token']),
+      } as any);
+    });
+    await new Promise<void>((resolve) => {
+      dispatcher.listen(0, '127.0.0.1', resolve);
+    });
+
+    try {
+      const address = dispatcher.address();
+      expect(typeof address).toBe('object');
+      const dispatcherBaseUrl = `http://127.0.0.1:${(address as { port: number }).port}`;
+      const accepted = await fetch(
+        `${dispatcherBaseUrl}/api/diagnostics/sync-coverage-evidence?afterSequence=6`,
+        { headers: { authorization: 'Bearer admin-token' } },
+      );
+      expect(accepted.status).toBe(200);
+      expect(await accepted.json()).toMatchObject({
+        waveId: 'wave-1',
+        entries: [{ sequence: 7, afterSequence: 6 }],
+      });
+
+      const denied = await fetch(
+        `${dispatcherBaseUrl}/api/diagnostics/sync-coverage-evidence`,
+        { headers: { authorization: 'Bearer agent-token' } },
+      );
+      expect(denied.status).toBe(403);
+      expect(getSyncCoverageEvidence).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        dispatcher.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it('rejects agent-scoped access and malformed cursors', async () => {

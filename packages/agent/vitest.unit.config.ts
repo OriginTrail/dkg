@@ -78,6 +78,8 @@ export default defineConfig({
       "test/sync-responder-metrics.test.ts",
       "test/sync-fetch-coalescing.test.ts",
       "test/sync-fetch-coalescing-durable.test.ts",
+      "test/sync-coverage-evidence-journal.test.ts",
+      "test/sync-coverage-evidence-runtime.test.ts",
       "test/sync-backpressure.test.ts",
       "test/sync-policy.test.ts",
       "test/catchup-policy.test.ts",
