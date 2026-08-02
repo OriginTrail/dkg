@@ -475,12 +475,12 @@ describe('ApiClient', () => {
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/subscribe`);
       expect(JSON.parse(calls[0].opts.body as string)).toEqual({
         contextGraphId: 'cg-selected',
-        includeWorkspace: true,
+        includeSharedMemory: true,
         syncMode: 'on-demand',
       });
     });
 
-    it('subscribe() keeps the legacy restart-durable lifetime explicit', async () => {
+    it('subscribe() maps its deprecated workspace option to the canonical request key', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,
         status: 200,
@@ -492,7 +492,7 @@ describe('ApiClient', () => {
 
       expect(JSON.parse(calls[0].opts.body as string)).toEqual({
         contextGraphId: 'cg-legacy',
-        includeWorkspace: true,
+        includeSharedMemory: true,
         syncMode: 'always-on',
       });
     });

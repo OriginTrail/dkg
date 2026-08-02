@@ -63,6 +63,20 @@ describe('catch-up status response', () => {
       .not.toHaveProperty('error');
   });
 
+  it('reports newer live completion while preserving a deferred attempt as diagnostics', () => {
+    expect(toCatchupStatusResponse(job('deferred'), completeConvergence)).toMatchObject({
+      status: 'done',
+      attempt: {
+        status: 'deferred',
+        error: 'deferred attempt',
+      },
+      completedAfterAttempt: true,
+      convergence: completeConvergence,
+    });
+    expect(toCatchupStatusResponse(job('deferred'), completeConvergence))
+      .not.toHaveProperty('error');
+  });
+
   it('does not hide a failed attempt behind readiness that predates it', () => {
     const staleConvergence = { ...completeConvergence, readinessUpdatedAt: 3 };
 

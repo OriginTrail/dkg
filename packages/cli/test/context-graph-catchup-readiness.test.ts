@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
-  classifyContextGraphCatchupReadiness,
   combineCatchupPlaneEvidence,
   describeContextGraphConvergence,
+  planContextGraphCatchupReadiness,
 } from '../src/context-graph-readiness.js';
 import {
   publicDurableAndSharedMemoryResult,
@@ -66,6 +66,19 @@ function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
       },
     },
   };
+}
+
+function classifyContextGraphCatchupReadiness(
+  input: Parameters<typeof planContextGraphCatchupReadiness>[0] & {
+    hasConfirmedMeta: boolean;
+    isPrivate: boolean;
+  },
+) {
+  const { hasConfirmedMeta, isPrivate, ...planInput } = input;
+  const plan = planContextGraphCatchupReadiness(planInput);
+  return plan.kind === 'settled'
+    ? plan.classification
+    : plan.finalize({ hasConfirmedMeta, isPrivate });
 }
 
 describe('context graph catch-up readiness classification', () => {

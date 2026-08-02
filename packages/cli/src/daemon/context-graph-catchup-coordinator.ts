@@ -2,8 +2,7 @@ import type { ContextGraphReadinessProvenance } from '@origintrail-official/dkg-
 import type { CatchupRunner } from '../catchup-runner.js';
 import type { CatchupJobResult } from '../catchup-result-wire.js';
 import {
-  catchupClassificationNeedsMetadata,
-  classifyContextGraphCatchupReadiness,
+  planContextGraphCatchupReadiness,
   type ContextGraphCatchupReadinessClassification,
 } from '../context-graph-readiness.js';
 import type {
@@ -290,23 +289,18 @@ export class ContextGraphCatchupCoordinatorService {
     result: CatchupJobResult,
     readinessBeforeCatchup: ContextGraphReadinessProvenance,
   ): Promise<CatchupResultClassification> {
-    const inspectReadiness = catchupClassificationNeedsMetadata({
+    const plan = planContextGraphCatchupReadiness({
       result,
       includeSharedMemory: job.includeSharedMemory,
+      readinessBeforeCatchup,
     });
-    const hasConfirmedMeta = inspectReadiness
-      ? await this.effects.hasConfirmedMeta(job.contextGraphId)
-      : false;
+    if (plan.kind === 'settled') return plan.classification;
+
+    const hasConfirmedMeta = await this.effects.hasConfirmedMeta(job.contextGraphId);
     const isPrivate = hasConfirmedMeta
       ? await this.effects.isPrivate(job.contextGraphId)
       : false;
-    return classifyContextGraphCatchupReadiness({
-      result,
-      includeSharedMemory: job.includeSharedMemory,
-      hasConfirmedMeta,
-      isPrivate,
-      readinessBeforeCatchup,
-    });
+    return plan.finalize({ hasConfirmedMeta, isPrivate });
   }
 
   private applyExecutionEffects(

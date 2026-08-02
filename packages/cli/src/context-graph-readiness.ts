@@ -492,49 +492,71 @@ function requestedCatchupBackpressure(
     ?? result.deferredBackpressure;
 }
 
-/** Whether the canonical classifier needs chain-backed CG metadata this round. */
-export function catchupClassificationNeedsMetadata(input: {
+interface ContextGraphCatchupReadinessInput {
   result: CatchupJobResult;
   includeSharedMemory: boolean;
-}): boolean {
-  const deferredBackpressure = requestedCatchupBackpressure(
-    input.result,
-    input.includeSharedMemory,
-  );
-  // A pure local deferral settles before any metadata/readiness branch. Mixed
-  // denial still needs the full classifier to distinguish denial from usable
-  // progress, so it must inspect clean evidence normally.
-  if (deferredBackpressure > 0 && !input.result.denied) return false;
-  return catchupResultHasCleanResponse(input.result);
+  readinessBeforeCatchup: ContextGraphReadinessProvenance;
 }
 
-/**
- * Canonical policy for converting one catch-up result into externally visible
- * subscription readiness. The HTTP route gathers live metadata and applies
- * the returned patches; all readiness decisions remain in this pure function.
- */
-export function classifyContextGraphCatchupReadiness(input: {
-  result: CatchupJobResult;
-  includeSharedMemory: boolean;
+export interface ContextGraphCatchupMetadata {
   hasConfirmedMeta: boolean;
   isPrivate: boolean;
-  readinessBeforeCatchup: ContextGraphReadinessProvenance;
-}): ContextGraphCatchupReadinessClassification {
+}
+
+export type ContextGraphCatchupReadinessPlan =
+  | {
+    kind: 'settled';
+    classification: ContextGraphCatchupReadinessClassification;
+  }
+  | {
+    kind: 'metadata-required';
+    finalize: (
+      metadata: ContextGraphCatchupMetadata,
+    ) => ContextGraphCatchupReadinessClassification;
+  };
+
+/**
+ * Canonical two-phase classifier for one catch-up attempt. The plan owns the
+ * decision to request chain-backed metadata, so orchestration never mirrors
+ * classifier branches merely to avoid an unnecessary metadata read.
+ */
+export function planContextGraphCatchupReadiness(
+  input: ContextGraphCatchupReadinessInput,
+): ContextGraphCatchupReadinessPlan {
   const deferredBackpressure = requestedCatchupBackpressure(
     input.result,
     input.includeSharedMemory,
   );
   if (deferredBackpressure > 0 && !input.result.denied) {
-    return deferredCatchupClassification();
+    return {
+      kind: 'settled',
+      classification: deferredCatchupClassification(),
+    };
   }
 
-  const classification = classifyContextGraphCatchupReadinessWithoutBackpressure(input);
-  // Pure ACL denial keeps its specific status. When denial coexists with clean
-  // requested-plane progress, local deferral still prevents that partial round
-  // from becoming successful or freezing readiness.
-  return deferredBackpressure > 0 && classification.jobStatus === 'done'
-    ? deferredCatchupClassification()
-    : classification;
+  const finalize = (
+    metadata: ContextGraphCatchupMetadata,
+  ): ContextGraphCatchupReadinessClassification => {
+    const classification = classifyContextGraphCatchupReadinessWithoutBackpressure({
+      ...input,
+      ...metadata,
+    });
+    // Pure ACL denial keeps its specific status. When denial coexists with
+    // clean requested-plane progress, local deferral still prevents that
+    // partial round from becoming successful or freezing readiness.
+    return deferredBackpressure > 0 && classification.jobStatus === 'done'
+      ? deferredCatchupClassification()
+      : classification;
+  };
+
+  if (!catchupResultHasCleanResponse(input.result)) {
+    return {
+      kind: 'settled',
+      classification: finalize({ hasConfirmedMeta: false, isPrivate: false }),
+    };
+  }
+
+  return { kind: 'metadata-required', finalize };
 }
 
 function classifyContextGraphCatchupReadinessWithoutBackpressure(input: {

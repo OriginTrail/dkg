@@ -84,11 +84,13 @@ function coordinatorFixture(options: {
     readiness = { ...readiness, ...patch, updatedAt: readiness.updatedAt + 1 };
   });
   const markSubscriptionState = vi.fn();
+  const hasConfirmedMeta = vi.fn(async () => true);
+  const isPrivate = vi.fn(async () => false);
   const service = new ContextGraphCatchupCoordinatorService(tracker, {
     runner: { run },
     readReadiness: () => readiness,
-    hasConfirmedMeta: async () => true,
-    isPrivate: async () => false,
+    hasConfirmedMeta,
+    isPrivate,
     writeReadiness,
     markSubscriptionState,
     emitProjectSynced: vi.fn(),
@@ -102,10 +104,34 @@ function coordinatorFixture(options: {
     releaseFirstRun,
     writeReadiness,
     markSubscriptionState,
+    hasConfirmedMeta,
+    isPrivate,
   };
 }
 
 describe('ContextGraphCatchupCoordinatorService', () => {
+  it('does not load metadata for pure local deferral', async () => {
+    const fixture = coordinatorFixture({
+      result: publicDurableWithSharedMemoryBackpressureResult(),
+    });
+    const full = fixture.service.start({
+      contextGraphId: 'cg:pure-deferral',
+      includeSharedMemory: true,
+      readinessBeforeCatchup: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: false,
+        updatedAt: 1,
+      },
+    });
+
+    await waitForJob(full);
+
+    expect(full.status).toBe('deferred');
+    expect(fixture.hasConfirmedMeta).not.toHaveBeenCalled();
+    expect(fixture.isPrivate).not.toHaveBeenCalled();
+  });
+
   it('settles a durable slot from broad work without inheriting SWM backpressure', async () => {
     const fixture = coordinatorFixture({
       blockBroadBase: true,
@@ -173,6 +199,8 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     });
     expect(fixture.writeReadiness).not.toHaveBeenCalled();
     expect(fixture.markSubscriptionState).not.toHaveBeenCalled();
+    expect(fixture.hasConfirmedMeta).toHaveBeenCalledTimes(1);
+    expect(fixture.isPrivate).toHaveBeenCalledTimes(1);
   });
 
   it('keeps orchestration state out of the historical two-map tracker', () => {
@@ -404,5 +432,7 @@ describe('ContextGraphCatchupCoordinatorService', () => {
       status: 'denied',
       finishedAt: expect.any(Number),
     });
+    expect(fixture.hasConfirmedMeta).not.toHaveBeenCalled();
+    expect(fixture.isPrivate).not.toHaveBeenCalled();
   });
 });
