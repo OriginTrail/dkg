@@ -7155,6 +7155,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
       const rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
+      // Snapshot operator intent before rehydration mutates the live scope.
+      // Legacy rows only persisted `syncScoped`, which cannot distinguish an
+      // explicit selection from a public CG automatically discovered by an
+      // older Core. The configured list is the deterministic explicit source;
+      // persisted-only public rows migrate into bounded automatic coverage.
+      const configuredExplicitSyncContextGraphs = new Set(
+        (this.config.syncContextGraphs ?? []).map((id) => id.trim()).filter(Boolean),
+      );
 
       // `pendingMeta` and the agent chosen for the first authenticated sync
       // are deliberately in-memory state. Recover both from the durable
@@ -7280,13 +7288,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             .some((address) => address.toLowerCase() === approvedAgentAddress)
           : false;
         const restorePendingMeta = hasJoinApproval && !approvedAgentAuthorized;
+        const isLegacySyncAdmission = row.syncAdmission === undefined;
+        const isConfiguredExplicit = configuredExplicitSyncContextGraphs.has(row.id);
         let syncAdmission = row.syncAdmission
-          ?? (row.syncScoped ? 'explicit' : 'none');
+          ?? (isConfiguredExplicit ? 'explicit' : row.syncScoped ? 'explicit' : 'none');
         if (
-          row.syncAdmission === undefined
+          isLegacySyncAdmission
+          && !isConfiguredExplicit
           && (this.config.nodeRole ?? 'edge') === 'core'
           && row.subscribed
-          && !row.syncScoped
           && row.onChainId
         ) {
           const accessPolicy = await this.getExplicitAccessPolicy(row.id);
@@ -7326,6 +7336,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             subscribed: false,
             admission: 'none',
           });
+        }
+        // Complete the V31 -> V32 semantic migration through the existing
+        // nullable schema column. Once written, later restarts use the
+        // canonical admission directly and never reinterpret `syncScoped`.
+        if (isLegacySyncAdmission && row.subscribed) {
+          await this.persistContextGraphSubscriptionStrict(row.id);
         }
         // Upgrade/self-heal path for late private-CG members whose payload and
         // authenticated `_meta` already completed before registration binding

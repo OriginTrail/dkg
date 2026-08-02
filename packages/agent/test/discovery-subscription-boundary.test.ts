@@ -636,6 +636,93 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 60_000);
 
+  it('migrates legacy public Core rows without treating persisted syncScoped as operator intent', async () => {
+    const explicitId = 'legacy-public-configured';
+    const automaticIds = ['legacy-public-automatic-a', 'legacy-public-automatic-b'];
+    const allIds = [explicitId, ...automaticIds];
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>(allIds.map((id, index) => [
+      id,
+      {
+        id,
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: `0x${String(index + 1).repeat(64)}`,
+        // V31 and older could not distinguish explicit operator intent from
+        // automatic Core discovery: both were written as syncScoped=true.
+        syncScoped: true,
+      },
+    ]));
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()].map((row) => ({ ...row })),
+      save: async (record: ContextGraphSubscriptionRecord) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (id: string) => { persisted.delete(id); },
+    };
+    let first: DKGAgent | undefined;
+    let restarted: DKGAgent | undefined;
+
+    try {
+      first = await DKGAgent.create({
+        name: 'LegacyCoreCoverageMigration',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: new MockChainAdapter(),
+        contextGraphSubscriptionStore: subscriptionStore,
+        syncContextGraphs: [explicitId],
+        syncCorePublicBatchSize: 1,
+      });
+      (first as any).getExplicitAccessPolicy = async () => 'public';
+      await first.start();
+
+      expect(first.getSubscribedContextGraphs().get(explicitId)?.syncAdmission).toBe('explicit');
+      expect((first as any).config.syncContextGraphs).toEqual([explicitId]);
+      expect(persisted.get(explicitId)).toMatchObject({
+        syncAdmission: 'explicit',
+        syncScoped: true,
+      });
+      for (const id of automaticIds) {
+        expect(first.getSubscribedContextGraphs().get(id)?.syncAdmission).toBe('automatic-public');
+        expect((first as any).config.syncContextGraphs).not.toContain(id);
+        expect(persisted.get(id)).toMatchObject({
+          syncAdmission: 'automatic-public',
+          syncScoped: false,
+        });
+      }
+      expect(first.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(2);
+      const firstRound = (first as any).planCorePublicSyncPeerRound('legacy-migration-peer');
+      expect(firstRound.initialDurableContextGraphIds[0]).toBe(explicitId);
+      expect(firstRound.automaticContextGraphIds).toHaveLength(1);
+      expect(automaticIds).toContain(firstRound.automaticContextGraphIds[0]);
+
+      await first.stop();
+      first = undefined;
+
+      restarted = await DKGAgent.create({
+        name: 'LegacyCoreCoverageMigratedRestart',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: new MockChainAdapter(),
+        contextGraphSubscriptionStore: subscriptionStore,
+        syncContextGraphs: [explicitId],
+        syncCorePublicBatchSize: 1,
+      });
+      // Contradict the original migration input. Current-schema canonical
+      // admissions must win directly instead of being reclassified.
+      (restarted as any).getExplicitAccessPolicy = async () => 'private';
+      await restarted.start();
+
+      expect(restarted.getSubscribedContextGraphs().get(explicitId)?.syncAdmission).toBe('explicit');
+      expect(restarted.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(2);
+      expect((restarted as any).config.syncContextGraphs).toEqual([explicitId]);
+    } finally {
+      await first?.stop().catch(() => {});
+      await restarted?.stop().catch(() => {});
+    }
+  }, 60_000);
+
   it('reconstructs an OnChainId-only edge catalogue entry after restart without chain RPC', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-discovery-restart-'));
     const localId = 'restart-chain-catalogue';
