@@ -710,6 +710,14 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
       }
     }
+    const corePublicSyncCoverage = typeof agent.getCorePublicSyncCoverageStatus === 'function'
+      ? agent.getCorePublicSyncCoverageStatus()
+      : {
+          enabled: false,
+          batchSize: config.syncCorePublicBatchSize ?? 8,
+          trackedContextGraphs: 0,
+          planningLanes: 0,
+        };
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -774,6 +782,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         })),
         diagnosticsAvailable: '/api/diagnostics/backpressure',
       },
+      corePublicSyncCoverage,
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,

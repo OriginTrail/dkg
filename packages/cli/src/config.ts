@@ -628,6 +628,12 @@ export interface DkgConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /**
+   * Public-CG coverage admitted per Core peer-sync round. Explicit Edge/Core
+   * selections are never capped. Default 8; 0 disables automatic Core catch-up.
+   * Env DKG_SYNC_CORE_PUBLIC_BATCH_SIZE wins.
+   */
+  syncCorePublicBatchSize?: number;
   /** Retained sync responder snapshot limits (rows and estimated bytes). */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /** Local sync scheduling priority by Context Graph ID. */

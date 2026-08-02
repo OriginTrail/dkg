@@ -3608,6 +3608,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   clearNetworkRejectedPeerState(this: DKGAgent, remotePeer: string): void {
+    this.releaseCorePublicSyncPlanningLane(remotePeer);
     this.knownCorePeerIds.delete(remotePeer);
     this.knownCorePeerIdsV2.delete(remotePeer);
     this.skippedNoSyncPeers.delete(remotePeer);
@@ -3753,13 +3754,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
+    let plannedAutomaticContextGraphIds: string[] | undefined;
+    const getPlannedContextGraphIds = (): string[] => {
+      plannedAutomaticContextGraphIds ??=
+        this.planAutomaticCorePublicSyncContextGraphsForPeerRound(remotePeer);
+      // Discovery can restore an explicit/private subscription during this
+      // same connect cycle. Keep selected scope live while freezing only the
+      // automatic Core tail so both planes use one bounded coverage batch.
+      return [...new Set([
+        ...(this.config.syncContextGraphs ?? []),
+        ...plannedAutomaticContextGraphIds,
+      ])];
+    };
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
       if (!plan) {
         plan = this.planSharedMemorySyncContextGraphs(
           peerId,
-          this.config.syncContextGraphs ?? [],
+          getPlannedContextGraphIds(),
           createOperationContext('sync'),
         );
         sharedMemorySyncPlans.set(peerId, plan);
@@ -3772,11 +3785,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
-      getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
+      getSyncContextGraphs: getPlannedContextGraphIds,
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
         peerId,
-        contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
+        contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...getPlannedContextGraphIds()],
         undefined,
         undefined,
         undefined,
@@ -4089,6 +4102,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
       if (now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
         this.lastSyncDisconnectedAt.delete(peerId);
+        this.releaseCorePublicSyncPlanningLane(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSuccessfulSyncAt) {

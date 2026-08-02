@@ -85,6 +85,7 @@ export default defineConfig({
       "test/map-with-concurrency.test.ts",
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",
+      "test/core-public-coverage-scheduler.test.ts",
       "test/sync-requester-progress.test.ts",
       "test/rootless-durable-bounded-progress.test.ts",
       "test/rootless-durable-skips-legacy-partition.test.ts",

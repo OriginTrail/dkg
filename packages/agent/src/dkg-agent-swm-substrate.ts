@@ -515,6 +515,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     if (syncSet.delete(contextGraphId)) {
       this.config.syncContextGraphs = [...syncSet];
     }
+    this.unregisterCorePublicSyncContextGraph(contextGraphId);
 
     // Tear down the per-CG gossip topics. These four carry only the member
     // handlers installed by `subscribeToContextGraph`, so a topic-wide

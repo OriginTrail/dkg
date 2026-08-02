@@ -1374,7 +1374,8 @@ export class DKGAgent extends DKGAgentBase {
         // host-only) private CG here would silently undo that operator choice on
         // every discovery scan. Only re-track CGs the node is still a live
         // subscriber of.
-        if (current.subscribed && await this.isPrivateContextGraph(id) && this.trackSyncContextGraph(id)) {
+        const isPrivate = await this.isPrivateContextGraph(id);
+        if (current.subscribed && isPrivate && this.trackSyncContextGraph(id)) {
           this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
         }
         continue;
@@ -1497,7 +1498,13 @@ export class DKGAgent extends DKGAgentBase {
         if (knownOnChainIds.has(p.contextGraphId)) {
           if (!p.name) continue;
           const durableOnChainId = await readDurableContextGraphOnChainId(p.name);
-          if (durableOnChainId === p.contextGraphId) continue;
+          if (durableOnChainId === p.contextGraphId) {
+            const existing = this.subscribedContextGraphs.get(p.name);
+            if (Number(p.accessPolicy) === 0 && existing?.subscribed === true) {
+              this.registerCorePublicSyncContextGraph(p.name);
+            }
+            continue;
+          }
           knownOnChainIds.delete(p.contextGraphId);
         }
 
@@ -1548,10 +1555,13 @@ export class DKGAgent extends DKGAgentBase {
           graph: ontoGraph,
         }]);
 
-        this.recordDiscoveredContextGraph(p.name, {
+        const recorded = this.recordDiscoveredContextGraph(p.name, {
           name: p.name,
           onChainId: p.contextGraphId,
         }, { trackSyncScope: false });
+        if (Number(p.accessPolicy) === 0 && recorded.subscribed) {
+          this.registerCorePublicSyncContextGraph(p.name);
+        }
         this.contextGraphMetaProjection.markDirty(p.name);
         const roleOutcome = (this.config.nodeRole ?? 'edge') === 'core'
           ? 'auto-subscribed for core ACK hosting'

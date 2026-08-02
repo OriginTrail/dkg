@@ -412,6 +412,19 @@ describe('Context Graph discovery/subscription boundary', () => {
       expect((agent as any).gossipRegistered.has(localId)).toBe(true);
       expect((agent as any).config.syncContextGraphs ?? []).not.toContain(localId);
       expect(persisted.get(localId)).toMatchObject({ subscribed: true, syncScoped: false });
+      expect(agent.getCorePublicSyncCoverageStatus()).toMatchObject({
+        enabled: true,
+        trackedContextGraphs: 1,
+      });
+      expect((agent as any).planAutomaticCorePublicSyncContextGraphsForPeerRound('peer-a'))
+        .toEqual([localId]);
+
+      agent.unsubscribeFromContextGraph(localId);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
+      expect((agent as any).planAutomaticCorePublicSyncContextGraphsForPeerRound('peer-a'))
+        .toEqual([]);
+      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
     } finally {
       await agent.stop().catch(() => {});
     }

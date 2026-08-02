@@ -162,6 +162,12 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(createArg.syncGlobalQueueLimit).toBe(0);
   });
 
+  it('passes the Core public-CG peer-round batch size through unchanged', async () => {
+    const createArg = await captureCreateArg({ syncCorePublicBatchSize: 13 });
+
+    expect(createArg.syncCorePublicBatchSize).toBe(13);
+  });
+
   it('passes snapshot limits and Context Graph priorities through unchanged', async () => {
     const syncResponderSnapshotLimits = {
       global: { rows: 500, bytesEstimate: 600 },

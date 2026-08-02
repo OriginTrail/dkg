@@ -1084,6 +1084,50 @@ describe('runSyncOnConnect callbacks', () => {
   });
 });
 
+describe('DKGAgent peer-round scope wiring', () => {
+  it('keeps newly restored explicit CGs live while freezing only the automatic tail', async () => {
+    const agent = await DKGAgent.create({
+      name: 'DynamicExplicitScope',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      nodeRole: 'edge',
+      syncContextGraphs: ['initial-selected'],
+    });
+    try {
+      await agent.start();
+      allowAllNetworkAdmission(agent);
+      const remotePeer = freshPeerIdString();
+      (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+      (agent as any).refreshMetaSyncedFlags = async () => {};
+      (agent as any).discoverContextGraphsFromStore = async () => {
+        (agent as any).config.syncContextGraphs = [
+          ...(agent as any).config.syncContextGraphs,
+          'restored-private',
+        ];
+        return 1;
+      };
+      const durable = recorder(async (..._args: unknown[]) => 1);
+      const planShared = recorder(async (_peerId: string, contextGraphIds: string[]) => ({
+        publicContextGraphIds: contextGraphIds,
+        privateRecoverFromCurator: [],
+        eligibleContextGraphIds: contextGraphIds,
+      }));
+      const shared = recorder(async (..._args: unknown[]) => 1);
+      (agent as any).syncFromPeerDetailed = durable;
+      (agent as any).planSharedMemorySyncContextGraphs = planShared;
+      (agent as any).syncSharedMemoryFromPeerDetailed = shared;
+
+      await (agent as any).trySyncFromPeer(remotePeer);
+
+      expect(durable.calls[1]?.[1]).toEqual(['restored-private']);
+      expect(planShared.calls[0]?.[1]).toEqual(['initial-selected', 'restored-private']);
+      expect(shared.calls[0]?.[1]).toEqual(['initial-selected', 'restored-private']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+});
+
 describe('DKGAgent sync retry — event-driven via peer:update', () => {
   it('retries trySyncFromPeer when a previously-skipped peer now advertises PROTOCOL_SYNC', async () => {
     const agent = await DKGAgent.create({

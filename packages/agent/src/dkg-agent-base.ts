@@ -159,6 +159,11 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import {
+  CorePublicSyncCoverageScheduler,
+  resolveCorePublicSyncBatchSize,
+  type CorePublicSyncCoverageStatus,
+} from './sync/core-public-coverage-scheduler.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1034,6 +1039,12 @@ export class DKGAgentBase {
   // chain — which would risk a duplicate profile / double-stake.
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
+  /**
+   * Core-only bounded admission for automatically discovered public CGs.
+   * Explicit user-selected CGs stay in config.syncContextGraphs and are never
+   * capped by this scheduler; Edge nodes never register automatic coverage.
+   */
+  protected readonly corePublicSyncCoverageScheduler: CorePublicSyncCoverageScheduler;
   protected started = false;
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
@@ -1595,6 +1606,9 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
   ) {
     this.config = config;
+    this.corePublicSyncCoverageScheduler = new CorePublicSyncCoverageScheduler(
+      resolveCorePublicSyncBatchSize(config.syncCorePublicBatchSize),
+    );
     this.wallet = wallet;
     this.node = node;
     this.store = store;
@@ -1625,6 +1639,39 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
+  }
+
+  protected registerCorePublicSyncContextGraph(contextGraphId: string): boolean {
+    if ((this.config.nodeRole ?? 'edge') !== 'core') return false;
+    return this.corePublicSyncCoverageScheduler.register(contextGraphId);
+  }
+
+  protected unregisterCorePublicSyncContextGraph(contextGraphId: string): boolean {
+    return this.corePublicSyncCoverageScheduler.unregister(contextGraphId);
+  }
+
+  protected releaseCorePublicSyncPlanningLane(remotePeer: string): boolean {
+    return this.corePublicSyncCoverageScheduler.releasePlanningLane(remotePeer);
+  }
+
+  /**
+   * Produce the automatic tail for one Core peer round. The caller merges it
+   * with the live explicit scope so newly restored selections stay visible.
+   */
+  protected planAutomaticCorePublicSyncContextGraphsForPeerRound(remotePeer: string): string[] {
+    const selected = this.config.syncContextGraphs ?? [];
+    if ((this.config.nodeRole ?? 'edge') !== 'core') return [];
+    return this.corePublicSyncCoverageScheduler.plan(
+      selected,
+      this.config.syncContextGraphPriorities,
+      remotePeer,
+    ).coverageContextGraphIds;
+  }
+
+  getCorePublicSyncCoverageStatus(): CorePublicSyncCoverageStatus {
+    return this.corePublicSyncCoverageScheduler.getStatus(
+      (this.config.nodeRole ?? 'edge') === 'core',
+    );
   }
 
   /**

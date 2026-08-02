@@ -221,6 +221,29 @@ describe('/api/status finalization recovery health', () => {
   });
 });
 
+describe('/api/status Core public synchronization coverage', () => {
+  it('includes the exact bounded scheduler snapshot', async () => {
+    const corePublicSyncCoverage = {
+      enabled: true,
+      batchSize: 8,
+      trackedContextGraphs: 25,
+      planningLanes: 6,
+      lastPlanAt: 123,
+      lastPlan: {
+        selectedContextGraphs: 2,
+        coverageContextGraphs: 8,
+        totalContextGraphs: 10,
+      },
+    };
+    const response = await requestStatusWithAgent({
+      getCorePublicSyncCoverageStatus: () => corePublicSyncCoverage,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.corePublicSyncCoverage).toEqual(corePublicSyncCoverage);
+  });
+});
+
 describe('/api/status selected overlay details', () => {
   it('returns the network id and name for the selected overlay genesis', async () => {
     const network = await loadNetworkConfig('mainnet-gnosis');

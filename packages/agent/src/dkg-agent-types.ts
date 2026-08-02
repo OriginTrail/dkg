@@ -1246,6 +1246,12 @@ export interface DKGAgentConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /**
+   * Maximum automatically discovered public CGs a Core adds to one peer-sync
+   * round. Explicitly selected CGs are not capped. Defaults to 8; 0 disables
+   * automatic Core catch-up while preserving discovery and live hosting.
+   */
+  syncCorePublicBatchSize?: number;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /** Local requester/responder priority by Context Graph ID. Higher runs first. */
