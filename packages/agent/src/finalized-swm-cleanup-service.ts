@@ -62,6 +62,23 @@ function hasActiveStorePressure(snapshot: StorePressureSnapshot | undefined): bo
   ].some((count) => count > 0);
 }
 
+/**
+ * Split sweep failures into transient and terminal, because the two need
+ * opposite scheduling. A scheduler rejection is the store's own lane reporting
+ * saturation — the same condition {@link hasActiveStorePressure} samples, only
+ * raised as a throw because the load arrived after the gate rather than before
+ * it. Those must stay on the short retry path or the backlog strands until the
+ * periodic backstop.
+ *
+ * Everything else is terminal until proven otherwise and must NOT be retried on
+ * that cadence: a genuinely broken sweep would spin every few seconds forever,
+ * trading a stranded backlog for a hot loop. Widening this predicate therefore
+ * needs the same scrutiny as adding a retry.
+ */
+function isTransientStorePressure(error: unknown): boolean {
+  return error instanceof StoreSchedulerBusyError;
+}
+
 export interface FinalizedSwmCleanupServiceOptions {
   store: TripleStore;
   writeLocks?: Map<string, Promise<void>>;
@@ -189,7 +206,7 @@ export class FinalizedSwmCleanupService {
       // the periodic backstop for a transient, retryable reason. Every other
       // error still throws: an unknown fault must not hot-retry every few
       // seconds, and the backstop is the right cadence for it.
-      if (error instanceof StoreSchedulerBusyError) return deferredResult(0, 'pressure');
+      if (isTransientStorePressure(error)) return deferredResult(0, 'pressure');
       throw error;
     }
     const pending = this.resumeRotation(contextGraphIds);
@@ -209,7 +226,7 @@ export class FinalizedSwmCleanupService {
         metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
       } catch (error) {
         if (deadlineSignal.aborted) return yieldRotation('budget');
-        if (error instanceof StoreSchedulerBusyError) return yieldRotation('pressure');
+        if (isTransientStorePressure(error)) return yieldRotation('pressure');
         throw error;
       }
       // A context graph contributes to the rotation total only once every one of
@@ -231,7 +248,7 @@ export class FinalizedSwmCleanupService {
             });
           } catch (error) {
             if (deadlineSignal.aborted) return yieldRotation('budget');
-            if (error instanceof StoreSchedulerBusyError) return yieldRotation('pressure');
+            if (isTransientStorePressure(error)) return yieldRotation('pressure');
             throw error;
           }
           deletedItems += cleanup.deletedItems;
@@ -251,7 +268,7 @@ export class FinalizedSwmCleanupService {
           if (deadlineSignal.aborted) return yieldRotation('budget');
           // Also covers this method's own defensive pressure throw, which the
           // snapshot gate above races with rather than prevents.
-          if (error instanceof StoreSchedulerBusyError) return yieldRotation('pressure');
+          if (isTransientStorePressure(error)) return yieldRotation('pressure');
           throw error;
         }
         contextGraphBacklogDepth += backlog.depth;
