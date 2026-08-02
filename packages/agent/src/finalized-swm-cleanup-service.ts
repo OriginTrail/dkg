@@ -160,6 +160,11 @@ export class FinalizedSwmCleanupService {
 
     const deadline = this.now() + this.wallClockBudgetMs;
     const deadlineSignal = AbortSignal.timeout(this.wallClockBudgetMs);
+    // The signal bounds enumeration by wall clock, which nothing did before.
+    // It is not load-responsive preemption: pressure is sampled at boundaries
+    // only, and the background lane bounds concurrency rather than interrupting
+    // a query already running. Cutting an in-flight scan short when load
+    // arrives mid-enumeration remains an accepted gap.
     const discoveryOptions: QueryOptions = {
       priority: 'background',
       source: 'agent.finalizedSwmCleanup.discover',
