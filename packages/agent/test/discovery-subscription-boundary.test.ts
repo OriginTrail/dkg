@@ -746,6 +746,57 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 60_000);
 
+  it('keeps configured explicit Core scope authoritative over persisted automatic admission', async () => {
+    const contextGraphId = 'configured-over-persisted-automatic';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>([[
+      contextGraphId,
+      {
+        id: contextGraphId,
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: `0x${'9'.repeat(64)}`,
+        syncAdmission: 'automatic-public',
+        syncScoped: false,
+      },
+    ]]);
+    let agent: DKGAgent | undefined;
+
+    try {
+      agent = await DKGAgent.create({
+        name: 'ConfiguredCoreAdmissionOverride',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: new MockChainAdapter(),
+        syncContextGraphs: [contextGraphId],
+        contextGraphSubscriptionStore: {
+          loadAll: async () => [...persisted.values()].map((row) => ({ ...row })),
+          save: async (record) => { persisted.set(record.id, { ...record }); },
+          delete: async (id) => { persisted.delete(id); },
+        },
+      });
+
+      await agent.start();
+
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+      });
+      expect((agent as any).config.syncContextGraphs).toContain(contextGraphId);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
+      expect((agent as any).planCorePublicSyncPeerRound('configured-peer')).toMatchObject({
+        initialDurableContextGraphIds: [contextGraphId],
+        automaticContextGraphIds: [],
+      });
+      // The configured override is intentionally an operator overlay; the
+      // durable baseline remains automatic if the selection is later removed.
+      expect(persisted.get(contextGraphId)?.syncAdmission).toBe('automatic-public');
+    } finally {
+      await agent?.stop().catch(() => {});
+    }
+  }, 60_000);
+
   it('continues legacy Core rehydration after one access-policy lookup fails', async () => {
     const failingId = 'legacy-policy-a-fails';
     const validId = 'legacy-policy-b-valid';

@@ -7291,8 +7291,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const restorePendingMeta = hasJoinApproval && !approvedAgentAuthorized;
         const isLegacySyncAdmission = row.syncAdmission === undefined;
         const isConfiguredExplicit = configuredExplicitSyncContextGraphs.has(row.id);
-        let syncAdmission = row.syncAdmission
-          ?? (isConfiguredExplicit ? 'explicit' : row.syncScoped ? 'explicit' : 'none');
+        // Current operator configuration is the authoritative explicit lane,
+        // even when a prior daemon persisted this public CG as automatic.
+        // Keep that overlay live-only: removing the configured selection on a
+        // later restart should reveal the durable automatic-public baseline.
+        let syncAdmission = isConfiguredExplicit
+          ? 'explicit'
+          : row.syncAdmission ?? (row.syncScoped ? 'explicit' : 'none');
         if (
           isLegacySyncAdmission
           && !isConfiguredExplicit
