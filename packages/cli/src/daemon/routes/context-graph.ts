@@ -65,7 +65,7 @@ import {
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -115,7 +115,6 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
   classifyExistingContextGraphReadiness,
-  hasAuthoritativeContextGraphMetadata,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
@@ -168,7 +167,7 @@ import {
   type CatchupJob,
   type CatchupTracker,
 } from '../types.js';
-import { ContextGraphCatchupCoordinatorService } from '../context-graph-catchup-coordinator.js';
+import { createContextGraphCatchupRouteAdapter } from '../context-graph-catchup-route-adapter.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -1740,30 +1739,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: requestedSyncMode,
     });
     const effectiveSyncMode = appliedSubscription.syncMode;
-    const catchupCoordinator = new ContextGraphCatchupCoordinatorService(
-      catchupTracker,
-      {
-        runner: daemonState.catchupRunner!,
-        readReadiness: (id) => readContextGraphReadiness(dashDb, id),
-        hasConfirmedMeta: (id) => hasAuthoritativeContextGraphMetadata({
-          agent,
-          contextGraphId: id,
-        }),
-        isPrivate: (id) => agent.isPrivateContextGraph(id).catch(() => true),
-        writeReadiness: (id, patch) => writeContextGraphReadiness(dashDb, id, patch),
-        markSubscriptionState: (id, patch) =>
-          agent.markContextGraphSubscriptionState(id, patch),
-        emitProjectSynced: (id, payload) => {
-          agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-            contextGraphId: id,
-            ...payload,
-          });
-        },
-        ...(DEBUG_SYNC_TRACE
-          ? { trace: (message: string) => console.log(message) }
-          : {}),
-      },
-    );
+    const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+      tracker: catchupTracker,
+      runner: daemonState.catchupRunner!,
+      readinessStore: dashDb,
+      agent,
+      ...(DEBUG_SYNC_TRACE
+        ? { trace: (message: string) => console.log(message) }
+        : {}),
+    });
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);

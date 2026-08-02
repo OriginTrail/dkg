@@ -50,6 +50,15 @@ export interface ContextGraphReadinessPatch {
   sharedMemoryVerified: boolean;
 }
 
+/** Narrow capability required to decide whether local CG metadata is trusted. */
+export interface ContextGraphMetadataAuthority {
+  isCuratorOf?: (contextGraphId: string) => Promise<boolean>;
+  hasConfirmedMetaState: (
+    contextGraphId: string,
+    options?: { rejectUnregisteredPlaceholder?: boolean },
+  ) => Promise<boolean>;
+}
+
 export type ContextGraphReadinessPlanes = Omit<
   ContextGraphConvergenceSnapshot,
   'observedAt'
@@ -628,7 +637,7 @@ async function withContextGraphReadinessMutationLock<T>(
  * must reject the legacy unregistered placeholder shape.
  */
 export async function hasAuthoritativeContextGraphMetadata(input: {
-  agent: DKGAgent;
+  agent: ContextGraphMetadataAuthority;
   contextGraphId: string;
 }): Promise<boolean> {
   const locallyCurated = typeof input.agent.isCuratorOf === 'function'
