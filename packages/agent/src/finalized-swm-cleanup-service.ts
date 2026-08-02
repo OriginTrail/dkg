@@ -139,6 +139,15 @@ export class FinalizedSwmCleanupService {
    */
   private rotationHeadContextGraphId: string | null = null;
   private rotationHeadStalledSweeps = 0;
+  /**
+   * Where to begin the next slice's walk of one context graph's meta graphs.
+   * A graph whose meta graphs cannot all be measured inside one slice would
+   * otherwise restart at index 0 every time and yield at the same point, so
+   * everything past that point is never cleaned — the rotation cursor's own
+   * failure mode, one level down. Rotating the start covers them all across
+   * successive slices.
+   */
+  private metaGraphResumeCursor: { contextGraphId: string; offset: number } | null = null;
 
   constructor(options: FinalizedSwmCleanupServiceOptions) {
     this.store = options.store;
@@ -215,8 +224,18 @@ export class FinalizedSwmCleanupService {
       const contextGraphId = pending[index]!;
       // Yielding keeps the unvisited tail, so the cursor never advances past a
       // context graph this sweep did not finish measuring.
+      let metaGraphStart = 0;
+      let metaGraphsMeasured = 0;
       const yieldRotation = (reason: 'pressure' | 'budget'): FinalizedSwmCleanupSweepResult => {
         this.rotationPending = pending.slice(index);
+        // Resume the meta-graph walk past what this slice already measured, so
+        // a context graph too large for one slice still covers all of them.
+        if (metaGraphsMeasured > 0) {
+          this.metaGraphResumeCursor = {
+            contextGraphId,
+            offset: metaGraphStart + metaGraphsMeasured,
+          };
+        }
         return deferredResult(deletedItems, reason);
       };
       if (underPressure()) return yieldRotation('pressure');
@@ -228,6 +247,16 @@ export class FinalizedSwmCleanupService {
         if (deadlineSignal.aborted) return yieldRotation('budget');
         if (isTransientStorePressure(error)) return yieldRotation('pressure');
         throw error;
+      }
+      // Resume where the last slice stopped inside this context graph, wrapping,
+      // so a graph too large for one slice still reaches every meta graph rather
+      // than re-walking the same prefix. The walk still covers all of them, so
+      // the contribution below stays a whole-graph sum.
+      if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId && metaGraphs.length > 0) {
+        metaGraphStart = this.metaGraphResumeCursor.offset % metaGraphs.length;
+        if (metaGraphStart > 0) {
+          metaGraphs = [...metaGraphs.slice(metaGraphStart), ...metaGraphs.slice(0, metaGraphStart)];
+        }
       }
       // A context graph contributes to the rotation total only once every one of
       // its meta graphs has been measured. Yielding part-way discards the partial
@@ -281,7 +310,12 @@ export class FinalizedSwmCleanupService {
         ) {
           contextGraphOldestMarkerAt = backlog.oldestMarkerAt;
         }
+        metaGraphsMeasured += 1;
         await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      // Every meta graph was measured, so the next visit starts from the top.
+      if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId) {
+        this.metaGraphResumeCursor = null;
       }
       this.rotationBacklogDepth += contextGraphBacklogDepth;
       if (
