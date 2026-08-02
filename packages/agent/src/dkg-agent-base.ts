@@ -1085,6 +1085,9 @@ export class DKGAgentBase {
   protected readonly subscribedContextGraphs = new Map<string, NormalizedContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  /** Persisted admission hidden by a live-only configured explicit overlay. */
+  protected readonly contextGraphSubscriptionDurableAdmissionOverrides =
+    new Map<string, ContextGraphSyncAdmission>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();

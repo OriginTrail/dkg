@@ -52,6 +52,8 @@ export type ContextGraphSubscriptionPersistenceProjection =
 export function projectContextGraphSubscriptionPersistence(input: {
   contextGraphId: string;
   subscription: NormalizedContextGraphSub | undefined;
+  /** Durable baseline retained when current config overlays a different live admission. */
+  durableSyncAdmission?: ContextGraphSyncAdmission;
   /** Optional legacy-call override; current callers persist the live admission. */
   syncScoped?: boolean;
 }): ContextGraphSubscriptionPersistenceProjection {
@@ -65,9 +67,10 @@ export function projectContextGraphSubscriptionPersistence(input: {
 
   const persistMemberIntent = sub.syncMode !== 'on-demand';
   const syncAdmission = persistMemberIntent
-    ? input.syncScoped === undefined
-      ? sub.syncAdmission
-      : input.syncScoped ? 'explicit' : 'none'
+    ? input.durableSyncAdmission
+      ?? (input.syncScoped === undefined
+        ? sub.syncAdmission
+        : input.syncScoped ? 'explicit' : 'none')
     : 'none';
   return {
     action: 'save',

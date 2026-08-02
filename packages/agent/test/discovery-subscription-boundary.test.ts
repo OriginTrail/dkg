@@ -451,6 +451,61 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 30_000);
 
+  it('keeps an explicitly selected public Core graph uncapped after rediscovery', async () => {
+    const contextGraphId = 'explicit-public-rediscovery';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const agent = await DKGAgent.create({
+      name: 'ExplicitPublicRediscovery',
+      listenHost: '127.0.0.1',
+      nodeRole: 'core',
+      chainAdapter: new MockChainAdapter(),
+      syncCorePublicBatchSize: 0,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()].map((row) => ({ ...row })),
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (id) => { persisted.delete(id); },
+      },
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph(contextGraphId);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+      });
+      expect((agent as any).config.syncContextGraphs).toContain(contextGraphId);
+
+      agent.recordDiscoveredContextGraph(contextGraphId, {
+        name: 'Explicit Public Rediscovery',
+        accessPolicy: 'public',
+        onChainId: `0x${'5'.repeat(64)}`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+        onChainId: `0x${'5'.repeat(64)}`,
+      });
+      expect((agent as any).config.syncContextGraphs).toContain(contextGraphId);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
+      expect((agent as any).planCorePublicSyncPeerRound('explicit-peer')).toMatchObject({
+        initialDurableContextGraphIds: [contextGraphId],
+        automaticContextGraphIds: [],
+      });
+      expect(persisted.get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+        syncScoped: true,
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
   it('catalogues revealed chain entries while retaining their authoritative ID', async () => {
     const onChainId = `0x${'b'.repeat(64)}`;
     let accessPolicy = 0;
@@ -746,7 +801,7 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 60_000);
 
-  it('keeps configured explicit Core scope authoritative over persisted automatic admission', async () => {
+  it('keeps configured explicit Core scope live-only across an ordinary save and restart', async () => {
     const contextGraphId = 'configured-over-persisted-automatic';
     const persisted = new Map<string, ContextGraphSubscriptionRecord>([[
       contextGraphId,
@@ -761,7 +816,15 @@ describe('Context Graph discovery/subscription boundary', () => {
         syncScoped: false,
       },
     ]]);
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()].map((row) => ({ ...row })),
+      save: async (record: ContextGraphSubscriptionRecord) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (id: string) => { persisted.delete(id); },
+    };
     let agent: DKGAgent | undefined;
+    let restarted: DKGAgent | undefined;
 
     try {
       agent = await DKGAgent.create({
@@ -770,11 +833,8 @@ describe('Context Graph discovery/subscription boundary', () => {
         nodeRole: 'core',
         chainAdapter: new MockChainAdapter(),
         syncContextGraphs: [contextGraphId],
-        contextGraphSubscriptionStore: {
-          loadAll: async () => [...persisted.values()].map((row) => ({ ...row })),
-          save: async (record) => { persisted.set(record.id, { ...record }); },
-          delete: async (id) => { persisted.delete(id); },
-        },
+        syncCorePublicBatchSize: 1,
+        contextGraphSubscriptionStore: subscriptionStore,
       });
 
       await agent.start();
@@ -792,8 +852,41 @@ describe('Context Graph discovery/subscription boundary', () => {
       // The configured override is intentionally an operator overlay; the
       // durable baseline remains automatic if the selection is later removed.
       expect(persisted.get(contextGraphId)?.syncAdmission).toBe('automatic-public');
+
+      agent.markContextGraphSubscriptionState(contextGraphId, { metaSynced: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(persisted.get(contextGraphId)).toMatchObject({
+        metaSynced: true,
+        syncAdmission: 'automatic-public',
+        syncScoped: false,
+      });
+
+      await agent.stop();
+      agent = undefined;
+
+      restarted = await DKGAgent.create({
+        name: 'ConfiguredCoreAdmissionRemoved',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: new MockChainAdapter(),
+        syncCorePublicBatchSize: 1,
+        contextGraphSubscriptionStore: subscriptionStore,
+      });
+      await restarted.start();
+
+      expect(restarted.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        metaSynced: true,
+        syncAdmission: 'automatic-public',
+      });
+      expect((restarted as any).config.syncContextGraphs ?? []).not.toContain(contextGraphId);
+      expect(restarted.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(1);
+      expect((restarted as any).planCorePublicSyncPeerRound('automatic-peer')).toMatchObject({
+        automaticContextGraphIds: [contextGraphId],
+      });
     } finally {
       await agent?.stop().catch(() => {});
+      await restarted?.stop().catch(() => {});
     }
   }, 60_000);
 

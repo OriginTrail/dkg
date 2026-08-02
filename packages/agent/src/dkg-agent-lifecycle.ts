@@ -6553,6 +6553,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: canonicalNext,
+      durableSyncAdmission:
+        this.contextGraphSubscriptionDurableAdmissionOverrides.get(contextGraphId),
     });
     if (options?.persist !== false && persistence.action !== 'skip') {
       if (this.config.contextGraphSubscriptionStore) {
@@ -6762,6 +6764,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    this.contextGraphSubscriptionDurableAdmissionOverrides.delete(contextGraphId);
     return this.subscribedContextGraphs.delete(contextGraphId);
   }
 
@@ -6793,6 +6796,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: sub,
+      durableSyncAdmission:
+        this.contextGraphSubscriptionDurableAdmissionOverrides.get(contextGraphId),
     });
     if (persistence.action === 'skip') {
       // Some lifecycle paths persist reconciliation watermarks directly
@@ -6867,6 +6872,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: sub,
+      ...(subscription === undefined && syncScoped === undefined
+        ? {
+          durableSyncAdmission:
+            this.contextGraphSubscriptionDurableAdmissionOverrides.get(contextGraphId),
+        }
+        : {}),
       syncScoped,
     });
     if (persistence.action !== 'save' || !persistence.persistMemberIntent) {
@@ -7156,6 +7167,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
       const rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
+      this.contextGraphSubscriptionDurableAdmissionOverrides.clear();
       // Snapshot operator intent before rehydration mutates the live scope.
       // Legacy rows only persisted `syncScoped`, which cannot distinguish an
       // explicit selection from a public CG automatically discovered by an
@@ -7298,6 +7310,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         let syncAdmission = isConfiguredExplicit
           ? 'explicit'
           : row.syncAdmission ?? (row.syncScoped ? 'explicit' : 'none');
+        if (
+          isConfiguredExplicit
+          && row.syncAdmission !== undefined
+          && row.syncAdmission !== 'explicit'
+        ) {
+          this.contextGraphSubscriptionDurableAdmissionOverrides.set(
+            row.id,
+            row.syncAdmission,
+          );
+        }
         if (
           isLegacySyncAdmission
           && !isConfiguredExplicit

@@ -392,6 +392,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     syncMode?: 'on-demand' | 'always-on';
   }): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const removedConfiguredAdmissionOverlay = options?.trackSyncScope !== false
+      ? this.contextGraphSubscriptionDurableAdmissionOverrides.delete(contextGraphId)
+      : false;
     const syncAdmission = options?.trackSyncScope === false
       ? existing?.syncAdmission ?? 'none'
       : 'explicit';
@@ -433,6 +436,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         !existing?.subscribed
         || existing.syncMode !== syncMode
         || existing.syncAdmission !== syncAdmission
+        || removedConfiguredAdmissionOverlay
       ) {
         return this.setContextGraphSubscription(
           contextGraphId,
@@ -517,6 +521,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
+    this.contextGraphSubscriptionDurableAdmissionOverrides.delete(contextGraphId);
 
     // Drop every sync-admission lane through the canonical owner.
     this.reconcileContextGraphSyncAdmission(contextGraphId, {

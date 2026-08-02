@@ -1283,9 +1283,11 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     const beforeAdmission = this.subscribedContextGraphs.get(contextGraphId) ?? next;
+    const preserveExplicitAdmission = beforeAdmission.syncAdmission === 'explicit'
+      || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     const admission: ContextGraphSyncAdmission = !beforeAdmission.subscribed
       ? 'none'
-      : disposition === 'explicit-sync-scope'
+      : preserveExplicitAdmission || disposition === 'explicit-sync-scope'
         ? 'explicit'
         : disposition === 'automatic-public-coverage'
           ? 'automatic-public'

@@ -7,6 +7,8 @@ export interface ContextGraphSubscribeResponse {
   syncMode: ContextGraphSyncMode;
   catchup?: CatchupJobResult | {
     status: 'queued';
+    includeSharedMemory: boolean;
+    /** @deprecated Backward-compatible response alias for includeSharedMemory. */
     includeWorkspace: boolean;
     jobId: string;
   };

@@ -496,6 +496,41 @@ describe('ApiClient', () => {
       });
     });
 
+    it('subscribeToContextGraph() preserves both queued shared-memory scope fields', async () => {
+      const queuedResponse = {
+        subscribed: 'cg-queued',
+        syncMode: 'always-on' as const,
+        catchup: {
+          status: 'queued' as const,
+          includeSharedMemory: false,
+          includeWorkspace: false,
+          jobId: 'catchup-job-1',
+        },
+      };
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: queuedResponse,
+      });
+      globalThis.fetch = fetch;
+
+      const response = await client.subscribeToContextGraph('cg-queued', {
+        includeSharedMemory: false,
+      });
+
+      expect(response).toEqual(queuedResponse);
+      if (!response.catchup || !('jobId' in response.catchup)) {
+        throw new Error('Expected queued catch-up response');
+      }
+      expect(response.catchup.includeSharedMemory).toBe(false);
+      expect(response.catchup.includeWorkspace).toBe(false);
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-queued',
+        includeSharedMemory: false,
+        syncMode: 'always-on',
+      });
+    });
+
     it('subscribe() maps its deprecated workspace option to the canonical request key', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,
