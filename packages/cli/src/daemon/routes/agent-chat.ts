@@ -1177,6 +1177,7 @@ export function buildSloPayload(agent: {
   getFinalizedSwmCleanupStats?: () => {
     backlogDepth: number;
     oldestMarkerAgeMs: number | null;
+    backlogStale: boolean;
     pressureSkips: number;
     deletedItems: number;
     runs: number;
@@ -1232,6 +1233,13 @@ export function buildSloPayload(agent: {
     finalizedCleanup?: {
       backlogDepth: number;
       oldestMarkerAgeMs: number | null;
+      /**
+       * True while `backlogDepth`/`oldestMarkerAgeMs` are not a current
+       * whole-node measurement — the GC deferred on store pressure or its slice
+       * budget, or is part-way through a context-graph rotation. Depth 0 with
+       * this set means "unknown", not "drained".
+       */
+      backlogStale: boolean;
       pressureSkips: number;
       deletedItems: number;
       runs: number;

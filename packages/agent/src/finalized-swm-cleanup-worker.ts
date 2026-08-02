@@ -10,7 +10,12 @@
  */
 
 export interface FinalizedSwmCleanupSweepResult {
-  /** Cleanup tasks still requiring a safe idle pass after this sweep. */
+  /**
+   * Cleanup tasks still requiring a safe idle pass, as a whole-node total from
+   * the last context-graph rotation that ran to completion. Never a partial sum:
+   * a sweep that only covers part of a rotation republishes the previous total
+   * and sets {@link stale}.
+   */
   backlogDepth: number;
   /** Oldest surviving cleanup marker, or null when the backlog is empty/unknown. */
   oldestMarkerAt: number | null;
@@ -20,11 +25,23 @@ export interface FinalizedSwmCleanupSweepResult {
   pressureSkipped: boolean;
   /** True when the bounded slice yielded with more discovery work possible. */
   budgetExhausted?: boolean;
+  /**
+   * True when `backlogDepth`/`oldestMarkerAt` are not a current measurement —
+   * this sweep deferred on pressure or wall clock, or is part-way through a
+   * rotation. Distinguishes a deferred backlog from an empty one.
+   */
+  stale?: boolean;
 }
 
 export interface FinalizedSwmCleanupStats {
   backlogDepth: number;
   oldestMarkerAgeMs: number | null;
+  /**
+   * True until a full context-graph rotation has published a whole-node
+   * measurement, and again whenever the latest sweep deferred. While true,
+   * `backlogDepth` 0 / `oldestMarkerAgeMs` null mean "unknown", not "empty".
+   */
+  backlogStale: boolean;
   pressureSkips: number;
   deletedItems: number;
   runs: number;
@@ -56,6 +73,8 @@ export class FinalizedSwmCleanupWorker {
   private readonly stats: FinalizedSwmCleanupStats = {
     backlogDepth: 0,
     oldestMarkerAgeMs: null,
+    // Nothing has been measured yet, which is not the same as an empty backlog.
+    backlogStale: true,
     pressureSkips: 0,
     deletedItems: 0,
     runs: 0,
@@ -148,6 +167,7 @@ export class FinalizedSwmCleanupWorker {
     try {
       const result = await this.sweep();
       this.stats.backlogDepth = Math.max(0, Math.floor(result.backlogDepth));
+      this.stats.backlogStale = result.stale === true;
       this.oldestMarkerAt = result.oldestMarkerAt;
       this.stats.oldestMarkerAgeMs = this.oldestMarkerAt === null
         ? null

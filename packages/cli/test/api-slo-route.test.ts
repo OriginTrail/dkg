@@ -295,6 +295,7 @@ describe('/api/slo wire format (rc.9 PR-A / Codex PR #570 R10)', () => {
       getFinalizedSwmCleanupStats: () => ({
         backlogDepth: 12,
         oldestMarkerAgeMs: 45_000,
+        backlogStale: true,
         pressureSkips: 7,
         deletedItems: 31,
         runs: 9,
@@ -309,6 +310,9 @@ describe('/api/slo wire format (rc.9 PR-A / Codex PR #570 R10)', () => {
     expect((body as { swm: Record<string, unknown> }).swm.finalizedCleanup).toEqual({
       backlogDepth: 12,
       oldestMarkerAgeMs: 45_000,
+      // Deferred-vs-drained is the distinction operators page on; it must reach
+      // the wire, not just the in-process snapshot.
+      backlogStale: true,
       pressureSkips: 7,
       deletedItems: 31,
       runs: 9,

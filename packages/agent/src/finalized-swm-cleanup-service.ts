@@ -66,8 +66,16 @@ export interface FinalizedSwmCleanupServiceOptions {
   store: TripleStore;
   writeLocks?: Map<string, Promise<void>>;
   eventBus?: EventBus;
-  listContextGraphIds: () => Promise<string[]>;
-  listSharedMemoryMetaGraphs: (contextGraphId: string) => Promise<string[]>;
+  /**
+   * Both enumerations are handed the sweep's background query options, so an
+   * implementation that reaches the store keeps discovery off the foreground
+   * lane: a cold or past-revalidation graph-set index resolves its refresh
+   * priority from the caller (see GraphSetIndexStore.refreshPriority), where an
+   * absent priority defaults to `normal`. An implementation backed by a shared
+   * cache may ignore them — see the production wiring for why.
+   */
+  listContextGraphIds: (options: QueryOptions) => Promise<string[]>;
+  listSharedMemoryMetaGraphs: (contextGraphId: string, options: QueryOptions) => Promise<string[]>;
   now?: () => number;
   maxCandidatesPerSweep?: number;
   wallClockBudgetMs?: number;
@@ -82,15 +90,38 @@ export class FinalizedSwmCleanupService {
   private readonly store: TripleStore;
   private readonly writeLocks: Map<string, Promise<void>> | undefined;
   private readonly eventBus: EventBus | undefined;
-  private readonly listContextGraphIds: () => Promise<string[]>;
-  private readonly listSharedMemoryMetaGraphs: (contextGraphId: string) => Promise<string[]>;
+  private readonly listContextGraphIds: (options: QueryOptions) => Promise<string[]>;
+  private readonly listSharedMemoryMetaGraphs: (
+    contextGraphId: string,
+    options: QueryOptions,
+  ) => Promise<string[]>;
   private readonly now: () => number;
   private readonly maxCandidatesPerSweep: number;
   private readonly wallClockBudgetMs: number;
   private readonly graphWriteGen: GraphWriteGenSource | null;
   private readonly log = new Logger('FinalizedSwmCleanupService');
+  /** Whole-node totals from the last rotation that closed; never a partial sum. */
   private lastKnownBacklogDepth = 0;
   private lastKnownOldestMarkerAt: number | null = null;
+  /**
+   * Context graphs still owed a visit in the rotation currently in progress, or
+   * `null` when none is. Entry 0 doubles as the resumption cursor: a sweep that
+   * yields on pressure or wall clock persists its remaining tail here, so the
+   * next sweep continues instead of re-walking the same prefix forever and
+   * never reaching markers in later context graphs.
+   */
+  private rotationPending: string[] | null = null;
+  private rotationBacklogDepth = 0;
+  private rotationOldestMarkerAt: number | null = null;
+  /**
+   * Head of the rotation the previous sweep started from, and how many
+   * consecutive sweeps have started from it without completing it. A context
+   * graph whose enumeration cannot finish inside one slice would otherwise hold
+   * the cursor forever and starve every context graph behind it — the same
+   * "later context graphs are never reached" failure the cursor exists to fix.
+   */
+  private rotationHeadContextGraphId: string | null = null;
+  private rotationHeadStalledSweeps = 0;
 
   constructor(options: FinalizedSwmCleanupServiceOptions) {
     this.store = options.store;
@@ -109,48 +140,71 @@ export class FinalizedSwmCleanupService {
 
   /** Run one bounded, idle-only maintenance slice. */
   async runSweep(): Promise<FinalizedSwmCleanupSweepResult> {
-    const pressureResult = (deletedItems = 0): FinalizedSwmCleanupSweepResult => ({
+    // A deferred sweep republishes the last rotation's whole-node totals rather
+    // than a partial sum, and marks them stale so the SLO surface can tell
+    // "deferred under load" apart from "nothing to do" — the distinction an
+    // operator needs while only `pressureSkips` is moving.
+    const deferredResult = (
+      deletedItems: number,
+      reason: 'pressure' | 'budget',
+    ): FinalizedSwmCleanupSweepResult => ({
       backlogDepth: this.lastKnownBacklogDepth,
       oldestMarkerAt: this.lastKnownOldestMarkerAt,
       deletedItems,
-      pressureSkipped: true,
-    });
-    const budgetResult = (
-      backlogDepth: number,
-      oldestMarkerAt: number | null,
-      deletedItems: number,
-    ): FinalizedSwmCleanupSweepResult => ({
-      backlogDepth: Math.max(backlogDepth, this.lastKnownBacklogDepth),
-      oldestMarkerAt: oldestMarkerAt ?? this.lastKnownOldestMarkerAt,
-      deletedItems,
-      pressureSkipped: false,
-      budgetExhausted: true,
+      pressureSkipped: reason === 'pressure',
+      ...(reason === 'budget' ? { budgetExhausted: true } : {}),
+      stale: true,
     });
     const underPressure = () => hasActiveStorePressure(this.store.getPressureSnapshot?.());
-    if (underPressure()) return pressureResult();
+    if (underPressure()) return deferredResult(0, 'pressure');
 
     const deadline = this.now() + this.wallClockBudgetMs;
     const deadlineSignal = AbortSignal.timeout(this.wallClockBudgetMs);
+    const discoveryOptions: QueryOptions = {
+      priority: 'background',
+      source: 'agent.finalizedSwmCleanup.discover',
+      signal: deadlineSignal,
+    };
     let remaining = this.maxCandidatesPerSweep;
     let deletedItems = 0;
-    let backlogDepth = 0;
-    let oldestMarkerAt: number | null = null;
 
     // Pressure is checked before every discovery boundary, including the first
     // potentially expensive context-graph enumeration.
-    if (underPressure()) return pressureResult();
-    const contextGraphIds = await this.listContextGraphIds();
-    for (const contextGraphId of contextGraphIds) {
-      if (underPressure()) return pressureResult(deletedItems);
-      if (this.now() >= deadline) {
-        return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
+    if (underPressure()) return deferredResult(0, 'pressure');
+    let contextGraphIds: string[];
+    try {
+      contextGraphIds = await this.listContextGraphIds(discoveryOptions);
+    } catch (error) {
+      if (deadlineSignal.aborted) return deferredResult(0, 'budget');
+      throw error;
+    }
+    const pending = this.resumeRotation(contextGraphIds);
+
+    for (let index = 0; index < pending.length; index += 1) {
+      const contextGraphId = pending[index]!;
+      // Yielding keeps the unvisited tail, so the cursor never advances past a
+      // context graph this sweep did not finish measuring.
+      const yieldRotation = (reason: 'pressure' | 'budget'): FinalizedSwmCleanupSweepResult => {
+        this.rotationPending = pending.slice(index);
+        return deferredResult(deletedItems, reason);
+      };
+      if (underPressure()) return yieldRotation('pressure');
+      if (this.now() >= deadline) return yieldRotation('budget');
+      let metaGraphs: string[];
+      try {
+        metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
+      } catch (error) {
+        if (deadlineSignal.aborted) return yieldRotation('budget');
+        throw error;
       }
-      const metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId);
+      // A context graph contributes to the rotation total only once every one of
+      // its meta graphs has been measured. Yielding part-way discards the partial
+      // sum, so the re-measure on resume cannot double-count it.
+      let contextGraphBacklogDepth = 0;
+      let contextGraphOldestMarkerAt: number | null = null;
       for (const swmMetaGraph of metaGraphs) {
-        if (underPressure()) return pressureResult(deletedItems);
-        if (this.now() >= deadline) {
-          return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-        }
+        if (underPressure()) return yieldRotation('pressure');
+        if (this.now() >= deadline) return yieldRotation('budget');
         if (remaining > 0) {
           let cleanup: { deletedItems: number; examinedCandidates: number };
           try {
@@ -161,41 +215,106 @@ export class FinalizedSwmCleanupService {
               signal: deadlineSignal,
             });
           } catch (error) {
-            if (deadlineSignal.aborted) {
-              return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-            }
+            if (deadlineSignal.aborted) return yieldRotation('budget');
             throw error;
           }
           deletedItems += cleanup.deletedItems;
           remaining -= cleanup.examinedCandidates;
         }
-        if (underPressure()) return pressureResult(deletedItems);
-        if (this.now() >= deadline) {
-          return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-        }
+        if (underPressure()) return yieldRotation('pressure');
+        if (this.now() >= deadline) return yieldRotation('budget');
+        // Deliberately not gated on `remaining`: that budget bounds deletion
+        // work (head resolution, VM/SWM verification, lock, atomic replace),
+        // while this is one cheap background aggregate and the sole source of
+        // the backlog metric. Capping the metric with the deletion budget would
+        // make it under-report exactly when the backlog is deepest.
         let backlog: { depth: number; oldestMarkerAt: number | null };
         try {
           backlog = await this.inspectBacklog(swmMetaGraph, deadlineSignal);
         } catch (error) {
-          if (deadlineSignal.aborted) {
-            return budgetResult(backlogDepth, oldestMarkerAt, deletedItems);
-          }
+          if (deadlineSignal.aborted) return yieldRotation('budget');
           throw error;
         }
-        backlogDepth += backlog.depth;
+        contextGraphBacklogDepth += backlog.depth;
         if (
           backlog.oldestMarkerAt !== null
-          && (oldestMarkerAt === null || backlog.oldestMarkerAt < oldestMarkerAt)
+          && (
+            contextGraphOldestMarkerAt === null
+            || backlog.oldestMarkerAt < contextGraphOldestMarkerAt
+          )
         ) {
-          oldestMarkerAt = backlog.oldestMarkerAt;
+          contextGraphOldestMarkerAt = backlog.oldestMarkerAt;
         }
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
+      this.rotationBacklogDepth += contextGraphBacklogDepth;
+      if (
+        contextGraphOldestMarkerAt !== null
+        && (
+          this.rotationOldestMarkerAt === null
+          || contextGraphOldestMarkerAt < this.rotationOldestMarkerAt
+        )
+      ) {
+        this.rotationOldestMarkerAt = contextGraphOldestMarkerAt;
+      }
     }
 
-    this.lastKnownBacklogDepth = backlogDepth;
-    this.lastKnownOldestMarkerAt = oldestMarkerAt;
-    return { backlogDepth, oldestMarkerAt, deletedItems, pressureSkipped: false };
+    // The rotation closed: every context graph was measured exactly once, so the
+    // accumulated sums are a whole-node total again.
+    this.lastKnownBacklogDepth = this.rotationBacklogDepth;
+    this.lastKnownOldestMarkerAt = this.rotationOldestMarkerAt;
+    this.rotationPending = null;
+    this.rotationBacklogDepth = 0;
+    this.rotationOldestMarkerAt = null;
+    this.rotationHeadContextGraphId = null;
+    this.rotationHeadStalledSweeps = 0;
+    return {
+      backlogDepth: this.lastKnownBacklogDepth,
+      oldestMarkerAt: this.lastKnownOldestMarkerAt,
+      deletedItems,
+      pressureSkipped: false,
+      stale: false,
+    };
+  }
+
+  /**
+   * Continue the rotation in progress, dropping context graphs that disappeared
+   * since it started, or open a fresh one. Context graphs created mid-rotation
+   * join the next rotation rather than this one; `stale` reports the lag.
+   *
+   * Guarantees forward progress: a head that three consecutive sweeps could not
+   * finish moves to the back of the rotation so the context graphs behind it are
+   * still served. It keeps its place in the rotation and is retried there.
+   */
+  private resumeRotation(contextGraphIds: string[]): string[] {
+    let pending: string[];
+    if (this.rotationPending === null) {
+      this.rotationBacklogDepth = 0;
+      this.rotationOldestMarkerAt = null;
+      pending = [...contextGraphIds];
+    } else {
+      const known = new Set(contextGraphIds);
+      pending = this.rotationPending.filter((contextGraphId) => known.has(contextGraphId));
+    }
+
+    const head = pending[0] ?? null;
+    if (head !== null && head === this.rotationHeadContextGraphId) {
+      this.rotationHeadStalledSweeps += 1;
+    } else {
+      this.rotationHeadContextGraphId = head;
+      this.rotationHeadStalledSweeps = 0;
+    }
+    if (this.rotationHeadStalledSweeps >= 2 && pending.length > 1) {
+      this.log.warn(
+        createOperationContext('system'),
+        `Deferring context graph ${head} in finalized-SWM cleanup rotation; `
+          + `${this.rotationHeadStalledSweeps + 1} consecutive slices could not finish it`,
+      );
+      pending = [...pending.slice(1), pending[0]!];
+      this.rotationHeadContextGraphId = pending[0] ?? null;
+      this.rotationHeadStalledSweeps = 0;
+    }
+    return pending;
   }
 
   /** Narrow test seam for one already-known SWM metadata graph. */
