@@ -211,7 +211,6 @@ interface CapacityCounters {
 interface CapacityControllerState {
   readonly window: Readonly<CapacityWindow>;
   readonly counters: Readonly<CapacityCounters>;
-  readonly state: AdaptiveCapacityState;
   readonly cooldownUntilMs: number;
   readonly storePressureTelemetryAvailable: boolean;
 }
@@ -324,7 +323,6 @@ function buildTransition(
   next: {
     window?: Readonly<CapacityWindow>;
     counters?: Readonly<CapacityCounters>;
-    state: AdaptiveCapacityState;
     cooldownUntilMs?: number;
   },
 ): CapacityTransition {
@@ -334,7 +332,6 @@ function buildTransition(
     next: {
       window: next.window ?? context.current.window,
       counters: next.counters ?? context.current.counters,
-      state: next.state,
       cooldownUntilMs: next.cooldownUntilMs ?? context.current.cooldownUntilMs,
       storePressureTelemetryAvailable: context.sample.store.telemetryAvailable,
     },
@@ -344,10 +341,9 @@ function buildTransition(
 function holdCapacity(
   context: CapacityTransitionContext,
   reason: AdaptiveCapacityReason,
-  state: AdaptiveCapacityState,
   counters: Readonly<CapacityCounters> = context.current.counters,
 ): CapacityTransition {
-  return buildTransition(context, 'hold', reason, { state, counters });
+  return buildTransition(context, 'hold', reason, { counters });
 }
 
 function halveCapacity(
@@ -362,7 +358,6 @@ function halveCapacity(
         : 0,
     },
     counters: { strainedSamples: 0, healthyDemandSamples: 0 },
-    state: 'constrained',
     cooldownUntilMs: atMs + cooldownMs,
   });
 }
@@ -379,7 +374,6 @@ function decreaseCapacity(
         : 0,
     },
     counters: { strainedSamples: 0, healthyDemandSamples: 0 },
-    state: 'constrained',
     cooldownUntilMs: atMs + cooldownMs,
   });
 }
@@ -396,7 +390,6 @@ function increaseCapacity(
       coverageBatch: current.window.coverageBatch + (coverageCanGrow ? 1 : 0),
     },
     counters: { strainedSamples: 0, healthyDemandSamples: 0 },
-    state: 'cooldown',
     cooldownUntilMs: atMs + cooldownMs,
   });
 }
@@ -423,7 +416,6 @@ function calculateCapacityTransition(
       return holdCapacity(
         context,
         'strained_hysteresis',
-        waitingForCooldown ? 'cooldown' : 'warming',
         { strainedSamples, healthyDemandSamples: 0 },
       );
     }
@@ -438,7 +430,6 @@ function calculateCapacityTransition(
     return holdCapacity(
       context,
       classified.reason,
-      waitingForCooldown ? 'cooldown' : 'warming',
       { strainedSamples: 0, healthyDemandSamples: 0 },
     );
   }
@@ -447,7 +438,6 @@ function calculateCapacityTransition(
     return holdCapacity(
       context,
       'no_demand',
-      waitingForCooldown ? 'cooldown' : 'healthy',
       { strainedSamples: 0, healthyDemandSamples: 0 },
     );
   }
@@ -461,12 +451,11 @@ function calculateCapacityTransition(
     return holdCapacity(
       context,
       'healthy_hysteresis',
-      waitingForCooldown ? 'cooldown' : 'warming',
       healthyCounters,
     );
   }
   if (waitingForCooldown) {
-    return holdCapacity(context, 'cooldown', 'cooldown', healthyCounters);
+    return holdCapacity(context, 'cooldown', healthyCounters);
   }
 
   const growthInflightCeiling = sample.store.telemetryAvailable
@@ -481,12 +470,48 @@ function calculateCapacityTransition(
       !sample.store.telemetryAvailable && current.window.inflight < bounds.maxInflight
         ? 'store_telemetry_growth_cap'
         : 'at_maximum',
-      sample.store.telemetryAvailable ? 'healthy' : 'constrained',
       healthyCounters,
     );
   }
 
   return increaseCapacity(context, inflightCanGrow, coverageCanGrow);
+}
+
+function deriveAdaptiveCapacityState(
+  current: Readonly<CapacityControllerState>,
+  lastDecision: Readonly<AdaptiveCapacityDecision>,
+): AdaptiveCapacityState {
+  if (lastDecision.action === 'halve' || lastDecision.action === 'decrease') {
+    return 'constrained';
+  }
+  if (lastDecision.action === 'increase') return 'cooldown';
+
+  switch (lastDecision.reason) {
+    case 'warming':
+      return 'warming';
+    case 'cooldown':
+      return 'cooldown';
+    case 'no_demand':
+      return lastDecision.atMs < current.cooldownUntilMs ? 'cooldown' : 'healthy';
+    case 'ambiguous_signals':
+    case 'strained_hysteresis':
+    case 'healthy_hysteresis':
+      return lastDecision.atMs < current.cooldownUntilMs ? 'cooldown' : 'warming';
+    case 'at_maximum':
+      return current.storePressureTelemetryAvailable ? 'healthy' : 'constrained';
+    case 'store_telemetry_growth_cap':
+    case 'critical_ack_queue':
+    case 'critical_health_queue':
+    case 'critical_store_saturated':
+    case 'critical_store_stalled':
+    case 'critical_heap':
+    case 'critical_event_loop':
+    case 'strained_store_queue':
+    case 'strained_cpu':
+    case 'strained_heap':
+    case 'strained_event_loop':
+      return 'constrained';
+  }
 }
 
 /**
@@ -529,7 +554,6 @@ export class AdaptiveCapacityController {
         coverageBatch: bounds.configuredCoverageBatch,
       },
       counters: { strainedSamples: 0, healthyDemandSamples: 0 },
-      state: 'warming',
       cooldownUntilMs: createdAt + this.cooldownMs,
       storePressureTelemetryAvailable: false,
     };
@@ -571,7 +595,7 @@ export class AdaptiveCapacityController {
   getStatus(): AdaptiveCapacityStatus {
     const { window, counters } = this.controllerState;
     return Object.freeze({
-      state: this.controllerState.state,
+      state: deriveAdaptiveCapacityState(this.controllerState, this.lastDecision),
       currentInflight: window.inflight,
       minInflight: this.bounds.minInflight,
       maxInflight: this.bounds.maxInflight,

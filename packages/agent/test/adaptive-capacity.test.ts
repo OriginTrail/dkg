@@ -151,6 +151,51 @@ describe('adaptive sync capacity controller', () => {
     });
   });
 
+  it('derives presentation state from cooldown, decision, and telemetry facts', () => {
+    const idle = controller({ initialInflight: 2, maxInflight: 2 });
+
+    expect(idle.observe(healthySample({ demand: false }), 1_000)).toMatchObject({
+      state: 'cooldown',
+      cooldownUntilMs: 30_000,
+      lastDecision: { action: 'hold', reason: 'no_demand', atMs: 1_000 },
+    });
+    expect(idle.observe(healthySample({ demand: false }), 30_000)).toMatchObject({
+      state: 'healthy',
+      cooldownUntilMs: 30_000,
+      lastDecision: { action: 'hold', reason: 'no_demand', atMs: 30_000 },
+    });
+    expect(idle.observe({
+      demand: true,
+      heapRatio: 0.65,
+      store: { telemetryAvailable: false },
+    }, 31_000)).toMatchObject({
+      state: 'warming',
+      lastDecision: { action: 'hold', reason: 'ambiguous_signals' },
+    });
+
+    const withStoreTelemetry = controller({ initialInflight: 2, maxInflight: 2 });
+    const withoutStoreTelemetry = controller({ initialInflight: 2, maxInflight: 2 });
+    let telemetryStatus = withStoreTelemetry.getStatus();
+    let noTelemetryStatus = withoutStoreTelemetry.getStatus();
+    for (let sample = 1; sample <= 6; sample += 1) {
+      telemetryStatus = withStoreTelemetry.observe(healthySample(), sample * 5_000);
+      noTelemetryStatus = withoutStoreTelemetry.observe(healthySample({
+        store: { telemetryAvailable: false },
+      }), sample * 5_000);
+    }
+
+    expect(telemetryStatus).toMatchObject({
+      state: 'healthy',
+      storePressureTelemetryAvailable: true,
+      lastDecision: { action: 'hold', reason: 'at_maximum' },
+    });
+    expect(noTelemetryStatus).toMatchObject({
+      state: 'constrained',
+      storePressureTelemetryAvailable: false,
+      lastDecision: { action: 'hold', reason: 'at_maximum' },
+    });
+  });
+
   it.each([
     ['ACK work', healthySample({ store: { ...healthyStore, ackQueued: 1 } }), 'critical_ack_queue'],
     ['health work', healthySample({ store: { ...healthyStore, healthQueued: 1 } }), 'critical_health_queue'],
