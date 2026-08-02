@@ -480,6 +480,23 @@ describe('ApiClient', () => {
       });
     });
 
+    it('subscribe() keeps the legacy restart-durable lifetime explicit', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-legacy', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribe('cg-legacy', { includeWorkspace: true });
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-legacy',
+        includeWorkspace: true,
+        syncMode: 'always-on',
+      });
+    });
+
     it('sendChat() sends correct body', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { delivered: true } });
       globalThis.fetch = fetch;

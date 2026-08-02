@@ -1072,13 +1072,13 @@ export async function bootstrapConfiguredContextGraphs(input: {
         input.log(
           `Context graph "${contextGraphId}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`,
         );
-        input.agent.subscribeToContextGraph(contextGraphId);
+        input.agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
       }
       continue;
     }
 
     const existing = input.agent.getSubscribedContextGraphs().get(contextGraphId);
-    input.agent.subscribeToContextGraph(contextGraphId);
+    input.agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
 
     let hasAuthoritativeMetadata = false;
     let locallyCurated = false;

@@ -1255,6 +1255,7 @@ export class DKGAgent extends DKGAgentBase {
     if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
       this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: options.trackSyncScope,
+        syncMode: 'always-on',
       });
     }
 
