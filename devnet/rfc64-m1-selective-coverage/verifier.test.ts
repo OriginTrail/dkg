@@ -497,10 +497,12 @@ test('scheduled Core IDs require exact same-round terminal completions', () => {
 });
 
 test('corpus and evidence serialization is deterministic', () => {
+  const canonical = canonicalJson({ z: { second: 2, first: 1 }, a: ['@', ':', '/'] });
   assert.equal(
-    canonicalJson({ z: { second: 2, first: 1 }, a: ['@', ':', '/'] }),
+    canonical,
     canonicalJson({ a: ['@', ':', '/'], z: { first: 1, second: 2 } }),
   );
+  assert.equal(canonical, '{"a":["@",":","/"],"z":{"first":1,"second":2}}');
   const rebuilt = createSelectiveCoverageCorpus({
     networkId: corpus.networkId,
     coreAutomaticBatchSize: corpus.coreAutomaticBatchSize,

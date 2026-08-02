@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
@@ -11,13 +10,15 @@ import {
 } from '../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
 import {
   canonicalJson,
-  type ExpectedSelectiveCoverageProvenanceV1,
-  type SelectiveCoverageCorpusV1,
 } from './manifest.ts';
 import { ProcessSelectiveCoverageRuntimeV1 } from './process-runtime.ts';
 import { collectSelectiveCoverageEvidenceV1 } from './runtime.ts';
 import { runSelectiveCoverageLiveV1 } from './live-runner.ts';
 import { buildSelectiveCoverageAdapterEnvironment } from './adapter-environment.ts';
+import {
+  readExpectedSelectiveCoverageProvenance,
+  readSelectiveCoverageCorpus,
+} from './operator-input.ts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const corpusPath = resolveRequiredPath('DKG_RFC64_M1_CORPUS_FILE');
@@ -34,8 +35,8 @@ const adapterArgs = parseStringArray(
 const adapterCwd = resolve(process.env['DKG_RFC64_M1_ADAPTER_CWD'] ?? repoRoot);
 const timeoutMs = parseTimeout(process.env['DKG_RFC64_M1_ADAPTER_TIMEOUT_MS']);
 
-const corpus = readJson(corpusPath) as SelectiveCoverageCorpusV1;
-const expectedProvenance = readJson(trustAnchorPath) as ExpectedSelectiveCoverageProvenanceV1;
+const corpus = readSelectiveCoverageCorpus(corpusPath);
+const expectedProvenance = readExpectedSelectiveCoverageProvenance(trustAnchorPath);
 const sourceCommit = readCleanRepositoryHead(repoRoot);
 if (sourceCommit !== expectedProvenance.testedHeadCommit) {
   throw new Error('M1 trust anchor names a different checked-out source commit');
@@ -80,14 +81,6 @@ function requiredEnvironment(name: string): string {
 
 function resolveRequiredPath(name: string): string {
   return resolve(requiredEnvironment(name));
-}
-
-function readJson(path: string): unknown {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'));
-  } catch (error) {
-    throw new Error(`Could not read M1 JSON input: ${path}`, { cause: error });
-  }
 }
 
 function parseStringArray(value: string, label: string): string[] {

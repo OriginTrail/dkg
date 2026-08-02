@@ -57,9 +57,25 @@ export function readCleanRepositoryHead(repoRootInput: string): string {
   return head;
 }
 
-export function stableJson(value: unknown): string {
-  const normalized = normalizePlainJsonValue(value, '$', new WeakSet<object>());
-  return `${JSON.stringify(normalized, null, 2)}\n`;
+export interface StableJsonOptions {
+  readonly format?: 'pretty' | 'compact';
+  readonly trailingLf?: boolean;
+  readonly numbers?: 'finite' | 'safe-integer';
+}
+
+export function stableJson(value: unknown, options: StableJsonOptions = {}): string {
+  const normalized = normalizePlainJsonValue(
+    value,
+    '$',
+    new WeakSet<object>(),
+    options.numbers ?? 'finite',
+  );
+  const encoded = JSON.stringify(
+    normalized,
+    null,
+    options.format === 'compact' ? undefined : 2,
+  );
+  return options.trailingLf === false ? encoded : `${encoded}\n`;
 }
 
 export function atomicWriteStableJson(
@@ -143,12 +159,14 @@ function normalizePlainJsonValue(
   value: unknown,
   path: string,
   seen: WeakSet<object>,
+  numbers: NonNullable<StableJsonOptions['numbers']>,
 ): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
   }
   if (typeof value === 'number') {
-    if (!Number.isFinite(value) || Object.is(value, -0)) {
+    if (!Number.isFinite(value) || Object.is(value, -0)
+      || (numbers === 'safe-integer' && !Number.isSafeInteger(value))) {
       throw new TypeError(`${path} contains a non-lossless JSON number`);
     }
     return value;
@@ -184,7 +202,7 @@ function normalizePlainJsonValue(
       if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
         throw new TypeError(`${path}[${index}] is not an enumerable data property`);
       }
-      return normalizePlainJsonValue(descriptor.value, `${path}[${index}]`, seen);
+      return normalizePlainJsonValue(descriptor.value, `${path}[${index}]`, seen, numbers);
     });
   }
 
@@ -202,7 +220,7 @@ function normalizePlainJsonValue(
       if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) {
         throw new TypeError(`${path}.${key} is not an enumerable data property`);
       }
-      return [key, normalizePlainJsonValue(descriptor.value, `${path}.${key}`, seen)];
+      return [key, normalizePlainJsonValue(descriptor.value, `${path}.${key}`, seen, numbers)];
     })
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
   return Object.fromEntries(entries);

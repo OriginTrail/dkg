@@ -21,9 +21,15 @@ import {
   type SyncCoverageJournalReferenceV1,
 } from './manifest.ts';
 import { parseSyncCoverageJournalReferenceV1 } from './sync-coverage-journal.ts';
+import {
+  closedArray,
+  closedRecord,
+  identifier,
+  nonNegativeInteger,
+  positiveInteger,
+} from './boundary-codec.ts';
 
 const DIGEST = /^(?:0x|sha256:)[0-9a-f]{64}$/u;
-const ID = /^[A-Za-z0-9._:/@-]+$/u;
 
 /** Canonical closed-schema decoder shared by artifact and process boundaries. */
 export function decodeSelectiveCoverageEvidence(
@@ -35,7 +41,7 @@ export function decodeSelectiveCoverageEvidence(
   if (!root || root.schema !== SELECTIVE_COVERAGE_EVIDENCE_SCHEMA) return undefined;
   const provenance = parseProvenance(root.provenance);
   const automaticJournalEvidence = parseAutomaticJournalEvidence(root.automaticJournalEvidence);
-  const corpus = parseCorpus(root.corpus);
+  const corpus = decodeSelectiveCoverageCorpus(root.corpus);
   const publisher = closedRecord(root.publisher, ['selected', 'final']);
   const edge = closedRecord(root.edge, [
     'beforeSelection', 'afterSelection', 'afterRestart', 'afterSecondOnDemand', 'operations',
@@ -246,7 +252,9 @@ function parseJournalProcessIdentity(
   return { processStartedAt: root.processStartedAt, evidenceWaveId };
 }
 
-function parseCorpus(input: unknown): SelectiveCoverageCorpusV1 | undefined {
+export function decodeSelectiveCoverageCorpus(
+  input: unknown,
+): SelectiveCoverageCorpusV1 | undefined {
   const root = closedRecord(input, [
     'schema', 'networkId', 'coreAutomaticBatchSize', 'coreCoverageRoundLimit',
     'graphs', 'manifestDigest',
@@ -394,48 +402,6 @@ function parseObservation(input: unknown): PlaneObservationV1 | undefined {
   };
 }
 
-export function closedRecord(
-  value: unknown,
-  keys: readonly string[],
-): Record<string, unknown> | undefined {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)
-    || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
-  const ownKeys = Reflect.ownKeys(value);
-  if (ownKeys.some((key) => typeof key !== 'string')) return undefined;
-  const actual = (ownKeys as string[]).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    return undefined;
-  }
-  if (actual.some((key) => {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return !descriptor?.enumerable || !('value' in descriptor);
-  })) return undefined;
-  return value as Record<string, unknown>;
-}
-
-export function closedArray(
-  value: unknown,
-  minimum: number,
-  maximum: number,
-): value is unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype
-    || value.length < minimum || value.length > maximum) return false;
-  const expected = new Set<PropertyKey>(['length']);
-  for (let index = 0; index < value.length; index += 1) expected.add(String(index));
-  const ownKeys = Reflect.ownKeys(value);
-  if (ownKeys.length !== expected.size || ownKeys.some((key) => !expected.has(key))) return false;
-  for (let index = 0; index < value.length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (!descriptor?.enumerable || !('value' in descriptor)) return false;
-  }
-  return true;
-}
-
-export function identifier(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length <= 256 && ID.test(value) ? value : undefined;
-}
-
 function digest(value: unknown): string | undefined {
   return typeof value === 'string' && DIGEST.test(value) ? value : undefined;
 }
@@ -448,12 +414,4 @@ function parseEdgePolicy(value: unknown): EdgeCoveragePolicy | undefined {
   return value === 'on-demand' || value === 'always-on' || value === 'unselected'
     ? value
     : undefined;
-}
-
-export function nonNegativeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
-}
-
-export function positiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
 }

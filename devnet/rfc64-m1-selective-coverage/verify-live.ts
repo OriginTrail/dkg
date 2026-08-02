@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { readCleanRepositoryHead } from '../rfc64-persistence-lifecycle/evidence.ts';
 import { buildGate2RuntimeManifestV1 } from
   '../rfc64-gate2-multi-asset-completeness/runtime-provenance.ts';
-import type { ExpectedSelectiveCoverageProvenanceV1 } from './manifest.ts';
+import { readExpectedSelectiveCoverageProvenance } from './operator-input.ts';
 import { verifySelectiveCoverage } from './verifier.ts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
@@ -13,9 +13,7 @@ const artifactPath = resolve(
   process.env['DKG_RFC64_M1_ARTIFACT']
     ?? resolve(import.meta.dirname, 'artifacts/selective-coverage-evidence.json'),
 );
-const expected = JSON.parse(
-  readFileSync(trustAnchorPath, 'utf8'),
-) as ExpectedSelectiveCoverageProvenanceV1;
+const expected = readExpectedSelectiveCoverageProvenance(trustAnchorPath);
 const sourceCommit = readCleanRepositoryHead(repoRoot);
 if (sourceCommit !== expected.testedHeadCommit) {
   throw new Error('M1 trust anchor names a different checked-out source commit');

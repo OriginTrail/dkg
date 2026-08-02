@@ -5,6 +5,14 @@ import type {
   SyncCoverageJournalReferenceV1,
 } from './manifest.ts';
 import { MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY } from './manifest.ts';
+import {
+  boundedString,
+  closedArray,
+  closedRecord,
+  nonNegativeInteger,
+  plainRecord,
+  positiveInteger,
+} from './boundary-codec.ts';
 
 const JOURNAL_CAPACITY = 256;
 const MAX_CONTEXT_GRAPH_ID_LENGTH = 256;
@@ -18,12 +26,9 @@ export type {
 export function parseSyncCoverageJournalReferenceV1(
   input: unknown,
 ): SyncCoverageJournalReferenceV1 | undefined {
-  if (!isPlainRecord(input)
-    || Reflect.ownKeys(input).length !== 2
-    || !Object.hasOwn(input, 'snapshot')
-    || !Object.hasOwn(input, 'sequence')
-    || !nonNegativeInteger(input['sequence'])) return undefined;
-  return { snapshot: input['snapshot'], sequence: input['sequence'] };
+  const row = closedRecord(input, ['snapshot', 'sequence']);
+  if (!row || !nonNegativeInteger(row['sequence'])) return undefined;
+  return { snapshot: row['snapshot'], sequence: row['sequence'] };
 }
 
 /**
@@ -56,7 +61,11 @@ export function assertCoreAutomaticRoundJournalV1(
   const entry = terminalEntry(reference, 'core-automatic-round', process);
   const automaticIds = stringArray(entry['automaticContextGraphIds']);
   const explicitIds = stringArray(entry['explicitSelectedContextGraphIds']);
-  const completions = plainArray(entry['completions']);
+  const completions = requiredArray(
+    entry['completions'],
+    MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY,
+    'Core completions',
+  );
   if (entry['jobId'] !== round.jobId
     || entry['planningLane'] !== round.planningLane
     || entry['source'] !== 'automatic-core-public'
@@ -73,13 +82,14 @@ export function assertCoreAutomaticRoundJournalV1(
   for (let index = 0; index < round.completions.length; index += 1) {
     const expected = round.completions[index]!;
     const completion = completions[index];
-    if (!isPlainRecord(completion)
+    const completionRow = plainRecord(completion);
+    if (!completionRow
       || expected.contextGraphId !== round.contextGraphIds[index]
-      || completion['contextGraphId'] !== automaticIds[index]
-      || completion['jobId'] !== round.jobId
-      || completion['state'] !== 'complete'
-      || !verifiedPlanes(completion['verified'])
-      || !nonNegativeInteger(completion['finishedAt'])) {
+      || completionRow['contextGraphId'] !== automaticIds[index]
+      || completionRow['jobId'] !== round.jobId
+      || completionRow['state'] !== 'complete'
+      || !verifiedPlanes(completionRow['verified'])
+      || !nonNegativeInteger(completionRow['finishedAt'])) {
       throw new Error('Core round lacks a terminal verified completion for a planned graph');
     }
   }
@@ -94,78 +104,70 @@ function terminalEntry(
     throw new Error(`${kind} requires an operator-journal terminal entry`);
   }
   const snapshot = reference.snapshot;
-  if (!isPlainRecord(snapshot)
-    || snapshot['schemaVersion'] !== 1
-    || snapshot['processStartedAt'] !== process.processStartedAt
-    || snapshot['waveId'] !== process.evidenceWaveId
-    || snapshot['capacity'] !== JOURNAL_CAPACITY
-    || !nonNegativeInteger(snapshot['nextSequence'])
-    || !nonNegativeInteger(snapshot['droppedBeforeSequence'])) {
+  const snapshotRow = plainRecord(snapshot);
+  if (!snapshotRow
+    || snapshotRow['schemaVersion'] !== 1
+    || snapshotRow['processStartedAt'] !== process.processStartedAt
+    || snapshotRow['waveId'] !== process.evidenceWaveId
+    || snapshotRow['capacity'] !== JOURNAL_CAPACITY
+    || !nonNegativeInteger(snapshotRow['nextSequence'])
+    || !nonNegativeInteger(snapshotRow['droppedBeforeSequence'])) {
     throw new Error('Sync coverage journal snapshot is malformed');
   }
-  if ((snapshot['droppedBeforeSequence'] as number) > reference.sequence
-    || (snapshot['nextSequence'] as number) <= reference.sequence) {
+  if ((snapshotRow['droppedBeforeSequence'] as number) > reference.sequence
+    || (snapshotRow['nextSequence'] as number) <= reference.sequence) {
     throw new Error('Sync coverage journal no longer retains the referenced evidence');
   }
-  const entries = plainArray(snapshot['entries']);
-  if (entries.length > (snapshot['capacity'] as number)) {
+  const entries = requiredArray(snapshotRow['entries'], JOURNAL_CAPACITY, 'journal entries');
+  if (entries.length > (snapshotRow['capacity'] as number)) {
     throw new Error('Sync coverage journal exceeds its declared capacity');
   }
-  const candidate = entries.find((entry) =>
-    isPlainRecord(entry) && entry['sequence'] === reference.sequence);
-  if (!isPlainRecord(candidate)
-    || candidate['kind'] !== kind
-    || candidate['waveId'] !== snapshot['waveId']
-    || candidate['evidenceTruncated'] !== false
-    || candidate['state'] !== 'complete'
-    || !nonNegativeInteger(candidate['startedAt'])
-    || !nonNegativeInteger(candidate['finishedAt'])) {
+  const candidate = entries.find((entry) => {
+    const row = plainRecord(entry);
+    return row !== undefined && row['sequence'] === reference.sequence;
+  });
+  const candidateRow = plainRecord(candidate);
+  if (!candidateRow
+    || candidateRow['kind'] !== kind
+    || candidateRow['waveId'] !== snapshotRow['waveId']
+    || candidateRow['evidenceTruncated'] !== false
+    || candidateRow['state'] !== 'complete'
+    || !nonNegativeInteger(candidateRow['startedAt'])
+    || !nonNegativeInteger(candidateRow['finishedAt'])) {
     throw new Error(`${kind} terminal journal entry is missing, truncated, or incomplete`);
   }
-  return candidate;
+  return candidateRow;
 }
 
 function verifiedPlanes(value: unknown): boolean {
-  return isPlainRecord(value)
-    && value['metadata'] === true
-    && value['durable'] === true
-    && value['sharedMemory'] === true;
+  const row = plainRecord(value);
+  return row !== undefined
+    && row['metadata'] === true
+    && row['durable'] === true
+    && row['sharedMemory'] === true;
 }
 
 function stringArray(value: unknown): string[] {
-  const values = plainArray(value);
+  const values = requiredArray(
+    value,
+    MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY,
+    'context graph IDs',
+  );
   if (values.length > MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY
-    || values.some((entry) => typeof entry !== 'string'
-      || entry.length === 0
-      || entry.length > MAX_CONTEXT_GRAPH_ID_LENGTH)
+    || values.some((entry) => boundedString(entry, 1, MAX_CONTEXT_GRAPH_ID_LENGTH) === undefined)
     || new Set(values).size !== values.length) {
     throw new Error('Sync coverage journal contains invalid context graph IDs');
   }
   return values as string[];
 }
 
-function plainArray(value: unknown): unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
-    throw new Error('Sync coverage journal field is not a plain array');
+function requiredArray(value: unknown, maximum: number, label: string): unknown[] {
+  if (!closedArray(value, 0, maximum)) {
+    throw new Error(`Sync coverage journal ${label} is not a bounded plain array`);
   }
   return value;
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function positiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
-}
-
-function nonNegativeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.getPrototypeOf(value) === Object.prototype;
 }

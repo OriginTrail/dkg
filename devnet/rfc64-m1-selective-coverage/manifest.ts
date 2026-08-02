@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { stableJson } from '../rfc64-persistence-lifecycle/evidence.ts';
 
 export const SELECTIVE_COVERAGE_CORPUS_SCHEMA =
   'dkg-rfc64-m1-selective-coverage-corpus-v1' as const;
@@ -239,56 +240,11 @@ export function computeSelectiveCoverageCorpusDigest(
 
 /** Stable JSON is also used by the future process launcher when publishing artifacts. */
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(normalizeJson(value, '$', new WeakSet<object>()));
-}
-
-function normalizeJson(value: unknown, path: string, seen: WeakSet<object>): unknown {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return value;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value) || !Number.isSafeInteger(value) || Object.is(value, -0)) {
-      throw new TypeError(`${path} must be a lossless JSON integer`);
-    }
-    return value;
-  }
-  if (typeof value !== 'object') throw new TypeError(`${path} is not JSON data`);
-  if (seen.has(value)) throw new TypeError(`${path} repeats an object reference`);
-  seen.add(value);
-  if (Array.isArray(value)) {
-    if (Object.getPrototypeOf(value) !== Array.prototype) {
-      throw new TypeError(`${path} must be a plain array`);
-    }
-    const ownKeys = Reflect.ownKeys(value);
-    const expected = new Set<PropertyKey>(['length']);
-    for (let index = 0; index < value.length; index += 1) expected.add(String(index));
-    if (ownKeys.length !== expected.size || ownKeys.some((key) => !expected.has(key))) {
-      throw new TypeError(`${path} must be a dense unextended array`);
-    }
-    return value.map((_, index) => {
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      if (!descriptor?.enumerable || !('value' in descriptor)) {
-        throw new TypeError(`${path}[${index}] must be an enumerable data property`);
-      }
-      return normalizeJson(descriptor.value, `${path}[${index}]`, seen);
-    });
-  }
-  if (Object.getPrototypeOf(value) !== Object.prototype) {
-    throw new TypeError(`${path} must be a plain object`);
-  }
-  const result: Record<string, unknown> = {};
-  const ownKeys = Reflect.ownKeys(value);
-  if (ownKeys.some((key) => typeof key !== 'string')) {
-    throw new TypeError(`${path} must not contain symbol keys`);
-  }
-  for (const key of (ownKeys as string[]).sort()) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !('value' in descriptor)) {
-      throw new TypeError(`${path}.${key} must be an enumerable data property`);
-    }
-    result[key] = normalizeJson(descriptor.value, `${path}.${key}`, seen);
-  }
-  return result;
+  return stableJson(value, {
+    format: 'compact',
+    trailingLf: false,
+    numbers: 'safe-integer',
+  });
 }
 
 function compareCodeUnits(left: string, right: string): number {

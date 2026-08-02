@@ -21,6 +21,13 @@ import {
   parseSyncCoverageJournalReferenceV1,
   type SyncCoverageJournalReferenceV1,
 } from './sync-coverage-journal.ts';
+import {
+  boundedString,
+  closedRecord,
+  nonNegativeInteger,
+  positiveInteger,
+  requireDecoded,
+} from './boundary-codec.ts';
 
 export function decodeRuntimeReady(input: unknown): SelectiveCoverageRuntimeReadyV1 {
   const row = record(input, [
@@ -65,15 +72,18 @@ export function decodeRestartReceipt(input: unknown): SelectiveCoverageEdgeResta
 }
 
 export function decodeGraphObservations(input: unknown): readonly GraphObservationV1[] {
-  return requiredCodec(parseGraphObservations(input), 'graph observations');
+  return requireDecoded(parseGraphObservations(input), 'M1 runtime adapter graph observations');
 }
 
 export function decodeEdgeObservations(input: unknown): readonly EdgeGraphObservationV1[] {
-  return requiredCodec(parseEdgeObservations(input), 'Edge observations');
+  return requireDecoded(parseEdgeObservations(input), 'M1 runtime adapter Edge observations');
 }
 
 export function decodeCoreFinalObservations(input: unknown): readonly CoreFinalObservationV1[] {
-  return requiredCodec(parseCoreFinalObservations(input), 'Core final observations');
+  return requireDecoded(
+    parseCoreFinalObservations(input),
+    'M1 runtime adapter Core final observations',
+  );
 }
 
 export function decodeEdgeSyncResult(input: unknown): {
@@ -104,7 +114,7 @@ export function decodeCoreRoundResult(input: unknown): {
 } {
   const row = record(input, ['round', 'journal']);
   return {
-    round: requiredCodec(decodeCoreAutomaticRound(row.round), 'Core round'),
+    round: requireDecoded(decodeCoreAutomaticRound(row.round), 'M1 runtime adapter Core round'),
     journal: requiredJournal(row.journal),
   };
 }
@@ -133,9 +143,9 @@ function decodeEdgeOperation(input: unknown): Omit<EdgeSyncOperationV1, 'sequenc
     contextGraphId: text(row.contextGraphId, 'contextGraphId'),
     jobId: text(row.jobId, 'jobId'),
     completedWave: row.completedWave,
-    completedSnapshot: requiredCodec(
+    completedSnapshot: requireDecoded(
       decodeGraphSnapshot(row.completedSnapshot),
-      'graph snapshot',
+      'M1 runtime adapter graph snapshot',
     ),
   };
 }
@@ -147,7 +157,7 @@ function requiredJournal(input: unknown): SyncCoverageJournalReferenceV1 {
 }
 
 function record(input: unknown, keys: readonly string[]): Record<string, unknown> {
-  return optionalRecord(input, keys, []);
+  return requireDecoded(closedRecord(input, keys), 'M1 runtime adapter record');
 }
 
 function optionalRecord(
@@ -155,36 +165,14 @@ function optionalRecord(
   requiredKeys: readonly string[],
   optionalKeys: readonly string[],
 ): Record<string, unknown> {
-  if (!isPlainRecord(input)) fail('record');
-  const allowed = new Set([...requiredKeys, ...optionalKeys]);
-  if (Reflect.ownKeys(input).some((key) => typeof key !== 'string' || !allowed.has(key))
-    || requiredKeys.some((key) => !Object.hasOwn(input, key))) fail('record');
-  return input;
+  return requireDecoded(
+    closedRecord(input, requiredKeys, optionalKeys),
+    'M1 runtime adapter record',
+  );
 }
 
 function text(input: unknown, label: string): string {
-  if (typeof input !== 'string' || input.length < 1 || input.length > 4_096) fail(label);
-  return input;
-}
-
-function requiredCodec<T>(input: T | undefined, label: string): T {
-  if (input === undefined) fail(label);
-  return input;
-}
-
-function positiveInteger(input: unknown): boolean {
-  return Number.isSafeInteger(input) && (input as number) > 0;
-}
-
-function nonNegativeInteger(input: unknown): boolean {
-  return Number.isSafeInteger(input) && (input as number) >= 0;
-}
-
-function isPlainRecord(input: unknown): input is Record<string, unknown> {
-  return input !== null
-    && typeof input === 'object'
-    && !Array.isArray(input)
-    && Object.getPrototypeOf(input) === Object.prototype;
+  return requireDecoded(boundedString(input, 1, 4_096), `M1 runtime adapter ${label}`);
 }
 
 function fail(label: string): never {
