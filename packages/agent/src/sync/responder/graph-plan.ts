@@ -57,6 +57,12 @@ const DKG_FINALIZED_SWM_CLEANUP_ROOT = `${DKG}finalizedSwmCleanupRoot`;
 const DKG_FINALIZED_SWM_CLEANUP_MARKED_AT = `${DKG}finalizedSwmCleanupMarkedAt`;
 const DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT = `${DKG}finalizedSwmCleanupHeadFingerprint`;
 const DKG_FINALIZED_SWM_CLEANUP_TASK = `${DKG}FinalizedSwmCleanupTask`;
+/** In-process mirror of the store-side predicate filter below. */
+const LOCAL_FINALIZED_SWM_CLEANUP_PREDICATES = new Set([
+  DKG_FINALIZED_SWM_CLEANUP_ROOT,
+  DKG_FINALIZED_SWM_CLEANUP_MARKED_AT,
+  DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT,
+]);
 const localFinalizedSwmCleanupRowFilter = (subject: string, predicate: string): string => `
   FILTER(${predicate} NOT IN (
     <${DKG_FINALIZED_SWM_CLEANUP_ROOT}>,
@@ -2612,9 +2618,18 @@ async function readBoundedSwmMetaSnapshot(
     }
     let result;
     try {
+      // Filter local finalized-cleanup rows AT THE STORE, like the fresh/TTL
+      // lanes already do. Stripping them in-process afterwards is not enough:
+      // every such row would first be accumulated against the peer-serving
+      // snapshot budget, so purely local GC bookkeeping could push a large
+      // context graph over SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS/_BYTES and
+      // make it unsyncable (#1847/#1868 snapshotBudgetError).
       result = await store.query(`
         SELECT ?s ?p ?o WHERE {
-          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+          GRAPH <${assertSafeIri(graph)}> {
+            ?s ?p ?o .
+            ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
+          }
         }
         LIMIT ${remainingRows + 1}
       `, {
@@ -2671,6 +2686,30 @@ function filterSwmMetaSnapshotRows(
   rows: readonly SyncRow[],
   cutoffIso: string | null,
 ): SyncRow[] {
+  // An unparseable cutoff admits nothing, so settle it BEFORE any O(rows)
+  // work — otherwise the responder indexes and scans the whole snapshot only
+  // to throw it away.
+  const cutoffMs = cutoffIso == null ? Number.NaN : Date.parse(cutoffIso);
+  if (cutoffIso != null && !Number.isFinite(cutoffMs)) return [];
+
+  // Finalized-SWM markers/tasks are local maintenance state. Strip only those
+  // rows; the active SWM lifecycle and its payload remain syncable until the
+  // independent idle GC safely removes them. This must stay ABOVE the
+  // TTL-disabled return: that lane is served from this function too, and an
+  // unfiltered return there advertises local GC metadata to peers.
+  const cleanupTaskSubjects = new Set<string>();
+  for (const row of rows) {
+    if (row.p === DKG_ONTOLOGY.RDF_TYPE && row.o === DKG_FINALIZED_SWM_CLEANUP_TASK) {
+      cleanupTaskSubjects.add(row.s);
+    }
+  }
+  const syncableRows = rows.filter((row) =>
+    !cleanupTaskSubjects.has(row.s) && !LOCAL_FINALIZED_SWM_CLEANUP_PREDICATES.has(row.p));
+  if (cutoffIso == null) return syncableRows.sort(compareRows);
+
+  // TTL lane only: the per-subject index exists solely to answer the freshness
+  // and tuple-key questions below, so it is built after the lanes that cannot
+  // use it have already returned.
   const bySubject = new Map<string, SyncRow[]>();
   for (const row of rows) {
     const bucket = bySubject.get(row.s) ?? [];
@@ -2681,7 +2720,6 @@ function filterSwmMetaSnapshotRows(
     (bySubject.get(subject) ?? [])
       .filter((row) => row.p === predicate)
       .map((row) => row.o);
-  const cutoffMs = cutoffIso == null ? Number.NaN : Date.parse(cutoffIso);
   const isFresh = (subject: string): boolean => objects(subject, DKG_PUBLISHED_AT)
     .some((value) => {
       const timestamp = Date.parse(stripLiteral(value));
@@ -2703,25 +2741,6 @@ function filterSwmMetaSnapshotRows(
     }
     return keys;
   };
-  // Finalized-SWM markers/tasks are local maintenance state. Strip only those
-  // rows; the active SWM lifecycle and its payload remain syncable until the
-  // independent idle GC safely removes them.
-  const cleanupTaskSubjects = new Set<string>();
-  for (const [subject] of bySubject) {
-    if (objects(subject, DKG_ONTOLOGY.RDF_TYPE).includes(DKG_FINALIZED_SWM_CLEANUP_TASK)) {
-      cleanupTaskSubjects.add(subject);
-    }
-  }
-  const localCleanupPredicates = new Set([
-    DKG_FINALIZED_SWM_CLEANUP_ROOT,
-    DKG_FINALIZED_SWM_CLEANUP_MARKED_AT,
-    DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT,
-  ]);
-  const syncableRows = rows.filter((row) =>
-    !cleanupTaskSubjects.has(row.s) && !localCleanupPredicates.has(row.p));
-  if (cutoffIso == null) return syncableRows.sort(compareRows);
-  if (!Number.isFinite(cutoffMs)) return [];
-
   const admitted = new Set<string>();
   const freshOperationKeys = new Set<string>();
   for (const [subject] of bySubject) {
