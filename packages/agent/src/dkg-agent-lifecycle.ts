@@ -3915,12 +3915,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       nodeRole: this.config.nodeRole ?? 'edge',
       planningLane: remotePeer,
       configuredBatchSize: coverageStatus.batchSize,
-      effectiveBatchSize: this.syncCapacityRuntime.getEffectiveCoverageBatch(),
     });
     const createScopePlan = () => {
       const scopePlan = this.planCorePublicSyncPeerRound(remotePeer);
       const selectedContextGraphIds = [...new Set(this.config.syncContextGraphs ?? [])];
       evidence.beginRound({
+        effectiveBatchSize: scopePlan.effectiveBatchSize,
         selectedContextGraphIds,
         automaticContextGraphIds: scopePlan.automaticContextGraphIds,
         rehydratedAlwaysOnContextGraphIds:

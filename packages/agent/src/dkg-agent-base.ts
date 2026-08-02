@@ -435,6 +435,7 @@ type ContextGraphDiscoveryDisposition =
 
 /** Internal peer-round policy: initial durable scope is frozen; later explicit intent is live. */
 interface PeerSyncScope {
+  readonly effectiveBatchSize: number;
   readonly automaticContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
   contextGraphIdsAfterDiscovery(): string[];
@@ -1740,13 +1741,14 @@ export class DKGAgentBase {
   /** Build one canonical peer-round scope with named snapshot/live phases. */
   protected planCorePublicSyncPeerRound(remotePeer: string): PeerSyncScope {
     const selected = [...(this.config.syncContextGraphs ?? [])];
+    const effectiveBatchSize = this.syncCapacityRuntime.getEffectiveCoverageBatch();
     let automaticContextGraphIds: string[] = [];
     if ((this.config.nodeRole ?? 'edge') === 'core') {
       automaticContextGraphIds = this.corePublicSyncCoverageScheduler
         .planAutomaticCoverageWithOptions(selected, {
           priorities: this.config.syncContextGraphPriorities,
           planningLane: remotePeer,
-          effectiveBatchSize: this.syncCapacityRuntime.getEffectiveCoverageBatch(),
+          effectiveBatchSize,
         });
     }
     const initialDurableContextGraphIds = [...new Set([
@@ -1754,6 +1756,7 @@ export class DKGAgentBase {
       ...automaticContextGraphIds,
     ])];
     return {
+      effectiveBatchSize,
       automaticContextGraphIds,
       initialDurableContextGraphIds,
       contextGraphIdsAfterDiscovery: () => [...new Set([

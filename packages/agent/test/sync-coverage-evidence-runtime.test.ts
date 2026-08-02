@@ -236,6 +236,35 @@ describe('automatic sync coverage runtime evidence', () => {
     });
   });
 
+  it('records the exact adaptive batch snapshot used by Core planning', async () => {
+    const automatic = ['cg-adaptive-a', 'cg-adaptive-b'];
+    const agent = await createEvidenceAgent('core', []);
+    for (const contextGraphId of automatic) {
+      (agent as any).subscribedContextGraphs.set(contextGraphId, {
+        subscribed: false,
+        metaSynced: false,
+      });
+      (agent as any).registerCorePublicSyncContextGraph(contextGraphId);
+    }
+    let effectiveBatchSize = 2;
+    (agent as any).syncCapacityRuntime.getEffectiveCoverageBatch = () => effectiveBatchSize;
+    (agent as any).getPeerProtocols = async () => {
+      effectiveBatchSize = 1;
+      return [PROTOCOL_SYNC];
+    };
+
+    await runConnectionOpenSync(agent);
+    const running = agent.getSyncCoverageEvidence().entries[0];
+
+    expect(running).toMatchObject({
+      kind: 'core-automatic-round',
+      state: 'running',
+      effectiveBatchSize: 1,
+      automaticContextGraphCount: 1,
+    });
+    expect(running?.automaticContextGraphIds).toHaveLength(1);
+  });
+
   it('closes an admitted automatic evidence job when a sync phase throws', async () => {
     const automatic = 'cg-automatic-throw';
     const agent = await createEvidenceAgent('core', []);

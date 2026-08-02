@@ -16,10 +16,10 @@ export interface SyncCoverageEvidenceRecorderOptions {
   nodeRole: 'edge' | 'core';
   planningLane: string;
   configuredBatchSize: number;
-  effectiveBatchSize: number;
 }
 
 export interface SyncCoverageEvidenceRoundInput {
+  effectiveBatchSize: number;
   selectedContextGraphIds: readonly string[];
   automaticContextGraphIds: readonly string[];
   rehydratedAlwaysOnContextGraphIds: readonly string[];
@@ -57,7 +57,7 @@ export class SyncCoverageEvidenceRecorder {
         planningLane: this.options.planningLane,
         trigger,
         configuredBatchSize: this.options.configuredBatchSize,
-        effectiveBatchSize: this.options.effectiveBatchSize,
+        effectiveBatchSize: input.effectiveBatchSize,
         explicitSelectedContextGraphIds: input.selectedContextGraphIds,
         automaticContextGraphIds: input.automaticContextGraphIds,
         startedAt,
