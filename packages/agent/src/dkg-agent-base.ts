@@ -363,6 +363,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSyncAdmission,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -416,6 +417,19 @@ import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+type ContextGraphDiscoveryDisposition =
+  | 'catalogue-only'
+  | 'core-hosting-only'
+  | 'explicit-sync-scope'
+  | 'automatic-public-coverage';
+
+/** Internal peer-round policy: initial durable scope is frozen; later explicit intent is live. */
+interface PeerSyncScope {
+  readonly automaticContextGraphIds: readonly string[];
+  readonly initialDurableContextGraphIds: readonly string[];
+  contextGraphIdsAfterDiscovery(): string[];
+}
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -1650,22 +1664,73 @@ export class DKGAgentBase {
     return this.corePublicSyncCoverageScheduler.unregister(contextGraphId);
   }
 
-  protected releaseCorePublicSyncPlanningLane(remotePeer: string): boolean {
-    return this.corePublicSyncCoverageScheduler.releasePlanningLane(remotePeer);
+  protected classifyContextGraphDiscovery(input: {
+    accessPolicy?: 'public' | 'private';
+    legacyPrivate?: boolean;
+    trackSyncScope?: boolean;
+  }): ContextGraphDiscoveryDisposition {
+    if ((this.config.nodeRole ?? 'edge') !== 'core') return 'catalogue-only';
+    if (input.trackSyncScope === false) return 'core-hosting-only';
+    if (input.trackSyncScope === true) return 'explicit-sync-scope';
+    if (input.accessPolicy === 'private' || input.legacyPrivate === true) {
+      return 'explicit-sync-scope';
+    }
+    if (input.accessPolicy === 'public') return 'automatic-public-coverage';
+    return 'core-hosting-only';
   }
 
-  /**
-   * Produce the automatic tail for one Core peer round. The caller merges it
-   * with the live explicit scope so newly restored selections stay visible.
-   */
-  protected planAutomaticCorePublicSyncContextGraphsForPeerRound(remotePeer: string): string[] {
-    const selected = this.config.syncContextGraphs ?? [];
-    if ((this.config.nodeRole ?? 'edge') !== 'core') return [];
-    return this.corePublicSyncCoverageScheduler.plan(
-      selected,
-      this.config.syncContextGraphPriorities,
-      remotePeer,
-    ).coverageContextGraphIds;
+  protected reconcileContextGraphSyncAdmission(
+    contextGraphId: string,
+    input: { subscribed: boolean; admission: ContextGraphSyncAdmission },
+  ): boolean {
+    const admission = input.subscribed ? input.admission : 'none';
+    const explicitScope = new Set(this.config.syncContextGraphs ?? []);
+    const hadExplicitScope = explicitScope.has(contextGraphId);
+    const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[])
+      .includes(contextGraphId);
+    if (admission === 'explicit' && !isSystemContextGraph) {
+      explicitScope.add(contextGraphId);
+    } else {
+      explicitScope.delete(contextGraphId);
+    }
+    const hasExplicitScope = explicitScope.has(contextGraphId);
+    if (hadExplicitScope !== hasExplicitScope) {
+      this.config.syncContextGraphs = [...explicitScope];
+    }
+
+    const schedulerChanged = admission === 'automatic-public'
+      ? this.registerCorePublicSyncContextGraph(contextGraphId)
+      : this.unregisterCorePublicSyncContextGraph(contextGraphId);
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const stateChanged = !!existing && existing.syncAdmission !== admission;
+    if (stateChanged && existing) {
+      this.subscribedContextGraphs.set(contextGraphId, { ...existing, syncAdmission: admission });
+    }
+    return hadExplicitScope !== hasExplicitScope || schedulerChanged || stateChanged;
+  }
+
+  /** Build one canonical peer-round scope with named snapshot/live phases. */
+  protected planCorePublicSyncPeerRound(remotePeer: string): PeerSyncScope {
+    const selected = [...(this.config.syncContextGraphs ?? [])];
+    const automaticContextGraphIds = (this.config.nodeRole ?? 'edge') === 'core'
+      ? this.corePublicSyncCoverageScheduler.planAutomaticCoverage(
+        selected,
+        this.config.syncContextGraphPriorities,
+        remotePeer,
+      )
+      : [];
+    const initialDurableContextGraphIds = [...new Set([
+      ...selected,
+      ...automaticContextGraphIds,
+    ])];
+    return {
+      automaticContextGraphIds,
+      initialDurableContextGraphIds,
+      contextGraphIdsAfterDiscovery: () => [...new Set([
+        ...(this.config.syncContextGraphs ?? []),
+        ...automaticContextGraphIds,
+      ])],
+    };
   }
 
   getCorePublicSyncCoverageStatus(): CorePublicSyncCoverageStatus {

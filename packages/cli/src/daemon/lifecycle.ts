@@ -68,7 +68,12 @@ import {
   MockChainAdapter,
   mergeRpcUsageWindows,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  loadOpWallets,
+  KaNumberAllocator,
+  resolveSyncAgentsMeta,
+} from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
@@ -101,6 +106,10 @@ import {
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+import {
+  contextGraphSubscriptionRecordFromRow,
+  contextGraphSubscriptionRecordToRow,
+} from './context-graph-subscription-store.js';
 import {
   loadConfig,
   saveConfig,
@@ -1801,50 +1810,14 @@ export async function runDaemonInner(
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {
-      loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
-        id: row.context_graph_id,
-        name: row.name ?? undefined,
-        subscribed: row.subscribed === 1,
-        synced: row.synced === 1,
-        sharedMemorySynced: row.shared_memory_synced == null ? undefined : row.shared_memory_synced === 1,
-        metaSynced: row.meta_synced == null ? undefined : row.meta_synced === 1,
-        onChainId: row.on_chain_id ?? undefined,
-        onChainHash: row.on_chain_hash ?? undefined,
-        lastReconciledOrdinal: row.last_reconciled_ordinal ?? undefined,
-        coreHosted: row.core_hosted == null ? undefined : row.core_hosted === 1,
-        syncScoped: row.sync_scoped === 1,
-      })),
+      loadAll: async () => dashDb.listContextGraphSubscriptions()
+        .map(contextGraphSubscriptionRecordFromRow),
       load: async (contextGraphId) => {
         const row = dashDb.getContextGraphSubscription(contextGraphId);
-        return row ? {
-          id: row.context_graph_id,
-          name: row.name ?? undefined,
-          subscribed: row.subscribed === 1,
-          synced: row.synced === 1,
-          sharedMemorySynced: row.shared_memory_synced == null ? undefined : row.shared_memory_synced === 1,
-          metaSynced: row.meta_synced == null ? undefined : row.meta_synced === 1,
-          onChainId: row.on_chain_id ?? undefined,
-          onChainHash: row.on_chain_hash ?? undefined,
-          lastReconciledOrdinal: row.last_reconciled_ordinal ?? undefined,
-          coreHosted: row.core_hosted == null ? undefined : row.core_hosted === 1,
-          syncScoped: row.sync_scoped === 1,
-        } : null;
+        return row ? contextGraphSubscriptionRecordFromRow(row) : null;
       },
       save: async (record) => {
-        dashDb.upsertContextGraphSubscription({
-          context_graph_id: record.id,
-          name: record.name ?? null,
-          subscribed: record.subscribed ? 1 : 0,
-          synced: record.synced ? 1 : 0,
-          shared_memory_synced: record.sharedMemorySynced == null ? null : record.sharedMemorySynced ? 1 : 0,
-          meta_synced: record.metaSynced == null ? null : record.metaSynced ? 1 : 0,
-          on_chain_id: record.onChainId ?? null,
-          on_chain_hash: record.onChainHash ?? null,
-          last_reconciled_ordinal: record.lastReconciledOrdinal ?? null,
-          core_hosted: record.coreHosted == null ? null : record.coreHosted ? 1 : 0,
-          sync_scoped: record.syncScoped ? 1 : 0,
-          updated_at: Date.now(),
-        });
+        dashDb.upsertContextGraphSubscription(contextGraphSubscriptionRecordToRow(record));
       },
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);

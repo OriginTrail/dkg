@@ -198,6 +198,7 @@ export {
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type ContextGraphSyncMode,
+  type ContextGraphSyncAdmission,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type PublishOpts,

@@ -8,19 +8,28 @@ type SyncProgressSummary = DurableProgressSummary & { insertedTriples: number };
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
+export interface SyncOnConnectScopePlan {
+  /** Explicit plus automatic CGs frozen for the first durable request. */
+  initialDurableContextGraphIds: readonly string[];
+  /** Explicit intent re-read after discovery, merged with the frozen automatic tail. */
+  contextGraphIdsAfterDiscovery: () => string[];
+}
+
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
   progress?: boolean;
 }
 
-interface SyncOnConnectContext {
+interface SyncOnConnectCommonContext {
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
-  getSyncContextGraphs: () => string[];
-  getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
+  getSharedMemorySyncContextGraphs?: (
+    remotePeerId: string,
+    contextGraphIdsAfterDiscovery: readonly string[],
+  ) => string[] | Promise<string[]>;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -48,6 +57,18 @@ interface SyncOnConnectContext {
    * controls whether the periodic reconciler may write its long cooldown.
    */
   onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
+}
+
+interface SyncOnConnectContext extends SyncOnConnectCommonContext {
+  /** Legacy dynamic scope callback retained at the compatibility boundary. */
+  getSyncContextGraphs?: () => string[];
+  /** Legacy two-phase scope retained at the compatibility boundary. */
+  contextGraphScope?: SyncOnConnectScopePlan;
+}
+
+interface PlannedSyncOnConnectContext extends SyncOnConnectCommonContext {
+  /** Invoked only after the peer passes in-flight and protocol admission. */
+  createScopePlan: () => SyncOnConnectScopePlan;
 }
 
 export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing' | 'deferred-backpressure';
@@ -106,14 +127,48 @@ function classifySyncResult(
   };
 }
 
-export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
+/** Compatibility adapter for existing direct callers of the generic orchestrator. */
+export function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
+  const {
+    getSyncContextGraphs = () => [],
+    contextGraphScope,
+    syncFromPeer,
+    ...common
+  } = context;
+  let initialCall = true;
+  return runSyncOnConnectWithScopePlan({
+    ...common,
+    createScopePlan: () => contextGraphScope ?? (() => {
+      const initialDurableContextGraphIds = [...(getSyncContextGraphs() ?? [])];
+      return {
+        initialDurableContextGraphIds,
+        contextGraphIdsAfterDiscovery: () => getSyncContextGraphs() ?? [],
+      };
+    })(),
+    // Preserve the historical one-argument initial call shape for direct
+    // callback-only clients. Legacy two-phase callers already received an
+    // explicit scope, while the normalized orchestrator always supplies one.
+    syncFromPeer: (peerId, contextGraphIds) => {
+      if (initialCall && !contextGraphScope) {
+        initialCall = false;
+        return syncFromPeer(peerId);
+      }
+      initialCall = false;
+      return syncFromPeer(peerId, contextGraphIds);
+    },
+  });
+}
+
+export async function runSyncOnConnectWithScopePlan(
+  context: PlannedSyncOnConnectContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
     syncingPeers,
     getPeerProtocols,
     knownCorePeerIds,
     knownCorePeerIdsV2 = new Set<string>(),
-    getSyncContextGraphs,
+    createScopePlan,
     getSharedMemorySyncContextGraphs,
     syncFromPeer,
     refreshMetaSyncedFlags,
@@ -221,9 +276,18 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       return 'skipped-no-sync';
     }
 
+    const scopePlan = createScopePlan();
+    const initialDurableContextGraphIds = [...scopePlan.initialDurableContextGraphIds];
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
-    const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
-    const synced = await syncFromPeer(remotePeer);
+    const knownCgsBefore = new Set(initialDurableContextGraphIds);
+    const synced = await syncFromPeer(
+      remotePeer,
+      [
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        ...initialDurableContextGraphIds,
+      ],
+    );
     const syncedAccounting = recordSyncAccounting(synced, 'durable');
     logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
     if (syncedAccounting.deferredByBackpressure) {
@@ -238,13 +302,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const syncScope = new Set<string>([
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
-      ...(getSyncContextGraphs() ?? []),
+      ...initialDurableContextGraphIds,
     ]);
     await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));
 
     await runNonTransportStep(() => discoverContextGraphsFromStore());
 
-    const allCgsAfter = getSyncContextGraphs() ?? [];
+    const allCgsAfter = scopePlan.contextGraphIdsAfterDiscovery();
     const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
@@ -264,8 +328,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
 
     durableSyncCompleted = true;
     const wsContextGraphIds = getSharedMemorySyncContextGraphs
-      ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
-      : getSyncContextGraphs() ?? [];
+      ? await runNonTransportStep(() => Promise.resolve(
+        getSharedMemorySyncContextGraphs(remotePeer, allCgsAfter),
+      ))
+      : allCgsAfter;
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');

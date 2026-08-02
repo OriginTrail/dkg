@@ -615,11 +615,16 @@ export interface ChatSendResult {
  */
 export type ContextGraphSyncMode = 'on-demand' | 'always-on';
 
+/** Local admission lane for durable and shared-memory synchronization. */
+export type ContextGraphSyncAdmission = 'none' | 'explicit' | 'automatic-public';
+
 /** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
   /** Requested synchronization lifetime, normalized before entering live state. */
   syncMode: ContextGraphSyncMode;
+  /** Canonical local sync admission, independent from gossip subscription. */
+  syncAdmission: ContextGraphSyncAdmission;
   /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
@@ -704,8 +709,9 @@ export interface ContextGraphSub {
  * values and must choose a synchronization lifetime explicitly. This shape is
  * retained solely for older standalone handler callbacks that predate modes.
  */
-export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
+export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode' | 'syncAdmission'> & {
   syncMode?: ContextGraphSyncMode;
+  syncAdmission?: ContextGraphSyncAdmission;
 };
 
 /**
@@ -722,13 +728,19 @@ export interface ContextGraphDiscoveryMetadata {
   onChainId?: string;
   onChainHash?: string;
   participantAgents?: string[];
+  /**
+   * Authoritative access policy when the discovery source can establish it.
+   * Core automatic public coverage is reconciled only from this explicit
+   * classification; absence keeps a Core in hosting-only compatibility mode.
+   */
+  accessPolicy?: 'public' | 'private';
 }
 
 export interface ContextGraphDiscoveryOptions {
   /**
-   * Whether a newly discovered core subscription joins the ordinary catch-up
-   * scope. Chain registry discovery historically installed gossip handlers
-   * without joining that scope, so its caller passes false.
+   * @deprecated Discovery sources should provide authoritative metadata and
+   * let the agent choose its local sync policy. Retained so existing typed and
+   * precompiled callers can still opt out of the explicit sync scope.
    */
   trackSyncScope?: boolean;
 }
@@ -751,6 +763,8 @@ export interface ContextGraphSubscriptionRecord {
   lastReconciledOrdinal?: number;
   /** Phase D — persisted "this Core hosts a public CG" flag (see ContextGraphSub). */
   coreHosted?: boolean;
+  /** Canonical admission written by current nodes; absent on legacy rows. */
+  syncAdmission?: ContextGraphSyncAdmission;
   syncScoped: boolean;
 }
 

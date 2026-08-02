@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -673,7 +673,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(31);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(32);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -741,7 +741,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     db.close();
 
     const raw = new Database(dbPath);
-    expect(raw.pragma('user_version', { simple: true })).toBe(31);
+    expect(raw.pragma('user_version', { simple: true })).toBe(32);
     raw.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
     raw.close();
 
@@ -765,7 +765,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
     const columns = db.db.pragma(
       'table_info(context_graph_join_approval_ledger)',
     ) as Array<{ name: string }>;
@@ -786,7 +786,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
     expect(db.db.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name = 'context_graph_join_policy_audit'
@@ -868,7 +868,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
     const trigger = db.db.prepare(`
       SELECT sql FROM sqlite_master
       WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
@@ -1273,7 +1273,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1294,7 +1294,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
   });
 });
 
@@ -1378,7 +1378,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1389,6 +1389,70 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
       on_chain_id: '0xabc',
       core_hosted: null,
     }]);
+  });
+});
+
+describe('DashboardDB — V32 sync_admission column migration', () => {
+  let db: DashboardDB;
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'dkg-db-v32-test-'));
+    db = new DashboardDB({ dataDir: dir });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds sync_admission to a V31 database without guessing legacy intent', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('ALTER TABLE context_graph_subscriptions DROP COLUMN sync_admission;');
+    raw.prepare(
+      `INSERT INTO context_graph_subscriptions
+         (context_graph_id, subscribed, synced, sync_scoped, updated_at)
+       VALUES ('legacy-explicit', 1, 0, 1, 1000)`,
+    ).run();
+    raw.pragma('user_version = 31');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    const columns = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
+      .map((column) => column.name);
+    expect(columns).toContain('sync_admission');
+    expect(db.getContextGraphSubscription('legacy-explicit')).toMatchObject({
+      sync_scoped: 1,
+      sync_admission: null,
+    });
+  });
+
+  it('round-trips every current sync admission independently of sync_scoped', () => {
+    for (const [index, syncAdmission] of ['none', 'explicit', 'automatic-public'].entries()) {
+      db.upsertContextGraphSubscription({
+        context_graph_id: `admission-${syncAdmission}`,
+        subscribed: 1,
+        synced: 0,
+        sync_scoped: syncAdmission === 'explicit' ? 1 : 0,
+        sync_admission: syncAdmission as 'none' | 'explicit' | 'automatic-public',
+        updated_at: 1000 + index,
+      });
+    }
+
+    expect(db.listContextGraphSubscriptions().map((row) => ({
+      id: row.context_graph_id,
+      admission: row.sync_admission,
+      scoped: row.sync_scoped,
+    }))).toEqual([
+      { id: 'admission-automatic-public', admission: 'automatic-public', scoped: 0 },
+      { id: 'admission-explicit', admission: 'explicit', scoped: 1 },
+      { id: 'admission-none', admission: 'none', scoped: 0 },
+    ]);
   });
 });
 
@@ -1407,7 +1471,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 
   it('fresh install lands at the current schema and already carries the ka_numbers table', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1444,7 +1508,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1537,7 +1601,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   });
 
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
     const tables = db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all();
@@ -1648,7 +1712,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
@@ -1677,7 +1741,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
     const columns = new Set(
       (db.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
         .map((column) => column.name),
@@ -2126,7 +2190,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -2192,7 +2256,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -2221,7 +2285,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -2464,7 +2528,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(32);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);
@@ -2519,6 +2583,6 @@ describe('SqliteChangelogEraGuard — OT-RFC-59 §6 P0 durable era guard', () =>
       .map((t) => t.name);
     expect(tables).toContain('changelog_cursors');
     expect(tables).toContain('changelog_era');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
   });
 });

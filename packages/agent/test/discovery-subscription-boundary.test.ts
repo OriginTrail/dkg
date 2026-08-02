@@ -182,8 +182,12 @@ describe('Context Graph discovery/subscription boundary', () => {
           metaSynced: false,
         });
         expect((agent as any).gossipRegistered.has(id)).toBe(role === 'core');
-        expect(((agent as any).config.syncContextGraphs ?? []).includes(id)).toBe(role === 'core');
+        expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
         expect(persisted.has(id)).toBe(role === 'core');
+        if (role === 'core') {
+          expect(persisted.get(id)).toMatchObject({ subscribed: true, syncScoped: false });
+          expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
+        }
 
         const inserted = await agent.store.query(`
           ASK WHERE {
@@ -282,13 +286,42 @@ describe('Context Graph discovery/subscription boundary', () => {
 
     try {
       await agent.start();
+      const compatibilityId = 'core-discovery-compat-opt-out';
+      agent.recordDiscoveredContextGraph(compatibilityId, {
+        name: compatibilityId,
+        accessPolicy: 'private',
+      }, { trackSyncScope: false });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(agent.getSubscribedContextGraphs().get(compatibilityId)?.subscribed).toBe(true);
+      expect((agent as any).gossipRegistered.has(compatibilityId)).toBe(true);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain(compatibilityId);
+      expect(persisted.get(compatibilityId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'none',
+        syncScoped: false,
+      });
+      agent.unsubscribeFromContextGraph(compatibilityId);
+
       const publicId = 'core-store-public';
+      const publicOnChainId = `0x${'9'.repeat(64)}`;
       const curatedId = 'core-store-curated';
       await agent.store.insert([
         {
           subject: contextGraphDataGraphUri(publicId),
           predicate: DKG_ONTOLOGY.RDF_TYPE,
           object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+        },
+        {
+          subject: contextGraphDataGraphUri(publicId),
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: `"${publicOnChainId}"`,
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+        },
+        {
+          subject: contextGraphDataGraphUri(publicId),
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
           graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
         },
         {
@@ -308,12 +341,24 @@ describe('Context Graph discovery/subscription boundary', () => {
       expect(await agent.discoverContextGraphsFromStore()).toBe(2);
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      for (const id of [publicId, curatedId]) {
-        expect(agent.getSubscribedContextGraphs().get(id)?.subscribed).toBe(true);
-        expect((agent as any).gossipRegistered.has(id)).toBe(true);
-        expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
-        expect(persisted.get(id)).toMatchObject({ subscribed: true, syncScoped: true });
-      }
+      expect(agent.getSubscribedContextGraphs().get(publicId)?.subscribed).toBe(true);
+      expect((agent as any).gossipRegistered.has(publicId)).toBe(true);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain(publicId);
+      expect(persisted.get(publicId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'automatic-public',
+        syncScoped: false,
+      });
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(1);
+
+      expect(agent.getSubscribedContextGraphs().get(curatedId)?.subscribed).toBe(true);
+      expect((agent as any).gossipRegistered.has(curatedId)).toBe(true);
+      expect((agent as any).config.syncContextGraphs ?? []).toContain(curatedId);
+      expect(persisted.get(curatedId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+        syncScoped: true,
+      });
 
       let capturedProfile: Record<string, unknown> | undefined;
       (agent as any).profileManager.publishProfile = async (profile: Record<string, unknown>) => {
@@ -327,7 +372,57 @@ describe('Context Graph discovery/subscription boundary', () => {
       agent.unsubscribeFromContextGraph(publicId);
       expect(await agent.discoverContextGraphsFromStore()).toBe(0);
       expect(agent.getSubscribedContextGraphs().get(publicId)?.subscribed).toBe(false);
+      expect(agent.getSubscribedContextGraphs().get(publicId)?.syncAdmission).toBe('none');
       expect((agent as any).gossipRegistered.has(publicId)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('bounds store-discovered public coverage without capping explicit scope', async () => {
+    const publicIds = ['store-public-a', 'store-public-b', 'store-public-c'];
+    const agent = await DKGAgent.create({
+      name: 'BoundedCoreStoreDiscovery',
+      listenHost: '127.0.0.1',
+      nodeRole: 'core',
+      chainAdapter: new MockChainAdapter(),
+      syncContextGraphs: ['explicit-selection'],
+      syncCorePublicBatchSize: 2,
+    });
+
+    try {
+      await agent.start();
+      await agent.store.insert(publicIds.flatMap((id, index) => ([
+        {
+          subject: contextGraphDataGraphUri(id),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+        },
+        {
+          subject: contextGraphDataGraphUri(id),
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: `"0x${String(index + 1).repeat(64)}"`,
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+        },
+        {
+          subject: contextGraphDataGraphUri(id),
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+        },
+      ])));
+
+      expect(await agent.discoverContextGraphsFromStore()).toBe(3);
+      expect((agent as any).config.syncContextGraphs).toEqual(['explicit-selection']);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(3);
+
+      const scope = (agent as any).planCorePublicSyncPeerRound('store-peer');
+      const planned = scope.initialDurableContextGraphIds;
+      expect(planned[0]).toBe('explicit-selection');
+      expect(planned.slice(1)).toHaveLength(2);
+      expect(new Set(planned.slice(1)).size).toBe(2);
+      expect(planned.slice(1).every((id: string) => publicIds.includes(id))).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -335,12 +430,13 @@ describe('Context Graph discovery/subscription boundary', () => {
 
   it('catalogues revealed chain entries while retaining their authoritative ID', async () => {
     const onChainId = `0x${'b'.repeat(64)}`;
+    let accessPolicy = 0;
     const chain = new MockChainAdapter();
     (chain as any).listContextGraphsFromChain = async () => ([{
       contextGraphId: onChainId,
       name: 'chain-discovery-only',
       creator: '0x1111111111111111111111111111111111111111',
-      accessPolicy: 0,
+      accessPolicy,
       blockNumber: 100,
       metadataRevealed: true,
     }] satisfies ContextGraphOnChain[]);
@@ -368,24 +464,40 @@ describe('Context Graph discovery/subscription boundary', () => {
       expect((agent as any).config.syncContextGraphs ?? []).not.toContain('chain-discovery-only');
       expect((agent as any).gossipRegistered.has('chain-discovery-only')).toBe(false);
       expect(persisted.has('chain-discovery-only')).toBe(false);
+      expect(await (agent as any).getExplicitAccessPolicy('chain-discovery-only')).toBe('public');
+      accessPolicy = 1;
       expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      expect(await (agent as any).getExplicitAccessPolicy('chain-discovery-only')).toBe('private');
     } finally {
       await agent.stop().catch(() => {});
     }
   }, 30_000);
 
-  it('auto-subscribes a core to chain discovery while preserving the legacy non-sync-scoped mode', async () => {
+  it('classifies public chain coverage as automatic and curator-private coverage as explicit', async () => {
     const onChainId = `0x${'d'.repeat(64)}`;
+    const privateOnChainId = `0x${'6'.repeat(64)}`;
     const localId = 'core-chain-discovery';
+    const privateId = 'core-chain-private';
+    let curatorAddress = '';
     const chain = new MockChainAdapter();
-    (chain as any).listContextGraphsFromChain = async () => ([{
-      contextGraphId: onChainId,
-      name: localId,
-      creator: '0x1111111111111111111111111111111111111111',
-      accessPolicy: 0,
-      blockNumber: 102,
-      metadataRevealed: true,
-    }] satisfies ContextGraphOnChain[]);
+    (chain as any).listContextGraphsFromChain = async () => ([
+      {
+        contextGraphId: onChainId,
+        name: localId,
+        creator: '0x1111111111111111111111111111111111111111',
+        accessPolicy: 0,
+        blockNumber: 102,
+        metadataRevealed: true,
+      },
+      {
+        contextGraphId: privateOnChainId,
+        name: privateId,
+        creator: curatorAddress,
+        accessPolicy: 1,
+        blockNumber: 103,
+        metadataRevealed: true,
+      },
+    ] satisfies ContextGraphOnChain[]);
     const persisted = new Map<string, ContextGraphSubscriptionRecord>();
     const agent = await DKGAgent.create({
       name: 'CoreChainDiscovery',
@@ -401,7 +513,9 @@ describe('Context Graph discovery/subscription boundary', () => {
 
     try {
       await agent.start();
-      expect(await agent.discoverContextGraphsFromChain()).toBe(1);
+      curatorAddress = '0x1111111111111111111111111111111111111111';
+      (agent as any).defaultAgentAddress = curatorAddress;
+      expect(await agent.discoverContextGraphsFromChain()).toBe(2);
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(agent.getSubscribedContextGraphs().get(localId)).toMatchObject({
@@ -411,24 +525,116 @@ describe('Context Graph discovery/subscription boundary', () => {
       });
       expect((agent as any).gossipRegistered.has(localId)).toBe(true);
       expect((agent as any).config.syncContextGraphs ?? []).not.toContain(localId);
-      expect(persisted.get(localId)).toMatchObject({ subscribed: true, syncScoped: false });
+      expect(persisted.get(localId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'automatic-public',
+        syncScoped: false,
+      });
+      expect(agent.getSubscribedContextGraphs().get(privateId)).toMatchObject({
+        subscribed: true,
+        synced: false,
+        onChainId: privateOnChainId,
+      });
+      expect((agent as any).config.syncContextGraphs ?? []).toContain(privateId);
+      expect(persisted.get(privateId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+        syncScoped: true,
+      });
       expect(agent.getCorePublicSyncCoverageStatus()).toMatchObject({
         enabled: true,
         trackedContextGraphs: 1,
       });
-      expect((agent as any).planAutomaticCorePublicSyncContextGraphsForPeerRound('peer-a'))
+      expect((agent as any).planCorePublicSyncPeerRound('peer-a').automaticContextGraphIds)
         .toEqual([localId]);
 
       agent.unsubscribeFromContextGraph(localId);
       expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
-      expect((agent as any).planAutomaticCorePublicSyncContextGraphsForPeerRound('peer-a'))
+      expect((agent as any).planCorePublicSyncPeerRound('peer-a').automaticContextGraphIds)
         .toEqual([]);
       expect(await agent.discoverContextGraphsFromChain()).toBe(0);
       expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(0);
+      expect((agent as any).config.syncContextGraphs ?? []).toContain(privateId);
     } finally {
       await agent.stop().catch(() => {});
     }
   }, 30_000);
+
+  it('rehydrates automatic public Core coverage before another chain scan succeeds', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-core-coverage-restart-'));
+    const localId = 'core-public-restart';
+    const onChainId = `0x${'7'.repeat(64)}`;
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record: ContextGraphSubscriptionRecord) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (id: string) => { persisted.delete(id); },
+    };
+    const discoveryChain = new MockChainAdapter();
+    (discoveryChain as any).listContextGraphsFromChain = async () => ([{
+      contextGraphId: onChainId,
+      name: localId,
+      creator: '0x1111111111111111111111111111111111111111',
+      accessPolicy: 0,
+      blockNumber: 104,
+      metadataRevealed: true,
+    }] satisfies ContextGraphOnChain[]);
+    let first: DKGAgent | undefined;
+    let restarted: DKGAgent | undefined;
+
+    try {
+      first = await DKGAgent.create({
+        name: 'CoreCoverageRestartFirst',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: discoveryChain,
+        contextGraphSubscriptionStore: subscriptionStore,
+        dataDir,
+      });
+      await first.start();
+      expect(await first.discoverContextGraphsFromChain()).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(persisted.get(localId)).toMatchObject({
+        subscribed: true,
+        onChainId,
+        syncAdmission: 'automatic-public',
+        syncScoped: false,
+      });
+      expect(first.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(1);
+      await first.stop();
+      first = undefined;
+
+      const offlineChain = new MockChainAdapter();
+      (offlineChain as any).listContextGraphsFromChain = async () => {
+        throw new Error('chain RPC unavailable');
+      };
+      restarted = await DKGAgent.create({
+        name: 'CoreCoverageRestartOffline',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: offlineChain,
+        contextGraphSubscriptionStore: subscriptionStore,
+        dataDir,
+      });
+      await restarted.start();
+
+      expect(restarted.getSubscribedContextGraphs().get(localId)).toMatchObject({
+        subscribed: true,
+        onChainId,
+        syncAdmission: 'automatic-public',
+      });
+      expect((restarted as any).config.syncContextGraphs ?? []).not.toContain(localId);
+      expect(restarted.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(1);
+      expect((restarted as any).planCorePublicSyncPeerRound('restart-peer').automaticContextGraphIds)
+        .toEqual([localId]);
+    } finally {
+      await first?.stop().catch(() => {});
+      await restarted?.stop().catch(() => {});
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('reconstructs an OnChainId-only edge catalogue entry after restart without chain RPC', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-discovery-restart-'));

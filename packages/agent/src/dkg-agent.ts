@@ -338,6 +338,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSyncMode,
+  type ContextGraphSyncAdmission,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type ContextGraphSubscriptionRecord,
@@ -451,6 +452,7 @@ export type {
   ChatSendResult,
   ContextGraphSub,
   ContextGraphSyncMode,
+  ContextGraphSyncAdmission,
   ContextGraphDiscoveryMetadata,
   ContextGraphDiscoveryOptions,
   ContextGraphSubscriptionRecord,
@@ -1225,10 +1227,30 @@ export class DKGAgent extends DKGAgentBase {
     metadata: ContextGraphDiscoveryMetadata,
     options: ContextGraphDiscoveryOptions = {},
   ): ContextGraphSub {
+    return this.recordDiscoveredContextGraphWithEvidence(contextGraphId, metadata, {
+      ...(options.trackSyncScope !== undefined
+        ? { trackSyncScope: options.trackSyncScope }
+        : {}),
+    });
+  }
+
+  private recordDiscoveredContextGraphWithEvidence(
+    contextGraphId: string,
+    metadata: ContextGraphDiscoveryMetadata,
+    evidence: { legacyPrivate?: boolean; trackSyncScope?: boolean } = {},
+  ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const disposition = this.classifyContextGraphDiscovery({
+      ...(metadata.accessPolicy ? { accessPolicy: metadata.accessPolicy } : {}),
+      ...(evidence.legacyPrivate === true ? { legacyPrivate: true } : {}),
+      ...(evidence.trackSyncScope !== undefined
+        ? { trackSyncScope: evidence.trackSyncScope }
+        : {}),
+    });
     const next: ContextGraphSub = {
       ...existing,
       syncMode: existing?.syncMode ?? 'always-on',
+      syncAdmission: existing?.syncAdmission ?? 'none',
       name: metadata.name ?? existing?.name,
       subscribed: existing?.subscribed === true,
       synced: existing?.synced === true,
@@ -1252,14 +1274,36 @@ export class DKGAgent extends DKGAgentBase {
     const persistEnrichment = existing?.subscribed === true || existing?.coreHosted === true;
     this.setContextGraphSubscription(contextGraphId, next, { persist: persistEnrichment });
 
-    if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
+    if (!existing && disposition !== 'catalogue-only') {
       this.subscribeToContextGraph(contextGraphId, {
-        trackSyncScope: options.trackSyncScope,
+        trackSyncScope: false,
         syncMode: 'always-on',
       });
     }
 
-    return this.subscribedContextGraphs.get(contextGraphId) ?? next;
+    const beforeAdmission = this.subscribedContextGraphs.get(contextGraphId) ?? next;
+    const admission: ContextGraphSyncAdmission = !beforeAdmission.subscribed
+      ? 'none'
+      : disposition === 'explicit-sync-scope'
+        ? 'explicit'
+        : disposition === 'automatic-public-coverage'
+          ? 'automatic-public'
+          : disposition === 'core-hosting-only'
+            ? 'none'
+            : beforeAdmission.syncAdmission;
+    const admissionChanged = this.reconcileContextGraphSyncAdmission(contextGraphId, {
+      subscribed: beforeAdmission.subscribed,
+      admission,
+    });
+    const recorded = this.subscribedContextGraphs.get(contextGraphId) ?? beforeAdmission;
+    if (admissionChanged) {
+      this.setContextGraphSubscription(
+        contextGraphId,
+        { ...recorded, syncAdmission: admission },
+        { persist: persistEnrichment || !existing },
+      );
+    }
+    return this.subscribedContextGraphs.get(contextGraphId) ?? recorded;
   }
 
   async discoverContextGraphsFromStore(): Promise<number> {
@@ -1356,28 +1400,19 @@ export class DKGAgent extends DKGAgentBase {
         // Enrich an existing active/hosted record and persist the binding. The
         // central recorder deliberately does not reactivate an existing
         // unsubscribed row, preserving explicit unsubscribe semantics.
-        this.recordDiscoveredContextGraph(id, { name, onChainId });
-        const current = this.subscribedContextGraphs.get(id) ?? existing;
-        // A restart re-seeds `subscribedContextGraphs` from persisted state but
-        // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
-        // what `getSyncContextGraphs()` and sync-on-connect's shared-memory pass
-        // iterate). For a PRIVATE CG the member is a participant in, that means a
-        // reconnecting member would data-sync the CG but its on-connect SWM pass
-        // would never cover it — the curator-leader REPLACE gate never sees it, so
-        // the member stays stale forever. Re-track the sync scope here for curated
-        // CGs so this same connect cycle's `newlyDiscovered` set picks it up
-        // (refreshing its meta-synced flag) and the shared-memory pass recovers it.
-        // `trackSyncContextGraph` is idempotent, so public/already-scoped CGs are
-        // unaffected. Gate on `existing.subscribed`: `unsubscribeFromContextGraph`
-        // keeps the record but flips `subscribed` to false and drops the CG from
-        // `syncContextGraphs`, so re-tracking an explicitly-unsubscribed (or
-        // host-only) private CG here would silently undo that operator choice on
-        // every discovery scan. Only re-track CGs the node is still a live
-        // subscriber of.
-        const isPrivate = await this.isPrivateContextGraph(id);
-        if (current.subscribed && isPrivate && this.trackSyncContextGraph(id)) {
-          this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
-        }
+        const explicitAccessPolicy = await this.getExplicitAccessPolicy(id);
+        const isPrivate = explicitAccessPolicy === 'private'
+          || (explicitAccessPolicy === null && await this.isPrivateContextGraph(id));
+        this.recordDiscoveredContextGraphWithEvidence(id, {
+          name,
+          onChainId,
+          // A durable on-chain binding is the store-side proof that this is
+          // eligible for automatic public coverage. Unbound local ontology
+          // entries remain catalogue-only for Core scheduling.
+          ...(explicitAccessPolicy ? { accessPolicy: explicitAccessPolicy } : {}),
+        }, {
+          legacyPrivate: explicitAccessPolicy === null && isPrivate,
+        });
         continue;
       }
 
@@ -1399,9 +1434,17 @@ export class DKGAgent extends DKGAgentBase {
       //   `source === 'meta'`, because the ontology-vs-meta
       //   collision resolver above lets an ontology row shadow a
       //   meta row when both exist for the same id.
-      const isCurated = await this.isPrivateContextGraph(id);
+      const explicitAccessPolicy = await this.getExplicitAccessPolicy(id);
+      const isCurated = explicitAccessPolicy === 'private'
+        || (explicitAccessPolicy === null && await this.isPrivateContextGraph(id));
 
-      const recorded = this.recordDiscoveredContextGraph(id, { name, onChainId });
+      const recorded = this.recordDiscoveredContextGraphWithEvidence(id, {
+        name,
+        onChainId,
+        ...(explicitAccessPolicy ? { accessPolicy: explicitAccessPolicy } : {}),
+      }, {
+        legacyPrivate: explicitAccessPolicy === null && isCurated,
+      });
       const roleOutcome = recorded.subscribed ? 'auto-subscribed for core hosting' : 'catalogued for explicit edge opt-in';
       this.log.info(
         ctx,
@@ -1491,6 +1534,42 @@ export class DKGAgent extends DKGAgentBase {
       const value = result.bindings[0]?.['id'];
       return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
     };
+    const persistDurableChainClassification = async (
+      contextGraphId: string,
+      onChainId: string,
+      accessPolicy: 'public' | 'private',
+      bindingAlreadyDurable = false,
+    ): Promise<void> => {
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+      if (!bindingAlreadyDurable) {
+        await this.store.deleteByPattern({
+          graph: ontologyGraph,
+          subject: contextGraphUri,
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        });
+      }
+      await this.store.deleteByPattern({
+        graph: ontologyGraph,
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      });
+      await this.store.insert([
+        ...(!bindingAlreadyDurable ? [{
+          subject: contextGraphUri,
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: `"${onChainId}"`,
+          graph: ontologyGraph,
+        }] : []),
+        {
+          subject: contextGraphUri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: `"${accessPolicy}"`,
+          graph: ontologyGraph,
+        },
+      ]);
+      this.contextGraphMetaProjection.markDirty(contextGraphId);
+    };
 
     let discovered = 0;
     const applyDiscoveredContextGraphs = async (contextGraphs: ContextGraphOnChain[]): Promise<void> => {
@@ -1499,10 +1578,18 @@ export class DKGAgent extends DKGAgentBase {
           if (!p.name) continue;
           const durableOnChainId = await readDurableContextGraphOnChainId(p.name);
           if (durableOnChainId === p.contextGraphId) {
-            const existing = this.subscribedContextGraphs.get(p.name);
-            if (Number(p.accessPolicy) === 0 && existing?.subscribed === true) {
-              this.registerCorePublicSyncContextGraph(p.name);
-            }
+            const accessPolicy = Number(p.accessPolicy) === 0 ? 'public' : 'private';
+            await persistDurableChainClassification(
+              p.name,
+              p.contextGraphId,
+              accessPolicy,
+              true,
+            );
+            this.recordDiscoveredContextGraph(p.name, {
+              name: p.name,
+              onChainId: p.contextGraphId,
+              accessPolicy,
+            });
             continue;
           }
           knownOnChainIds.delete(p.contextGraphId);
@@ -1535,34 +1622,20 @@ export class DKGAgent extends DKGAgentBase {
         // Persist the on-chain ID to the ontology graph so the publisher's
         // VM registration guard can find it via RDF (it has no access to
         // the in-memory subscribedContextGraphs map).
-        const cgUri = contextGraphDataGraphUri(p.name);
-        const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
         // Single-valued binding guard (RS heal): on-chain id is immutable; clear
         // any prior value so the cgId resolver / heal never read a multi-valued
         // (LIMIT-1-nondeterministic) binding.
         // Keep this durable write before in-memory catalogue mutation: cursor
         // pages are acked after this function returns, and an in-memory onChainId
         // alone must not make a retry skip the RDF binding.
-        await this.store.deleteByPattern({
-          graph: ontoGraph,
-          subject: cgUri,
-          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-        });
-        await this.store.insert([{
-          subject: cgUri,
-          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-          object: `"${p.contextGraphId}"`,
-          graph: ontoGraph,
-        }]);
+        const accessPolicy = Number(p.accessPolicy) === 0 ? 'public' : 'private';
+        await persistDurableChainClassification(p.name, p.contextGraphId, accessPolicy);
 
-        const recorded = this.recordDiscoveredContextGraph(p.name, {
+        this.recordDiscoveredContextGraph(p.name, {
           name: p.name,
           onChainId: p.contextGraphId,
-        }, { trackSyncScope: false });
-        if (Number(p.accessPolicy) === 0 && recorded.subscribed) {
-          this.registerCorePublicSyncContextGraph(p.name);
-        }
-        this.contextGraphMetaProjection.markDirty(p.name);
+          accessPolicy,
+        });
         const roleOutcome = (this.config.nodeRole ?? 'edge') === 'core'
           ? 'auto-subscribed for core ACK hosting'
           : 'catalogued (not subscribed)';

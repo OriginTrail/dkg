@@ -391,11 +391,14 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     deferSharedMemoryGossipSubscribe?: boolean;
     syncMode?: 'on-demand' | 'always-on';
   }): ContextGraphSub {
-    if (options?.trackSyncScope !== false) {
-      this.trackSyncContextGraph(contextGraphId);
-    }
-
     const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const syncAdmission = options?.trackSyncScope === false
+      ? existing?.syncAdmission ?? 'none'
+      : 'explicit';
+    this.reconcileContextGraphSyncAdmission(contextGraphId, {
+      subscribed: true,
+      admission: syncAdmission,
+    });
     // Opening an already durable graph must never silently downgrade it to a
     // process-local subscription. An explicit always-on request may promote an
     // existing on-demand subscription, while an omitted mode preserves the
@@ -426,7 +429,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!deferSwmGossip) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
-      if (!existing?.subscribed || existing.syncMode !== syncMode) {
+      if (
+        !existing?.subscribed
+        || existing.syncMode !== syncMode
+        || existing.syncAdmission !== syncAdmission
+      ) {
         return this.setContextGraphSubscription(
           contextGraphId,
           {
@@ -434,6 +441,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             subscribed: true,
             synced: existing?.synced ?? false,
             syncMode,
+            syncAdmission,
           },
           { persist },
         );
@@ -455,6 +463,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         subscribed: true,
         synced: existing?.synced ?? false,
         syncMode,
+        syncAdmission,
       },
       { persist },
     );
@@ -509,13 +518,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
 
-    // Drop from the active sync scope so background sweeps no longer treat
-    // this as a subscribed CG to keep current.
-    const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
-    if (syncSet.delete(contextGraphId)) {
-      this.config.syncContextGraphs = [...syncSet];
-    }
-    this.unregisterCorePublicSyncContextGraph(contextGraphId);
+    // Drop every sync-admission lane through the canonical owner.
+    this.reconcileContextGraphSyncAdmission(contextGraphId, {
+      subscribed: false,
+      admission: 'none',
+    });
 
     // Tear down the per-CG gossip topics. These four carry only the member
     // handlers installed by `subscribeToContextGraph`, so a topic-wide
@@ -553,7 +560,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // other field) intact. Persisted: the row is kept iff `coreHosted`.
     this.setContextGraphSubscription(
       contextGraphId,
-      { ...existing, subscribed: false },
+      { ...existing, subscribed: false, syncAdmission: 'none' },
       { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus },
     );
 

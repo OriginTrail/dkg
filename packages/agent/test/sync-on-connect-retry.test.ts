@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  PROTOCOL_SYNC,
+  PROTOCOL_ACCESS,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   runSyncOnConnect,
@@ -1090,13 +1097,22 @@ describe('DKGAgent peer-round scope wiring', () => {
       name: 'DynamicExplicitScope',
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
-      nodeRole: 'edge',
+      nodeRole: 'core',
       syncContextGraphs: ['initial-selected'],
+      syncCorePublicBatchSize: 1,
     });
     try {
       await agent.start();
+      (agent as any).registerCorePublicSyncContextGraph('automatic-public-a');
+      (agent as any).registerCorePublicSyncContextGraph('automatic-public-b');
+      (agent as any).registerCorePublicSyncContextGraph('automatic-public-c');
       allowAllNetworkAdmission(agent);
       const remotePeer = freshPeerIdString();
+      (agent as any).syncingPeers.add(remotePeer);
+      expect(await (agent as any).trySyncFromPeer(remotePeer)).toBe('already-syncing');
+      (agent as any).syncingPeers.delete(remotePeer);
+      (agent as any).getPeerProtocols = async () => [];
+      expect(await (agent as any).trySyncFromPeer(remotePeer)).toBe('skipped-no-sync');
       (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
       (agent as any).refreshMetaSyncedFlags = async () => {};
       (agent as any).discoverContextGraphsFromStore = async () => {
@@ -1119,9 +1135,23 @@ describe('DKGAgent peer-round scope wiring', () => {
 
       await (agent as any).trySyncFromPeer(remotePeer);
 
+      expect(durable.calls[0]?.[1]).toEqual([
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        'initial-selected',
+        'automatic-public-a',
+      ]);
       expect(durable.calls[1]?.[1]).toEqual(['restored-private']);
-      expect(planShared.calls[0]?.[1]).toEqual(['initial-selected', 'restored-private']);
-      expect(shared.calls[0]?.[1]).toEqual(['initial-selected', 'restored-private']);
+      expect(planShared.calls[0]?.[1]).toEqual([
+        'initial-selected',
+        'restored-private',
+        'automatic-public-a',
+      ]);
+      expect(shared.calls[0]?.[1]).toEqual([
+        'initial-selected',
+        'restored-private',
+        'automatic-public-a',
+      ]);
     } finally {
       await agent.stop().catch(() => {});
     }

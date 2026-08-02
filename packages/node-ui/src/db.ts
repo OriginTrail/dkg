@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 31;
+const SCHEMA_VERSION = 32;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -533,6 +533,8 @@ export class DashboardDB {
           meta_synced INTEGER,
           on_chain_id TEXT,
           sync_scoped INTEGER NOT NULL DEFAULT 1,
+          sync_admission TEXT
+            CHECK (sync_admission IS NULL OR sync_admission IN ('none', 'explicit', 'automatic-public')),
           updated_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cg_subs_sync_scoped
@@ -1211,6 +1213,22 @@ export class DashboardDB {
         );
       `);
     }
+    if (version < 32) {
+      // M1 Core public coverage: preserve the canonical admission lane across
+      // daemon restarts. NULL intentionally identifies legacy rows, whose
+      // `sync_scoped` bit is migrated by the agent rehydration boundary.
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has('sync_admission')) {
+        this.db.exec(`
+          ALTER TABLE context_graph_subscriptions
+          ADD COLUMN sync_admission TEXT
+            CHECK (sync_admission IS NULL OR sync_admission IN ('none', 'explicit', 'automatic-public'));
+        `);
+      }
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -1508,15 +1526,18 @@ export class DashboardDB {
     last_reconciled_ordinal?: number | null;
     core_hosted?: number | null;
     sync_scoped: number;
+    sync_admission?: 'none' | 'explicit' | 'automatic-public' | null;
     updated_at: number;
   }): void {
     this.stmt('upsertContextGraphSubscription', `
       INSERT INTO context_graph_subscriptions (
         context_graph_id, name, subscribed, synced, shared_memory_synced, meta_synced,
-        on_chain_id, on_chain_hash, last_reconciled_ordinal, core_hosted, sync_scoped, updated_at
+        on_chain_id, on_chain_hash, last_reconciled_ordinal, core_hosted,
+        sync_scoped, sync_admission, updated_at
       ) VALUES (
         @context_graph_id, @name, @subscribed, @synced, @shared_memory_synced, @meta_synced,
-        @on_chain_id, @on_chain_hash, @last_reconciled_ordinal, @core_hosted, @sync_scoped, @updated_at
+        @on_chain_id, @on_chain_hash, @last_reconciled_ordinal, @core_hosted,
+        @sync_scoped, @sync_admission, @updated_at
       )
       ON CONFLICT(context_graph_id) DO UPDATE SET
         name = excluded.name,
@@ -1529,6 +1550,7 @@ export class DashboardDB {
         last_reconciled_ordinal = excluded.last_reconciled_ordinal,
         core_hosted = excluded.core_hosted,
         sync_scoped = excluded.sync_scoped,
+        sync_admission = excluded.sync_admission,
         updated_at = excluded.updated_at
     `).run({
       context_graph_id: record.context_graph_id,
@@ -1542,6 +1564,7 @@ export class DashboardDB {
       last_reconciled_ordinal: record.last_reconciled_ordinal ?? null,
       core_hosted: record.core_hosted ?? null,
       sync_scoped: record.sync_scoped,
+      sync_admission: record.sync_admission ?? null,
       updated_at: record.updated_at,
     });
   }
@@ -4173,6 +4196,7 @@ export interface ContextGraphSubscriptionRow {
   last_reconciled_ordinal: number | null;
   core_hosted: number | null;
   sync_scoped: number;
+  sync_admission: 'none' | 'explicit' | 'automatic-public' | null;
   updated_at: number;
 }
 

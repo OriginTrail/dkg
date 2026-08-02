@@ -280,7 +280,7 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
+import { runSyncOnConnectWithScopePlan, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
@@ -457,6 +457,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -474,7 +475,10 @@ import {
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
-import { projectContextGraphSubscriptionPersistence } from './context-graph-subscription-policy.js';
+import {
+  normalizeLegacyContextGraphSubscriptionInput,
+  projectContextGraphSubscriptionPersistence,
+} from './context-graph-subscription-policy.js';
 import {
   authoritativeSyncPeerId,
   resolveCuratorSyncPeer,
@@ -2677,6 +2681,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const approvedSubscription: ContextGraphSub = {
               ...this.subscribedContextGraphs.get(contextGraphId),
               syncMode: 'always-on',
+              syncAdmission: 'explicit',
               subscribed: true,
               pendingMeta: true,
               metaSynced: false,
@@ -3608,7 +3613,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   clearNetworkRejectedPeerState(this: DKGAgent, remotePeer: string): void {
-    this.releaseCorePublicSyncPlanningLane(remotePeer);
     this.knownCorePeerIds.delete(remotePeer);
     this.knownCorePeerIdsV2.delete(remotePeer);
     this.skippedNoSyncPeers.delete(remotePeer);
@@ -3754,42 +3758,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
-    let plannedAutomaticContextGraphIds: string[] | undefined;
-    const getPlannedContextGraphIds = (): string[] => {
-      plannedAutomaticContextGraphIds ??=
-        this.planAutomaticCorePublicSyncContextGraphsForPeerRound(remotePeer);
-      // Discovery can restore an explicit/private subscription during this
-      // same connect cycle. Keep selected scope live while freezing only the
-      // automatic Core tail so both planes use one bounded coverage batch.
-      return [...new Set([
-        ...(this.config.syncContextGraphs ?? []),
-        ...plannedAutomaticContextGraphIds,
-      ])];
-    };
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
-    const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
+    const getSharedMemorySyncPlan = (
+      peerId: string,
+      contextGraphIdsAfterDiscovery: readonly string[],
+    ): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
       if (!plan) {
         plan = this.planSharedMemorySyncContextGraphs(
           peerId,
-          getPlannedContextGraphIds(),
+          [...contextGraphIdsAfterDiscovery],
           createOperationContext('sync'),
         );
         sharedMemorySyncPlans.set(peerId, plan);
       }
       return plan;
     };
-    return runSyncOnConnect({
+    return runSyncOnConnectWithScopePlan({
       remotePeer,
       syncingPeers: this.syncingPeers,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
-      getSyncContextGraphs: getPlannedContextGraphIds,
-      getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
+      createScopePlan: () => this.planCorePublicSyncPeerRound(remotePeer),
+      getSharedMemorySyncContextGraphs: async (peerId, contextGraphIdsAfterDiscovery) =>
+        (await getSharedMemorySyncPlan(peerId, contextGraphIdsAfterDiscovery)).eligibleContextGraphIds,
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
         peerId,
-        contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...getPlannedContextGraphIds()],
+        contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
         undefined,
         undefined,
         undefined,
@@ -3800,7 +3796,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
         stopOnBackoffWorthyFailure: true,
         source,
-        sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
+        sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId, contextGraphIds),
       }),
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => this.log.info(ctx, message),
@@ -4102,7 +4098,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
       if (now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
         this.lastSyncDisconnectedAt.delete(peerId);
-        this.releaseCorePublicSyncPlanningLane(peerId);
       }
     }
     for (const [peerId, ts] of this.lastSuccessfulSyncAt) {
@@ -6514,7 +6509,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
@@ -6530,8 +6525,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphWireId(next.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
+    const normalizedNext = normalizeLegacyContextGraphSubscriptionInput(
+      previous,
+      next,
+      (this.config.syncContextGraphs ?? []).includes(contextGraphId) ? 'explicit' : 'none',
+    );
     const canonicalNext: ContextGraphSub = {
-      ...next,
+      ...normalizedNext,
       ...(next.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
     if (
@@ -6552,7 +6552,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: canonicalNext,
-      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
     });
     if (options?.persist !== false && persistence.action !== 'skip') {
       if (this.config.contextGraphSubscriptionStore) {
@@ -6793,7 +6792,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: sub,
-      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
     });
     if (persistence.action === 'skip') {
       // Some lifecycle paths persist reconciliation watermarks directly
@@ -6868,7 +6866,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: sub,
-      syncScoped: syncScoped ?? (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      syncScoped,
     });
     if (persistence.action !== 'save' || !persistence.persistMemberIntent) {
       throw new Error(
@@ -7282,6 +7280,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             .some((address) => address.toLowerCase() === approvedAgentAddress)
           : false;
         const restorePendingMeta = hasJoinApproval && !approvedAgentAuthorized;
+        let syncAdmission = row.syncAdmission
+          ?? (row.syncScoped ? 'explicit' : 'none');
+        if (
+          row.syncAdmission === undefined
+          && (this.config.nodeRole ?? 'edge') === 'core'
+          && row.subscribed
+          && !row.syncScoped
+          && row.onChainId
+        ) {
+          const accessPolicy = await this.getExplicitAccessPolicy(row.id);
+          if (accessPolicy === 'public') syncAdmission = 'automatic-public';
+        }
         this.setContextGraphSubscription(row.id, {
           name: row.name,
           // Every row in the durable store predates or represents explicit
@@ -7298,17 +7308,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           onChainHash: row.onChainHash,
           lastReconciledOrdinal: row.lastReconciledOrdinal,
           coreHosted: row.coreHosted,
+          syncAdmission,
         }, { persist: false });
-        if (row.syncScoped) {
-          this.trackSyncContextGraph(row.id);
-        }
         if (row.subscribed) {
           this.subscribeToContextGraph(row.id, {
             trackSyncScope: false,
             persist: false,
             syncMode: 'always-on',
           });
+          this.reconcileContextGraphSyncAdmission(row.id, {
+            subscribed: true,
+            admission: syncAdmission,
+          });
           this.persistLocalNodeMembership(row.id, 'rehydrated-subscription');
+        } else {
+          this.reconcileContextGraphSyncAdmission(row.id, {
+            subscribed: false,
+            admission: 'none',
+          });
         }
         // Upgrade/self-heal path for late private-CG members whose payload and
         // authenticated `_meta` already completed before registration binding

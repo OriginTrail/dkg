@@ -352,6 +352,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
@@ -2439,7 +2440,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(localCgId);
     if (existing?.coreHosted && existing.onChainId === numericStr) return; // already recorded
 
-    let next: ContextGraphSub;
+    let next: ContextGraphSubInput;
     if (existing) {
       // Rebind through the helper so a CG re-created/rebound under the same
       // local id drops its stale reconcile watermark + in-memory cursor before

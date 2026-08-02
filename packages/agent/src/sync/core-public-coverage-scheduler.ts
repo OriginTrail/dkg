@@ -4,6 +4,7 @@ import {
 } from './policy.js';
 
 export const DEFAULT_CORE_PUBLIC_SYNC_BATCH_SIZE = 8;
+export const DEFAULT_CORE_PUBLIC_SYNC_MAX_PLANNING_LANES = 2_048;
 
 export interface CorePublicSyncCoverageStatus {
   enabled: boolean;
@@ -16,12 +17,6 @@ export interface CorePublicSyncCoverageStatus {
     coverageContextGraphs: number;
     totalContextGraphs: number;
   };
-}
-
-export interface CorePublicSyncPlan {
-  contextGraphIds: string[];
-  selectedContextGraphIds: string[];
-  coverageContextGraphIds: string[];
 }
 
 function normalizeBatchSize(value: number | undefined): number {
@@ -67,22 +62,27 @@ export function resolveCorePublicSyncBatchSize(
   return normalizeBatchSize(configured);
 }
 
-/**
- * Rotating, bounded admission for automatic Core coverage. Explicitly selected
- * CGs are always included; only the automatic all-public tail is sliced.
- */
+/** Rotating, bounded admission for the automatic Core-public tail only. */
 export class CorePublicSyncCoverageScheduler {
   private readonly tracked = new Set<string>();
-  /** Per-peer cursors prevent a stable peer order from pinning each peer to one batch. */
-  private readonly cursors = new Map<string, number>();
+  /**
+   * Bounded LRU lane anchors keep active-peer fairness without a lifecycle cleanup contract.
+   * Each value names the graph that most recently occupied the lane's first slot, so the
+   * state remains meaningful when priorities or tracked membership rebuild the ordered list.
+   */
+  private readonly laneAnchors = new Map<string, string>();
   private lastPlanAt?: number;
   private lastPlan?: CorePublicSyncCoverageStatus['lastPlan'];
 
   constructor(
     private readonly batchSize: number,
     private readonly now: () => number = Date.now,
+    private readonly maxPlanningLanes = DEFAULT_CORE_PUBLIC_SYNC_MAX_PLANNING_LANES,
   ) {
     normalizeBatchSize(batchSize);
+    if (!Number.isInteger(maxPlanningLanes) || maxPlanningLanes <= 0) {
+      throw new TypeError('maxPlanningLanes must be a positive integer');
+    }
   }
 
   register(contextGraphId: string): boolean {
@@ -96,20 +96,22 @@ export class CorePublicSyncCoverageScheduler {
   unregister(contextGraphId: string): boolean {
     const removed = this.tracked.delete(contextGraphId);
     if (this.tracked.size === 0) {
-      this.cursors.clear();
-    } else {
-      for (const [planningLane, cursor] of this.cursors) {
-        this.cursors.set(planningLane, cursor % this.tracked.size);
+      this.laneAnchors.clear();
+    } else if (removed) {
+      for (const [planningLane, anchorContextGraphId] of this.laneAnchors) {
+        if (anchorContextGraphId === contextGraphId) {
+          this.laneAnchors.delete(planningLane);
+        }
       }
     }
     return removed;
   }
 
-  plan(
+  planAutomaticCoverage(
     selectedContextGraphIds: readonly string[],
     priorities?: Readonly<SyncContextGraphPriorityConfig>,
     planningLane = 'default',
-  ): CorePublicSyncPlan {
+  ): string[] {
     const selected = [...new Set(
       selectedContextGraphIds.map((id) => id.trim()).filter(Boolean),
     )];
@@ -127,34 +129,35 @@ export class CorePublicSyncCoverageScheduler {
     const scheduledCoverage: string[] = [];
     if (this.batchSize > 0 && coverage.length > 0) {
       const count = Math.min(this.batchSize, coverage.length);
-      const start = (this.cursors.get(planningLane) ?? 0) % coverage.length;
+      const previousAnchor = this.laneAnchors.get(planningLane);
+      const previousAnchorIndex = previousAnchor === undefined
+        ? -1
+        : coverage.indexOf(previousAnchor);
+      const start = previousAnchorIndex < 0
+        ? 0
+        : (previousAnchorIndex + rotationStride(count, coverage.length)) % coverage.length;
       for (let offset = 0; offset < count; offset += 1) {
         scheduledCoverage.push(coverage[(start + offset) % coverage.length]!);
       }
-      this.cursors.set(
-        planningLane,
-        (start + rotationStride(count, coverage.length)) % coverage.length,
-      );
+      // Delete-before-set refreshes LRU order for an existing active lane.
+      if (previousAnchor !== undefined) this.laneAnchors.delete(planningLane);
+      this.laneAnchors.set(planningLane, coverage[start]!);
+      while (this.laneAnchors.size > this.maxPlanningLanes) {
+        const oldestLane = this.laneAnchors.keys().next().value as string | undefined;
+        if (oldestLane === undefined) break;
+        this.laneAnchors.delete(oldestLane);
+      }
     } else {
-      this.cursors.delete(planningLane);
+      this.laneAnchors.delete(planningLane);
     }
 
-    const contextGraphIds = [...selected, ...scheduledCoverage];
     this.lastPlanAt = this.now();
     this.lastPlan = {
       selectedContextGraphs: selected.length,
       coverageContextGraphs: scheduledCoverage.length,
-      totalContextGraphs: contextGraphIds.length,
+      totalContextGraphs: selected.length + scheduledCoverage.length,
     };
-    return {
-      contextGraphIds,
-      selectedContextGraphIds: selected,
-      coverageContextGraphIds: scheduledCoverage,
-    };
-  }
-
-  releasePlanningLane(planningLane: string): boolean {
-    return this.cursors.delete(planningLane);
+    return scheduledCoverage;
   }
 
   getStatus(enabled: boolean): CorePublicSyncCoverageStatus {
@@ -162,7 +165,7 @@ export class CorePublicSyncCoverageScheduler {
       enabled: enabled && this.batchSize > 0,
       batchSize: this.batchSize,
       trackedContextGraphs: this.tracked.size,
-      planningLanes: this.cursors.size,
+      planningLanes: this.laneAnchors.size,
       ...(this.lastPlanAt !== undefined ? { lastPlanAt: this.lastPlanAt } : {}),
       ...(this.lastPlan ? { lastPlan: { ...this.lastPlan } } : {}),
     };

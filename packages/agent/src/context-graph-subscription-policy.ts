@@ -1,6 +1,7 @@
 import type {
   ContextGraphSub,
   ContextGraphSubInput,
+  ContextGraphSyncAdmission,
   ContextGraphSubscriptionRecord,
   ContextGraphSyncMode,
 } from './dkg-agent-types.js';
@@ -8,10 +9,12 @@ import type {
 export function normalizeLegacyContextGraphSubscriptionInput(
   previous: ContextGraphSub | undefined,
   next: ContextGraphSubInput,
+  defaultAdmission: ContextGraphSyncAdmission = 'none',
 ): ContextGraphSub {
   return {
     ...next,
     syncMode: next.syncMode ?? previous?.syncMode ?? 'always-on',
+    syncAdmission: next.syncAdmission ?? previous?.syncAdmission ?? defaultAdmission,
   };
 }
 
@@ -48,7 +51,8 @@ export type ContextGraphSubscriptionPersistenceProjection =
 export function projectContextGraphSubscriptionPersistence(input: {
   contextGraphId: string;
   subscription: ContextGraphSub | undefined;
-  syncScoped: boolean;
+  /** Optional legacy-call override; current callers persist the live admission. */
+  syncScoped?: boolean;
 }): ContextGraphSubscriptionPersistenceProjection {
   const sub = input.subscription;
   if (sub?.syncMode === 'on-demand' && sub.coreHosted !== true) {
@@ -59,6 +63,11 @@ export function projectContextGraphSubscriptionPersistence(input: {
   }
 
   const persistMemberIntent = sub.syncMode !== 'on-demand';
+  const syncAdmission = persistMemberIntent
+    ? input.syncScoped === undefined
+      ? sub.syncAdmission
+      : input.syncScoped ? 'explicit' : 'none'
+    : 'none';
   return {
     action: 'save',
     persistMemberIntent,
@@ -73,7 +82,9 @@ export function projectContextGraphSubscriptionPersistence(input: {
       onChainHash: sub.onChainHash,
       lastReconciledOrdinal: sub.lastReconciledOrdinal,
       coreHosted: sub.coreHosted,
-      syncScoped: persistMemberIntent && input.syncScoped,
+      syncAdmission,
+      // Keep the legacy compatibility bit derived from the canonical lane.
+      syncScoped: syncAdmission === 'explicit',
     },
   };
 }
