@@ -265,7 +265,10 @@ export class FinalizedSwmCleanupService {
     }
 
     // The rotation closed: every context graph was measured exactly once, so the
-    // accumulated sums are a whole-node total again.
+    // accumulated sums are a whole-node total again. Reached with an empty tail
+    // too, when every context graph still owed a visit disappeared mid-rotation
+    // (or the node has none at all) — the total then covers exactly the graphs
+    // that still exist, which is the whole-node answer.
     this.lastKnownBacklogDepth = this.rotationBacklogDepth;
     this.lastKnownOldestMarkerAt = this.rotationOldestMarkerAt;
     this.rotationPending = null;
@@ -285,11 +288,16 @@ export class FinalizedSwmCleanupService {
   /**
    * Continue the rotation in progress, dropping context graphs that disappeared
    * since it started, or open a fresh one. Context graphs created mid-rotation
-   * join the next rotation rather than this one; `stale` reports the lag.
+   * join the next rotation rather than this one, so a closing total covers the
+   * set as of rotation start; the lag is bounded by one rotation. That lag is
+   * deliberately not reported as `stale` — on a node with any context-graph
+   * churn the flag would be true almost always, destroying the deferred-versus-
+   * drained signal it exists to carry.
    *
-   * Guarantees forward progress: a head that three consecutive sweeps could not
-   * finish moves to the back of the rotation so the context graphs behind it are
-   * still served. It keeps its place in the rotation and is retried there.
+   * Guarantees forward progress: after two consecutive slices fail to finish the
+   * head, the third defers it to the back of the rotation so the context graphs
+   * behind it are still served. It keeps its place in the rotation and is
+   * retried there.
    */
   private resumeRotation(contextGraphIds: string[]): string[] {
     let pending: string[];
@@ -313,7 +321,7 @@ export class FinalizedSwmCleanupService {
       this.log.warn(
         createOperationContext('system'),
         `Deferring context graph ${head} in finalized-SWM cleanup rotation; `
-          + `${this.rotationHeadStalledSweeps + 1} consecutive slices could not finish it`,
+          + `${this.rotationHeadStalledSweeps} consecutive slices could not finish it`,
       );
       pending = [...pending.slice(1), pending[0]!];
       this.rotationHeadContextGraphId = pending[0] ?? null;
