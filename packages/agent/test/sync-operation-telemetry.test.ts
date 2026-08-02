@@ -442,6 +442,127 @@ describe('W1 A6/M6 — the changelog lane reports its own attempts AND bytes', (
   });
 });
 
+describe('W1 R1 — the ambient source reaches every recording path', () => {
+  // Parameter threading fails CLOSED: a missing argument is a compile error.
+  // The ambient context fails OPEN: a path that never enters the scope records
+  // `unspecified` at runtime with no type error. §5.5 turns that into a loud
+  // window invalidation rather than corrupt data — but if a path routinely
+  // misses the scope, EVERY window is inconclusive and W1 answers nothing. So
+  // each lane is proven against its EXACT expected literal, not "not unspecified".
+  it.each([
+    ['durable', 'on-connect'],
+    ['changelog', 'catchup-foreground'],
+    ['shared_memory', 'reconcile'],
+    ['swm_recovery', 'swm-recovery'],
+  ] as const)('lane %s: a real send inside the boundary carries source=%s', async (lane, source) => {
+    harness.install();
+    let sends = 0;
+    const agent = await createAgent({
+      sendToPeer: async () => { sends += 1; return new Uint8Array(0); },
+    });
+
+    await admit(agent, { lane, source }, () => (agent as any).fetchSyncPages(
+      createOperationContext('sync'), PEER_A, CG, false, 'data',
+      `did:dkg:context-graph:${CG}`, DEFAULT_DEADLINE,
+    ));
+
+    expect(sends).toBe(1);
+    expect(await harness.matching(I1, { transport: 'legacy', source })).toHaveLength(1);
+    expect(await harness.matching(I1, { source: 'unspecified' })).toEqual([]);
+  });
+
+  it('the changelog→legacy `runResync` fallback inherits the changelog operation\'s source', async () => {
+    harness.install();
+    // This is the case that motivated the ambient design over parameter
+    // threading: `runResync` re-enters the LEGACY lane from inside the
+    // changelog lane, and no `source` is in scope on that path. Threading
+    // would have left these attempts `unspecified` — a silently partial
+    // denominator, which §4 says is uncorrectable after collection.
+    let changelogSends = 0;
+    let legacySends = 0;
+    const agent = await createAgent({
+      sendToPeer: async (..._args: unknown[]) => {
+        const protocolId = _args[1] as string;
+        if (protocolId.includes('changelog')) {
+          changelogSends += 1;
+          return encodeChangelogResponse({ kind: 'resync', era: 'era-1', headSeq: 5 });
+        }
+        legacySends += 1;
+        return new Uint8Array(0); // empty page ⇒ the legacy phase completes
+      },
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [], verifiedMeta: [],
+      totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0,
+      rejectedKcs: 0, emptyResponses: 1, metaOnlyResponses: 0, dataRejectedMissingMeta: 0,
+    });
+
+    await admit(agent, { source: 'catchup-foreground', lane: 'changelog' }, () =>
+      (agent as any).runChangelogSyncForCg(createOperationContext('sync'), PEER_A, CG));
+
+    expect(changelogSends).toBeGreaterThanOrEqual(1);
+    expect(legacySends).toBeGreaterThanOrEqual(1);
+
+    // Both lanes, one operation, one source — the shared denominator §4 requires.
+    expect((await harness.matching(I1, { transport: 'changelog', source: 'catchup-foreground' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect((await harness.matching(I1, { transport: 'legacy', source: 'catchup-foreground' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'unspecified' })).toEqual([]);
+    // Bytes follow the attempts, so the fallback is in the denominator too.
+    expect((await harness.matching(I2, { transport: 'legacy', source: 'catchup-foreground' })).length)
+      .toBeGreaterThanOrEqual(1);
+  });
+
+  it('a detached spawn that establishes its own source keeps it after the operation ends', async () => {
+    harness.install();
+    let sends = 0;
+    const agent = await createAgent({
+      sendToPeer: async () => { sends += 1; return new Uint8Array(0); },
+    });
+
+    // This pins the MITIGATION, not the absence of the hazard. If you must
+    // detach, wrapping in `withSyncAdmissionSource` works and the scope survives
+    // the detachment — that is what is asserted below.
+    //
+    // It deliberately does NOT prove that a *bare* detached spawn is impossible.
+    // A bare spawn would inherit `catchup-foreground` and keep it, and this test
+    // would stay green; the assertion below passes because the spawn was handed
+    // its own source, not because detachment prevents inheritance. The real
+    // protection is the audit (no detached senders inside the admitted boundary)
+    // plus the standing hazard note in the plan's §5.5 — not a runtime guard.
+    //
+    // The audit's structural half, which is the durable part: the send-capable
+    // modules are exactly `dkg-agent-lifecycle.ts`, `p2p/sync-transport.ts` and
+    // the two `sync/requester/` modules. The store-commit and verification trees
+    // contain no sender at all, so detached work there cannot reach an I1–I3
+    // record site whatever scope it inherits.
+    //
+    // A test asserting the bare case DOES inherit is deliberately absent: it
+    // would encode the hazard as expected behaviour and make the eventual fix
+    // read as a regression.
+    let detached: Promise<unknown> | undefined;
+    await admit(agent, { lane: 'durable', source: 'catchup-foreground' }, async () => {
+      detached = withSyncAdmissionSource('catchup-background', () => (agent as any).fetchSyncPages(
+        createOperationContext('sync'), PEER_A, `${CG}-detached`, false, 'data',
+        `did:dkg:context-graph:${CG}-detached`, DEFAULT_DEADLINE,
+      ));
+      return undefined;
+    });
+    await detached;
+
+    expect(sends).toBe(1);
+    // The detached send carries the source IT established, not the foreground
+    // operation's — `catchup-foreground` is an ELIGIBLE family, so inheriting
+    // it here would inflate the eligible bytes numerator in §7.3.
+    expect(await harness.matching(I1, { source: 'catchup-background' })).toHaveLength(1);
+    expect(await harness.matching(I1, { source: 'catchup-foreground' })).toEqual([]);
+  });
+});
+
 describe('W1 A15/M13 — VM recovery is labelled `vm-recovery`, not `catchup-background`', () => {
   it('the override replaces the mode-derived source and leaves priority alone', async () => {
     const seen: Array<{ priority?: number; source?: string }> = [];
