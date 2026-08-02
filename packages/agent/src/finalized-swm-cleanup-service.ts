@@ -326,9 +326,11 @@ export class FinalizedSwmCleanupService {
    * drained signal it exists to carry.
    *
    * Guarantees forward progress: after two consecutive slices fail to finish the
-   * head, the third defers it to the back of the rotation so the context graphs
-   * behind it are still served. It keeps its place in the rotation and is
-   * retried there.
+   * head, the third either defers it to the back of the rotation, so the context
+   * graphs behind it are still served, or — when it is the only one left, where
+   * deferring is a no-op — closes the rotation and re-seeds, so the rest of the
+   * node is swept again. Either way the stalled graph keeps its place and is
+   * retried; neither path drops it.
    */
   private resumeRotation(contextGraphIds: string[]): string[] {
     let pending: string[];
@@ -348,13 +350,36 @@ export class FinalizedSwmCleanupService {
       this.rotationHeadContextGraphId = head;
       this.rotationHeadStalledSweeps = 0;
     }
-    if (this.rotationHeadStalledSweeps >= 2 && pending.length > 1) {
+    if (this.rotationHeadStalledSweeps >= 2) {
+      const soleHead = pending.length === 1;
       this.log.warn(
         createOperationContext('system'),
-        `Deferring context graph ${head} in finalized-SWM cleanup rotation; `
-          + `${this.rotationHeadStalledSweeps} consecutive slices could not finish it`,
+        `Context graph ${head} was not finished by ${this.rotationHeadStalledSweeps} `
+          + `consecutive finalized-SWM cleanup slices; `
+          + (soleHead
+            ? 'closing the rotation early so every other context graph is swept again'
+            : 'deferring it to the back of the rotation'),
       );
-      pending = [...pending.slice(1), pending[0]!];
+      if (soleHead) {
+        // Rotating a one-element list is a no-op, so without this the rotation
+        // could never close: `rotationPending` would stay non-null forever, the
+        // re-seed below would never run, and every OTHER context graph on the
+        // node would never be swept again — #1996 reintroduced node-wide by the
+        // subsystem that exists to close it.
+        //
+        // The partial accumulator is discarded rather than published. An
+        // incomplete rotation must never become a whole-node total, so
+        // `lastKnownBacklogDepth` keeps the last complete measurement and every
+        // slice keeps reporting `stale` until a rotation genuinely finishes.
+        // A node whose budget cannot fit one context graph therefore reports an
+        // honestly unknown backlog, and this warning names the graph to raise it
+        // for.
+        this.rotationBacklogDepth = 0;
+        this.rotationOldestMarkerAt = null;
+        pending = [...contextGraphIds];
+      } else {
+        pending = [...pending.slice(1), pending[0]!];
+      }
       this.rotationHeadContextGraphId = pending[0] ?? null;
       this.rotationHeadStalledSweeps = 0;
     }
