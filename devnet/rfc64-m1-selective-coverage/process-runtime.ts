@@ -82,6 +82,11 @@ interface PendingRequest {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+interface ProcessExitOutcome {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
 /**
  * JSON-lines bridge to an operator-owned adapter that controls three real DKG
  * processes. Ordinary adapter logs may use stdout; only prefixed result lines
@@ -96,7 +101,8 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
   private exitError: Error | undefined;
   private stdoutBuffer = Buffer.alloc(0);
   private readonly sessionNonce = randomBytes(32).toString('hex');
-  private readonly exited: Promise<void>;
+  private readonly exited: Promise<ProcessExitOutcome>;
+  private exitOutcome: ProcessExitOutcome | undefined;
 
   constructor(input: {
     readonly command: string;
@@ -118,15 +124,16 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     });
     this.child.stderr.pipe(process.stderr);
     this.child.stdout.on('data', (chunk: Buffer) => this.consumeChunk(chunk));
-    let resolveExited!: () => void;
+    let resolveExited!: (outcome: ProcessExitOutcome) => void;
     this.exited = new Promise((resolveExit) => {
       resolveExited = resolveExit;
     });
     let terminal = false;
-    const resolveTerminal = () => {
+    const resolveTerminal = (outcome: ProcessExitOutcome) => {
       if (terminal) return;
       terminal = true;
-      resolveExited();
+      this.exitOutcome = outcome;
+      resolveExited(outcome);
     };
     this.child.on('error', (error) => {
       // Spawn failures are terminal but ChildProcess also emits `error` for
@@ -135,12 +142,12 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
       if (this.child.pid === undefined
         || this.child.exitCode !== null
         || this.child.signalCode !== null) {
-        resolveTerminal();
+        resolveTerminal({ code: this.child.exitCode, signal: this.child.signalCode });
       }
       this.failAll(new Error('M1 runtime adapter process failed', { cause: error }));
     });
     this.child.once('exit', (code, signal) => {
-      resolveTerminal();
+      resolveTerminal({ code, signal });
       if (!this.closing || this.pending.size > 0) {
         this.failAll(new Error(
           `M1 runtime adapter exited before shutdown acknowledgement `
@@ -149,7 +156,7 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
       }
     });
     this.child.once('close', (code, signal) => {
-      resolveTerminal();
+      resolveTerminal({ code, signal });
       if (!this.closing || this.pending.size > 0) {
         this.failAll(new Error(
           `M1 runtime adapter closed before shutdown acknowledgement `
@@ -227,14 +234,32 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     }
     this.closed = true;
     this.child.stdin.end();
-    if (!await this.waitForExit(CLOSE_GRACE_MS)) {
+    let forcedSignal: NodeJS.Signals | undefined;
+    let exit = await this.waitForExit(CLOSE_GRACE_MS);
+    if (!exit) {
+      forcedSignal = 'SIGTERM';
       this.child.kill('SIGTERM');
-      if (!await this.waitForExit(CLOSE_GRACE_MS)) {
+      exit = await this.waitForExit(CLOSE_GRACE_MS);
+      if (!exit) {
+        forcedSignal = 'SIGKILL';
         this.child.kill('SIGKILL');
-        await this.exited;
+        exit = await this.waitForExit(CLOSE_GRACE_MS);
       }
     }
     if (shutdownFailure !== undefined) throw shutdownFailure;
+    if (this.exitError) throw this.exitError;
+    if (!exit) {
+      throw new Error('M1 runtime adapter did not exit after forced SIGKILL');
+    }
+    if (forcedSignal) {
+      throw new Error(`M1 runtime adapter required forced ${forcedSignal} during shutdown`);
+    }
+    if (exit.code !== 0 || exit.signal !== null) {
+      throw new Error(
+        `M1 runtime adapter exited abnormally after shutdown `
+          + `(code=${String(exit.code)} signal=${String(exit.signal)})`,
+      );
+    }
   }
 
   private request<T>(
@@ -352,15 +377,17 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     this.pending.clear();
   }
 
-  private async waitForExit(timeoutMs: number): Promise<boolean> {
-    if (this.child.exitCode !== null || this.child.signalCode !== null) return true;
+  private async waitForExit(timeoutMs: number): Promise<ProcessExitOutcome | undefined> {
+    if (this.exitOutcome) return this.exitOutcome;
+    if (this.child.exitCode !== null || this.child.signalCode !== null) {
+      return { code: this.child.exitCode, signal: this.child.signalCode };
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<false>((resolveTimeout) => {
-      timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+    const timedOut = new Promise<undefined>((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout(undefined), timeoutMs);
       timer.unref();
     });
-    const exited = this.exited.then(() => true as const);
-    const result = await Promise.race([exited, timedOut]);
+    const result = await Promise.race([this.exited, timedOut]);
     if (timer) clearTimeout(timer);
     return result;
   }

@@ -45,7 +45,16 @@ lines.on('line', (line) => {
     process.stdout.write(`${prefix}${JSON.stringify(result)}\n`, () => process.exit(0));
     return;
   }
-  if (input.command === 'start' && mode) {
+  if (input.command === 'shutdown' && mode === 'shutdown-nonzero') {
+    process.stdout.write(`${prefix}${JSON.stringify(result)}\n`, () => process.exit(17));
+    return;
+  }
+  if (input.command === 'shutdown' && mode === 'shutdown-hang') {
+    process.stdout.write(`${prefix}${JSON.stringify(result)}\n`);
+    setInterval(() => undefined, 1_000);
+    return;
+  }
+  if (input.command === 'start' && mode && !mode.startsWith('shutdown-')) {
     if (mode === 'malformed-publish') {
       process.stdout.write(`${prefix}${JSON.stringify(result)}\n`);
       return;

@@ -153,6 +153,24 @@ test('a non-terminal child error cannot satisfy the process-exit proof', async (
   }
 });
 
+test('rejects a non-zero adapter exit after shutdown acknowledgement', async () => {
+  const runtime = fixtureRuntime('shutdown-nonzero');
+  await runtime.start('publisher');
+  await assert.rejects(
+    runtime.close(),
+    /runtime adapter exited abnormally after shutdown \(code=17 signal=null\)/,
+  );
+});
+
+test('rejects forced termination after shutdown acknowledgement', async () => {
+  const runtime = fixtureRuntime('shutdown-hang');
+  await runtime.start('publisher');
+  await assert.rejects(
+    runtime.close(),
+    /runtime adapter required forced SIGTERM during shutdown/,
+  );
+});
+
 for (const [command, invoke] of [
   ['observe-edge', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
     runtime.observeEdge('before-selection')],
