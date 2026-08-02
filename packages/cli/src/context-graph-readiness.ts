@@ -42,6 +42,73 @@ export interface ContextGraphReadinessPatch {
   sharedMemoryVerified: boolean;
 }
 
+export type ContextGraphConvergencePlane = 'metadata' | 'durable' | 'sharedMemory';
+
+export interface ContextGraphConvergenceSnapshot {
+  state: 'pending' | 'partial' | 'complete';
+  required: {
+    metadata: true;
+    durable: true;
+    sharedMemory: boolean;
+  };
+  verified: {
+    metadata: boolean;
+    durable: boolean;
+    sharedMemory: boolean;
+  };
+  missing: ContextGraphConvergencePlane[];
+  readinessUpdatedAt?: number;
+  observedAt: number;
+}
+
+/**
+ * Describe the live, per-plane convergence of one selected context graph.
+ * A VM/SWM proof is only effective while authoritative CG metadata is local;
+ * stale provenance must not make a graph look complete after metadata loss.
+ */
+export function describeContextGraphConvergence(input: {
+  readiness: ContextGraphReadinessProvenance;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+  observedAt?: number;
+}): ContextGraphConvergenceSnapshot {
+  const currentReadinessProvenance =
+    input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
+  const metadataVerified = input.hasConfirmedMeta;
+  const durableVerified = metadataVerified &&
+    currentReadinessProvenance &&
+    input.readiness.durableVerified;
+  const sharedMemoryVerified = metadataVerified &&
+    currentReadinessProvenance &&
+    input.readiness.sharedMemoryVerified;
+  const missing: ContextGraphConvergencePlane[] = [];
+  if (!metadataVerified) missing.push('metadata');
+  if (!durableVerified) missing.push('durable');
+  if (input.includeSharedMemory && !sharedMemoryVerified) missing.push('sharedMemory');
+
+  const anyVerified = metadataVerified || durableVerified ||
+    (input.includeSharedMemory && sharedMemoryVerified);
+
+  return {
+    state: missing.length === 0 ? 'complete' : anyVerified ? 'partial' : 'pending',
+    required: {
+      metadata: true,
+      durable: true,
+      sharedMemory: input.includeSharedMemory,
+    },
+    verified: {
+      metadata: metadataVerified,
+      durable: durableVerified,
+      sharedMemory: sharedMemoryVerified,
+    },
+    missing,
+    ...(currentReadinessProvenance
+      ? { readinessUpdatedAt: input.readiness.updatedAt }
+      : {}),
+    observedAt: input.observedAt ?? Date.now(),
+  };
+}
+
 export interface MissingMetadataReadinessPatches {
   statePatch: ContextGraphSubscriptionStatePatch;
   readinessPatch: ContextGraphReadinessPatch;
@@ -75,11 +142,9 @@ export function classifyExistingContextGraphReadiness(input: {
 } {
   const currentReadinessProvenance =
     input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
-  const overallReadinessVerified =
-    input.readiness.durableVerified || input.readiness.sharedMemoryVerified;
   const requestedPlanesVerified =
     currentReadinessProvenance &&
-    overallReadinessVerified &&
+    input.readiness.durableVerified &&
     (!input.includeSharedMemory || input.readiness.sharedMemoryVerified);
   const alreadyReady =
     input.hasConfirmedMeta &&
@@ -113,12 +178,11 @@ export function classifyExistingContextGraphReadiness(input: {
     currentReadinessProvenance && input.readiness.durableVerified;
   const sharedMemoryVerified =
     currentReadinessProvenance && input.readiness.sharedMemoryVerified;
-  const overallVerified = durableVerified || sharedMemoryVerified;
   const statePatch =
-    input.subscription.synced !== overallVerified ||
+    input.subscription.synced !== durableVerified ||
     input.subscription.sharedMemorySynced !== sharedMemoryVerified
       ? {
-          synced: overallVerified,
+          synced: durableVerified,
           sharedMemorySynced: sharedMemoryVerified,
           metaSynced: true,
           pendingMeta: false,
@@ -351,17 +415,7 @@ export function classifyContextGraphCatchupReadiness(input: {
     const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
     const sharedMemoryVerifiedPersisted =
       sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
-    // `subscription.synced` is a SECOND persisted readiness bit, living outside
-    // the provenance store and consumed by callers that never see this job's
-    // result — `contextGraphRowIsWritable` treats `subscribed && synced` as
-    // writable. It must therefore carry the same verdict as `readinessPatch`,
-    // not the transient one. The pre-catch-up path already assumes they agree:
-    // it derives `synced` from the persisted provenance and patches the row
-    // back into line, so letting them diverge here would be corrected away on
-    // the next pass anyway — after a window in which the graph looked writable.
-    const overallVerifiedPersisted = durableVerifiedPersisted || sharedMemoryVerifiedPersisted;
-    const overallVerified = durableVerified || sharedMemoryVerified;
-    const missingGraphProof = !overallVerified;
+    const missingDurable = !durableVerified;
     const missingRequestedSharedMemory =
       input.includeSharedMemory && !sharedMemoryVerified;
     const madeIncompleteProgress =
@@ -370,14 +424,18 @@ export function classifyContextGraphCatchupReadiness(input: {
 
     let jobStatus: ContextGraphCatchupReadinessClassification['jobStatus'] = 'done';
     let error: string | undefined;
-    if (missingGraphProof || missingRequestedSharedMemory) {
+    if (missingDurable || missingRequestedSharedMemory) {
       jobStatus = 'unreachable';
       if (madeIncompleteProgress) {
         error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
-      } else if (input.isPrivate && missingGraphProof) {
-        error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
-      } else if (input.isPrivate) {
+      } else if (input.isPrivate && missingDurable && sharedMemoryVerified) {
+        error = 'Shared-memory catch-up completed, but no authorized peer delivered a verified durable VM snapshot. The selected graph remains incomplete.';
+      } else if (input.isPrivate && missingDurable) {
+        error = 'No authorized context-graph peer delivered verified durable VM data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
+      } else if (input.isPrivate && missingRequestedSharedMemory) {
         error = 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
+      } else if (missingDurable && sharedMemoryVerified) {
+        error = 'Shared-memory catch-up completed, but durable VM catch-up did not complete. The selected graph remains incomplete.';
       } else {
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }
@@ -387,7 +445,10 @@ export function classifyContextGraphCatchupReadiness(input: {
       jobStatus,
       error,
       statePatch: {
-        synced: overallVerifiedPersisted,
+        // `synced` is a second persisted VM-readiness bit used by write
+        // preflight, so it must match durable provenance rather than transient
+        // empty-round evidence or independently verified SWM.
+        synced: durableVerifiedPersisted,
         sharedMemorySynced: sharedMemoryVerifiedPersisted,
         metaSynced: true,
         pendingMeta: false,

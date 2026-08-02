@@ -1648,6 +1648,7 @@ export class ApiClient {
     contextGraphId: string;
     includeWorkspace: boolean;
     status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
+    attemptStatus: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -1706,6 +1707,26 @@ export class ApiClient {
       };
     };
     error?: string;
+    attemptError?: string;
+    convergence?: {
+      state: 'pending' | 'partial' | 'complete';
+      required: {
+        metadata: true;
+        durable: true;
+        sharedMemory: boolean;
+      };
+      verified: {
+        metadata: boolean;
+        durable: boolean;
+        sharedMemory: boolean;
+      };
+      missing: Array<'metadata' | 'durable' | 'sharedMemory'>;
+      readinessUpdatedAt?: number;
+      observedAt: number;
+      syncMode: 'on-demand' | 'always-on';
+      automaticRetryActive: boolean;
+    };
+    completedAfterAttempt?: true;
   }> {
     return this.get(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
   }

@@ -118,6 +118,10 @@ export {
 export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import {
+  describeContextGraphConvergence,
+  readContextGraphReadiness,
+} from '../../context-graph-readiness.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -1033,7 +1037,20 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
-    return jsonResponse(res, 200, toCatchupStatusResponse(job));
+    const subscription = agent.getSubscribedContextGraphs().get(job.contextGraphId);
+    const hasConfirmedMeta = await agent.hasConfirmedMetaState(job.contextGraphId)
+      .catch(() => false);
+    const convergence = {
+      ...describeContextGraphConvergence({
+        readiness: readContextGraphReadiness(dashDb, job.contextGraphId),
+        includeSharedMemory: job.includeWorkspace,
+        hasConfirmedMeta,
+      }),
+      syncMode: subscription?.syncMode ?? 'always-on',
+      automaticRetryActive: subscription?.subscribed === true,
+    };
+
+    return jsonResponse(res, 200, toCatchupStatusResponse(job, convergence));
   }
 
   // POST /api/verify

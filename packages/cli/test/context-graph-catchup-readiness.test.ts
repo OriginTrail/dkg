@@ -3,6 +3,7 @@ import type { CatchupJobResult } from '../src/catchup-runner.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
   classifyContextGraphCatchupReadiness,
+  describeContextGraphConvergence,
 } from '../src/context-graph-readiness.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
@@ -529,5 +530,82 @@ describe('context graph catch-up readiness classification', () => {
       isPrivate: true,
       readinessBeforeCatchup,
     }).jobStatus).toBe('unreachable');
+  });
+});
+
+describe('selected context-graph convergence snapshot', () => {
+  it('requires independently verified VM and requested SWM planes', () => {
+    const snapshot = describeContextGraphConvergence({
+      readiness: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: true,
+        updatedAt: 42,
+      },
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      observedAt: 100,
+    });
+
+    expect(snapshot).toEqual({
+      state: 'partial',
+      required: {
+        metadata: true,
+        durable: true,
+        sharedMemory: true,
+      },
+      verified: {
+        metadata: true,
+        durable: false,
+        sharedMemory: true,
+      },
+      missing: ['durable'],
+      readinessUpdatedAt: 42,
+      observedAt: 100,
+    });
+  });
+
+  it('rejects stale per-plane provenance when authoritative metadata is absent', () => {
+    const snapshot = describeContextGraphConvergence({
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+        updatedAt: 42,
+      },
+      includeSharedMemory: true,
+      hasConfirmedMeta: false,
+      observedAt: 100,
+    });
+
+    expect(snapshot).toMatchObject({
+      state: 'pending',
+      verified: {
+        metadata: false,
+        durable: false,
+        sharedMemory: false,
+      },
+      missing: ['metadata', 'durable', 'sharedMemory'],
+    });
+  });
+
+  it('marks a VM-only request complete without requiring SWM', () => {
+    const snapshot = describeContextGraphConvergence({
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: false,
+        updatedAt: 42,
+      },
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      observedAt: 100,
+    });
+
+    expect(snapshot).toMatchObject({
+      state: 'complete',
+      missing: [],
+      required: { sharedMemory: false },
+    });
   });
 });

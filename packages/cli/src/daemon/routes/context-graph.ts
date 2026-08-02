@@ -1747,6 +1747,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        // Coalesce repeated selection into the one in-flight job. Required
+        // planes are monotonic: a later VM+SWM request upgrades a VM-only
+        // attempt, while a narrower request can never remove SWM from work
+        // that is already queued or running.
+        existingJob.includeWorkspace = existingJob.includeWorkspace ||
+          shouldSyncSharedMemory;
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
@@ -1857,76 +1863,99 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       job.startedAt = Date.now();
       if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
       try {
-        const result = await daemonState.catchupRunner!.run({
-          contextGraphId: contextGraphId,
-          includeSharedMemory: shouldSyncSharedMemory,
-        });
-        job.result = result;
-        // Local scheduler pressure cut the round short. An incomplete round has
-        // no readiness to inspect and must never finalize the subscription, so
-        // short-circuit the whole classification path and report a distinct
-        // retryable status. A remote denial still wins: waiting for local
-        // capacity will never clear it.
-        if (result.deferredBackpressure > 0 && !result.denied) {
-          job.status = "deferred";
-          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
-        } else {
-          const inspectReadiness = catchupResultHasCleanResponse(result);
-          const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
-            : false;
-          const isPrivate = hasConfirmedMeta
-            ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-            : false;
-          const classification = classifyContextGraphCatchupReadiness({
-            result,
-            includeSharedMemory: shouldSyncSharedMemory,
-            hasConfirmedMeta,
-            isPrivate,
-            readinessBeforeCatchup,
+        let attemptReadinessBeforeCatchup = readinessBeforeCatchup;
+        while (true) {
+          const attemptIncludeSharedMemory = job.includeWorkspace;
+          const result = await daemonState.catchupRunner!.run({
+            contextGraphId: contextGraphId,
+            includeSharedMemory: attemptIncludeSharedMemory,
           });
-
-          job.status = classification.jobStatus;
-          job.error = classification.error;
-          if (classification.readinessPatch) {
-            writeContextGraphReadiness(
-              dashDb,
-              contextGraphId,
-              classification.readinessPatch,
-            );
-          }
-          if (classification.statePatch) {
-            agent.markContextGraphSubscriptionState(
-              contextGraphId,
-              classification.statePatch,
-            );
-          }
-          if (classification.eventPayload) {
-            agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-              contextGraphId,
-              ...classification.eventPayload,
-            });
-          }
-
-          // Denial took precedence above, but a denied-yet-still-deferred round
-          // is likewise incomplete: never let it settle as a successful "done".
-          if (job.status === "done" && result.deferredBackpressure > 0) {
+          job.result = result;
+          job.error = undefined;
+          // Local scheduler pressure cut the round short. An incomplete round has
+          // no readiness to inspect and must never finalize the subscription, so
+          // short-circuit the whole classification path and report a distinct
+          // retryable status. A remote denial still wins: waiting for local
+          // capacity will never clear it.
+          if (result.deferredBackpressure > 0 && !result.denied) {
             job.status = "deferred";
             job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-          }
-        }
+            if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
+          } else {
+            const inspectReadiness = catchupResultHasCleanResponse(result);
+            const hasConfirmedMeta = inspectReadiness
+              ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
+              : false;
+            const isPrivate = hasConfirmedMeta
+              ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
+              : false;
+            const classification = classifyContextGraphCatchupReadiness({
+              result,
+              includeSharedMemory: attemptIncludeSharedMemory,
+              hasConfirmedMeta,
+              isPrivate,
+              readinessBeforeCatchup: attemptReadinessBeforeCatchup,
+            });
 
-        if (DEBUG_SYNC_TRACE) {
-          if (job.status === 'denied') {
-            console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+            job.status = classification.jobStatus;
+            job.error = classification.error;
+            if (classification.readinessPatch) {
+              writeContextGraphReadiness(
+                dashDb,
+                contextGraphId,
+                classification.readinessPatch,
+              );
+            }
+            if (classification.statePatch) {
+              agent.markContextGraphSubscriptionState(
+                contextGraphId,
+                classification.statePatch,
+              );
+            }
+            if (classification.eventPayload) {
+              agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+                contextGraphId,
+                ...classification.eventPayload,
+              });
+            }
+
+            // Denial took precedence above, but a denied-yet-still-deferred round
+            // is likewise incomplete: never let it settle as a successful "done".
+            if (job.status === "done" && result.deferredBackpressure > 0) {
+              job.status = "deferred";
+              job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+            }
           }
-          console.log(
-            `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
-              `connected=${result.totalPeers ?? result.connectedPeers} ` +
-              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-          );
+
+          if (DEBUG_SYNC_TRACE) {
+            if (job.status === 'denied') {
+              console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+            }
+            console.log(
+              `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
+                `peers=${result.peersTried}/${result.syncCapablePeers} ` +
+                `connected=${result.totalPeers ?? result.connectedPeers} ` +
+                `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+            );
+          }
+
+          // A caller may upgrade a running VM-only selection to VM+SWM. Finish
+          // the narrow attempt, then satisfy the wider request in the same job
+          // instead of launching a competing per-CG catch-up.
+          if (
+            job.includeWorkspace &&
+            !attemptIncludeSharedMemory &&
+            job.status !== 'denied'
+          ) {
+            job.status = 'running';
+            job.error = undefined;
+            attemptReadinessBeforeCatchup = readContextGraphReadiness(
+              dashDb,
+              contextGraphId,
+            );
+            continue;
+          }
+          break;
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);

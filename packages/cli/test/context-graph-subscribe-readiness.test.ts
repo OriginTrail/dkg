@@ -146,6 +146,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     result?: CatchupJobResult;
     includeSharedMemory?: boolean;
     syncMode?: unknown;
+    coalescedUpgradeResult?: CatchupJobResult;
+    simulateAutomaticRecovery?: boolean;
     readiness?: {
       version: number;
       durableVerified: boolean;
@@ -166,6 +168,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
     statusResponse: any;
+    coalescedResponse?: any;
   }> {
     const contextGraphId = `readiness-${Math.random().toString(36).slice(2, 8)}`;
     const state = new Map<string, Record<string, any>>();
@@ -184,12 +187,27 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
+    let releaseFirstRun: (() => void) | undefined;
+    let noteFirstRunStarted: (() => void) | undefined;
+    const firstRunGate = opts.coalescedUpgradeResult
+      ? new Promise<void>((resolve) => { releaseFirstRun = resolve; })
+      : undefined;
+    const firstRunStarted = opts.coalescedUpgradeResult
+      ? new Promise<void>((resolve) => { noteFirstRunStarted = resolve; })
+      : undefined;
 
     daemonState.catchupRunner = {
       run: async (request) => {
         runCalls += 1;
+        const callNumber = runCalls;
         runRequests.push(request);
-        return opts.result ?? cleanEmptyResult();
+        if (callNumber === 1 && firstRunGate) {
+          noteFirstRunStarted?.();
+          await firstRunGate;
+        }
+        return callNumber === 2 && opts.coalescedUpgradeResult
+          ? opts.coalescedUpgradeResult
+          : opts.result ?? cleanEmptyResult();
       },
       close: async () => {},
     };
@@ -291,9 +309,43 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     const response = await httpResponse.json() as any;
     const jobId = response.catchup?.jobId as string | undefined;
 
+    let coalescedResponse: any;
+    if (firstRunStarted && releaseFirstRun) {
+      await firstRunStarted;
+      coalescedResponse = await fetch(
+        `http://127.0.0.1:${address.port}/api/context-graph/subscribe`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contextGraphId,
+            includeSharedMemory: true,
+            ...(opts.syncMode !== undefined ? { syncMode: opts.syncMode } : {}),
+          }),
+        },
+      ).then((result) => result.json());
+      releaseFirstRun();
+    }
+
     for (let i = 0; jobId && i < 50; i++) {
       if (catchupTracker.jobs.get(jobId)?.finishedAt) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    if (opts.simulateAutomaticRecovery) {
+      readiness = {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+        updatedAt: Date.now(),
+      };
+      state.set(contextGraphId, {
+        ...state.get(contextGraphId),
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        pendingMeta: false,
+      });
     }
 
     const statusResponse = jobId
@@ -313,6 +365,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       patches,
       readiness,
       statusResponse,
+      coalescedResponse,
     };
   }
 
@@ -590,6 +643,17 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.statusResponse).toMatchObject({
       jobId: result.response.catchup.jobId,
       status: 'done',
+      attemptStatus: 'done',
+      convergence: {
+        state: 'complete',
+        verified: {
+          metadata: true,
+          durable: true,
+          sharedMemory: true,
+        },
+        missing: [],
+        automaticRetryActive: true,
+      },
       result: {
         dataSynced: 3,
         sharedMemorySynced: 4,
@@ -772,15 +836,17 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
 
     expect(result.runCalls).toBe(1);
-    expect(result.job.status).toBe('done');
-    expect(result.job.error).toBeUndefined();
+    expect(result.job).toMatchObject({
+      status: 'unreachable',
+      error: expect.stringContaining('durable VM'),
+    });
     expect(result.job.result).toMatchObject({
       dataSynced: 0,
       sharedMemorySynced: 4,
     });
     expect(result.state).toMatchObject({
       subscribed: true,
-      synced: true,
+      synced: false,
       sharedMemorySynced: true,
       metaSynced: true,
       pendingMeta: false,
@@ -788,6 +854,81 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.readiness).toMatchObject({
       durableVerified: false,
       sharedMemoryVerified: true,
+    });
+  });
+
+  it('coalesces a running VM-only selection and serially upgrades it to VM plus SWM', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      includeSharedMemory: false,
+      result: privateDataOnlyResult(),
+      coalescedUpgradeResult: publicDurableAndSharedMemoryResult(),
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.coalescedResponse).toMatchObject({
+      subscribed: result.response.subscribed,
+      catchup: {
+        status: 'running',
+        includeWorkspace: true,
+        jobId: result.response.catchup.jobId,
+      },
+    });
+    expect(result.runRequests).toEqual([
+      {
+        contextGraphId: result.response.subscribed,
+        includeSharedMemory: false,
+      },
+      {
+        contextGraphId: result.response.subscribed,
+        includeSharedMemory: true,
+      },
+    ]);
+    expect(result.job).toMatchObject({
+      jobId: result.response.catchup.jobId,
+      includeWorkspace: true,
+      status: 'done',
+    });
+    expect(result.statusResponse.convergence).toMatchObject({
+      state: 'complete',
+      missing: [],
+    });
+  });
+
+  it('reports live completion when automatic retry recovers a failed foreground attempt', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      result: privateSharedMemoryOnlyResult(),
+      simulateAutomaticRecovery: true,
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.job.status).toBe('unreachable');
+    expect(result.statusResponse).toMatchObject({
+      status: 'done',
+      attemptStatus: 'unreachable',
+      attemptError: expect.stringContaining('durable VM'),
+      completedAfterAttempt: true,
+      convergence: {
+        state: 'complete',
+        verified: {
+          metadata: true,
+          durable: true,
+          sharedMemory: true,
+        },
+        missing: [],
+      },
     });
   });
 

@@ -202,6 +202,10 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   console.log(`Context Graph: ${status.contextGraphId}`);
   console.log(`Job:           ${status.jobId}`);
   console.log(`Status:        ${status.status}`);
+  if (status.attemptStatus !== status.status) {
+    console.log(`Last attempt:  ${status.attemptStatus}`);
+    if (status.attemptError) console.log(`Attempt error: ${status.attemptError}`);
+  }
   console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
@@ -230,6 +234,27 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   }
   if (status.error) {
     console.log(`Error:         ${status.error}`);
+  }
+  if (status.convergence) {
+    const sharedMemoryState = status.convergence.required.sharedMemory
+      ? status.convergence.verified.sharedMemory ? 'verified' : 'missing'
+      : 'not requested';
+    console.log(`Convergence:   ${status.convergence.state}`);
+    console.log(
+      `Verified:      metadata ${status.convergence.verified.metadata ? 'yes' : 'no'}, ` +
+        `VM ${status.convergence.verified.durable ? 'yes' : 'no'}, ` +
+        `SWM ${sharedMemoryState}`,
+    );
+    if (status.convergence.missing.length > 0) {
+      console.log(`Missing:       ${status.convergence.missing.join(', ')}`);
+    }
+    console.log(
+      `Retry:         ${status.convergence.automaticRetryActive ? 'active' : 'inactive'} ` +
+        `(${status.convergence.syncMode})`,
+    );
+    if (status.completedAfterAttempt) {
+      console.log('Recovered:     a later synchronization completed the selected graph');
+    }
   }
   if (
     status.result &&

@@ -3,6 +3,7 @@
 // Pure type/interface declarations used across the daemon sub-modules.
 
 import type { CatchupJobResult } from '../catchup-runner.js';
+import type { ContextGraphConvergenceSnapshot } from '../context-graph-readiness.js';
 
 export type CatchupJobState =
   | "queued"
@@ -39,10 +40,32 @@ export interface CatchupTracker {
   latestByContextGraph: Map<string, string>;
 }
 
-export function toCatchupStatusResponse(job: CatchupJob) {
+export interface CatchupConvergenceStatus extends ContextGraphConvergenceSnapshot {
+  syncMode: 'on-demand' | 'always-on';
+  automaticRetryActive: boolean;
+}
+
+export function toCatchupStatusResponse(
+  job: CatchupJob,
+  convergence?: CatchupConvergenceStatus,
+) {
+  const completedAfterAttempt = convergence?.state === 'complete' &&
+    (job.status === 'failed' ||
+      job.status === 'deferred' ||
+      job.status === 'unreachable');
   return {
     ...job,
     contextGraphId: job.contextGraphId,
     includeSharedMemory: job.includeWorkspace,
+    attemptStatus: job.status,
+    ...(completedAfterAttempt
+      ? {
+          status: 'done' as const,
+          error: undefined,
+          ...(job.error ? { attemptError: job.error } : {}),
+        }
+      : {}),
+    ...(convergence ? { convergence } : {}),
+    ...(completedAfterAttempt ? { completedAfterAttempt: true } : {}),
   };
 }
