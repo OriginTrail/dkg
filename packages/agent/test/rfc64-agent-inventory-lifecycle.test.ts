@@ -10,7 +10,10 @@ import {
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  verifyControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -386,6 +389,46 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(nodeStart).not.toHaveBeenCalled();
     expect(agent.started).toBe(false);
   });
+
+  it('starts adaptive-capacity sampling through the real agent lifecycle', async () => {
+    const agent = await DKGAgent.create({
+      name: 'AdaptiveCapacityLifecycle',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
+      syncContextGraphs: ['explicit-cg'],
+      syncAdaptiveCapacity: { enabled: true },
+    });
+    const runtime = (agent as any).syncCapacityRuntime;
+    const scheduler = (agent as any).corePublicSyncCoverageScheduler;
+    const startSampling = vi.spyOn(runtime, 'startSampling').mockReturnValue(true);
+    const getEffectiveCoverageBatch = vi.spyOn(
+      runtime,
+      'getEffectiveCoverageBatch',
+    ).mockReturnValue(4);
+    const hasAutomaticCoverageBacklog = vi.spyOn(
+      scheduler,
+      'hasAutomaticCoverageBacklog',
+    ).mockReturnValue(true);
+
+    try {
+      await agent.start();
+
+      expect(runtime.isAdaptive()).toBe(true);
+      expect(startSampling).toHaveBeenCalledOnce();
+      const samplingOptions = startSampling.mock.calls[0]?.[0];
+      expect(samplingOptions).toBeDefined();
+      expect(samplingOptions.hasSupplementalDemand()).toBe(true);
+      expect(getEffectiveCoverageBatch).toHaveBeenCalledOnce();
+      expect(hasAutomaticCoverageBacklog).toHaveBeenCalledWith(
+        ['explicit-cg'],
+        4,
+      );
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
 
   it.runIf(process.platform !== 'win32')(
     'releases inventory ownership when control-store topology is unsafe',
