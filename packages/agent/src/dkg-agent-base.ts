@@ -363,6 +363,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type NormalizedContextGraphSub,
   type ContextGraphSyncAdmission,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
@@ -1081,7 +1082,7 @@ export class DKGAgentBase {
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
-  protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected readonly subscribedContextGraphs = new Map<string, NormalizedContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();

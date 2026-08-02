@@ -4,13 +4,14 @@ import type {
   ContextGraphSyncAdmission,
   ContextGraphSubscriptionRecord,
   ContextGraphSyncMode,
+  NormalizedContextGraphSub,
 } from './dkg-agent-types.js';
 
 export function normalizeLegacyContextGraphSubscriptionInput(
   previous: ContextGraphSub | undefined,
   next: ContextGraphSubInput,
   defaultAdmission: ContextGraphSyncAdmission = 'none',
-): ContextGraphSub {
+): NormalizedContextGraphSub {
   return {
     ...next,
     syncMode: next.syncMode ?? previous?.syncMode ?? 'always-on',
@@ -50,7 +51,7 @@ export type ContextGraphSubscriptionPersistenceProjection =
  */
 export function projectContextGraphSubscriptionPersistence(input: {
   contextGraphId: string;
-  subscription: ContextGraphSub | undefined;
+  subscription: NormalizedContextGraphSub | undefined;
   /** Optional legacy-call override; current callers persist the live admission. */
   syncScoped?: boolean;
 }): ContextGraphSubscriptionPersistenceProjection {

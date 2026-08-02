@@ -14,11 +14,33 @@ import { MockChainAdapter, type ContextGraphOnChain } from '@origintrail-officia
 import {
   AGENT_REGISTRY_CONTEXT_GRAPH,
   DKGAgent,
+  type ContextGraphSub,
   type ContextGraphMembershipRecord,
   type ContextGraphSubscriptionRecord,
 } from '../src/index.js';
+import { normalizeLegacyContextGraphSubscriptionInput } from '../src/context-graph-subscription-policy.js';
 
 describe('Context Graph discovery/subscription boundary', () => {
+  it('normalizes the legacy public subscription shape before it enters live state', () => {
+    const legacySubscription: ContextGraphSub = {
+      syncMode: 'always-on',
+      subscribed: true,
+      synced: false,
+    };
+
+    const normalized = normalizeLegacyContextGraphSubscriptionInput(
+      undefined,
+      legacySubscription,
+    );
+
+    expect(normalized).toMatchObject({
+      syncMode: 'always-on',
+      syncAdmission: 'none',
+      subscribed: true,
+      synced: false,
+    });
+  });
+
   it('keeps discovery passive, activates explicit intent, and rehydrates only the explicit subscription', async () => {
     expect([...Object.values(SYSTEM_CONTEXT_GRAPHS)].sort()).toEqual(['agents', 'ontology']);
     expect(AGENT_REGISTRY_CONTEXT_GRAPH).toBe(SYSTEM_CONTEXT_GRAPHS.AGENTS);

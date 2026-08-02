@@ -458,6 +458,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubInput,
+  type NormalizedContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -2678,7 +2679,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
-            const approvedSubscription: ContextGraphSub = {
+            const approvedSubscription: NormalizedContextGraphSub = {
               ...this.subscribedContextGraphs.get(contextGraphId),
               syncMode: 'always-on',
               syncAdmission: 'explicit',
@@ -6511,7 +6512,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     next: ContextGraphSubInput,
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
-  ): ContextGraphSub {
+  ): NormalizedContextGraphSub {
     this.invalidateListContextGraphsCache();
     const previous = this.subscribedContextGraphs.get(contextGraphId);
     // A local id is always cleartext unless the subscription explicitly says
@@ -6530,7 +6531,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       next,
       (this.config.syncContextGraphs ?? []).includes(contextGraphId) ? 'explicit' : 'none',
     );
-    const canonicalNext: ContextGraphSub = {
+    const canonicalNext: NormalizedContextGraphSub = {
       ...normalizedNext,
       ...(next.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
@@ -6847,7 +6848,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async persistContextGraphSubscriptionStrict(this: DKGAgent,
     contextGraphId: string,
-    subscription?: ContextGraphSub,
+    subscription?: NormalizedContextGraphSub,
     syncScoped?: boolean,
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
@@ -6894,7 +6895,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async persistJoinApprovalStateStrict(this: DKGAgent,
     contextGraphId: string,
     membership: ContextGraphMembershipRecord,
-    subscription: ContextGraphSub,
+    subscription: NormalizedContextGraphSub,
   ): Promise<void> {
     const membershipStore = this.config.contextGraphMembershipStore;
     const subscriptionStore = this.config.contextGraphSubscriptionStore;

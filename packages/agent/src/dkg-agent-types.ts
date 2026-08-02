@@ -623,8 +623,15 @@ export interface ContextGraphSub {
   name?: string;
   /** Requested synchronization lifetime, normalized before entering live state. */
   syncMode: ContextGraphSyncMode;
-  /** Canonical local sync admission, independent from gossip subscription. */
-  syncAdmission: ContextGraphSyncAdmission;
+  /**
+   * Canonical local sync admission, independent from gossip subscription.
+   *
+   * Optional on this exported compatibility shape so callers that construct
+   * the pre-admission subscription object continue to type-check. Agent-owned
+   * live state crosses a normalization boundary before storage and uses the
+   * required internal shape below.
+   */
+  syncAdmission?: ContextGraphSyncAdmission;
   /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
@@ -702,10 +709,15 @@ export interface ContextGraphSub {
   pendingMeta?: boolean;
 }
 
+/** Agent-owned live subscription state after the public compatibility boundary. */
+export type NormalizedContextGraphSub = Omit<ContextGraphSub, 'syncAdmission'> & {
+  syncAdmission: ContextGraphSyncAdmission;
+};
+
 /**
  * Legacy compatibility input for the standalone gossip handler only.
  *
- * Agent-owned live-state mutations use normalized {@link ContextGraphSub}
+ * Agent-owned live-state mutations use {@link NormalizedContextGraphSub}
  * values and must choose a synchronization lifetime explicitly. This shape is
  * retained solely for older standalone handler callbacks that predate modes.
  */

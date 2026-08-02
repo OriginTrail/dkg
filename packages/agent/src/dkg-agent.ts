@@ -337,6 +337,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type NormalizedContextGraphSub,
   type ContextGraphSyncMode,
   type ContextGraphSyncAdmission,
   type ContextGraphDiscoveryMetadata,
@@ -1238,7 +1239,7 @@ export class DKGAgent extends DKGAgentBase {
     contextGraphId: string,
     metadata: ContextGraphDiscoveryMetadata,
     evidence: { legacyPrivate?: boolean; trackSyncScope?: boolean } = {},
-  ): ContextGraphSub {
+  ): NormalizedContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const disposition = this.classifyContextGraphDiscovery({
       ...(metadata.accessPolicy ? { accessPolicy: metadata.accessPolicy } : {}),
@@ -1247,7 +1248,7 @@ export class DKGAgent extends DKGAgentBase {
         ? { trackSyncScope: evidence.trackSyncScope }
         : {}),
     });
-    const next: ContextGraphSub = {
+    const next: NormalizedContextGraphSub = {
       ...existing,
       syncMode: existing?.syncMode ?? 'always-on',
       syncAdmission: existing?.syncAdmission ?? 'none',
