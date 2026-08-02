@@ -351,6 +351,8 @@ importers:
 
   devnet/rfc64-m0-public-baseline: {}
 
+  devnet/rfc64-m1-selective-coverage: {}
+
   devnet/rfc64-persistence-lifecycle:
     dependencies:
       '@origintrail-official/dkg-agent':

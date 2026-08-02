@@ -1,0 +1,11 @@
+{
+  "name": "@devnet/rfc64-m1-selective-coverage",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Fail-closed evidence contract for RFC-64 M1 Edge selection and bounded Core public coverage.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test verifier.test.ts"
+  }
+}
