@@ -139,6 +139,31 @@ export class FinalizedSwmCleanupService {
    */
   private rotationHeadContextGraphId: string | null = null;
   private rotationHeadStalledSweeps = 0;
+  /**
+   * Where to begin the next slice's walk of one context graph's meta graphs.
+   * A graph whose meta graphs cannot all be measured inside one slice would
+   * otherwise restart at index 0 every time and yield at the same point, so
+   * everything past that point is never cleaned — the rotation cursor's own
+   * failure mode, one level down. Rotating the start covers them all across
+   * successive slices.
+   */
+  private metaGraphResumeCursor: { contextGraphId: string; offset: number } | null = null;
+  /**
+   * Keyset position within the one meta graph whose candidate page is unfinished.
+   * Discovery is `ORDER BY ?task LIMIT n`, so without this the same prefix is
+   * re-selected every sweep and its successors are never examined — the third
+   * instance of the cursor-less re-walk this service has, after the context-graph
+   * rotation and the meta-graph walk. Tasks that can never be acted on (a head
+   * that no longer verifies) otherwise hold the whole node-wide deletion budget
+   * indefinitely.
+   *
+   * A single entry suffices, and is bounded by construction rather than by an
+   * eviction policy: charging `remaining` per examined candidate means a full page
+   * always spends the rest of the budget, so no other meta graph runs discovery
+   * in that slice, and a short page clears the cursor. At most one meta graph can
+   * hold an unfinished page at a time.
+   */
+  private taskCursor: { swmMetaGraph: string; afterTaskSubject: string } | null = null;
 
   constructor(options: FinalizedSwmCleanupServiceOptions) {
     this.store = options.store;
@@ -211,88 +236,136 @@ export class FinalizedSwmCleanupService {
     }
     const pending = this.resumeRotation(contextGraphIds);
 
-    for (let index = 0; index < pending.length; index += 1) {
-      const contextGraphId = pending[index]!;
-      // Yielding keeps the unvisited tail, so the cursor never advances past a
-      // context graph this sweep did not finish measuring.
-      const yieldRotation = (reason: 'pressure' | 'budget'): FinalizedSwmCleanupSweepResult => {
-        this.rotationPending = pending.slice(index);
-        return deferredResult(deletedItems, reason);
-      };
-      if (underPressure()) return yieldRotation('pressure');
-      if (this.now() >= deadline) return yieldRotation('budget');
-      let metaGraphs: string[];
-      try {
-        metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
-      } catch (error) {
-        if (deadlineSignal.aborted) return yieldRotation('budget');
-        if (isTransientStorePressure(error)) return yieldRotation('pressure');
-        throw error;
-      }
-      // A context graph contributes to the rotation total only once every one of
-      // its meta graphs has been measured. Yielding part-way discards the partial
-      // sum, so the re-measure on resume cannot double-count it.
-      let contextGraphBacklogDepth = 0;
-      let contextGraphOldestMarkerAt: number | null = null;
-      for (const swmMetaGraph of metaGraphs) {
-        if (underPressure()) return yieldRotation('pressure');
-        if (this.now() >= deadline) return yieldRotation('budget');
-        if (remaining > 0) {
-          let cleanup: { deletedItems: number; examinedCandidates: number };
-          try {
-            cleanup = await this.cleanupMetaGraph({
+    let index = 0;
+    try {
+      for (; index < pending.length; index += 1) {
+        const contextGraphId = pending[index]!;
+        // Yielding keeps the unvisited tail, so the cursor never advances past a
+        // context graph this sweep did not finish measuring.
+        let metaGraphStart = 0;
+        let metaGraphsMeasured = 0;
+        const yieldRotation = (reason: 'pressure' | 'budget'): FinalizedSwmCleanupSweepResult => {
+          this.rotationPending = pending.slice(index);
+          // Resume the meta-graph walk past what this slice already measured, so
+          // a context graph too large for one slice still covers all of them.
+          if (metaGraphsMeasured > 0) {
+            this.metaGraphResumeCursor = {
               contextGraphId,
-              swmMetaGraph,
-              maxCandidates: remaining,
-              signal: deadlineSignal,
-            });
-          } catch (error) {
-            if (deadlineSignal.aborted) return yieldRotation('budget');
-            if (isTransientStorePressure(error)) return yieldRotation('pressure');
-            throw error;
+              offset: metaGraphStart + metaGraphsMeasured,
+            };
           }
-          deletedItems += cleanup.deletedItems;
-          remaining -= cleanup.examinedCandidates;
-        }
+          return deferredResult(deletedItems, reason);
+        };
         if (underPressure()) return yieldRotation('pressure');
         if (this.now() >= deadline) return yieldRotation('budget');
-        // Deliberately not gated on `remaining`: that budget bounds deletion
-        // work (head resolution, VM/SWM verification, lock, atomic replace),
-        // while this is one cheap background aggregate and the sole source of
-        // the backlog metric. Capping the metric with the deletion budget would
-        // make it under-report exactly when the backlog is deepest.
-        let backlog: { depth: number; oldestMarkerAt: number | null };
+        let metaGraphs: string[];
         try {
-          backlog = await this.inspectBacklog(swmMetaGraph, deadlineSignal);
+          metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
         } catch (error) {
           if (deadlineSignal.aborted) return yieldRotation('budget');
-          // Also covers this method's own defensive pressure throw, which the
-          // snapshot gate above races with rather than prevents.
           if (isTransientStorePressure(error)) return yieldRotation('pressure');
           throw error;
         }
-        contextGraphBacklogDepth += backlog.depth;
+        // Resume where the last slice stopped inside this context graph, wrapping,
+        // so a graph too large for one slice still reaches every meta graph rather
+        // than re-walking the same prefix. The walk still covers all of them, so
+        // the contribution below stays a whole-graph sum.
+        if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId && metaGraphs.length > 0) {
+          metaGraphStart = this.metaGraphResumeCursor.offset % metaGraphs.length;
+          if (metaGraphStart > 0) {
+            metaGraphs = [...metaGraphs.slice(metaGraphStart), ...metaGraphs.slice(0, metaGraphStart)];
+          }
+        }
+        // A context graph contributes to the rotation total only once every one of
+        // its meta graphs has been measured. Yielding part-way discards the partial
+        // sum, so the re-measure on resume cannot double-count it.
+        let contextGraphBacklogDepth = 0;
+        let contextGraphOldestMarkerAt: number | null = null;
+        for (const swmMetaGraph of metaGraphs) {
+          if (underPressure()) return yieldRotation('pressure');
+          if (this.now() >= deadline) return yieldRotation('budget');
+          if (remaining > 0) {
+            let cleanup: Awaited<ReturnType<typeof this.cleanupMetaGraph>>;
+            try {
+              cleanup = await this.cleanupMetaGraph({
+                contextGraphId,
+                swmMetaGraph,
+                maxCandidates: remaining,
+                signal: deadlineSignal,
+                ...(this.taskCursor?.swmMetaGraph === swmMetaGraph
+                  ? { afterTaskSubject: this.taskCursor.afterTaskSubject }
+                  : {}),
+              });
+            } catch (error) {
+              if (deadlineSignal.aborted) return yieldRotation('budget');
+              if (isTransientStorePressure(error)) return yieldRotation('pressure');
+              throw error;
+            }
+            deletedItems += cleanup.deletedItems;
+            remaining -= cleanup.examinedCandidates;
+            // Advance while the page is full; wrap when it is short so a stuck
+            // prefix is skipped without stranding the suffix behind it.
+            this.taskCursor = cleanup.pageWasFull && cleanup.lastTaskSubject !== undefined
+              ? { swmMetaGraph, afterTaskSubject: cleanup.lastTaskSubject }
+              : null;
+          }
+          if (underPressure()) return yieldRotation('pressure');
+          if (this.now() >= deadline) return yieldRotation('budget');
+          // Deliberately not gated on `remaining`: that budget bounds deletion
+          // work (head resolution, VM/SWM verification, lock, atomic replace),
+          // while this is one cheap background aggregate and the sole source of
+          // the backlog metric. Capping the metric with the deletion budget would
+          // make it under-report exactly when the backlog is deepest.
+          let backlog: { depth: number; oldestMarkerAt: number | null };
+          try {
+            backlog = await this.inspectBacklog(swmMetaGraph, deadlineSignal);
+          } catch (error) {
+            if (deadlineSignal.aborted) return yieldRotation('budget');
+            // Also covers this method's own defensive pressure throw, which the
+            // snapshot gate above races with rather than prevents.
+            if (isTransientStorePressure(error)) return yieldRotation('pressure');
+            throw error;
+          }
+          contextGraphBacklogDepth += backlog.depth;
+          if (
+            backlog.oldestMarkerAt !== null
+            && (
+              contextGraphOldestMarkerAt === null
+              || backlog.oldestMarkerAt < contextGraphOldestMarkerAt
+            )
+          ) {
+            contextGraphOldestMarkerAt = backlog.oldestMarkerAt;
+          }
+          metaGraphsMeasured += 1;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        // Every meta graph was measured, so the next visit starts from the top.
+        if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId) {
+          this.metaGraphResumeCursor = null;
+        }
+        this.rotationBacklogDepth += contextGraphBacklogDepth;
         if (
-          backlog.oldestMarkerAt !== null
+          contextGraphOldestMarkerAt !== null
           && (
-            contextGraphOldestMarkerAt === null
-            || backlog.oldestMarkerAt < contextGraphOldestMarkerAt
+            this.rotationOldestMarkerAt === null
+            || contextGraphOldestMarkerAt < this.rotationOldestMarkerAt
           )
         ) {
-          contextGraphOldestMarkerAt = backlog.oldestMarkerAt;
+          this.rotationOldestMarkerAt = contextGraphOldestMarkerAt;
         }
-        await new Promise<void>((resolve) => setImmediate(resolve));
       }
-      this.rotationBacklogDepth += contextGraphBacklogDepth;
-      if (
-        contextGraphOldestMarkerAt !== null
-        && (
-          this.rotationOldestMarkerAt === null
-          || contextGraphOldestMarkerAt < this.rotationOldestMarkerAt
-        )
-      ) {
-        this.rotationOldestMarkerAt = contextGraphOldestMarkerAt;
-      }
+    } catch (error) {
+      // Every exit from this loop must persist the cursor, including a terminal
+      // fault. Context graphs completed earlier in this sweep are already
+      // credited to `rotationBacklogDepth`, and `resumeRotation` only zeroes the
+      // accumulator when `rotationPending` is null — which a throw never
+      // produces. Leaving the cursor stale makes the next sweep resume from the
+      // old tail, re-measure those graphs and add them a second time, and the
+      // inflated sum eventually publishes as `stale: false`: presented as a
+      // trustworthy fresh whole-node measurement. Catching around the whole loop
+      // rather than at each throw site means a future raise site cannot miss it.
+      this.rotationPending = pending.slice(index);
+      throw error;
     }
 
     // The rotation closed: every context graph was measured exactly once, so the
@@ -326,9 +399,11 @@ export class FinalizedSwmCleanupService {
    * drained signal it exists to carry.
    *
    * Guarantees forward progress: after two consecutive slices fail to finish the
-   * head, the third defers it to the back of the rotation so the context graphs
-   * behind it are still served. It keeps its place in the rotation and is
-   * retried there.
+   * head, the third either defers it to the back of the rotation, so the context
+   * graphs behind it are still served, or — when it is the only one left, where
+   * deferring is a no-op — closes the rotation and re-seeds, so the rest of the
+   * node is swept again. Either way the stalled graph keeps its place and is
+   * retried; neither path drops it.
    */
   private resumeRotation(contextGraphIds: string[]): string[] {
     let pending: string[];
@@ -348,13 +423,36 @@ export class FinalizedSwmCleanupService {
       this.rotationHeadContextGraphId = head;
       this.rotationHeadStalledSweeps = 0;
     }
-    if (this.rotationHeadStalledSweeps >= 2 && pending.length > 1) {
+    if (this.rotationHeadStalledSweeps >= 2) {
+      const soleHead = pending.length === 1;
       this.log.warn(
         createOperationContext('system'),
-        `Deferring context graph ${head} in finalized-SWM cleanup rotation; `
-          + `${this.rotationHeadStalledSweeps} consecutive slices could not finish it`,
+        `Context graph ${head} was not finished by ${this.rotationHeadStalledSweeps} `
+          + `consecutive finalized-SWM cleanup slices; `
+          + (soleHead
+            ? 'closing the rotation early so every other context graph is swept again'
+            : 'deferring it to the back of the rotation'),
       );
-      pending = [...pending.slice(1), pending[0]!];
+      if (soleHead) {
+        // Rotating a one-element list is a no-op, so without this the rotation
+        // could never close: `rotationPending` would stay non-null forever, the
+        // re-seed below would never run, and every OTHER context graph on the
+        // node would never be swept again — #1996 reintroduced node-wide by the
+        // subsystem that exists to close it.
+        //
+        // The partial accumulator is discarded rather than published. An
+        // incomplete rotation must never become a whole-node total, so
+        // `lastKnownBacklogDepth` keeps the last complete measurement and every
+        // slice keeps reporting `stale` until a rotation genuinely finishes.
+        // A node whose budget cannot fit one context graph therefore reports an
+        // honestly unknown backlog, and this warning names the graph to raise it
+        // for.
+        this.rotationBacklogDepth = 0;
+        this.rotationOldestMarkerAt = null;
+        pending = [...contextGraphIds];
+      } else {
+        pending = [...pending.slice(1), pending[0]!];
+      }
       this.rotationHeadContextGraphId = pending[0] ?? null;
       this.rotationHeadStalledSweeps = 0;
     }
@@ -413,9 +511,19 @@ export class FinalizedSwmCleanupService {
     swmMetaGraph: string;
     maxCandidates?: number;
     signal?: AbortSignal;
-  }): Promise<{ deletedItems: number; examinedCandidates: number }> {
+    /**
+     * Keyset position from a previous slice. Only `runSweep` supplies it, so the
+     * `cleanupKnownMetaGraph` seam keeps selecting from the top unchanged.
+     */
+    afterTaskSubject?: string;
+  }): Promise<{
+    deletedItems: number;
+    examinedCandidates: number;
+    lastTaskSubject?: string;
+    pageWasFull: boolean;
+  }> {
     if (!this.writeLocks || hasActiveStorePressure(this.store.getPressureSnapshot?.())) {
-      return { deletedItems: 0, examinedCandidates: 0 };
+      return { deletedItems: 0, examinedCandidates: 0, pageWasFull: false };
     }
     const limit = Math.min(16, Math.max(1, Math.floor(input.maxCandidates ?? 4)));
     const queryOptions: QueryOptions = {
@@ -434,11 +542,16 @@ export class FinalizedSwmCleanupService {
             <http://dkg.io/ontology/shareOperationId> ?shareId ;
             <http://dkg.io/ontology/assertionGraph> ?assertionGraph .
           OPTIONAL { ?task <http://dkg.io/ontology/subGraphName> ?subGraphName }
+          ${input.afterTaskSubject === undefined
+            ? ''
+            : `FILTER(STR(?task) > ${JSON.stringify(input.afterTaskSubject)})`}
         }
       } ORDER BY ?task LIMIT ${limit}`,
       queryOptions,
     );
-    if (result.type !== 'bindings') return { deletedItems: 0, examinedCandidates: 0 };
+    if (result.type !== 'bindings') {
+      return { deletedItems: 0, examinedCandidates: 0, pageWasFull: false };
+    }
 
     let cleared = 0;
     for (const row of result.bindings) {
@@ -527,7 +640,21 @@ export class FinalizedSwmCleanupService {
       });
       if (outcome === 'cleared') cleared += 1;
     }
-    return { deletedItems: cleared, examinedCandidates: result.bindings.length };
+    // `ORDER BY ?task` makes the last row the keyset position. A short page means
+    // the ordered set is exhausted, so the caller wraps instead of advancing.
+    // This is an optimisation, NOT a safety property: an empty page carries no
+    // last subject and therefore clears the cursor anyway, so dropping the
+    // short-page wrap costs one wasted empty query per cycle rather than
+    // stranding the suffix. Established by mutation — a wrap-only mutant is not
+    // killed, and this fallback is why.
+    const lastRow = result.bindings[result.bindings.length - 1];
+    const lastTaskSubject = typeof lastRow?.['task'] === 'string' ? lastRow['task'] : undefined;
+    return {
+      deletedItems: cleared,
+      examinedCandidates: result.bindings.length,
+      ...(lastTaskSubject === undefined ? {} : { lastTaskSubject }),
+      pageWasFull: result.bindings.length >= limit,
+    };
   }
 
   private async retireStaleTask(input: {
