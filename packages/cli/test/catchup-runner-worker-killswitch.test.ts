@@ -123,6 +123,28 @@ async function runWorkerCatchup(
   });
 }
 
+/**
+ * SCOPE OF THESE TESTS — read before trusting a green run.
+ *
+ * Every case below hands the worker an `authoritativePeerId` through the stubbed
+ * `prepareCatchup` boundary. **No production resolver route currently produces
+ * one.** `resolveCuratorSyncPeer` was changed in `e7f46dca2` so that nothing
+ * earns `metadata` provenance, because a curator-to-peer binding read out of
+ * accumulated `<cg>/_meta` identifies the graph that HOLDS the rows, not the
+ * writer that SUPPLIED them — and ordinary durable-meta catch-up lets a
+ * contacted peer write those very rows.
+ *
+ * So these tests verify that the worker HANDLES an authority correctly IF it is
+ * given one. They do NOT verify that the early stop or the per-plane narrowing
+ * happens in the shipped build — it cannot, and byte volume is at the pre-fix
+ * level until #2018 lands a trusted binding. Read as end-to-end evidence for the
+ * fan-out reduction they would be claiming something untrue.
+ *
+ * They are kept rather than deleted because #2018 re-enables exactly this
+ * machinery, and deleting them would remove the contract it has to satisfy. When
+ * that lands, the missing piece is a case that derives `authoritativePeerId`
+ * through the REAL resolver/projection path instead of injecting it here.
+ */
 describe('catch-up progressive walk kill-switch', () => {
   it('restores the full fan-out over every peer and every requested plane', async () => {
     const peerIds = Array.from({ length: 12 }, (_, i) => `peer-${i}`);

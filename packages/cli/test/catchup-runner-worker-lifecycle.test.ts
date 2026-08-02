@@ -160,6 +160,13 @@ describe('WorkerCatchupRunner lifecycle', () => {
  * and observe `source` themselves, so a regression HERE would leave them green
  * while production early-stopped on a stale bootstrap hint or reported
  * foreground catch-up as `unspecified` in scheduler diagnostics.
+ *
+ * NOTE on the authoritative cases below: they stub `resolveSyncPeerWithProvenance`
+ * to return `provenance: 'metadata'`, which the real resolver no longer returns
+ * for ANY input (`e7f46dca2`). They pin that the bridge PROPAGATES an authority
+ * faithfully — that `authoritativeSyncPeerId` is the single definition of who
+ * may end a walk, and that the bridge does not invent one from a bootstrap hint.
+ * They are not evidence that an authority is ever produced. See #2018.
  */
 describe('WorkerCatchupRunner agent bridge', () => {
   function bridgeAgent(overrides: Record<string, unknown> = {}) {
