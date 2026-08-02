@@ -24,6 +24,7 @@ export interface CatchupConvergenceStatus extends ContextGraphConvergenceSnapsho
 export interface CatchupStatusResponse {
   jobId: string;
   contextGraphId: string;
+  /** @deprecated Backward-compatible response alias for includeSharedMemory. */
   includeWorkspace: boolean;
   includeSharedMemory: boolean;
   /** Canonical actionable status, including newer live convergence evidence. */

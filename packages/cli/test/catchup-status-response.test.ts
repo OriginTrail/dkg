@@ -28,7 +28,7 @@ function job(status: CatchupJob['status']): CatchupJob {
   return {
     jobId: 'job-1',
     contextGraphId: 'cg-1',
-    includeWorkspace: true,
+    includeSharedMemory: true,
     status,
     queuedAt: 1,
     startedAt: 2,
@@ -38,6 +38,17 @@ function job(status: CatchupJob['status']): CatchupJob {
 }
 
 describe('catch-up status response', () => {
+  it('keeps the legacy workspace name at the response boundary only', () => {
+    const attempt = job('done');
+
+    expect(attempt).toHaveProperty('includeSharedMemory', true);
+    expect(attempt).not.toHaveProperty('includeWorkspace');
+    expect(toCatchupStatusResponse(attempt)).toMatchObject({
+      includeSharedMemory: true,
+      includeWorkspace: true,
+    });
+  });
+
   it('reports live completion while preserving a failed attempt as diagnostics', () => {
     expect(toCatchupStatusResponse(job('failed'), completeConvergence)).toMatchObject({
       status: 'done',

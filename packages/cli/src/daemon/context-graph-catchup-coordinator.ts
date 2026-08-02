@@ -118,7 +118,7 @@ export class ContextGraphCatchupCoordinatorService {
     const job: CatchupJob = {
       jobId: this.createJobId(),
       contextGraphId,
-      includeWorkspace: scope === 'durable-and-shared-memory',
+      includeSharedMemory: scope === 'durable-and-shared-memory',
       status: 'queued',
       queuedAt: this.now(),
     };
@@ -265,7 +265,7 @@ export class ContextGraphCatchupCoordinatorService {
     );
     const result = await this.effects.runner.run({
       contextGraphId: job.contextGraphId,
-      includeSharedMemory: job.includeWorkspace,
+      includeSharedMemory: job.includeSharedMemory,
     });
     const classification = await this.classifyResult(
       job,
@@ -292,7 +292,7 @@ export class ContextGraphCatchupCoordinatorService {
   ): Promise<CatchupResultClassification> {
     const inspectReadiness = catchupClassificationNeedsMetadata({
       result,
-      includeSharedMemory: job.includeWorkspace,
+      includeSharedMemory: job.includeSharedMemory,
     });
     const hasConfirmedMeta = inspectReadiness
       ? await this.effects.hasConfirmedMeta(job.contextGraphId)
@@ -302,7 +302,7 @@ export class ContextGraphCatchupCoordinatorService {
       : false;
     return classifyContextGraphCatchupReadiness({
       result,
-      includeSharedMemory: job.includeWorkspace,
+      includeSharedMemory: job.includeSharedMemory,
       hasConfirmedMeta,
       isPrivate,
       readinessBeforeCatchup,

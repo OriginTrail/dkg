@@ -10,7 +10,7 @@ export type { CatchupJobState } from '../catchup-status-wire.js';
 export interface CatchupJob {
   jobId: string;
   contextGraphId: string;
-  includeWorkspace: boolean; // kept for wire compat; semantically "includeSharedMemory"
+  includeSharedMemory: boolean;
   status: CatchupJobState;
   queuedAt: number;
   startedAt?: number;

@@ -134,11 +134,11 @@ describe('ContextGraphCatchupCoordinatorService', () => {
 
     expect(fixture.run).toHaveBeenCalledTimes(1);
     expect(full).toMatchObject({
-      includeWorkspace: true,
+      includeSharedMemory: true,
       status: 'deferred',
     });
     expect(durable).toMatchObject({
-      includeWorkspace: false,
+      includeSharedMemory: false,
       status: 'done',
     });
     expect(fixture.writeReadiness).toHaveBeenCalledTimes(1);
@@ -290,8 +290,8 @@ describe('ContextGraphCatchupCoordinatorService', () => {
       includeSharedMemory: true,
     });
 
-    expect(base).toMatchObject({ jobId: 'job-1', includeWorkspace: false });
-    expect(upgrade).toMatchObject({ jobId: 'job-2', includeWorkspace: true });
+    expect(base).toMatchObject({ jobId: 'job-1', includeSharedMemory: false });
+    expect(upgrade).toMatchObject({ jobId: 'job-2', includeSharedMemory: true });
     expect(repeatedUpgrade?.jobId).toBe(upgrade?.jobId);
     expect(fixture.run).toHaveBeenCalledTimes(1);
 
@@ -304,8 +304,8 @@ describe('ContextGraphCatchupCoordinatorService', () => {
       { contextGraphId: 'cg:one', includeSharedMemory: false },
       { contextGraphId: 'cg:one', includeSharedMemory: true },
     ]);
-    expect(base).toMatchObject({ includeWorkspace: false, status: 'done' });
-    expect(upgrade).toMatchObject({ includeWorkspace: true, status: 'done' });
+    expect(base).toMatchObject({ includeSharedMemory: false, status: 'done' });
+    expect(upgrade).toMatchObject({ includeSharedMemory: true, status: 'done' });
     expect(fixture.service.coalesceActive({
       contextGraphId: 'cg:one',
       includeSharedMemory: true,
@@ -335,9 +335,9 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     if (!upgrade) throw new Error('upgrade job missing');
     await waitForJob(upgrade);
 
-    expect(base).toMatchObject({ includeWorkspace: false, status: 'done' });
+    expect(base).toMatchObject({ includeSharedMemory: false, status: 'done' });
     expect(upgrade).toMatchObject({
-      includeWorkspace: true,
+      includeSharedMemory: true,
       status: 'unreachable',
       error: expect.stringContaining('requested data plane'),
     });

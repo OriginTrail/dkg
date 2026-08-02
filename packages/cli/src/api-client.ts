@@ -1554,13 +1554,15 @@ export class ApiClient {
       }
       | {
         status: 'queued';
+        includeSharedMemory: boolean;
+        /** @deprecated Backward-compatible response alias. */
         includeWorkspace: boolean;
         jobId: string;
       };
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
-      includeWorkspace: options.includeSharedMemory,
+      includeSharedMemory: options.includeSharedMemory,
       syncMode: options.syncMode,
     });
   }
@@ -1634,6 +1636,8 @@ export class ApiClient {
       }
       | {
         status: 'queued';
+        includeSharedMemory: boolean;
+        /** @deprecated Backward-compatible response alias. */
         includeWorkspace: boolean;
         jobId: string;
       };

@@ -1753,7 +1753,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           syncMode: effectiveSyncMode,
           catchup: {
             status: responseJob.status,
-            includeWorkspace: responseJob.includeWorkspace,
+            includeSharedMemory: responseJob.includeSharedMemory,
+            includeWorkspace: responseJob.includeSharedMemory,
             jobId: responseJob.jobId,
           },
         });
@@ -1773,7 +1774,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
       if (existingReadiness.alreadyReady) {
         const reusableDoneJob = existingJob?.status === 'done' &&
-          existingJob.includeWorkspace === shouldSyncSharedMemory
+          existingJob.includeSharedMemory === shouldSyncSharedMemory
           ? existingJob
           : undefined;
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1781,7 +1782,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           const syntheticJob: CatchupJob = {
             jobId,
             contextGraphId,
-            includeWorkspace: shouldSyncSharedMemory,
+            includeSharedMemory: shouldSyncSharedMemory,
             status: "done",
             queuedAt: Date.now(),
             startedAt: Date.now(),
@@ -1795,6 +1796,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           syncMode: effectiveSyncMode,
           catchup: {
             status: "done",
+            includeSharedMemory: shouldSyncSharedMemory,
             includeWorkspace: shouldSyncSharedMemory,
             jobId,
           },
@@ -1836,6 +1838,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: effectiveSyncMode,
       catchup: {
         status: "queued",
+        includeSharedMemory: shouldSyncSharedMemory,
         includeWorkspace: shouldSyncSharedMemory,
         jobId: job.jobId,
       },

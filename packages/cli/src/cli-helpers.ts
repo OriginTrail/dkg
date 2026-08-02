@@ -206,7 +206,7 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
     console.log(`Last attempt:  ${status.attempt.status}`);
     if (status.attempt.error) console.log(`Attempt error: ${status.attempt.error}`);
   }
-  console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
+  console.log(`Shared Memory: ${status.includeSharedMemory ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);

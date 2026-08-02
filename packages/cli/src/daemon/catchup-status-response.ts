@@ -43,7 +43,8 @@ export function toCatchupStatusResponse(
   return {
     ...attemptFields,
     contextGraphId: job.contextGraphId,
-    includeSharedMemory: job.includeWorkspace,
+    // `includeWorkspace` remains wire-only for pre-rename clients.
+    includeWorkspace: job.includeSharedMemory,
     status,
     ...(status === attemptStatus && attemptError ? { error: attemptError } : {}),
     ...(status !== attemptStatus
@@ -85,7 +86,7 @@ export async function loadCatchupStatusResponse(input: {
         input.readinessStore,
         input.job.contextGraphId,
       ),
-      includeSharedMemory: input.job.includeWorkspace,
+      includeSharedMemory: input.job.includeSharedMemory,
       hasConfirmedMeta,
       ...(input.observedAt === undefined
         ? {}

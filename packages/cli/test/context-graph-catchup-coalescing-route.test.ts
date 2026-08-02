@@ -127,7 +127,7 @@ describe('context graph catch-up route coalescing', () => {
 
       expect(upgrade.body.catchup).toMatchObject({
         status: 'queued',
-        includeWorkspace: true,
+        includeSharedMemory: true,
       });
       expect(upgrade.body.catchup.jobId).not.toBe(base.body.catchup.jobId);
       expect(harness.runCalls).toBe(1);
@@ -135,8 +135,8 @@ describe('context graph catch-up route coalescing', () => {
       await expect(harness.getStatusByContextGraph()).resolves.toMatchObject({
         jobId: upgrade.body.catchup.jobId,
         status: 'queued',
-        includeWorkspace: true,
         includeSharedMemory: true,
+        includeWorkspace: true,
       });
 
       releaseFirstRun.resolve();
@@ -153,8 +153,8 @@ describe('context graph catch-up route coalescing', () => {
           includeSharedMemory: true,
         },
       ]);
-      expect(baseJob).toMatchObject({ includeWorkspace: false, status: 'done' });
-      expect(upgradeJob).toMatchObject({ includeWorkspace: true, status: 'done' });
+      expect(baseJob).toMatchObject({ includeSharedMemory: false, status: 'done' });
+      expect(upgradeJob).toMatchObject({ includeSharedMemory: true, status: 'done' });
       await expect(harness.getStatus(base.body.catchup.jobId)).resolves.toMatchObject({
         status: 'done',
         convergence: {
@@ -202,7 +202,7 @@ describe('context graph catch-up route coalescing', () => {
 
       expect(narrow.body.catchup).toMatchObject({
         status: 'queued',
-        includeWorkspace: false,
+        includeSharedMemory: false,
       });
       expect(narrow.body.catchup.jobId).not.toBe(broad.body.catchup.jobId);
       expect(harness.runCalls).toBe(1);
@@ -213,11 +213,11 @@ describe('context graph catch-up route coalescing', () => {
 
       expect(harness.runCalls).toBe(1);
       expect(broadJob).toMatchObject({
-        includeWorkspace: true,
+        includeSharedMemory: true,
         status: 'unreachable',
       });
       expect(narrowJob).toMatchObject({
-        includeWorkspace: false,
+        includeSharedMemory: false,
         status: 'done',
       });
       await expect(harness.getStatus(narrow.body.catchup.jobId)).resolves.toMatchObject({
@@ -314,9 +314,9 @@ describe('context graph catch-up route coalescing', () => {
 
       const baseJob = await harness.waitForJob(base.body.catchup.jobId);
       const upgradeJob = await harness.waitForJob(upgrade.body.catchup.jobId);
-      expect(baseJob).toMatchObject({ includeWorkspace: false, status: 'done' });
+      expect(baseJob).toMatchObject({ includeSharedMemory: false, status: 'done' });
       expect(upgradeJob).toMatchObject({
-        includeWorkspace: true,
+        includeSharedMemory: true,
         status: 'unreachable',
         error: expect.stringContaining('requested data plane'),
       });

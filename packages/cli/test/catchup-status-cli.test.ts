@@ -9,7 +9,7 @@ import {
 const recoveredStatus: CatchupStatusResponse = {
   jobId: 'job-recovered',
   contextGraphId: 'cg-recovered',
-  includeWorkspace: true,
+  includeWorkspace: false,
   includeSharedMemory: true,
   status: 'done',
   queuedAt: 1,
@@ -46,6 +46,7 @@ describe('catch-up status CLI', () => {
     expect(lines).toContain('Status:        done');
     expect(lines).toContain('Last attempt:  unreachable');
     expect(lines).toContain('Attempt error: durable VM missing');
+    expect(lines).toContain('Shared Memory: enabled');
     expect(lines).toContain('Convergence:   complete');
     expect(lines).toContain('Recovered:     a later synchronization completed the selected graph');
   });
