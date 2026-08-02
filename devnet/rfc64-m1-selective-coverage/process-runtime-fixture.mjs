@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline';
 
 const commandSchema = 'dkg-rfc64-m1-selective-coverage-runtime-command-v1';
 const resultSchema = 'dkg-rfc64-m1-selective-coverage-runtime-result-v1';
-const protocol = 'dkg-rfc64-m1-selective-coverage-runtime-v1';
+const protocol = 'dkg-rfc64-m1-selective-coverage-runtime-v2';
 const prefix = 'DKG_RFC64_M1_RESULT ';
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 

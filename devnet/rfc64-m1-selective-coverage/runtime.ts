@@ -20,7 +20,7 @@ import {
 } from './sync-coverage-journal.ts';
 
 export const SELECTIVE_COVERAGE_RUNTIME_PROTOCOL =
-  'dkg-rfc64-m1-selective-coverage-runtime-v1' as const;
+  'dkg-rfc64-m1-selective-coverage-runtime-v2' as const;
 
 export type SelectiveCoverageRuntimeRole = 'publisher' | 'edge' | 'core';
 
@@ -52,6 +52,15 @@ export interface SelectiveCoverageEdgeRestartReceiptV1 {
     readonly exitedAt: number;
   };
   readonly current: SelectiveCoverageRuntimeReadyV1;
+}
+
+interface OsProcessIdentity {
+  readonly hostIdentity: string;
+  readonly pid: number;
+}
+
+interface ProcessInstanceIdentity extends OsProcessIdentity {
+  readonly processInstanceId: string;
 }
 
 export interface SelectiveCoverageRuntimeV1 {
@@ -285,15 +294,14 @@ function assertEdgeRestartReceipt(
   receipt: SelectiveCoverageEdgeRestartReceiptV1,
   previous: SelectiveCoverageRuntimeReadyV1,
 ): void {
-  if (receipt.previous.pid !== previous.pid
-    || receipt.previous.hostIdentity !== previous.hostIdentity
-    || receipt.previous.processInstanceId !== previous.processInstanceId
+  if (!sameOsProcess(receipt.previous, previous)
+    || !sameProcessInstance(receipt.previous, previous)
     || !Number.isSafeInteger(receipt.previous.exitedAt)
     || receipt.previous.exitedAt < previous.processStartedAt
     || receipt.current.processStartedAt < receipt.previous.exitedAt
     || receipt.current.hostIdentity !== previous.hostIdentity
-    || receipt.current.pid === previous.pid
-    || receipt.current.processInstanceId === previous.processInstanceId
+    || sameOsProcess(receipt.current, previous)
+    || sameProcessInstance(receipt.current, previous)
     || receipt.current.dataDirectoryIdentity !== previous.dataDirectoryIdentity) {
     throw new Error('Edge restart receipt does not prove old-process exit and durable reuse');
   }
@@ -380,16 +388,30 @@ function assertReady(
 function assertDistinctProcesses(
   processes: readonly SelectiveCoverageRuntimeReadyV1[],
 ): void {
-  const osProcessIdentities = processes.map((entry) => `${entry.hostIdentity}\0${entry.pid}`);
-  if (new Set(osProcessIdentities).size !== processes.length
-    || new Set(processes.map((entry) => entry.processInstanceId)).size !== processes.length) {
-    throw new Error('M1 roles did not cross distinct OS process boundaries');
+  for (let left = 0; left < processes.length; left += 1) {
+    for (let right = left + 1; right < processes.length; right += 1) {
+      if (sameOsProcess(processes[left]!, processes[right]!)
+        || sameProcessInstance(processes[left]!, processes[right]!)) {
+        throw new Error('M1 roles did not cross distinct OS process boundaries');
+      }
+    }
   }
   const peerByRole = new Map<SelectiveCoverageRuntimeRole, string>();
   for (const process of processes) peerByRole.set(process.role, process.peerId);
   if (new Set(peerByRole.values()).size !== peerByRole.size) {
     throw new Error('M1 roles did not use distinct DKG peer identities');
   }
+}
+
+function sameOsProcess(left: OsProcessIdentity, right: OsProcessIdentity): boolean {
+  return left.hostIdentity === right.hostIdentity && left.pid === right.pid;
+}
+
+function sameProcessInstance(
+  left: ProcessInstanceIdentity,
+  right: ProcessInstanceIdentity,
+): boolean {
+  return left.processInstanceId === right.processInstanceId;
 }
 
 function canonicalGraphObservations<T extends GraphObservationV1>(

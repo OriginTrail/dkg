@@ -23,7 +23,7 @@ import {
   type SelectiveCoverageRuntimeV1,
 } from './runtime.ts';
 import { decodeEdgeSyncOperationPayload } from './evidence-codec.ts';
-import { decodeEdgeSyncResult } from './runtime-wire.ts';
+import { decodeEdgeSyncResult, decodeRuntimeReady } from './runtime-wire.ts';
 import type { SyncCoverageJournalReferenceV1 } from './sync-coverage-journal.ts';
 import { runSelectiveCoverageLiveV1 } from './live-runner.ts';
 
@@ -642,6 +642,34 @@ test('requires an Edge restart to stay on the anchored host', async () => {
     collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
     /does not prove old-process exit/,
   );
+});
+
+test('requires the restart receipt to identify the previous Edge host', async () => {
+  const runtime = new ScriptedRuntime();
+  runtime.restartReceiptMutation = (receipt) => ({
+    ...receipt,
+    previous: { ...receipt.previous, hostIdentity: 'wrong-previous-host' },
+  });
+  await assert.rejects(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+    /does not prove old-process exit/,
+  );
+});
+
+test('rejects the pre-host-identity v1 runtime wire shape under protocol v2', () => {
+  assert.throws(() => decodeRuntimeReady({
+    protocol: 'dkg-rfc64-m1-selective-coverage-runtime-v1',
+    role: 'edge',
+    pid: 102,
+    peerId: expected.edgePeerId,
+    networkId: expected.networkId,
+    testedHeadCommit: expected.testedHeadCommit,
+    runtimeManifestDigest: expected.runtimeManifestDigest,
+    processStartedAt: 0,
+    processInstanceId: 'edge-instance-before',
+    dataDirectoryIdentity: 'edge-data',
+    evidenceWaveId: 'edge-wave-before',
+  }), /runtime adapter record/);
 });
 
 test('requires positive proof that the previous Edge process exited', async () => {
