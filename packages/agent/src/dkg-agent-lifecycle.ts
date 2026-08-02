@@ -269,6 +269,7 @@ import {
   runOrderedContextGraphSyncs,
   runOrderedContextGraphSyncsWithOutcomes,
   type ContextGraphSyncWork,
+  type OrderedContextGraphSyncExecution,
 } from './sync/requester/ordered-sync.js';
 import {
   recoverContextGraphSwm,
@@ -1196,6 +1197,49 @@ function withSharedMemoryContextGraphTerminals(
     terminals.map((terminal) => Object.freeze(terminal)),
   );
   return { ...summary, contextGraphTerminals: immutableTerminals };
+}
+
+function asSharedMemorySyncDetailedResult(
+  execution: OrderedContextGraphSyncExecution<SharedMemorySyncResult>,
+  requestedContextGraphIds: readonly string[],
+): SharedMemorySyncDetailedResult {
+  const terminalContextGraphIds = new Set(
+    execution.outcomes.map((outcome) => outcome.contextGraphId),
+  );
+  const terminals: SharedMemoryContextGraphTerminal[] = execution.outcomes.map((outcome) => {
+    if (outcome.disposition === 'settled') {
+      return {
+        contextGraphId: outcome.contextGraphId,
+        lane: asSharedMemoryTerminalLane(outcome.lane),
+        disposition: 'settled',
+        result: Object.freeze({ ...outcome.result } satisfies SharedMemoryContextGraphResult),
+      };
+    }
+    if (outcome.disposition === 'deferred') {
+      return {
+        contextGraphId: outcome.contextGraphId,
+        lane: asSharedMemoryTerminalLane(outcome.lane),
+        disposition: 'deferred',
+      };
+    }
+    return {
+      contextGraphId: outcome.contextGraphId,
+      lane: asSharedMemoryTerminalLane(outcome.lane),
+      disposition: 'skipped',
+      reason: outcome.reason,
+    };
+  });
+  for (const contextGraphId of [...new Set(requestedContextGraphIds)]) {
+    if (!terminalContextGraphIds.has(contextGraphId)) {
+      terminals.push({
+        contextGraphId,
+        lane: null,
+        disposition: 'skipped',
+        reason: 'not-eligible',
+      });
+    }
+  }
+  return withSharedMemoryContextGraphTerminals(execution.summary, terminals);
 }
 
 function asSharedMemoryTerminalLane(
@@ -3928,7 +3972,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sharedMemorySyncPlan: plan,
             },
           );
-          evidence.markSharedMemory(result.contextGraphTerminals);
+          // Existing JavaScript embedders can override the detailed method with
+          // the legacy aggregate-only shape. Missing or malformed terminals
+          // make evidence unverifiable, but must not turn successful sync into
+          // a runtime failure.
+          if (Array.isArray(result.contextGraphTerminals)) {
+            evidence.markSharedMemory(result.contextGraphTerminals);
+          }
           return result;
         },
         syncSharedMemoryOnConnect:
@@ -5691,43 +5741,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
         ),
       });
-      const terminalContextGraphIds = new Set(
-        execution.outcomes.map((outcome) => outcome.contextGraphId),
-      );
-      const terminals: SharedMemoryContextGraphTerminal[] = execution.outcomes.map((outcome) => {
-        if (outcome.disposition === 'settled') {
-          return {
-            contextGraphId: outcome.contextGraphId,
-            lane: asSharedMemoryTerminalLane(outcome.lane),
-            disposition: 'settled',
-            result: Object.freeze({ ...outcome.result } satisfies SharedMemoryContextGraphResult),
-          };
-        }
-        if (outcome.disposition === 'deferred') {
-          return {
-            contextGraphId: outcome.contextGraphId,
-            lane: asSharedMemoryTerminalLane(outcome.lane),
-            disposition: 'deferred',
-          };
-        }
-        return {
-          contextGraphId: outcome.contextGraphId,
-          lane: asSharedMemoryTerminalLane(outcome.lane),
-          disposition: 'skipped',
-          reason: outcome.reason,
-        };
-      });
-      for (const contextGraphId of [...new Set(contextGraphIds)]) {
-        if (!terminalContextGraphIds.has(contextGraphId)) {
-          terminals.push({
-            contextGraphId,
-            lane: null,
-            disposition: 'skipped',
-            reason: 'not-eligible',
-          });
-        }
-      }
-      return withSharedMemoryContextGraphTerminals(execution.summary, terminals);
+      return asSharedMemorySyncDetailedResult(execution, contextGraphIds);
     };
 
     return runSyncSingleFlight(this, singleFlightKey, runSync);

@@ -1091,19 +1091,13 @@ export type SharedMemoryContextGraphTerminal =
       | 'not-eligible';
   };
 
-export interface SharedMemorySyncResult extends SharedMemoryContextGraphResult {
-  /**
-   * Exact terminal outcome for each requested Context Graph. Production sync
-   * always populates this field. It remains optional so existing structural
-   * mocks and external implementations stay source-compatible.
-   */
-  contextGraphTerminals?: readonly SharedMemoryContextGraphTerminal[];
-}
+/** Aggregate-only compatibility result for shared-memory synchronization. */
+export interface SharedMemorySyncResult extends SharedMemoryContextGraphResult {}
 
 /**
  * Exact production result of the detailed shared-memory sync path. Aggregate
- * compatibility callers may continue to use SharedMemorySyncResult, while
- * automatic coverage evidence requires the per-CG terminal contract.
+ * compatibility callers continue to use SharedMemorySyncResult without
+ * terminal state, while this boundary requires the per-CG terminal contract.
  */
 export interface SharedMemorySyncDetailedResult extends SharedMemorySyncResult {
   contextGraphTerminals: readonly SharedMemoryContextGraphTerminal[];

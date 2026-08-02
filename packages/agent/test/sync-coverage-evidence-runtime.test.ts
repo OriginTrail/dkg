@@ -208,6 +208,34 @@ describe('automatic sync coverage runtime evidence', () => {
     expect(complete!.sequence).toBe(running!.sequence + 1);
   });
 
+  it('keeps Core automatic sync successful when a legacy result omits terminals', async () => {
+    const automatic = 'cg-automatic-legacy-result';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    (agent as any).syncSharedMemoryFromPeerDetailed = async () =>
+      cleanSharedMemorySyncResult();
+
+    await runConnectionOpenSync(agent);
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect((agent as any).lastSuccessfulSyncAt.get(PEER)).toEqual(expect.any(Number));
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      kind: 'core-automatic-round',
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+      completions: [{
+        contextGraphId: automatic,
+        state: 'failed',
+        verified: { metadata: true, durable: true, sharedMemory: false },
+      }],
+    });
+  });
+
   it('closes an admitted automatic evidence job when a sync phase throws', async () => {
     const automatic = 'cg-automatic-throw';
     const agent = await createEvidenceAgent('core', []);
@@ -314,6 +342,67 @@ describe('automatic sync coverage runtime evidence', () => {
       jobId: entries[0]!.jobId,
       state: 'complete',
       verified: { metadata: true, durable: true, sharedMemory: true },
+    });
+  });
+
+  it('keeps Edge reconciler sync successful when terminals are malformed', async () => {
+    const rehydrated = 'cg-rehydrated-legacy-result';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>([[rehydrated, {
+      id: rehydrated,
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      syncAdmission: 'explicit',
+      syncScoped: true,
+    }]]);
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId) => {
+        persisted.delete(contextGraphId);
+      },
+    };
+    const agent = await createEvidenceAgent('edge', [], subscriptionStore);
+    (agent as any).gossip = {
+      subscribe: () => undefined,
+      unsubscribe: () => undefined,
+      onMessage: () => undefined,
+      offMessage: () => undefined,
+    };
+    (agent.node as any).node = {
+      peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
+    };
+    await (agent as any).rehydrateContextGraphSubscriptions();
+    (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+      ...cleanSharedMemorySyncResult(),
+      contextGraphTerminals: null,
+    });
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER }],
+      getConnections: () => [],
+    };
+    (agent as any).getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: PEER,
+    });
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (agent.getSyncCoverageEvidence().entries.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect((agent as any).lastSuccessfulSyncAt.get(PEER)).toEqual(expect.any(Number));
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      kind: 'edge-reconciler-job',
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+      verified: { metadata: true, durable: true, sharedMemory: false },
     });
   });
 
