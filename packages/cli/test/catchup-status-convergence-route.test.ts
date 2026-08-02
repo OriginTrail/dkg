@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { privateSharedMemoryOnlyResult } from './helpers/context-graph-catchup-fixtures.js';
+import {
+  lossyPublicEmptyResult,
+  privateSharedMemoryOnlyResult,
+} from './helpers/context-graph-catchup-fixtures.js';
 import { ContextGraphSubscribeRouteHarness } from './helpers/context-graph-subscribe-route-harness.js';
 
 async function runIncompletePrivateAttempt(
@@ -25,6 +28,41 @@ async function runIncompletePrivateAttempt(
 }
 
 describe('catch-up status live convergence', () => {
+  it('preserves a lossy public empty-round success without persisted completion', async () => {
+    const harness = await ContextGraphSubscribeRouteHarness.create({
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+      runner: () => lossyPublicEmptyResult(),
+    });
+    try {
+      const response = await harness.postSubscribe({ includeSharedMemory: false });
+      const jobId = response.body.catchup.jobId as string;
+      const job = await harness.waitForJob(jobId);
+      expect(job).toMatchObject({ status: 'done' });
+
+      await expect(harness.getStatus(jobId)).resolves.toMatchObject({
+        status: 'done',
+        convergence: {
+          state: 'partial',
+          verified: {
+            metadata: true,
+            durable: false,
+            sharedMemory: false,
+          },
+          missing: ['durable'],
+        },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('keeps a failed attempt failed when complete readiness predates the job', async () => {
     const harness = await ContextGraphSubscribeRouteHarness.create({
       hasConfirmedMeta: true,

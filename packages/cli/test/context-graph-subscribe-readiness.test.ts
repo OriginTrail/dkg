@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DKGEvent } from '@origintrail-official/dkg-core';
 import {
   cleanEmptyResult,
   privateDataOnlyResult,
@@ -318,6 +319,15 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       version: 1,
       durableVerified: true,
       sharedMemoryVerified: true,
+    });
+    expect(result.emittedEvents).toContainEqual({
+      event: DKGEvent.PROJECT_SYNCED,
+      payload: {
+        contextGraphId: result.response.subscribed,
+        dataSynced: 3,
+        sharedMemorySynced: 4,
+        verifiedPrivateOnlyResponses: 0,
+      },
     });
   });
 

@@ -88,4 +88,22 @@ describe('catch-up status response', () => {
       convergence: invalidatedConvergence,
     });
   });
+
+  it('preserves a successful attempt when incomplete convergence is not a newer invalidation', () => {
+    const nonPersistedConvergence = {
+      ...completeConvergence,
+      state: 'partial' as const,
+      verified: { metadata: true, durable: false, sharedMemory: false },
+      missing: ['durable', 'sharedMemory'] as const,
+      readinessUpdatedAt: undefined,
+    };
+
+    expect(toCatchupStatusResponse(job('done'), nonPersistedConvergence))
+      .toMatchObject({
+        status: 'done',
+        convergence: nonPersistedConvergence,
+      });
+    expect(toCatchupStatusResponse(job('done'), nonPersistedConvergence))
+      .not.toHaveProperty('attempt');
+  });
 });

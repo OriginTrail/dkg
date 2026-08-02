@@ -118,11 +118,6 @@ export {
 export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import {
-  describeContextGraphConvergence,
-  hasAuthoritativeContextGraphMetadata,
-  readContextGraphReadiness,
-} from '../../context-graph-readiness.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -172,7 +167,7 @@ import {
   type CatchupJob,
   type CatchupTracker,
 } from '../types.js';
-import { toCatchupStatusResponse } from '../catchup-status-response.js';
+import { loadCatchupStatusResponse } from '../catchup-status-response.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -1038,22 +1033,12 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
-    const subscription = agent.getSubscribedContextGraphs().get(job.contextGraphId);
-    const hasConfirmedMeta = await hasAuthoritativeContextGraphMetadata({
+    const response = await loadCatchupStatusResponse({
+      job,
       agent,
-      contextGraphId: job.contextGraphId,
+      readinessStore: dashDb,
     });
-    const convergence = {
-      ...describeContextGraphConvergence({
-        readiness: readContextGraphReadiness(dashDb, job.contextGraphId),
-        includeSharedMemory: job.includeWorkspace,
-        hasConfirmedMeta,
-      }),
-      syncMode: subscription?.syncMode ?? 'always-on',
-      automaticRetryActive: subscription?.subscribed === true,
-    };
-
-    return jsonResponse(res, 200, toCatchupStatusResponse(job, convergence));
+    return jsonResponse(res, 200, response);
   }
 
   // POST /api/verify

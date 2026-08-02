@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { DKGEvent } from '@origintrail-official/dkg-core';
 import type {
   CatchupJobResult,
   CatchupRunRequest,
@@ -44,6 +45,10 @@ export class ContextGraphSubscribeRouteHarness {
   readonly metadataCheckOptions: Array<
     { rejectUnregisteredPlaceholder?: boolean } | undefined
   > = [];
+  readonly emittedEvents: Array<{
+    event: DKGEvent;
+    payload: unknown;
+  }> = [];
 
   private readonly previousCatchupRunner = daemonState.catchupRunner;
   private readonly catchupTracker = {
@@ -217,6 +222,11 @@ export class ContextGraphSubscribeRouteHarness {
       },
       isCuratorOf: async () => this.options.locallyCurated ?? false,
       isPrivateContextGraph: async () => this.options.isPrivate ?? false,
+      eventBus: {
+        emit: (event: DKGEvent, payload: unknown) => {
+          this.emittedEvents.push({ event, payload });
+        },
+      },
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () =>
         this.options.callerAddress ?? '0x0000000000000000000000000000000000000001',
@@ -306,6 +316,7 @@ export async function runSubscribeScenario(
   readiness: Record<string, unknown> | undefined;
   statusResponse: any;
   metadataCheckOptions: ContextGraphSubscribeRouteHarness['metadataCheckOptions'];
+  emittedEvents: ContextGraphSubscribeRouteHarness['emittedEvents'];
 }> {
   const harness = await ContextGraphSubscribeRouteHarness.create({
     ...options,
@@ -330,6 +341,7 @@ export async function runSubscribeScenario(
       readiness: harness.readiness,
       statusResponse: jobId ? await harness.getStatus(jobId) : null,
       metadataCheckOptions: [...harness.metadataCheckOptions],
+      emittedEvents: [...harness.emittedEvents],
     };
   } finally {
     await harness.close();

@@ -1,7 +1,30 @@
 import type { CatchupJobResult } from '../../src/catchup-runner.js';
 
-export function cleanEmptyResult(): CatchupJobResult {
-  return {
+type CleanPlaneCompletions = NonNullable<
+  CatchupJobResult['cleanPlaneCompletions']
+>;
+type CatchupDiagnostics = NonNullable<CatchupJobResult['diagnostics']>;
+
+export type CatchupJobResultOverrides = Omit<
+  Partial<CatchupJobResult>,
+  'cleanPlaneCompletions' | 'diagnostics'
+> & {
+  cleanPlaneCompletions?: {
+    durable?: Partial<CleanPlaneCompletions['durable']>;
+    sharedMemory?: Partial<CleanPlaneCompletions['sharedMemory']>;
+  };
+  diagnostics?: {
+    noProtocolPeers?: number;
+    durable?: Partial<CatchupDiagnostics['durable']>;
+    sharedMemory?: Partial<CatchupDiagnostics['sharedMemory']>;
+  };
+};
+
+/** Complete canonical result factory; scenario helpers override only their signal. */
+export function makeCatchupJobResult(
+  overrides: CatchupJobResultOverrides = {},
+): CatchupJobResult {
+  const defaults = {
     connectedPeers: 1,
     totalPeers: 1,
     selectedPeers: 1,
@@ -9,13 +32,21 @@ export function cleanEmptyResult(): CatchupJobResult {
     peersTried: 1,
     peersResponded: 1,
     peersSucceeded: 1,
+    deferredBackpressure: 0,
     dataSynced: 0,
     sharedMemorySynced: 0,
     denied: false,
     deniedPeers: 0,
     cleanPlaneCompletions: {
-      durable: { verifiedDataPeers: 0, emptyPeers: 1 },
-      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 1 },
+      durable: {
+        verifiedDataPeers: 0,
+        verifiedPrivateOnlyPeers: 0,
+        emptyPeers: 1,
+      },
+      sharedMemory: {
+        verifiedDataPeers: 0,
+        emptyPeers: 1,
+      },
     },
     diagnostics: {
       noProtocolPeers: 0,
@@ -31,10 +62,12 @@ export function cleanEmptyResult(): CatchupJobResult {
         checkpointAdvances: 0,
         emptyResponses: 1,
         metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
         rejectedKcs: 0,
         failedPeers: 0,
         failedPhases: 0,
+        deferredBackpressure: 0,
       },
       sharedMemory: {
         fetchedMetaTriples: 0,
@@ -50,70 +83,135 @@ export function cleanEmptyResult(): CatchupJobResult {
         droppedDataTriples: 0,
         failedPeers: 0,
         failedPhases: 0,
+        deferredBackpressure: 0,
+      },
+    },
+  } satisfies CatchupJobResult;
+
+  return {
+    ...defaults,
+    ...overrides,
+    cleanPlaneCompletions: {
+      durable: {
+        ...defaults.cleanPlaneCompletions.durable,
+        ...overrides.cleanPlaneCompletions?.durable,
+      },
+      sharedMemory: {
+        ...defaults.cleanPlaneCompletions.sharedMemory,
+        ...overrides.cleanPlaneCompletions?.sharedMemory,
+      },
+    },
+    diagnostics: {
+      noProtocolPeers:
+        overrides.diagnostics?.noProtocolPeers ?? defaults.diagnostics.noProtocolPeers,
+      durable: {
+        ...defaults.diagnostics.durable,
+        ...overrides.diagnostics?.durable,
+      },
+      sharedMemory: {
+        ...defaults.diagnostics.sharedMemory,
+        ...overrides.diagnostics?.sharedMemory,
       },
     },
   };
 }
 
+export function cleanEmptyResult(): CatchupJobResult {
+  return makeCatchupJobResult();
+}
+
 export function privateMetaOnlyResult(): CatchupJobResult {
-  const result = cleanEmptyResult();
-  if (!result.diagnostics?.durable) throw new Error('durable diagnostics missing');
-  result.diagnostics.durable.emptyResponses = 0;
-  result.diagnostics.durable.fetchedMetaTriples = 7;
-  result.diagnostics.durable.insertedMetaTriples = 1;
-  result.diagnostics.durable.metaOnlyResponses = 1;
-  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
-  result.cleanPlaneCompletions.durable.emptyPeers = 0;
-  return result;
+  return makeCatchupJobResult({
+    cleanPlaneCompletions: {
+      durable: { emptyPeers: 0 },
+    },
+    diagnostics: {
+      durable: {
+        emptyResponses: 0,
+        fetchedMetaTriples: 7,
+        insertedMetaTriples: 1,
+        metaOnlyResponses: 1,
+      },
+    },
+  });
 }
 
 export function privateDataOnlyResult(): CatchupJobResult {
-  const result = cleanEmptyResult();
-  if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
-    throw new Error('catch-up diagnostics missing');
-  }
-  result.dataSynced = 3;
-  result.diagnostics.durable.emptyResponses = 0;
-  result.diagnostics.durable.fetchedDataTriples = 3;
-  result.diagnostics.durable.insertedDataTriples = 3;
-  result.diagnostics.sharedMemory.emptyResponses = 0;
-  result.diagnostics.sharedMemory.completedPhases = 0;
-  result.diagnostics.sharedMemory.timedOutPhases = 1;
-  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
-  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 1, emptyPeers: 0 };
-  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 0, emptyPeers: 0 };
-  return result;
+  return makeCatchupJobResult({
+    dataSynced: 3,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 1, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    },
+    diagnostics: {
+      durable: {
+        emptyResponses: 0,
+        fetchedDataTriples: 3,
+        insertedDataTriples: 3,
+      },
+      sharedMemory: {
+        emptyResponses: 0,
+        completedPhases: 0,
+        timedOutPhases: 1,
+      },
+    },
+  });
 }
 
 export function privateSharedMemoryOnlyResult(): CatchupJobResult {
-  const result = cleanEmptyResult();
-  if (!result.diagnostics?.sharedMemory) {
-    throw new Error('shared-memory diagnostics missing');
-  }
-  result.sharedMemorySynced = 4;
-  result.diagnostics.sharedMemory.emptyResponses = 0;
-  result.diagnostics.sharedMemory.fetchedDataTriples = 4;
-  result.diagnostics.sharedMemory.insertedDataTriples = 4;
-  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
-  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 1, emptyPeers: 0 };
-  return result;
+  return makeCatchupJobResult({
+    sharedMemorySynced: 4,
+    cleanPlaneCompletions: {
+      sharedMemory: { verifiedDataPeers: 1, emptyPeers: 0 },
+    },
+    diagnostics: {
+      sharedMemory: {
+        emptyResponses: 0,
+        fetchedDataTriples: 4,
+        insertedDataTriples: 4,
+      },
+    },
+  });
 }
 
 export function publicDurableAndSharedMemoryResult(): CatchupJobResult {
-  const result = cleanEmptyResult();
-  if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
-    throw new Error('catch-up diagnostics missing');
-  }
-  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
-  result.dataSynced = 3;
-  result.sharedMemorySynced = 4;
-  result.diagnostics.durable.emptyResponses = 0;
-  result.diagnostics.durable.fetchedDataTriples = 3;
-  result.diagnostics.durable.insertedDataTriples = 3;
-  result.diagnostics.sharedMemory.emptyResponses = 0;
-  result.diagnostics.sharedMemory.fetchedDataTriples = 4;
-  result.diagnostics.sharedMemory.insertedDataTriples = 4;
-  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 1, emptyPeers: 0 };
-  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 1, emptyPeers: 0 };
-  return result;
+  return makeCatchupJobResult({
+    dataSynced: 3,
+    sharedMemorySynced: 4,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 1, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 1, emptyPeers: 0 },
+    },
+    diagnostics: {
+      durable: {
+        emptyResponses: 0,
+        fetchedDataTriples: 3,
+        insertedDataTriples: 3,
+      },
+      sharedMemory: {
+        emptyResponses: 0,
+        fetchedDataTriples: 4,
+        insertedDataTriples: 4,
+      },
+    },
+  });
+}
+
+/** One public host proves empty while another selected peer transport-fails. */
+export function lossyPublicEmptyResult(): CatchupJobResult {
+  return makeCatchupJobResult({
+    connectedPeers: 2,
+    totalPeers: 2,
+    selectedPeers: 2,
+    syncCapablePeers: 2,
+    peersTried: 2,
+    peersResponded: 1,
+    peersSucceeded: 1,
+    cleanPlaneCompletions: {
+      durable: { emptyPeers: 1 },
+    },
+    diagnostics: {
+      durable: { failedPeers: 1 },
+    },
+  });
 }
