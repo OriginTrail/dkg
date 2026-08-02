@@ -36,6 +36,7 @@ import type {
   ContextGraphSub,
   ContextGraphSubInput,
 } from './dkg-agent-types.js';
+import { normalizeLegacyContextGraphSubscriptionInput } from './context-graph-subscription-policy.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -136,7 +137,7 @@ function resolveGraphScopedPublishRequest(
 export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
-  setContextGraphSubscription?: (id: string, next: ContextGraphSubInput, options?: { persist?: boolean }) => void;
+  setContextGraphSubscription?: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
   /**
    * Record a Context Graph learned from ontology gossip. Agent-backed callers
    * apply the node-role policy centrally (edge=catalogue-only, core=activate);
@@ -202,16 +203,14 @@ export class GossipPublishHandler {
     next: ContextGraphSubInput,
     options?: { persist?: boolean },
   ): void {
+    const previous = this.subscribedContextGraphs.get(id);
+    const normalized = normalizeLegacyContextGraphSubscriptionInput(previous, next);
     const setter = this.callbacks.setContextGraphSubscription;
     if (setter) {
-      setter(id, next, options);
+      setter(id, normalized, options);
       return;
     }
-    const previous = this.subscribedContextGraphs.get(id);
-    this.subscribedContextGraphs.set(id, {
-      ...next,
-      syncMode: next.syncMode ?? previous?.syncMode ?? 'always-on',
-    });
+    this.subscribedContextGraphs.set(id, normalized);
   }
 
   private recordDiscoveredContextGraph(id: string, metadata: ContextGraphDiscoveryMetadata): void {

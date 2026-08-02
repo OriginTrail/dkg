@@ -235,6 +235,92 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('preserves dormant durable intent when an edge opens the graph on demand', async () => {
+      const fixture = createContextGraphPersistenceFixture();
+      const { persisted, persistedMembers } = fixture;
+      const activeId = 'durable-a-active';
+      const dormantId = 'durable-z-dormant';
+      for (const id of [activeId, dormantId]) {
+        persisted.set(id, {
+          id,
+          name: id,
+          subscribed: true,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          syncScoped: true,
+        });
+      }
+
+      const agentA = await DKGAgent.create({
+        name: 'DormantDurableIntentA',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: fixture.subscriptionStore,
+        contextGraphMembershipStore: fixture.membershipStore,
+        maxRehydratedContextGraphSubscriptions: 1,
+      });
+
+      try {
+        await agentA.start();
+        expect(agentA.getSubscribedContextGraphs().get(activeId)?.syncMode).toBe('always-on');
+        expect(agentA.getSubscribedContextGraphs().get(dormantId)).toBeUndefined();
+        expect(agentA.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 1,
+          dormant: 1,
+          dormantIds: [dormantId],
+        });
+
+        // Opening a capped durable row is expressed by the UI as on-demand.
+        // The agent must recover the stored always-on intent instead of
+        // downgrading it and later deleting it from the durable store.
+        const selected = agentA.subscribeToContextGraph(dormantId, { syncMode: 'on-demand' });
+        expect(selected.syncMode).toBe('always-on');
+        expect(agentA.getSubscribedContextGraphs().get(dormantId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'always-on',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(persisted.get(dormantId)).toMatchObject({
+          id: dormantId,
+          subscribed: true,
+          syncScoped: true,
+        });
+        expect(persistedMembers.get(`${dormantId}|node|${agentA.peerId}`)).toMatchObject({
+          contextGraphId: dormantId,
+          status: 'active',
+          source: 'subscription',
+        });
+        expect(agentA.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 2,
+          dormant: 0,
+          dormantIds: [],
+        });
+      } finally {
+        await agentA.stop().catch(() => {});
+      }
+
+      const agentB = await DKGAgent.create({
+        name: 'DormantDurableIntentB',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: fixture.subscriptionStore,
+        contextGraphMembershipStore: fixture.membershipStore,
+        maxRehydratedContextGraphSubscriptions: 0,
+      });
+      try {
+        await agentB.start();
+        expect(agentB.getSubscribedContextGraphs().get(dormantId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'always-on',
+        });
+      } finally {
+        await agentB.stop().catch(() => {});
+      }
+    });
+
+
     it('promotes an existing on-demand selection when the node creates the graph', async () => {
       const fixture = createContextGraphPersistenceFixture();
       const { persisted, persistedMembers } = fixture;

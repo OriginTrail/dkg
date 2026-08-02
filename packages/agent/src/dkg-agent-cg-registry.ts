@@ -1051,6 +1051,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
       this.setContextGraphSubscription(opts.id, {
         name: opts.name,
+        syncMode: 'always-on',
         subscribed: true,
         synced: true,
         metaSynced: true,
@@ -1111,6 +1112,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
+      syncMode: 'always-on',
       subscribed: true,
       synced: true,
       metaSynced: true,

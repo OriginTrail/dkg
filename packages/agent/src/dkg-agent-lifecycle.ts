@@ -488,7 +488,6 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
-  type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -506,6 +505,7 @@ import {
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
+import { projectContextGraphSubscriptionPersistence } from './context-graph-subscription-policy.js';
 import {
   authoritativeSyncPeerId,
   resolveCuratorSyncPeer,
@@ -2546,6 +2546,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // upsert a minimal stub first.
             if (!this.subscribedContextGraphs.has(localId)) {
               this.setContextGraphSubscription(localId, {
+                syncMode: 'always-on',
                 subscribed: false,
                 synced: false,
                 onChainHash: hashLower,
@@ -7126,7 +7127,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
-    next: ContextGraphSubInput,
+    next: ContextGraphSub,
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
@@ -7144,7 +7145,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const nextWireId = nextOnChainHash ?? localWireId;
     const canonicalNext: ContextGraphSub = {
       ...next,
-      syncMode: next.syncMode ?? previous?.syncMode ?? 'always-on',
       ...(next.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
     if (
@@ -7162,10 +7162,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // readiness process-local. A Core's independent hosting obligation is
     // still durable, though: persistContextGraphSubscription writes a
     // host-only snapshot without converting the member intent to always-on.
-    if (
-      options?.persist !== false &&
-      (canonicalNext.syncMode !== 'on-demand' || canonicalNext.coreHosted === true)
-    ) {
+    const persistence = projectContextGraphSubscriptionPersistence({
+      contextGraphId,
+      subscription: canonicalNext,
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+    });
+    if (options?.persist !== false && persistence.action !== 'skip') {
       if (this.config.contextGraphSubscriptionStore) {
         const revision = this.nextContextGraphSubscriptionPersistRevision(contextGraphId);
         this.persistContextGraphSubscription(
@@ -7176,9 +7178,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      if (canonicalNext.syncMode !== 'on-demand' && canonicalNext.subscribed) {
+      if (persistence.persistMemberIntent && canonicalNext.subscribed) {
         this.persistLocalNodeMembership(contextGraphId);
-      } else if (canonicalNext.syncMode !== 'on-demand') {
+      } else if (persistence.persistMemberIntent) {
         this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
       }
     }
@@ -7415,7 +7417,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return Promise.resolve();
     }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
-    if (sub?.syncMode === 'on-demand' && sub.coreHosted !== true) {
+    const persistence = projectContextGraphSubscriptionPersistence({
+      contextGraphId,
+      subscription: sub,
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+    });
+    if (persistence.action === 'skip') {
       // Some lifecycle paths persist reconciliation watermarks directly
       // instead of going through setContextGraphSubscription. Preserve the
       // process-local lifetime at this lowest shared write boundary too.
@@ -7427,7 +7434,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // during a publish remembers it hosts the CG and fills its gap. Drop the
     // row only when the node neither subscribes to nor hosts the CG.
     this.beginContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
-    if (!sub?.subscribed && !sub?.coreHosted) {
+    if (persistence.action === 'delete') {
       return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.delete(contextGraphId))
         .then(() => {
           if (
@@ -7447,24 +7454,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
         });
     }
-    const persistMemberIntent = sub.syncMode !== 'on-demand';
-    // Project the durable record directly from the real live state. An
-    // on-demand member can coexist with an independent Core-hosting duty, but
-    // that host-only row must not masquerade as a second live subscription.
-    const record: ContextGraphSubscriptionRecord = {
-      id: contextGraphId,
-      name: sub.name,
-      subscribed: persistMemberIntent && sub.subscribed,
-      synced: persistMemberIntent && sub.synced,
-      sharedMemorySynced: persistMemberIntent ? sub.sharedMemorySynced : false,
-      metaSynced: persistMemberIntent ? sub.metaSynced : false,
-      onChainId: sub.onChainId,
-      onChainHash: sub.onChainHash,
-      lastReconciledOrdinal: sub.lastReconciledOrdinal,
-      coreHosted: sub.coreHosted,
-      syncScoped:
-        persistMemberIntent && (this.config.syncContextGraphs ?? []).includes(contextGraphId),
-    };
+    const record = persistence.record;
     return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
       .then(() => {
         if (
@@ -7507,19 +7497,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         `Cannot persist context graph "${contextGraphId}": active subscription or host state is missing`,
       );
     }
-    const record = {
-      id: contextGraphId,
-      name: sub.name,
-      subscribed: sub.subscribed,
-      synced: sub.synced,
-      sharedMemorySynced: sub.sharedMemorySynced,
-      metaSynced: sub.metaSynced,
-      onChainId: sub.onChainId,
-      onChainHash: sub.onChainHash,
-      lastReconciledOrdinal: sub.lastReconciledOrdinal,
-      coreHosted: sub.coreHosted,
+    const persistence = projectContextGraphSubscriptionPersistence({
+      contextGraphId,
+      subscription: sub,
       syncScoped: syncScoped ?? (this.config.syncContextGraphs ?? []).includes(contextGraphId),
-    };
+    });
+    if (persistence.action !== 'save' || !persistence.persistMemberIntent) {
+      throw new Error(
+        `Cannot acknowledge join approval for "${contextGraphId}": durable subscription intent is missing`,
+      );
+    }
+    const record = persistence.record;
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
     await this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
