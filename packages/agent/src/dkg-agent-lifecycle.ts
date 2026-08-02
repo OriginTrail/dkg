@@ -98,7 +98,7 @@ import {
   pickNetworkTunables,
   withRetry,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, tryReplaceGraphAtomically, type ChangelogReader, type QueryOptions, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
@@ -7614,7 +7614,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.finalizedSwmCleanupWorker) {
       this.finalizedSwmCleanupWorker = new FinalizedSwmCleanupWorker({
         sweep: () => this.runFinalizedSwmCleanupSweep(),
-        retryDelayMs: 5_000,
+        retryDelayMs: DKGAgentBase.FINALIZED_SWM_CLEANUP_RETRY_MS,
         onError: (error) => {
           this.log.warn(
             createOperationContext('system'),
@@ -7641,9 +7641,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         store: this.store,
         writeLocks: this.writeLocks,
         eventBus: this.eventBus,
+        // Deliberately ignores the sweep's query options: this is the shared,
+        // TTL-cached listing, so its result is normally amortized across
+        // foreground callers rather than store work attributable to the GC, and
+        // threading the sweep's deadline signal in would let a foreground caller
+        // joining the same in-flight promise inherit the GC's abort. It stays
+        // the id source because it is the only one that resolves owner/name
+        // context graphs — a graph-URI walk cannot tell `<owner>/<name>` apart
+        // from a sub-graph. The per-context-graph enumeration below is the call
+        // that scales with graph count, and that one is lane-tagged.
         listContextGraphIds: async () => (await this.listContextGraphs()).map((row) => row.id),
-        listSharedMemoryMetaGraphs: (contextGraphId) =>
-          listSharedMemoryMetaGraphs(this.store, contextGraphId),
+        listSharedMemoryMetaGraphs: (contextGraphId, options) =>
+          listSharedMemoryMetaGraphs(this.store, contextGraphId, options),
+        maxCandidatesPerSweep: DKGAgentBase.FINALIZED_SWM_CLEANUP_MAX_CANDIDATES,
+        wallClockBudgetMs: DKGAgentBase.FINALIZED_SWM_CLEANUP_BUDGET_MS,
       });
     }
     return this.finalizedSwmCleanupService;
@@ -7844,10 +7855,14 @@ async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<s
   return graphs;
 }
 
-async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+async function listGraphsByPrefix(
+  store: TripleStore,
+  prefix: string,
+  options?: QueryOptions,
+): Promise<string[]> {
   return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix)
-    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+    ? store.listGraphsByPrefix(prefix, options)
+    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
 }
 
 async function runRecoverContextGraphSwmFromPeer(
@@ -8054,12 +8069,16 @@ async function isKnownContextGraphUri(store: TripleStore, contextGraphUri: strin
  * families such as `…/_verifiable_memory/…` or `…/_shared_memory_snapshots/…`
  * can never be misread as a sub-graph meta graph.
  */
-async function listSharedMemoryMetaGraphs(store: TripleStore, contextGraphId: string): Promise<string[]> {
+async function listSharedMemoryMetaGraphs(
+  store: TripleStore,
+  contextGraphId: string,
+  options?: QueryOptions,
+): Promise<string[]> {
   const rootMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
   const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   const metaSuffix = '/_shared_memory_meta';
   const metaGraphs = [rootMetaGraph];
-  for (const graph of await listGraphsByPrefix(store, cgPrefix)) {
+  for (const graph of await listGraphsByPrefix(store, cgPrefix, options)) {
     if (graph === rootMetaGraph || !graph.endsWith(metaSuffix)) continue;
     const subGraphName = graph.slice(cgPrefix.length, graph.length - metaSuffix.length);
     if (!validateSubGraphName(subGraphName).valid) continue;

@@ -882,6 +882,24 @@ export class DKGAgentBase {
   static readonly SWM_ACK_QUORUM_TICK_MS = 5_000;
 
   /**
+   * Finalized-SWM GC slice budgets. The sweep yields once either is spent and
+   * resumes at the next context graph in its rotation, so these trade cleanup
+   * latency against how long one background slice may hold store capacity.
+   * Env-overridable for ops tuning; the service clamps candidates to 16.
+   */
+  static readonly FINALIZED_SWM_CLEANUP_MAX_CANDIDATES =
+    Math.max(1, Number(process.env['DKG_FINALIZED_SWM_CLEANUP_MAX_CANDIDATES']) || 4);
+  static readonly FINALIZED_SWM_CLEANUP_BUDGET_MS =
+    Math.max(1, Number(process.env['DKG_FINALIZED_SWM_CLEANUP_BUDGET_MS']) || 10_000);
+  /**
+   * Delay before re-waking the GC after a sweep yielded on pressure or budget,
+   * or drained part of a known backlog. This is the cadence that actually fires
+   * while the node is draining, so it is the knob ops reach for first.
+   */
+  static readonly FINALIZED_SWM_CLEANUP_RETRY_MS =
+    Math.max(1, Number(process.env['DKG_FINALIZED_SWM_CLEANUP_RETRY_MS']) || 5_000);
+
+  /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
    * is the safety net behind the live `KnowledgeAssetRegisteredToContextGraph`
    * nudge: it guarantees eventual reconciliation even if an event was missed or
