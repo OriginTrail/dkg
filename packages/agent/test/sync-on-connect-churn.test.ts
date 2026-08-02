@@ -125,22 +125,20 @@ describe('sync-on-connect churn gates', () => {
     // relabel most sync-global pressure on the operator dashboards.
     const agent = await createUnstartedAgent('SyncOnConnectSourceLabel');
     (agent as any).started = true;
-    const sources: unknown[] = [];
-    (agent as any).trySyncFromPeer = async (
-      _peer: string,
-      _onAccounting: unknown,
-      source: unknown,
-    ) => {
-      sources.push(source);
-      return undefined;
-    };
+    const trySyncFromPeer = recorder(async () => undefined);
+    (agent as any).trySyncFromPeer = trySyncFromPeer;
 
     await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
       connected: true,
       hasSyncProtocol: true,
     });
 
-    expect(sources).toEqual(['on-connect']);
+    // An untriggered compatibility call must not gain a trailing `undefined`.
+    expect(trySyncFromPeer.calls).toEqual([[
+      PEER_A,
+      expect.any(Function),
+      'on-connect',
+    ]]);
   });
 
   it('reconciler still retries stale connected peers', async () => {
@@ -157,10 +155,15 @@ describe('sync-on-connect churn gates', () => {
     await (agent as any).reconcileSyncFromConnectedPeers();
     await flushTimers();
 
-    // The third argument is the bounded admission origin (issue #2006): the
-    // reconciler's queue pressure must be attributable to `reconcile`, not
-    // indistinguishable from sync-on-connect.
-    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function), 'reconcile']]);
+    // The third argument is the bounded admission origin (issue #2006), while
+    // the fourth is the opaque module-private provenance token used only by
+    // automatic paths. Direct callers cannot manufacture its symbol brand.
+    expect(trySyncFromPeer.calls).toEqual([[
+      PEER_A,
+      expect.any(Function),
+      'reconcile',
+      expect.objectContaining({ trigger: 'periodic-reconciler' }),
+    ]]);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {

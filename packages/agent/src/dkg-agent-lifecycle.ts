@@ -3769,14 +3769,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
     let syncAccountingClearedBackoff = false;
     try {
-      const outcome = await this.trySyncFromPeer(
-        remotePeer,
-        () => {
-          syncAccountingClearedBackoff = true;
-        },
-        source,
-        trigger ? automaticSyncInvocation(trigger) : undefined,
-      );
+      const onSyncAccounting = () => {
+        syncAccountingClearedBackoff = true;
+      };
+      // Keep the established three-argument call shape when no internal
+      // automatic trigger exists. Some embedders replace this method with a
+      // strict-arity seam, and a trailing `undefined` is still observable.
+      const outcome = trigger
+        ? await this.trySyncFromPeer(
+          remotePeer,
+          onSyncAccounting,
+          source,
+          automaticSyncInvocation(trigger),
+        )
+        : await this.trySyncFromPeer(remotePeer, onSyncAccounting, source);
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
