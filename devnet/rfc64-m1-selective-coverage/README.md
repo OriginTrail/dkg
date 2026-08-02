@@ -55,7 +55,7 @@ process is cryptographically bound to the reviewed source head:
 2. Publish the selected wave and read exact Publisher VM and SWM snapshots.
 3. Prove the Edge has no payload, then issue only the anchored on-demand and
    always-on user selections and retain their returned job IDs.
-4. Publish the final wave, restart the Edge into a new OS process, and require
+4. Publish/share the final plane-specific wave, restart the Edge into a new OS process, and require
    its actual reconciler record for always-on refresh. Observe on-demand data
    still at the selected snapshot with no active runtime mode.
 5. Issue the second explicit on-demand request and require exact final state.
@@ -104,7 +104,7 @@ Commands are:
 | Command | Required runtime action/evidence |
 | --- | --- |
 | `start` | Start the named role; independently return host identity, PID, process instance/wave IDs, `processStartedAt` as integer epoch milliseconds sourced from `Math.floor(performance.timeOrigin)`, durable-directory identity, peer ID, network, commit, and loaded-runtime digest. OS-process uniqueness is evaluated as `(hostIdentity, pid)`, so valid processes on different hosts may reuse a numeric PID. The command contains only the role, never the trust anchor. |
-| `publish-wave` | Publish the named anchored wave; return exact Publisher VM/SWM observations for every graph. |
+| `publish-wave` | Publish the named VM asset and separately share the named SWM asset for every graph; return exact stable Publisher VM/SWM observations. Distinct assets are required because confirmed VM publication intentionally consumes its own SWM root. |
 | `observe-edge` | Return exact Edge VM/SWM observations, effective runtime mode, and the actual producing job ID. |
 | `synchronize-edge` | Issue only the named explicit user selection; return its real job ID and terminal exact snapshot. |
 | `restart-edge` | Stop and restart Edge from the same durable data directory; return a receipt binding the old process instance/PID and observed exit to the new process instance/PID, stable directory identity, and peer identity. |
@@ -223,7 +223,8 @@ For the shipped TypeScript adapter, set the command to `node`, pass
 `["--import","tsx","devnet/rfc64-m1-selective-coverage/testnet-operator-adapter.ts"]`
 as `DKG_RFC64_M1_ADAPTER_ARGS_JSON`, and provide the closed operator file via
 `DKG_RFC64_M1_OPERATOR_CONFIG`. `prepare-testnet-corpus.ts` creates and seals
-exactly two KAs in each of the five policy/selection cells, then writes both the
+exactly four KAs in each of the five policy/selection cells (one VM and one SWM
+asset per wave), then writes both the
 immutable corpus and the adapter graph plan. After probing stable identities for
 the three isolated data directories, `create-testnet-trust-anchor.ts` binds
 those peer IDs to the clean source/runtime manifest and corpus digest.

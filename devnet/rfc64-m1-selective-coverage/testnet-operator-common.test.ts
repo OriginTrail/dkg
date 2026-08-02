@@ -23,8 +23,10 @@ const graph = (index: number): TestnetOperatorGraphV1 => ({
   publishPolicy: index % 2 as 0 | 1,
   edgePolicy: index === 1 ? 'on-demand' : index === 2 ? 'always-on' : 'unselected',
   assets: [
-    { name: `selected-${index}`, subject: `urn:test:g${index}:selected`, ual: `did:dkg:test/0x${'1'.repeat(40)}/${index}`, wave: 'selected' },
-    { name: `final-${index}`, subject: `urn:test:g${index}:final`, ual: `did:dkg:test/0x${'2'.repeat(40)}/${index}`, wave: 'final' },
+    { name: `selected-vm-${index}`, subject: `urn:test:g${index}:selected:vm`, ual: `did:dkg:test/0x${'1'.repeat(40)}/${index}1`, wave: 'selected', plane: 'vm' },
+    { name: `selected-swm-${index}`, subject: `urn:test:g${index}:selected:swm`, ual: `did:dkg:test/0x${'1'.repeat(40)}/${index}2`, wave: 'selected', plane: 'swm' },
+    { name: `final-vm-${index}`, subject: `urn:test:g${index}:final:vm`, ual: `did:dkg:test/0x${'2'.repeat(40)}/${index}1`, wave: 'final', plane: 'vm' },
+    { name: `final-swm-${index}`, subject: `urn:test:g${index}:final:swm`, ual: `did:dkg:test/0x${'2'.repeat(40)}/${index}2`, wave: 'final', plane: 'swm' },
   ],
 });
 
@@ -57,6 +59,18 @@ test('operator config decoder accepts the closed five-graph plan and rejects unk
 
   writeFileSync(path, JSON.stringify({ ...config(), typoThatWouldOtherwiseBeIgnored: true }));
   assert.throws(() => readTestnetOperatorConfig(path), /operator config has an invalid key set/u);
+
+  const missingSwmAsset = config();
+  writeFileSync(path, JSON.stringify({
+    ...missingSwmAsset,
+    graphs: missingSwmAsset.graphs.map((item, index) => index === 0
+      ? { ...item, assets: item.assets.filter((asset) => asset.plane !== 'swm') }
+      : item),
+  }));
+  assert.throws(
+    () => readTestnetOperatorConfig(path),
+    /requires one asset per wave and plane/u,
+  );
 });
 
 test('testnet corpus registration never turns a public cell private through an allowlist', () => {
@@ -107,8 +121,8 @@ test('exact graph observation derives VM and SWM evidence from scoped data and m
       const bindings = sparql.includes('COUNT(*)')
         ? [{ count: { type: 'literal', value: '7', datatype: 'http://www.w3.org/2001/XMLSchema#integer' } }]
         : [
-            { s: { type: 'uri', value: 'urn:test:g1:selected' }, p: { type: 'uri', value: 'urn:test:p:1' }, o: { type: 'literal', value: 'alpha' } },
-            { s: '<urn:test:g1:selected>', p: '<urn:test:p:2>', o: '<urn:test:o:2>' },
+            { s: { type: 'uri', value: 'urn:test:g1:selected:vm' }, p: { type: 'uri', value: 'urn:test:p:1' }, o: { type: 'literal', value: 'alpha' } },
+            { s: '<urn:test:g1:selected:vm>', p: '<urn:test:p:2>', o: '<urn:test:o:2>' },
           ];
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ result: { bindings } }));

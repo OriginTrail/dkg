@@ -25,6 +25,7 @@ export interface TestnetOperatorAssetV1 {
   readonly subject: string;
   readonly ual: string;
   readonly wave: 'selected' | 'final';
+  readonly plane: 'vm' | 'swm';
 }
 
 export interface TestnetOperatorGraphV1 {
@@ -155,22 +156,28 @@ export function readTestnetOperatorConfig(path: string): TestnetOperatorConfigV1
     const assets = array(row['assets'], `operator graph ${index} assets`)
       .map((asset, assetIndex): TestnetOperatorAssetV1 => {
         const item = record(asset, `operator graph ${index} asset ${assetIndex}`);
-        assertExactKeys(item, ['name', 'subject', 'ual', 'wave'], `operator graph ${index} asset ${assetIndex}`);
+        assertExactKeys(item, ['name', 'subject', 'ual', 'wave', 'plane'], `operator graph ${index} asset ${assetIndex}`);
         const wave = item['wave'];
+        const plane = item['plane'];
         if (wave !== 'selected' && wave !== 'final') {
           throw new TypeError(`operator graph ${index} asset ${assetIndex} has an invalid wave`);
+        }
+        if (plane !== 'vm' && plane !== 'swm') {
+          throw new TypeError(`operator graph ${index} asset ${assetIndex} has an invalid plane`);
         }
         return {
           name: boundedText(item['name'], 'asset name'),
           subject: absoluteIri(item['subject'], 'asset subject'),
           ual: boundedText(item['ual'], 'asset UAL'),
           wave,
+          plane,
         };
       });
-    if (assets.length !== 2
-      || assets.filter((asset) => asset.wave === 'selected').length !== 1
-      || assets.filter((asset) => asset.wave === 'final').length !== 1) {
-      throw new RangeError(`operator graph ${index} requires one asset per wave`);
+    if (assets.length !== 4
+      || (['selected', 'final'] as const).some((wave) =>
+        (['vm', 'swm'] as const).some((plane) =>
+          assets.filter((asset) => asset.wave === wave && asset.plane === plane).length !== 1))) {
+      throw new RangeError(`operator graph ${index} requires one asset per wave and plane`);
     }
     return {
       contextGraphId: boundedText(row['contextGraphId'], 'context graph ID'),

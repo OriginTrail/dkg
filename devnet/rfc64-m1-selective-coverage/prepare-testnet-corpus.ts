@@ -73,45 +73,56 @@ for (const [graphIndex, policy] of policyCells.entries()) {
   }
 
   const assets: TestnetOperatorAssetV1[] = [];
-  const semantic: Rfc64KnowledgeAssetObservation[] = [];
+  const semantic: Record<'vm' | 'swm', Rfc64KnowledgeAssetObservation[]> = {
+    vm: [],
+    swm: [],
+  };
   let selectedSnapshot: GraphSnapshotExpectationV1 | undefined;
   for (const wave of ['selected', 'final'] as const) {
-    const name = `${wave}-${graphIndex + 1}`;
-    const subject = `urn:dkg:rfc64:m1:${runId}:g${graphIndex + 1}:${wave}`;
-    const lines = Array.from({ length: 24 }, (_, tripleIndex) => {
-      const predicate = `urn:dkg:rfc64:m1:predicate:${tripleIndex.toString().padStart(2, '0')}`;
-      const object = JSON.stringify(`${runId}|g${graphIndex + 1}|${wave}|${tripleIndex}`);
-      return `<${subject}> <${predicate}> ${object} .`;
-    });
-    const quads = lines.map((line) => {
-      const match = /^<([^>]+)> <([^>]+)> (.+) \.$/u.exec(line);
-      if (!match) throw new Error('generated M1 N-Quad is malformed');
-      return { subject: match[1], predicate: match[2], object: match[3] };
-    });
-    await requireJson(publisher, '/api/knowledge-assets', {
-      method: 'POST',
-      body: JSON.stringify({ contextGraphId, name, quads, finalize: true }),
-    }, [201]);
-    const descriptor = await requireJson(
-      publisher,
-      `/api/knowledge-assets/${encodeURIComponent(name)}?contextGraphId=${encodeURIComponent(contextGraphId)}`,
-    );
-    const ual = requiredText(descriptor['reservedUal'], `${contextGraphId}/${name} reserved UAL`);
-    assets.push({ name, subject, ual, wave });
-    semantic.push({ ual, semanticNQuads: lines });
-    const snapshot = await createRfc64SemanticSnapshot(semantic);
+    for (const plane of ['vm', 'swm'] as const) {
+      const name = `${wave}-${plane}-${graphIndex + 1}`;
+      const subject = `urn:dkg:rfc64:m1:${runId}:g${graphIndex + 1}:${wave}:${plane}`;
+      const lines = Array.from({ length: 24 }, (_, tripleIndex) => {
+        const predicate = `urn:dkg:rfc64:m1:predicate:${tripleIndex.toString().padStart(2, '0')}`;
+        const object = JSON.stringify(
+          `${runId}|g${graphIndex + 1}|${wave}|${plane}|${tripleIndex}`,
+        );
+        return `<${subject}> <${predicate}> ${object} .`;
+      });
+      const quads = lines.map((line) => {
+        const match = /^<([^>]+)> <([^>]+)> (.+) \.$/u.exec(line);
+        if (!match) throw new Error('generated M1 N-Quad is malformed');
+        return { subject: match[1], predicate: match[2], object: match[3] };
+      });
+      await requireJson(publisher, '/api/knowledge-assets', {
+        method: 'POST',
+        body: JSON.stringify({ contextGraphId, name, quads, finalize: true }),
+      }, [201]);
+      const descriptor = await requireJson(
+        publisher,
+        `/api/knowledge-assets/${encodeURIComponent(name)}?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+      );
+      const ual = requiredText(
+        descriptor['reservedUal'],
+        `${contextGraphId}/${name} reserved UAL`,
+      );
+      assets.push({ name, subject, ual, wave, plane });
+      semantic[plane].push({ ual, semanticNQuads: lines });
+    }
+    const vmSnapshot = await createRfc64SemanticSnapshot(semantic.vm);
+    const swmSnapshot = await createRfc64SemanticSnapshot(semantic.swm);
     const expectation = {
       vm: {
-        headDigest: snapshot.ualsSha256,
-        inventoryDigest: snapshot.semanticNQuadsSha256,
-        assetCount: snapshot.kaCount,
-        dataTripleCount: snapshot.quadCount,
+        headDigest: vmSnapshot.ualsSha256,
+        inventoryDigest: vmSnapshot.semanticNQuadsSha256,
+        assetCount: vmSnapshot.kaCount,
+        dataTripleCount: vmSnapshot.quadCount,
       },
       swm: {
-        headDigest: snapshot.ualsSha256,
-        inventoryDigest: snapshot.semanticNQuadsSha256,
-        assetCount: snapshot.kaCount,
-        dataTripleCount: snapshot.quadCount,
+        headDigest: swmSnapshot.ualsSha256,
+        inventoryDigest: swmSnapshot.semanticNQuadsSha256,
+        assetCount: swmSnapshot.kaCount,
+        dataTripleCount: swmSnapshot.quadCount,
       },
     } satisfies GraphSnapshotExpectationV1;
     if (wave === 'selected') selectedSnapshot = expectation;
@@ -152,7 +163,7 @@ const operatorConfig = {
 writeJson(corpusPath, corpus);
 writeJson(configPath, operatorConfig);
 process.stdout.write(
-  `[rfc64-m1] prepared ${operatorGraphs.length} registered CGs and 10 sealed KAs; `
+  `[rfc64-m1] prepared ${operatorGraphs.length} registered CGs and 20 sealed KAs; `
     + `corpus=${corpusPath} operatorConfig=${configPath}\n`,
 );
 

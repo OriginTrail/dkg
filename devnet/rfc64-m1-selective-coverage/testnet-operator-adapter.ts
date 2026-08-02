@@ -198,7 +198,11 @@ class TestnetOperatorController {
     this.requireRunning('publisher');
     const publisher = this.cfg.roles.publisher;
     for (const graph of this.cfg.graphs) {
-      for (const asset of graph.assets.filter((candidate) => candidate.wave === selectedWave)) {
+      const waveAssets = graph.assets.filter((candidate) => candidate.wave === selectedWave);
+      // A confirmed VM publish intentionally consumes that asset's SWM root.
+      // Use distinct plane assets and publish VM first so the stable snapshot
+      // contains a real finalized VM asset plus a real off-chain SWM asset.
+      for (const asset of waveAssets.filter((candidate) => candidate.plane === 'vm')) {
         await requireJson(
           publisher,
           `/api/knowledge-assets/${encodeURIComponent(asset.name)}/swm/share`,
@@ -212,6 +216,16 @@ class TestnetOperatorController {
         const returnedUal = published['ual'];
         if (typeof returnedUal === 'string' && returnedUal.toLowerCase() !== asset.ual.toLowerCase()) {
           throw new Error(`${graph.contextGraphId}/${asset.name} published an unexpected UAL`);
+        }
+      }
+      for (const asset of waveAssets.filter((candidate) => candidate.plane === 'swm')) {
+        const shared = await requireJson(
+          publisher,
+          `/api/knowledge-assets/${encodeURIComponent(asset.name)}/swm/share`,
+          { method: 'POST', body: JSON.stringify({ contextGraphId: graph.contextGraphId }) },
+        );
+        if (shared['swmShared'] !== true || shared['sealed'] !== true) {
+          throw new Error(`${graph.contextGraphId}/${asset.name} did not produce a sealed SWM share`);
         }
       }
     }
