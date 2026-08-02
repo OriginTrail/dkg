@@ -1410,6 +1410,28 @@ export class FinalizationHandler {
         input.contextGraphId,
         input.subGraphName,
       );
+      // Every DISCRIMINATING test must run inside the query, ahead of LIMIT.
+      // With only the version filter here, the limit truncated the CANDIDATE
+      // SET rather than the work: sixteen same-version operations with the
+      // wrong triple count filled the window, the matching one was never
+      // returned, and since `ORDER BY ?shareId` is deterministic over stable
+      // store state, every retry re-derived the identical sixteen and missed
+      // the same snapshot permanently. A KA re-shared repeatedly at one version
+      // reaches that without anything unusual happening.
+      //
+      // `?count` is compared numerically first, so a non-canonical typed
+      // literal ("02"^^xsd:integer) still matches, with the lexical form as a
+      // fallback for an untyped one. The JS check below parses either, and this
+      // filter must never be STRICTER than it — a filter that rejects a
+      // candidate the caller would have accepted is the same missed-discovery
+      // bug wearing different clothes.
+      const countFilter = Number.isSafeInteger(input.publicTripleCount)
+        ? `\n            FILTER(?count = ${input.publicTripleCount}`
+          + ` || STR(?count) = ${JSON.stringify(String(input.publicTripleCount))})`
+        : '';
+      const digestFilter = input.expectedPublicQuadsDigest === undefined
+        ? ''
+        : `\n            FILTER(STR(?digest) = ${JSON.stringify(input.expectedPublicQuadsDigest)})`;
       const result = await this.store.query(
         `SELECT DISTINCT ?shareId ?digest ?count WHERE {
           GRAPH <${assertSafeIri(metaGraph)}> {
@@ -1419,7 +1441,7 @@ export class FinalizationHandler {
               <${DKG_NS}shareOperationId> ?shareId ;
               <${DKG_NS}publicQuadsDigest> ?digest ;
               <${DKG_NS}publicQuadsCount> ?count .
-            FILTER(STR(?version) = ${JSON.stringify(input.scope.assertionVersion)})
+            FILTER(STR(?version) = ${JSON.stringify(input.scope.assertionVersion)})${countFilter}${digestFilter}
           }
         } ORDER BY ?shareId LIMIT 16`,
         { source: 'agent.finalization.verifyImmutableSnapshot' },

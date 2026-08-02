@@ -31,6 +31,7 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
   resolveKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
@@ -721,5 +722,75 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     // the replace silently did nothing.
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual([`"${v1.operationId}"`]);
+  });
+
+  /**
+   * Immutable-snapshot discovery must not let `LIMIT` truncate the CANDIDATE
+   * SET — only the work.
+   *
+   * The discovery query binds every same-version operation and takes
+   * `ORDER BY ?shareId LIMIT 16`. While the triple-count and digest tests ran
+   * in JS on the returned rows, sixteen non-matching operations sorting ahead
+   * of the real one filled the window and the matching snapshot was never
+   * examined. The ordering is deterministic over stable store state, so this is
+   * not a flake that clears on retry: every attempt re-derives the identical
+   * sixteen and strands the same recovery permanently.
+   *
+   * This lives with the materializer suite rather than the finalization suite
+   * on purpose: it is driven directly against the private method with a real
+   * store, needs no chain fixture, and keeps this branch out of a test file
+   * another branch is editing.
+   */
+  it('finds a matching snapshot that sorts past the discovery limit', async () => {
+    const store = new OxigraphStore();
+    const snapshotStore = new MemorySnapshotStore();
+    const version = 4;
+    const scope = createGraphKnowledgeAssetScope(UAL, version);
+    const payload: Quad[] = [
+      { subject: 'urn:late:a', predicate: 'http://schema.org/status', object: '"late-match"', graph: '' },
+      { subject: 'urn:late:b', predicate: 'http://schema.org/status', object: '"late-match"', graph: '' },
+    ];
+    const digest = workspacePublicQuadsDigest(payload);
+    await snapshotStore.putSnapshot({ digest, quads: payload });
+
+    const operationRows = (shareId: string, publicCount: number, quadsDigest: string): Quad[] => {
+      const subject = `urn:dkg:share:${CG}:${shareId}`;
+      return [
+        { subject, predicate: `${DKG}contentScopeVersion`, object: `"2"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+        { subject, predicate: `${DKG}assertionVersion`, object: `"${version}"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject, predicate: `${DKG}shareOperationId`, object: `"${shareId}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publicQuadsDigest`, object: `"${quadsDigest}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publicQuadsCount`, object: `"${publicCount}"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject, predicate: `${DKG}publicSnapshotRef`, object: `"${quadsDigest}"`, graph: WS_META },
+      ];
+    };
+
+    // Sixteen decoys that sort BEFORE the real operation and are rejected only
+    // by their triple count — exactly the rows that used to consume the window.
+    for (let index = 0; index < 16; index += 1) {
+      await store.insert(operationRows(
+        `aaa-decoy-${String(index).padStart(2, '0')}`,
+        payload.length + 1,
+        `sha256:decoy-${index}`,
+      ));
+    }
+    await store.insert(operationRows('zzz-real-operation', payload.length, digest));
+
+    const handler = new FinalizationHandler(store, undefined as never, {
+      publicSnapshotStore: snapshotStore,
+    });
+    const verified = await (handler as unknown as {
+      verifyImmutableGraphScopedSnapshot(input: unknown): Promise<{ status: string } | undefined>;
+    }).verifyImmutableGraphScopedSnapshot({
+      contextGraphId: CG,
+      scope,
+      publicTripleCount: payload.length,
+      expectedPublicQuadsDigest: undefined,
+      expectedMerkleRoot: computeFlatKCRootV10(payload, []),
+      ctx,
+    });
+
+    expect(verified?.status).toBe('verified');
   });
 });
