@@ -235,12 +235,29 @@ describe('/api/status Core public synchronization coverage', () => {
         totalContextGraphs: 10,
       },
     };
+    const syncCapacity = {
+      mode: 'adaptive' as const,
+      state: 'cooldown' as const,
+      currentInflight: 3,
+      minInflight: 1,
+      maxInflight: 6,
+      currentCoverageBatch: 4,
+      configuredCoverageBatch: 8,
+      storePressureTelemetryAvailable: true,
+      lastDecision: {
+        action: 'increase' as const,
+        reason: 'healthy_hysteresis' as const,
+        atMs: 123,
+      },
+    };
     const response = await requestStatusWithAgent({
       getCorePublicSyncCoverageStatus: () => corePublicSyncCoverage,
+      getSyncCapacityStatus: () => syncCapacity,
     });
 
     expect(response.status).toBe(200);
     expect(response.body.corePublicSyncCoverage).toEqual(corePublicSyncCoverage);
+    expect(response.body.syncCapacity).toEqual(syncCapacity);
   });
 });
 

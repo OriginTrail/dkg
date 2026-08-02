@@ -23,6 +23,8 @@ import {
 } from './backpressure.js';
 import { resolveCorePublicSyncBatchSize } from './core-public-coverage-scheduler.js';
 
+export const DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS = 5_000;
+
 export interface SyncCapacityRuntimeConfig extends SyncGlobalBackpressureConfig {
   nodeRole?: 'core' | 'edge';
   syncAdaptiveCapacity?: SyncAdaptiveCapacityConfig;

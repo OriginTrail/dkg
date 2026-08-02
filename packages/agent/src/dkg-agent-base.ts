@@ -164,6 +164,10 @@ import {
   resolveCorePublicSyncBatchSize,
   type CorePublicSyncCoverageStatus,
 } from './sync/core-public-coverage-scheduler.js';
+import {
+  SyncCapacityRuntime,
+  type SyncCapacityStatus,
+} from './sync/capacity-runtime.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1060,6 +1064,8 @@ export class DKGAgentBase {
    * capped by this scheduler; Edge nodes never register automatic coverage.
    */
   protected readonly corePublicSyncCoverageScheduler: CorePublicSyncCoverageScheduler;
+  /** Role-aware requester admission and Core automatic-coverage capacity. */
+  protected readonly syncCapacityRuntime: SyncCapacityRuntime;
   protected started = false;
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
@@ -1555,6 +1561,7 @@ export class DKGAgentBase {
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
+  protected syncAdaptiveCapacityTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can
@@ -1630,6 +1637,7 @@ export class DKGAgentBase {
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.syncCapacityRuntime = SyncCapacityRuntime.create(config, store);
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;
@@ -1721,6 +1729,7 @@ export class DKGAgentBase {
         selected,
         this.config.syncContextGraphPriorities,
         remotePeer,
+        this.syncCapacityRuntime.getEffectiveCoverageBatch(),
       )
       : [];
     const initialDurableContextGraphIds = [...new Set([
@@ -1741,6 +1750,10 @@ export class DKGAgentBase {
     return this.corePublicSyncCoverageScheduler.getStatus(
       (this.config.nodeRole ?? 'edge') === 'core',
     );
+  }
+
+  getSyncCapacityStatus(): SyncCapacityStatus {
+    return this.syncCapacityRuntime.getStatus();
   }
 
   /**

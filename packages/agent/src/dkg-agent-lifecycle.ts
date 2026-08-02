@@ -307,9 +307,9 @@ import {
   getSyncBackpressureBusyError,
   resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
-  resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
+import { DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS } from './sync/capacity-runtime.js';
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -1235,7 +1235,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       return await withGlobalSyncBackpressure(
         {
-          policy: resolveSyncGlobalBackpressure(this.config),
+          policy: this.syncCapacityRuntime.policy,
           ctx,
           label,
           contextGraphId,
@@ -1245,6 +1245,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           source,
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
+          ...(this.syncCapacityRuntime.isAdaptive()
+            ? { currentLimit: () => this.syncCapacityRuntime.getCurrentInflight()! }
+            : {}),
         },
         work,
       );
@@ -2021,7 +2024,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
-                const syncPressure = getSyncBackpressureSnapshot(resolveSyncGlobalBackpressure(this.config));
+                const syncPressure = getSyncBackpressureSnapshot(this.syncCapacityRuntime.policy);
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +
@@ -2544,7 +2547,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       process.env,
       (message) => this.log.warn(ctx, message),
     );
-    const syncGlobalPolicy = resolveSyncGlobalBackpressure(this.config);
+    const syncGlobalPolicy = this.syncCapacityRuntime.policy;
+    const syncCapacity = this.syncCapacityRuntime.getStatus();
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
       snapshotGlobalRows: snapshotPolicy.budget.maxRows,
@@ -2553,6 +2557,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotLocalBytesEstimate: snapshotPolicy.budget.maxSnapshotBytesEstimate,
       syncGlobalInflightLimit: syncGlobalPolicy.limit ?? 0,
       syncGlobalQueueLimit: syncGlobalPolicy.queueLimit ?? 0,
+      syncCapacityMode: syncCapacity.mode,
+      syncCapacityCurrentInflight: syncCapacity.currentInflight ?? 0,
+      syncCapacityCoverageBatch: syncCapacity.currentCoverageBatch,
       configuredPriorities: configuredPriorityCounts,
       snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
     })}`);
@@ -3247,6 +3254,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.syncReconcilerTimer.unref) this.syncReconcilerTimer.unref();
     } else {
       this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
+    }
+
+    if (this.syncCapacityRuntime.isAdaptive()) {
+      this.syncAdaptiveCapacityTimer = setInterval(() => {
+        try {
+          const pressure = getSyncBackpressureSnapshot(this.syncCapacityRuntime.policy);
+          this.syncCapacityRuntime.sample(pressure.inflight > 0 || pressure.queued > 0);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.log.warn(ctx, `Adaptive sync capacity sample failed: ${message}`);
+        }
+      }, DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS);
+      if (this.syncAdaptiveCapacityTimer.unref) this.syncAdaptiveCapacityTimer.unref();
     }
 
     // A.4-lite+: keep a small set of Core nodes warm (connection pinned +
