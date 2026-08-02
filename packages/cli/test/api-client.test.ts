@@ -459,6 +459,27 @@ describe('ApiClient', () => {
   });
 
   describe('POST endpoints', () => {
+    it('subscribeToContextGraph() forwards explicit sync lifetime', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-selected', syncMode: 'on-demand' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-selected', {
+        includeSharedMemory: true,
+        syncMode: 'on-demand',
+      });
+
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/subscribe`);
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-selected',
+        includeWorkspace: true,
+        syncMode: 'on-demand',
+      });
+    });
+
     it('sendChat() sends correct body', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { delivered: true } });
       globalThis.fetch = fetch;

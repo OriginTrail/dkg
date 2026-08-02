@@ -145,6 +145,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     callerAddress?: string;
     result?: CatchupJobResult;
     includeSharedMemory?: boolean;
+    syncMode?: unknown;
     readiness?: {
       version: number;
       durableVerified: boolean;
@@ -153,9 +154,14 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
   }): Promise<{
     response: any;
+    responseStatus: number;
     job: any;
     runCalls: number;
     runRequests: CatchupRunRequest[];
+    subscribeCalls: Array<{
+      id: string;
+      options: { syncMode?: 'on-demand' | 'always-on' } | undefined;
+    }>;
     state: Record<string, any>;
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
@@ -171,6 +177,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
     let runCalls = 0;
     const runRequests: CatchupRunRequest[] = [];
+    const subscribeCalls: Array<{
+      id: string;
+      options: { syncMode?: 'on-demand' | 'always-on' } | undefined;
+    }> = [];
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
@@ -187,10 +197,15 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     const agent = {
       getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
-      subscribeToContextGraph: (id: string) => {
+      subscribeToContextGraph: (
+        id: string,
+        options?: { syncMode?: 'on-demand' | 'always-on' },
+      ) => {
+        subscribeCalls.push({ id, options });
         state.set(id, {
           ...state.get(id),
           subscribed: true,
+          syncMode: options?.syncMode,
         });
       },
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
@@ -263,32 +278,73 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       body: JSON.stringify({
         contextGraphId,
         includeSharedMemory: opts.includeSharedMemory ?? true,
+        ...(opts.syncMode !== undefined ? { syncMode: opts.syncMode } : {}),
       }),
     });
     const response = await httpResponse.json() as any;
-    const jobId = response.catchup.jobId as string;
+    const jobId = response.catchup?.jobId as string | undefined;
 
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; jobId && i < 50; i++) {
       if (catchupTracker.jobs.get(jobId)?.finishedAt) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
-    const statusHttpResponse = await fetch(
-      `http://127.0.0.1:${address.port}/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`,
-    );
-    const statusResponse = await statusHttpResponse.json() as any;
+    const statusResponse = jobId
+      ? await fetch(
+        `http://127.0.0.1:${address.port}/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`,
+      ).then((result) => result.json())
+      : null;
 
     return {
       response,
-      job: catchupTracker.jobs.get(jobId),
+      responseStatus: httpResponse.status,
+      job: jobId ? catchupTracker.jobs.get(jobId) : undefined,
       runCalls,
       runRequests,
+      subscribeCalls,
       state: state.get(contextGraphId) ?? {},
       patches,
       readiness,
       statusResponse,
     };
   }
+
+  it('keeps omitted sync mode backward-compatible as always-on', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+    });
+
+    expect(result.response.syncMode).toBe('always-on');
+    expect(result.subscribeCalls).toEqual([
+      { id: expect.any(String), options: { syncMode: 'always-on' } },
+    ]);
+    expect(result.state.syncMode).toBe('always-on');
+  });
+
+  it('forwards explicit on-demand edge intent without making it always-on', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      syncMode: 'on-demand',
+    });
+
+    expect(result.response.syncMode).toBe('on-demand');
+    expect(result.subscribeCalls).toEqual([
+      { id: expect.any(String), options: { syncMode: 'on-demand' } },
+    ]);
+    expect(result.state.syncMode).toBe('on-demand');
+  });
+
+  it('rejects unknown sync modes before changing subscription state', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      syncMode: 'sometimes',
+    });
+
+    expect(result.responseStatus).toBe(400);
+    expect(result.response.error).toContain('Invalid "syncMode"');
+    expect(result.subscribeCalls).toEqual([]);
+    expect(result.runCalls).toBe(0);
+  });
 
   it('does not turn a clean empty response with no authoritative metadata into ready state', async () => {
     const result = await subscribe({

@@ -1734,6 +1734,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // `include_shared_memory` value; it depends only on the parsed body.
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
+    const requestedSyncMode = parsed.syncMode ?? 'always-on';
+    if (requestedSyncMode !== 'on-demand' && requestedSyncMode !== 'always-on') {
+      recordCatchupRequest('bad_request', shouldSyncSharedMemory);
+      return jsonResponse(res, 400, {
+        error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
+      });
+    }
     // #1102: accept `id` as an alias for `contextGraphId`.
     const contextGraphId = parsed.contextGraphId ?? parsed.id;
     if (!contextGraphId) {
@@ -1773,6 +1780,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
+    // A process-local access must not downgrade an already durable
+    // subscription. Omitted mode retains the legacy API contract: always-on.
+    const effectiveSyncMode = existingSub?.subscribed &&
+      (existingSub.syncMode ?? 'always-on') === 'always-on'
+      ? 'always-on'
+      : requestedSyncMode;
+    agent.subscribeToContextGraph(contextGraphId, { syncMode: effectiveSyncMode });
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
@@ -1784,6 +1798,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         recordCatchupRequest('deduped', shouldSyncSharedMemory);
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
+          syncMode: effectiveSyncMode,
           catchup: {
             status: existingJob.status,
             includeWorkspace: existingJob.includeWorkspace,
@@ -1840,6 +1855,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         );
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
+          syncMode: effectiveSyncMode,
           catchup: {
             status: "done",
             includeWorkspace: shouldSyncSharedMemory,
@@ -1884,8 +1900,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
     }
 
-    console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
-    agent.subscribeToContextGraph(contextGraphId);
+    console.log(
+      `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode}`,
+    );
+    agent.subscribeToContextGraph(contextGraphId, { syncMode: effectiveSyncMode });
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
@@ -2024,6 +2042,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     recordCatchupRequest('queued', shouldSyncSharedMemory);
     return jsonResponse(res, 200, {
       subscribed: contextGraphId,
+      syncMode: effectiveSyncMode,
       catchup: {
         status: "queued",
         includeWorkspace: shouldSyncSharedMemory,

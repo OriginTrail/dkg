@@ -750,6 +750,14 @@ describe('UI API tests', () => {
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/subscribe'));
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.contextGraphId).toBe('cg-1');
+      expect(body.syncMode).toBe('on-demand');
+    });
+
+    it('subscribeToContextGraph forwards an explicit always-on choice', async () => {
+      await subscribeToContextGraph('cg-1', { syncMode: 'always-on' });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/subscribe'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body).toEqual({ contextGraphId: 'cg-1', syncMode: 'always-on' });
     });
   });
 
