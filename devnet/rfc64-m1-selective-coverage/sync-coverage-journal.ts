@@ -9,6 +9,7 @@ import {
   boundedString,
   closedArray,
   closedRecord,
+  defineRecordKeys,
   nonNegativeInteger,
   plainRecord,
   positiveInteger,
@@ -16,6 +17,9 @@ import {
 
 const JOURNAL_CAPACITY = 256;
 const MAX_CONTEXT_GRAPH_ID_LENGTH = 256;
+const SYNC_COVERAGE_JOURNAL_REFERENCE_KEYS = defineRecordKeys<
+  SyncCoverageJournalReferenceV1
+>()('snapshot', 'sequence');
 
 export type {
   SyncCoverageJournalProcessIdentityV1,
@@ -26,7 +30,7 @@ export type {
 export function parseSyncCoverageJournalReferenceV1(
   input: unknown,
 ): SyncCoverageJournalReferenceV1 | undefined {
-  const row = closedRecord(input, ['snapshot', 'sequence']);
+  const row = closedRecord(input, SYNC_COVERAGE_JOURNAL_REFERENCE_KEYS);
   if (!row || !nonNegativeInteger(row['sequence'])) return undefined;
   return { snapshot: row['snapshot'], sequence: row['sequence'] };
 }

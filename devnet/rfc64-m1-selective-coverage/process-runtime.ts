@@ -2,6 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 import {
+  closedRecord,
+  defineRecordKeys,
+  plainRecord,
+} from './boundary-codec.ts';
+import {
   SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
   type SelectiveCoverageEdgeRestartReceiptV1,
   type SelectiveCoverageRuntimeReadyV1,
@@ -35,6 +40,41 @@ export const SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA =
 export const SELECTIVE_COVERAGE_RUNTIME_RESULT_PREFIX = 'DKG_RFC64_M1_RESULT ';
 const MAX_RESULT_LINE_BYTES = 1024 * 1024;
 const CLOSE_GRACE_MS = 5_000;
+
+interface RuntimeSuccessResultEnvelopeV1 {
+  readonly schema: typeof SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA;
+  readonly protocol: typeof SELECTIVE_COVERAGE_RUNTIME_PROTOCOL;
+  readonly sessionNonce: string;
+  readonly sequence: number;
+  readonly ok: true;
+  readonly value: unknown;
+}
+
+interface RuntimeFailureResultEnvelopeV1 {
+  readonly schema: typeof SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA;
+  readonly protocol: typeof SELECTIVE_COVERAGE_RUNTIME_PROTOCOL;
+  readonly sessionNonce: string;
+  readonly sequence: number;
+  readonly ok: false;
+  readonly error: string;
+}
+
+const RUNTIME_SUCCESS_RESULT_KEYS = defineRecordKeys<RuntimeSuccessResultEnvelopeV1>()(
+  'schema',
+  'protocol',
+  'sessionNonce',
+  'sequence',
+  'ok',
+  'value',
+);
+const RUNTIME_FAILURE_RESULT_KEYS = defineRecordKeys<RuntimeFailureResultEnvelopeV1>()(
+  'schema',
+  'protocol',
+  'sessionNonce',
+  'sequence',
+  'ok',
+  'error',
+);
 
 interface PendingRequest {
   readonly resolve: (value: unknown) => void;
@@ -273,15 +313,22 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
       this.failAll(new Error('M1 runtime adapter emitted malformed result JSON', { cause: error }));
       return;
     }
-    if (!isPlainRecord(value)
-      || value['schema'] !== SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA
-      || value['protocol'] !== SELECTIVE_COVERAGE_RUNTIME_PROTOCOL
-      || value['sessionNonce'] !== this.sessionNonce
-      || !Number.isSafeInteger(value['sequence'])) {
+    const probe = plainRecord(value);
+    const row = probe?.['ok'] === true
+      ? closedRecord(value, RUNTIME_SUCCESS_RESULT_KEYS)
+      : probe?.['ok'] === false
+        ? closedRecord(value, RUNTIME_FAILURE_RESULT_KEYS)
+        : undefined;
+    if (!row
+      || row['schema'] !== SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA
+      || row['protocol'] !== SELECTIVE_COVERAGE_RUNTIME_PROTOCOL
+      || row['sessionNonce'] !== this.sessionNonce
+      || !Number.isSafeInteger(row['sequence'])
+      || (row['ok'] === false && (typeof row['error'] !== 'string' || !row['error']))) {
       this.failAll(new Error('M1 runtime adapter emitted an invalid result envelope'));
       return;
     }
-    const sequence = value['sequence'] as number;
+    const sequence = row['sequence'] as number;
     const request = this.pending.get(sequence);
     if (!request) {
       this.failAll(new Error(`M1 runtime adapter emitted an unknown result sequence: ${sequence}`));
@@ -289,14 +336,11 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     }
     clearTimeout(request.timer);
     this.pending.delete(sequence);
-    if (value['ok'] === true && Object.hasOwn(value, 'value')) {
-      request.resolve(value['value']);
+    if (row['ok'] === true) {
+      request.resolve(row['value']);
       return;
     }
-    const message = typeof value['error'] === 'string' && value['error']
-      ? value['error']
-      : 'runtime adapter command failed without an error message';
-    request.reject(new Error(message));
+    request.reject(new Error(row['error'] as string));
   }
 
   private failAll(error: Error): void {
@@ -320,11 +364,4 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     if (timer) clearTimeout(timer);
     return result;
   }
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.getPrototypeOf(value) === Object.prototype;
 }

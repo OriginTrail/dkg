@@ -55,6 +55,18 @@ lines.on('line', (line) => {
     if (mode === 'wrong-protocol') result.protocol = 'wrong-protocol';
     if (mode === 'wrong-schema') result.schema = 'wrong-schema';
     if (mode === 'unknown-sequence') result.sequence += 1;
+    if (mode === 'extra-envelope') result.unexpected = true;
+    if (mode === 'mixed-success-envelope') result.error = 'contradictory failure';
+    if (mode === 'mixed-failure-envelope') {
+      result.ok = false;
+      result.error = 'fixture failure';
+    }
+    if (mode === 'nonboolean-ok') result.ok = 'yes';
+    if (mode === 'failure-envelope') {
+      result.ok = false;
+      delete result.value;
+      result.error = 'fixture failure';
+    }
     if (mode === 'malformed-json') {
       process.stdout.write(`${prefix}{not-json\n`, () => process.exit(0));
       return;

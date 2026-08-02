@@ -68,6 +68,10 @@ for (const [mode, message] of [
   ['wrong-protocol', /invalid result envelope/],
   ['wrong-schema', /invalid result envelope/],
   ['unknown-sequence', /unknown result sequence/],
+  ['extra-envelope', /invalid result envelope/],
+  ['mixed-success-envelope', /invalid result envelope/],
+  ['mixed-failure-envelope', /invalid result envelope/],
+  ['nonboolean-ok', /invalid result envelope/],
   ['malformed-json', /malformed result JSON/],
   ['oversized-line', /exceeds 1 MiB/],
 ] as const) {
@@ -80,6 +84,15 @@ for (const [mode, message] of [
     }
   });
 }
+
+test('accepts the exact closed failure result envelope', async () => {
+  const runtime = fixtureRuntime('failure-envelope');
+  try {
+    await assert.rejects(runtime.start('publisher'), /fixture failure/);
+  } finally {
+    await runtime.close().catch(() => undefined);
+  }
+});
 
 test('decodes non-start command results at the adapter boundary', async () => {
   const runtime = fixtureRuntime('malformed-publish');
