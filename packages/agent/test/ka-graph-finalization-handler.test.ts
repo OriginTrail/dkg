@@ -15,7 +15,9 @@ import {
   GraphManager,
   OxigraphStore,
   StoreSchedulerBusyError,
+  asGraphWriteGenSource,
   type Quad,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -133,6 +135,33 @@ function legacyFinalizationChain(
     },
     ...overrides,
   } as ChainAdapter;
+}
+
+/** The read the cleanup service takes again once it owns the writer lock. */
+const WORKSPACE_HEAD_READ_PREFIX = 'SELECT ?scopeVersion ?kaUal ?assertionVersion';
+
+const WRITE_GEN_CAPABILITY_KEYS = new Set(['getWriteGen', 'innerStore', 'inner']);
+
+/**
+ * A store whose per-graph write-generation capability cannot be recovered.
+ *
+ * `asGraphWriteGenSource` is documented as fail-open, so on such a store every
+ * generation comparison in the cleanup service is inert and the head re-read
+ * taken inside the writer lock is the only remaining proof that nothing moved
+ * while verification ran outside it.
+ */
+function withoutWriteGenTracking(inner: OxigraphStore): TripleStore {
+  return new Proxy(inner as unknown as object, {
+    get(target, prop) {
+      if (WRITE_GEN_CAPABILITY_KEYS.has(prop as string)) return undefined;
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+    has(target, prop) {
+      if (WRITE_GEN_CAPABILITY_KEYS.has(prop as string)) return false;
+      return Reflect.has(target, prop);
+    },
+  }) as unknown as TripleStore;
 }
 
 async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): Promise<void> {
@@ -2352,6 +2381,127 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
     expect(await drainFinalizedSwm(writeLocks)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  it('preserves an assertion replaced between the pre-lock head read and the in-lock re-check', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    // Discovery and both payload verifications run OUTSIDE the per-KA writer
+    // lock by design, so everything the drain has proven is only as fresh as
+    // the head it read before taking the lock. The re-read taken under the
+    // lock is the sole check that closes that window: the write-generation
+    // comparisons are already behind us by then, and the marker ASK only
+    // proves the cleanup task still exists, not that the assertion is still
+    // the one that was verified.
+    //
+    // Mutating the head *before* the drain does not reach this branch — the
+    // pre-lock triage in `cleanupMetaGraph` sees the mismatch first and
+    // retires the task. The race has to land between the two reads.
+    const originalQuery = store.query.bind(store);
+    let racedInsideLock = false;
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (
+        !racedInsideLock
+        && options?.source === 'agent.finalizedSwmCleanup'
+        && query.startsWith(WORKSPACE_HEAD_READ_PREFIX)
+      ) {
+        racedInsideLock = true;
+        // Drop the seam first so the staging writes and the rest of the commit
+        // path run against the real store.
+        querySpy.mockRestore();
+        await stageNewerWorkspaceAssertion(
+          swmGraph,
+          message.privateMerkleRoot,
+          message.privateTripleCount,
+        );
+      }
+      return originalQuery(query, options);
+    });
+
+    await expect(drainFinalizedSwm()).resolves.toBe(0);
+    expect(racedInsideLock).toBe(true);
+
+    // The newer assertion shares the SWM graph URI with the finalized one, so
+    // a delete here destroys unpublished data rather than a redundant copy.
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+        + `<urn:predicate:value> "newer" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
+  });
+
+  it('re-reads the head under the lock when the store cannot track write generations', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    const untrackedStore = withoutWriteGenTracking(store);
+    expect(asGraphWriteGenSource(untrackedStore)).toBeNull();
+
+    const lockKey = swmKaWriteLockKey(CG, undefined, UAL);
+    let releaseWriter!: () => void;
+    let markWriterHolding!: () => void;
+    const writerHolding = new Promise<void>((resolve) => { markWriterHolding = resolve; });
+    const writerDone = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const blocker = withKeyedLocks(writeLocks, [lockKey], async () => {
+      markWriterHolding();
+      await writerDone;
+    });
+    // `withKeyedLocks` installs its gate synchronously, before its first await.
+    const writerGate = writeLocks.get(lockKey);
+    expect(writerGate).toBeDefined();
+    await writerHolding;
+
+    const drain = new FinalizedSwmCleanupService({
+      store: untrackedStore,
+      writeLocks,
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [graphManager.sharedMemoryMetaUri(CG)],
+    }).cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    });
+
+    // Wait until the drain has finished discovery plus both verifications and
+    // queued behind the writer; the map entry flips to the drain's own gate.
+    let drainQueuedBehindWriter = false;
+    for (let attempt = 0; attempt < 1_000 && !drainQueuedBehindWriter; attempt += 1) {
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      drainQueuedBehindWriter = writeLocks.get(lockKey) !== writerGate;
+    }
+    expect(drainQueuedBehindWriter).toBe(true);
+
+    // The lock holder replaces the assertion the drain just verified. Nothing
+    // the drain captured before queueing is true any more.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+    releaseWriter();
+    await blocker;
+
+    await expect(drain).resolves.toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+        + `<urn:predicate:value> "newer" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
   });
 
   it('preserves finalized SWM when the handler has no shared writer lock', async () => {

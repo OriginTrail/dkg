@@ -116,6 +116,7 @@ export default defineConfig({
       "test/startup-jitter.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
       "test/finalized-swm-cleanup-worker.test.ts",
+      "test/finalized-swm-cleanup-sweep.test.ts",
       "test/finalization-handler.test.ts",
       "test/finalization-handler-chain-truth.test.ts",
       "test/finalization-handler-defensive-cg-id.test.ts",
