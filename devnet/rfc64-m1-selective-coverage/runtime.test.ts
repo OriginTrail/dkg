@@ -22,6 +22,8 @@ import {
   type SelectiveCoverageRuntimeRole,
   type SelectiveCoverageRuntimeV1,
 } from './runtime.ts';
+import { decodeEdgeSyncOperationPayload } from './evidence-codec.ts';
+import { decodeEdgeSyncResult } from './runtime-wire.ts';
 import type { SyncCoverageJournalReferenceV1 } from './sync-coverage-journal.ts';
 import { runSelectiveCoverageLiveV1 } from './live-runner.ts';
 
@@ -108,6 +110,27 @@ function absentObservation(contextGraphId: string): GraphObservationV1 {
   } as const;
   return { contextGraphId, vm: { ...plane }, swm: { ...plane } };
 }
+
+test('keeps artifact and adapter Edge-operation boundaries in lockstep', () => {
+  const operation: Omit<EdgeSyncOperationV1, 'sequence'> = {
+    phase: 'selection',
+    source: 'user',
+    syncMode: 'on-demand',
+    contextGraphId: graphs[0].contextGraphId,
+    jobId: 'edge-select-on-demand',
+    completedWave: 'selected',
+    completedSnapshot: graphs[0].selectedSnapshot,
+  };
+  assert.deepEqual(decodeEdgeSyncOperationPayload(operation), operation);
+  assert.deepEqual(decodeEdgeSyncResult({ operation }).operation, operation);
+
+  const unknownField = { ...operation, futureField: true };
+  assert.equal(decodeEdgeSyncOperationPayload(unknownField), undefined);
+  assert.throws(
+    () => decodeEdgeSyncResult({ operation: unknownField }),
+    /Invalid M1 runtime adapter Edge operation/,
+  );
+});
 
 class ScriptedRuntime implements SelectiveCoverageRuntimeV1 {
   readonly calls: string[] = [];

@@ -19,6 +19,7 @@ import test from 'node:test';
 
 import {
   atomicWriteStableJson,
+  compactSafeIntegerJson,
   readCleanRepositoryHead,
   stableJson,
 } from './evidence.js';
@@ -31,7 +32,7 @@ test.afterEach(() => {
   }
 });
 
-test('stableJson sorts keys and preserves supported plain data exactly', () => {
+test('stable JSON encoders preserve their distinct exact policies', () => {
   const value = {
     z: [true, null, 17.25, 'plain'],
     a: { second: 2, first: 1 },
@@ -42,6 +43,15 @@ test('stableJson sorts keys and preserves supported plain data exactly', () => {
     '{\n  "a": {\n    "first": 1,\n    "second": 2\n  },\n  "z": [\n    true,\n    null,\n    17.25,\n    "plain"\n  ]\n}\n',
   );
   assert.deepEqual(JSON.parse(encoded), value);
+  assert.equal(
+    compactSafeIntegerJson({ z: [true, null, 17], a: { second: 2, first: 1 } }),
+    '{"a":{"first":1,"second":2},"z":[true,null,17]}',
+  );
+  assert.throws(() => compactSafeIntegerJson({ value: 17.25 }), /non-lossless JSON number/u);
+  assert.throws(
+    () => compactSafeIntegerJson({ value: Number.MAX_SAFE_INTEGER + 1 }),
+    /non-lossless JSON number/u,
+  );
 });
 
 test('stableJson rejects values that JSON would omit, coerce, or reshape', () => {

@@ -20,6 +20,12 @@ import {
   assertCoreAutomaticRoundJournalV1,
   assertEdgeReconcilerJournalV1,
 } from './sync-coverage-journal.ts';
+import {
+  buildEdgeOperationPlan,
+  findEdgeOperationPlanStep,
+  matchesEdgeOperationPlanStep,
+  type EdgeOperationPlanV1,
+} from './edge-operation-plan.ts';
 
 import {
   decodeExpectedSelectiveCoverageProvenance,
@@ -202,6 +208,7 @@ function verifyPublisher(context: VerificationContext) {
 function verifyEdge(context: VerificationContext) {
   const { corpus, evidence, edgeBefore, edgeSelected, edgeRestarted,
     edgeSecondOnDemand } = context;
+  const operationPlan = buildEdgeOperationPlan(corpus);
   const edgePassiveBeforeSelection = corpus.graphs.every((graph) =>
     absentGraph(edgeBefore.get(graph.contextGraphId))
       && edgeBefore.get(graph.contextGraphId)?.runtimeSyncMode === null
@@ -212,7 +219,7 @@ function verifyEdge(context: VerificationContext) {
       ? exactGraph(observed, graph.selectedSnapshot)
         && observed?.runtimeSyncMode === graph.edgePolicy
         && observed.producingJobId
-          === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'selection')
+          === edgeJobId(operationPlan, evidence.edge.operations, graph.contextGraphId, 'selection')
       : absentGraph(observed) && observed?.runtimeSyncMode === null
         && observed.producingJobId === null;
   });
@@ -221,14 +228,19 @@ function verifyEdge(context: VerificationContext) {
     .every((graph) => exactGraph(edgeRestarted.get(graph.contextGraphId), graph.selectedSnapshot)
       && edgeRestarted.get(graph.contextGraphId)?.runtimeSyncMode === null
       && edgeRestarted.get(graph.contextGraphId)?.producingJobId
-        === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'selection'));
+        === edgeJobId(operationPlan, evidence.edge.operations, graph.contextGraphId, 'selection'));
   const edgeAlwaysOnRefreshesAfterRestart = corpus.graphs
     .filter((graph) => graph.edgePolicy === 'always-on')
     .every((graph) => snapshotsAdvance(graph.selectedSnapshot, graph.finalSnapshot)
       && exactGraph(edgeRestarted.get(graph.contextGraphId), graph.finalSnapshot)
       && edgeRestarted.get(graph.contextGraphId)?.runtimeSyncMode === 'always-on'
       && edgeRestarted.get(graph.contextGraphId)?.producingJobId
-        === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'post-restart-auto'));
+        === edgeJobId(
+          operationPlan,
+          evidence.edge.operations,
+          graph.contextGraphId,
+          'post-restart-auto',
+        ));
   const edgeSecondOnDemandConverges = corpus.graphs.every((graph) => {
     const observed = edgeSecondOnDemand.get(graph.contextGraphId);
     if (graph.accessPolicy !== 0 || graph.edgePolicy === 'unselected') {
@@ -242,7 +254,7 @@ function verifyEdge(context: VerificationContext) {
       && exactGraph(observed, graph.finalSnapshot)
       && observed?.runtimeSyncMode === graph.edgePolicy
       && observed.producingJobId
-        === edgeJobId(evidence.edge.operations, graph.contextGraphId, phase);
+        === edgeJobId(operationPlan, evidence.edge.operations, graph.contextGraphId, phase);
   });
   const excluded = (graph: SelectiveCoverageGraphV1) =>
     absentGraph(edgeSelected.get(graph.contextGraphId))
@@ -256,7 +268,7 @@ function verifyEdge(context: VerificationContext) {
     edgeSelectedSnapshotsExact,
     edgeOnDemandRemainsPointInTime,
     edgeAlwaysOnRefreshesAfterRestart,
-    edgeOperationProvenance: verifyEdgeOperations(evidence.edge.operations, corpus.graphs)
+    edgeOperationProvenance: verifyEdgeOperations(evidence.edge.operations, operationPlan)
       && verifyAutomaticEdgeJournals(evidence),
     edgeSecondOnDemandConverges,
     edgeUnselectedExcluded: context.publicGraphs
@@ -392,60 +404,30 @@ function verifyAutomaticCoreJournals(evidence: SelectiveCoverageEvidenceV1): boo
 
 function verifyEdgeOperations(
   operations: readonly EdgeSyncOperationV1[],
-  graphs: readonly SelectiveCoverageGraphV1[],
+  plan: EdgeOperationPlanV1,
 ): boolean {
-  const selected = graphs.filter((graph) =>
-    graph.accessPolicy === 0 && graph.edgePolicy !== 'unselected');
-  if (operations.length !== selected.length * 2
+  if (operations.length !== plan.ordered.length
     || new Set(operations.map((operation) => operation.jobId)).size !== operations.length) {
     return false;
   }
-  const selectionSequences = operations
-    .filter((operation) => operation.phase === 'selection')
-    .map((operation) => operation.sequence);
-  const automaticSequences = operations
-    .filter((operation) => operation.phase === 'post-restart-auto')
-    .map((operation) => operation.sequence);
-  const secondOnDemandSequences = operations
-    .filter((operation) => operation.phase === 'post-restart-explicit')
-    .map((operation) => operation.sequence);
-  if (selectionSequences.length === 0
-    || Math.max(...selectionSequences) >= Math.min(...automaticSequences)
-    || Math.max(...automaticSequences) >= Math.min(...secondOnDemandSequences)) return false;
-  return selected.every((graph) => {
-    const graphOperations = operations.filter((operation) =>
-      operation.contextGraphId === graph.contextGraphId);
-    if (graphOperations.length !== 2) return false;
-    const selection = graphOperations.find((operation) => operation.phase === 'selection');
-    if (selection?.source !== 'user' || selection.syncMode !== graph.edgePolicy
-      || selection.completedWave !== 'selected'
-      || !exactSnapshot(selection.completedSnapshot, graph.selectedSnapshot)) return false;
-    if (graph.edgePolicy === 'on-demand') {
-      const refresh = graphOperations.find((operation) =>
-        operation.phase === 'post-restart-explicit');
-      return refresh?.source === 'user' && refresh.syncMode === 'on-demand'
-        && refresh.completedWave === 'final'
-        && exactSnapshot(refresh.completedSnapshot, graph.finalSnapshot);
-    }
-    const refresh = graphOperations.find((operation) =>
-      operation.phase === 'post-restart-auto');
-    return refresh?.source === 'reconciler' && refresh.syncMode === 'always-on'
-      && refresh.completedWave === 'final'
-      && exactSnapshot(refresh.completedSnapshot, graph.finalSnapshot);
-  }) && operations.every((operation) => {
-    const graph = graphs.find((candidate) =>
-      candidate.contextGraphId === operation.contextGraphId);
-    return graph?.accessPolicy === 0 && graph.edgePolicy !== 'unselected';
-  });
+  return plan.ordered.every((step, index) =>
+    matchesEdgeOperationPlanStep(operations[index], step));
 }
 
 function edgeJobId(
+  plan: EdgeOperationPlanV1,
   operations: readonly EdgeSyncOperationV1[],
   contextGraphId: string,
   phase: EdgeSyncOperationV1['phase'],
 ): string | undefined {
-  return operations.find((operation) =>
-    operation.contextGraphId === contextGraphId && operation.phase === phase)?.jobId;
+  const step = findEdgeOperationPlanStep(plan, contextGraphId, phase);
+  if (!step) return undefined;
+  const operation = operations[step.sequence];
+  return operation?.sequence === step.sequence
+    && operation.phase === step.phase
+    && operation.contextGraphId === step.contextGraphId
+    ? operation.jobId
+    : undefined;
 }
 
 function exactGraph(

@@ -9,8 +9,8 @@ import {
   decodeCoreAutomaticRound,
   decodeCoreFinalObservations as parseCoreFinalObservations,
   decodeEdgeObservations as parseEdgeObservations,
+  decodeEdgeSyncOperationPayload,
   decodeGraphObservations as parseGraphObservations,
-  decodeGraphSnapshot,
 } from './evidence-codec.ts';
 import {
   SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
@@ -24,17 +24,63 @@ import {
 import {
   boundedString,
   closedRecord,
+  defineRecordKeys,
   nonNegativeInteger,
   positiveInteger,
   requireDecoded,
 } from './boundary-codec.ts';
 
+type EdgeRestartPreviousV1 = SelectiveCoverageEdgeRestartReceiptV1['previous'];
+type EdgeSyncResultV1 = {
+  readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
+  readonly journal?: SyncCoverageJournalReferenceV1;
+};
+type EdgeReconcilerResultV1 = {
+  readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
+  readonly journal: SyncCoverageJournalReferenceV1;
+};
+type CoreRoundResultV1 = {
+  readonly round: CoreAutomaticRoundV1;
+  readonly journal: SyncCoverageJournalReferenceV1;
+};
+type OptionalPropertyKeys<T> = {
+  [Key in keyof T]-?: object extends Pick<T, Key> ? Key : never;
+}[keyof T];
+
+const RUNTIME_READY_KEYS = defineRecordKeys<SelectiveCoverageRuntimeReadyV1>()(
+  'protocol',
+  'role',
+  'pid',
+  'peerId',
+  'networkId',
+  'testedHeadCommit',
+  'runtimeManifestDigest',
+  'processStartedAt',
+  'processInstanceId',
+  'dataDirectoryIdentity',
+  'evidenceWaveId',
+);
+const EDGE_RESTART_RECEIPT_KEYS = defineRecordKeys<SelectiveCoverageEdgeRestartReceiptV1>()(
+  'previous',
+  'current',
+);
+const EDGE_RESTART_PREVIOUS_KEYS = defineRecordKeys<EdgeRestartPreviousV1>()(
+  'pid',
+  'processInstanceId',
+  'exitedAt',
+);
+const EDGE_SYNC_RESULT_KEYS = defineRecordKeys<EdgeSyncResultV1>()('operation', 'journal');
+const EDGE_SYNC_RESULT_OPTIONAL_KEYS = defineRecordKeys<
+  Pick<EdgeSyncResultV1, OptionalPropertyKeys<EdgeSyncResultV1>>
+>()('journal');
+const EDGE_RECONCILER_RESULT_KEYS = defineRecordKeys<EdgeReconcilerResultV1>()(
+  'operation',
+  'journal',
+);
+const CORE_ROUND_RESULT_KEYS = defineRecordKeys<CoreRoundResultV1>()('round', 'journal');
+
 export function decodeRuntimeReady(input: unknown): SelectiveCoverageRuntimeReadyV1 {
-  const row = record(input, [
-    'protocol', 'role', 'pid', 'peerId', 'networkId', 'testedHeadCommit',
-    'runtimeManifestDigest', 'processStartedAt', 'processInstanceId',
-    'dataDirectoryIdentity', 'evidenceWaveId',
-  ]);
+  const row = record(input, RUNTIME_READY_KEYS);
   const role = row.role;
   if (row.protocol !== SELECTIVE_COVERAGE_RUNTIME_PROTOCOL
     || (role !== 'publisher' && role !== 'edge' && role !== 'core')
@@ -56,8 +102,8 @@ export function decodeRuntimeReady(input: unknown): SelectiveCoverageRuntimeRead
 }
 
 export function decodeRestartReceipt(input: unknown): SelectiveCoverageEdgeRestartReceiptV1 {
-  const row = record(input, ['previous', 'current']);
-  const previous = record(row.previous, ['pid', 'processInstanceId', 'exitedAt']);
+  const row = record(input, EDGE_RESTART_RECEIPT_KEYS);
+  const previous = record(row.previous, EDGE_RESTART_PREVIOUS_KEYS);
   if (!positiveInteger(previous.pid) || !nonNegativeInteger(previous.exitedAt)) {
     fail('restart receipt');
   }
@@ -86,33 +132,24 @@ export function decodeCoreFinalObservations(input: unknown): readonly CoreFinalO
   );
 }
 
-export function decodeEdgeSyncResult(input: unknown): {
-  readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
-  readonly journal?: SyncCoverageJournalReferenceV1;
-} {
-  const row = optionalRecord(input, ['operation'], ['journal']);
+export function decodeEdgeSyncResult(input: unknown): EdgeSyncResultV1 {
+  const row = optionalRecord(input, EDGE_SYNC_RESULT_KEYS, EDGE_SYNC_RESULT_OPTIONAL_KEYS);
   const journal = Object.hasOwn(row, 'journal')
     ? requiredJournal(row.journal)
     : undefined;
   return { operation: decodeEdgeOperation(row.operation), ...(journal ? { journal } : {}) };
 }
 
-export function decodeEdgeReconcilerResult(input: unknown): {
-  readonly operation: Omit<EdgeSyncOperationV1, 'sequence'>;
-  readonly journal: SyncCoverageJournalReferenceV1;
-} {
-  const row = record(input, ['operation', 'journal']);
+export function decodeEdgeReconcilerResult(input: unknown): EdgeReconcilerResultV1 {
+  const row = record(input, EDGE_RECONCILER_RESULT_KEYS);
   return {
     operation: decodeEdgeOperation(row.operation),
     journal: requiredJournal(row.journal),
   };
 }
 
-export function decodeCoreRoundResult(input: unknown): {
-  readonly round: CoreAutomaticRoundV1;
-  readonly journal: SyncCoverageJournalReferenceV1;
-} {
-  const row = record(input, ['round', 'journal']);
+export function decodeCoreRoundResult(input: unknown): CoreRoundResultV1 {
+  const row = record(input, CORE_ROUND_RESULT_KEYS);
   return {
     round: requireDecoded(decodeCoreAutomaticRound(row.round), 'M1 runtime adapter Core round'),
     journal: requiredJournal(row.journal),
@@ -125,29 +162,10 @@ export function decodeNull(input: unknown): null {
 }
 
 function decodeEdgeOperation(input: unknown): Omit<EdgeSyncOperationV1, 'sequence'> {
-  const row = record(input, [
-    'phase', 'source', 'syncMode', 'contextGraphId', 'jobId',
-    'completedWave', 'completedSnapshot',
-  ]);
-  if ((row.phase !== 'selection' && row.phase !== 'post-restart-auto'
-      && row.phase !== 'post-restart-explicit')
-    || (row.source !== 'user' && row.source !== 'reconciler')
-    || (row.syncMode !== 'always-on' && row.syncMode !== 'on-demand')
-    || (row.completedWave !== 'selected' && row.completedWave !== 'final')) {
-    fail('Edge operation');
-  }
-  return {
-    phase: row.phase,
-    source: row.source,
-    syncMode: row.syncMode,
-    contextGraphId: text(row.contextGraphId, 'contextGraphId'),
-    jobId: text(row.jobId, 'jobId'),
-    completedWave: row.completedWave,
-    completedSnapshot: requireDecoded(
-      decodeGraphSnapshot(row.completedSnapshot),
-      'M1 runtime adapter graph snapshot',
-    ),
-  };
+  return requireDecoded(
+    decodeEdgeSyncOperationPayload(input),
+    'M1 runtime adapter Edge operation',
+  );
 }
 
 function requiredJournal(input: unknown): SyncCoverageJournalReferenceV1 {
@@ -162,11 +180,12 @@ function record(input: unknown, keys: readonly string[]): Record<string, unknown
 
 function optionalRecord(
   input: unknown,
-  requiredKeys: readonly string[],
+  keys: readonly string[],
   optionalKeys: readonly string[],
 ): Record<string, unknown> {
+  const optional = new Set(optionalKeys);
   return requireDecoded(
-    closedRecord(input, requiredKeys, optionalKeys),
+    closedRecord(input, keys.filter((key) => !optional.has(key)), optionalKeys),
     'M1 runtime adapter record',
   );
 }

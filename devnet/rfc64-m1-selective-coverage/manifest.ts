@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { stableJson } from '../rfc64-persistence-lifecycle/evidence.ts';
+import { compactSafeIntegerJson } from '../rfc64-persistence-lifecycle/evidence.ts';
 
 export const SELECTIVE_COVERAGE_CORPUS_SCHEMA =
   'dkg-rfc64-m1-selective-coverage-corpus-v1' as const;
@@ -240,11 +240,7 @@ export function computeSelectiveCoverageCorpusDigest(
 
 /** Stable JSON is also used by the future process launcher when publishing artifacts. */
 export function canonicalJson(value: unknown): string {
-  return stableJson(value, {
-    format: 'compact',
-    trailingLf: false,
-    numbers: 'safe-integer',
-  });
+  return compactSafeIntegerJson(value);
 }
 
 function compareCodeUnits(left: string, right: string): number {

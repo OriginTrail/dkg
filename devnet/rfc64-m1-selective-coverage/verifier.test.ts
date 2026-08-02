@@ -746,6 +746,16 @@ test('Edge checkpoints bind their exact state to the operation that produced it'
   assert.equal(verdict.checks.edgeOperationProvenance, false);
 });
 
+test('Edge operations preserve canonical corpus order within each phase', () => {
+  const reordered = clone();
+  [reordered.edge.operations[0], reordered.edge.operations[1]] =
+    [reordered.edge.operations[1], reordered.edge.operations[0]];
+
+  const verdict = verifySelectiveCoverage(reordered);
+  assert.equal(verdict.checks.edgeOperationProvenance, false);
+  assert.equal(verdict.pass, false);
+});
+
 test('late eventual coverage fails the deterministic first-admission window', () => {
   const starved = clone();
   starved.core.rounds = [

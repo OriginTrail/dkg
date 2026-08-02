@@ -82,14 +82,37 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     this.exited = new Promise((resolveExit) => {
       resolveExited = resolveExit;
     });
-    this.child.once('error', (error) => this.failAll(
-      new Error('M1 runtime adapter process failed', { cause: error }),
-    ));
-    this.child.once('exit', (code, signal) => {
+    let terminal = false;
+    const resolveTerminal = () => {
+      if (terminal) return;
+      terminal = true;
       resolveExited();
+    };
+    this.child.on('error', (error) => {
+      // Spawn failures are terminal but ChildProcess also emits `error` for
+      // failures such as an unsuccessful kill while the child is still live.
+      // Do not let those later errors falsely satisfy cleanup.
+      if (this.child.pid === undefined
+        || this.child.exitCode !== null
+        || this.child.signalCode !== null) {
+        resolveTerminal();
+      }
+      this.failAll(new Error('M1 runtime adapter process failed', { cause: error }));
+    });
+    this.child.once('exit', (code, signal) => {
+      resolveTerminal();
       if (!this.closing || this.pending.size > 0) {
         this.failAll(new Error(
           `M1 runtime adapter exited before shutdown acknowledgement `
+            + `(code=${String(code)} signal=${String(signal)})`,
+        ));
+      }
+    });
+    this.child.once('close', (code, signal) => {
+      resolveTerminal();
+      if (!this.closing || this.pending.size > 0) {
+        this.failAll(new Error(
+          `M1 runtime adapter closed before shutdown acknowledgement `
             + `(code=${String(code)} signal=${String(signal)})`,
         ));
       }

@@ -12,6 +12,7 @@ import {
   computeSelectiveCoverageCorpusDigest,
 } from './manifest.ts';
 import { verifySelectiveCoverage } from './verifier.ts';
+import { buildEdgeOperationPlan } from './edge-operation-plan.ts';
 import {
   assertCoreAutomaticRoundJournalV1,
   assertEdgeReconcilerJournalV1,
@@ -96,7 +97,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
   readonly runtime: SelectiveCoverageRuntimeV1;
 }): Promise<SelectiveCoverageEvidenceV1> {
   assertAnchoredCorpus(input.corpus, input.expectedProvenance);
-  const edgePlan = buildEdgePhasePlan(input.corpus);
+  const edgePlan = buildEdgeOperationPlan(input.corpus);
   const attempted = new Set<SelectiveCoverageRuntimeRole>();
   let primaryFailure: unknown;
   try {
@@ -125,9 +126,9 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
     for (const step of edgePlan.selection) {
       const result = await input.runtime.synchronizeEdge({
         contextGraphId: step.contextGraphId,
-        phase: 'selection',
+        phase: step.phase,
         syncMode: step.syncMode,
-        wave: 'selected',
+        wave: step.completedWave,
       });
       edgeOperations.push(withSequence(result.operation, edgeOperations.length));
     }
@@ -149,7 +150,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
     assertReady(edgeAfterRestartReady, 'edge', input.expectedProvenance);
     assertDistinctProcesses([publisher, edgeBeforeRestart, edgeAfterRestartReady]);
 
-    for (const step of edgePlan.reconciler) {
+    for (const step of edgePlan.postRestartAutomatic) {
       const result = await input.runtime.waitForEdgeReconciler({
         contextGraphId: step.contextGraphId,
       });
@@ -167,12 +168,12 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
       'Edge after restart',
     );
 
-    for (const step of edgePlan.secondOnDemand) {
+    for (const step of edgePlan.postRestartExplicit) {
       const result = await input.runtime.synchronizeEdge({
         contextGraphId: step.contextGraphId,
-        phase: 'post-restart-explicit',
-        syncMode: 'on-demand',
-        wave: 'final',
+        phase: step.phase,
+        syncMode: step.syncMode,
+        wave: step.completedWave,
       });
       edgeOperations.push(withSequence(result.operation, edgeOperations.length));
     }
@@ -304,35 +305,6 @@ function detachJsonEvidence(
   } catch (error) {
     throw new Error('M1 runtime evidence is not lossless JSON', { cause: error });
   }
-}
-
-interface EdgePhasePlanV1 {
-  readonly selection: readonly {
-    readonly contextGraphId: string;
-    readonly syncMode: 'always-on' | 'on-demand';
-  }[];
-  readonly reconciler: readonly { readonly contextGraphId: string }[];
-  readonly secondOnDemand: readonly { readonly contextGraphId: string }[];
-}
-
-function buildEdgePhasePlan(corpus: SelectiveCoverageCorpusV1): EdgePhasePlanV1 {
-  const selection: Array<EdgePhasePlanV1['selection'][number]> = [];
-  const reconciler: Array<EdgePhasePlanV1['reconciler'][number]> = [];
-  const secondOnDemand: Array<EdgePhasePlanV1['secondOnDemand'][number]> = [];
-  for (const graph of corpus.graphs) {
-    if (graph.accessPolicy !== 0 || graph.edgePolicy === 'unselected') continue;
-    selection.push({ contextGraphId: graph.contextGraphId, syncMode: graph.edgePolicy });
-    if (graph.edgePolicy === 'always-on') {
-      reconciler.push({ contextGraphId: graph.contextGraphId });
-    } else {
-      secondOnDemand.push({ contextGraphId: graph.contextGraphId });
-    }
-  }
-  return {
-    selection: Object.freeze(selection),
-    reconciler: Object.freeze(reconciler),
-    secondOnDemand: Object.freeze(secondOnDemand),
-  };
 }
 
 function withSequence(

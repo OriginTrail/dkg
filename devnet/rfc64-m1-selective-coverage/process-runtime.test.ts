@@ -94,6 +94,52 @@ test('decodes non-start command results at the adapter boundary', async () => {
   }
 });
 
+test('missing adapter executable fails startup and close without hanging', async () => {
+  const runtime = new ProcessSelectiveCoverageRuntimeV1({
+    command: resolve(import.meta.dirname, `missing-adapter-${process.pid}`),
+    cwd: resolve(import.meta.dirname, '../..'),
+    timeoutMs: 5_000,
+  });
+  await assert.rejects(runtime.start('publisher'), /runtime adapter process failed/);
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const closeTimeout = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error('runtime close timed out')), 1_000);
+  });
+  try {
+    await assert.rejects(
+      Promise.race([runtime.close(), closeTimeout]),
+      /runtime adapter process failed/,
+    );
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+});
+
+test('a non-terminal child error cannot satisfy the process-exit proof', async () => {
+  const runtime = fixtureRuntime();
+  const internals = runtime as unknown as {
+    readonly child: { emit(event: 'error', error: Error): boolean };
+    readonly exited: Promise<void>;
+  };
+  try {
+    await runtime.start('publisher');
+    internals.child.emit('error', new Error('synthetic live-child kill failure'));
+    assert.doesNotThrow(() => {
+      internals.child.emit('error', new Error('second synthetic live-child error'));
+    });
+    const terminalState = await Promise.race([
+      internals.exited.then(() => 'exited' as const),
+      new Promise<'still-running'>((resolveState) => {
+        setTimeout(() => resolveState('still-running'), 50);
+      }),
+    ]);
+    assert.equal(terminalState, 'still-running');
+  } finally {
+    await runtime.close().catch(() => undefined);
+  }
+});
+
 for (const [command, invoke] of [
   ['observe-edge', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
     runtime.observeEdge('before-selection')],

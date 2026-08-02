@@ -4,6 +4,7 @@ import {
   MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY,
   SELECTIVE_COVERAGE_CORPUS_SCHEMA,
   SELECTIVE_COVERAGE_EVIDENCE_SCHEMA,
+  type CoreAutomaticCompletionV1,
   type CoreAutomaticRoundV1,
   type CoreFinalObservationV1,
   type EdgeCoveragePolicy,
@@ -15,8 +16,10 @@ import {
   type PlaneExpectationV1,
   type PlaneObservationV1,
   type SelectiveCoverageCorpusV1,
+  type SelectiveCoverageAutomaticJournalEvidenceV1,
   type SelectiveCoverageEvidenceV1,
   type SelectiveCoverageGraphV1,
+  type SelectiveCoverageProvenanceV1,
   type SyncCoverageJournalProcessIdentityV1,
   type SyncCoverageJournalReferenceV1,
 } from './manifest.ts';
@@ -24,6 +27,7 @@ import { parseSyncCoverageJournalReferenceV1 } from './sync-coverage-journal.ts'
 import {
   closedArray,
   closedRecord,
+  defineRecordKeys,
   identifier,
   nonNegativeInteger,
   positiveInteger,
@@ -31,22 +35,154 @@ import {
 
 const DIGEST = /^(?:0x|sha256:)[0-9a-f]{64}$/u;
 
+type PublisherEvidenceV1 = SelectiveCoverageEvidenceV1['publisher'];
+type EdgeEvidenceV1 = SelectiveCoverageEvidenceV1['edge'];
+type CoreEvidenceV1 = SelectiveCoverageEvidenceV1['core'];
+
+const SELECTIVE_COVERAGE_EVIDENCE_KEYS = defineRecordKeys<SelectiveCoverageEvidenceV1>()(
+  'schema',
+  'provenance',
+  'automaticJournalEvidence',
+  'corpus',
+  'publisher',
+  'edge',
+  'core',
+);
+const SELECTIVE_COVERAGE_PROVENANCE_KEYS = defineRecordKeys<
+  SelectiveCoverageProvenanceV1
+>()(
+  'networkId',
+  'testedHeadCommit',
+  'runtimeManifestDigest',
+  'publisherPeerId',
+  'edgePeerId',
+  'corePeerId',
+);
+const EXPECTED_SELECTIVE_COVERAGE_PROVENANCE_KEYS = defineRecordKeys<
+  ExpectedSelectiveCoverageProvenanceV1
+>()(
+  ...SELECTIVE_COVERAGE_PROVENANCE_KEYS,
+  'corpusManifestDigest',
+);
+const AUTOMATIC_JOURNAL_EVIDENCE_KEYS = defineRecordKeys<
+  SelectiveCoverageAutomaticJournalEvidenceV1
+>()(
+  'edgeProcess',
+  'edgeReconciler',
+  'coreProcess',
+  'coreRounds',
+);
+const JOURNAL_PROCESS_IDENTITY_KEYS = defineRecordKeys<
+  SyncCoverageJournalProcessIdentityV1
+>()('processStartedAt', 'evidenceWaveId');
+const SELECTIVE_COVERAGE_CORPUS_KEYS = defineRecordKeys<SelectiveCoverageCorpusV1>()(
+  'schema',
+  'networkId',
+  'coreAutomaticBatchSize',
+  'coreCoverageRoundLimit',
+  'graphs',
+  'manifestDigest',
+);
+const SELECTIVE_COVERAGE_GRAPH_KEYS = defineRecordKeys<SelectiveCoverageGraphV1>()(
+  'contextGraphId',
+  'accessPolicy',
+  'publishPolicy',
+  'edgePolicy',
+  'selectedSnapshot',
+  'finalSnapshot',
+);
+const PUBLISHER_EVIDENCE_KEYS = defineRecordKeys<PublisherEvidenceV1>()('selected', 'final');
+const EDGE_EVIDENCE_KEYS = defineRecordKeys<EdgeEvidenceV1>()(
+  'beforeSelection',
+  'afterSelection',
+  'afterRestart',
+  'afterSecondOnDemand',
+  'operations',
+);
+const CORE_EVIDENCE_KEYS = defineRecordKeys<CoreEvidenceV1>()(
+  'automaticBatchSize',
+  'rounds',
+  'final',
+);
+const GRAPH_OBSERVATION_KEYS = defineRecordKeys<GraphObservationV1>()(
+  'contextGraphId',
+  'vm',
+  'swm',
+);
+const EDGE_GRAPH_OBSERVATION_KEYS = defineRecordKeys<EdgeGraphObservationV1>()(
+  'contextGraphId',
+  'runtimeSyncMode',
+  'producingJobId',
+  'vm',
+  'swm',
+);
+const CORE_FINAL_OBSERVATION_KEYS = defineRecordKeys<CoreFinalObservationV1>()(
+  'contextGraphId',
+  'automaticJobIds',
+  'vm',
+  'swm',
+);
+const GRAPH_SNAPSHOT_EXPECTATION_KEYS = defineRecordKeys<GraphSnapshotExpectationV1>()(
+  'vm',
+  'swm',
+);
+const EDGE_SYNC_OPERATION_PAYLOAD_KEYS = defineRecordKeys<
+  Omit<EdgeSyncOperationV1, 'sequence'>
+>()(
+  'phase',
+  'source',
+  'syncMode',
+  'contextGraphId',
+  'jobId',
+  'completedWave',
+  'completedSnapshot',
+);
+const EDGE_SYNC_OPERATION_KEYS = defineRecordKeys<EdgeSyncOperationV1>()(
+  'sequence',
+  ...EDGE_SYNC_OPERATION_PAYLOAD_KEYS,
+);
+const CORE_AUTOMATIC_ROUND_KEYS = defineRecordKeys<CoreAutomaticRoundV1>()(
+  'round',
+  'jobId',
+  'planningLane',
+  'source',
+  'configuredBatchSize',
+  'explicitSelectedContextGraphIds',
+  'contextGraphIds',
+  'completions',
+);
+const CORE_AUTOMATIC_COMPLETION_KEYS = defineRecordKeys<CoreAutomaticCompletionV1>()(
+  'contextGraphId',
+  'completedWave',
+  'completedSnapshot',
+);
+const PLANE_EXPECTATION_KEYS = defineRecordKeys<PlaneExpectationV1>()(
+  'headDigest',
+  'inventoryDigest',
+  'assetCount',
+  'dataTripleCount',
+);
+const PLANE_OBSERVATION_KEYS = defineRecordKeys<PlaneObservationV1>()(
+  'reportedComplete',
+  'headDigest',
+  'inventoryDigest',
+  'assetCount',
+  'metadataTripleCount',
+  'dataTripleCount',
+);
+
 /** Canonical closed-schema decoder shared by artifact and process boundaries. */
 export function decodeSelectiveCoverageEvidence(
   input: unknown,
 ): SelectiveCoverageEvidenceV1 | undefined {
-  const root = closedRecord(input, [
-    'schema', 'provenance', 'automaticJournalEvidence', 'corpus', 'publisher', 'edge', 'core',
-  ]);
+  const root = closedRecord(input, SELECTIVE_COVERAGE_EVIDENCE_KEYS);
   if (!root || root.schema !== SELECTIVE_COVERAGE_EVIDENCE_SCHEMA) return undefined;
   const provenance = parseProvenance(root.provenance);
   const automaticJournalEvidence = parseAutomaticJournalEvidence(root.automaticJournalEvidence);
   const corpus = decodeSelectiveCoverageCorpus(root.corpus);
-  const publisher = closedRecord(root.publisher, ['selected', 'final']);
-  const edge = closedRecord(root.edge, [
-    'beforeSelection', 'afterSelection', 'afterRestart', 'afterSecondOnDemand', 'operations',
-  ]);
-  const core = closedRecord(root.core, ['automaticBatchSize', 'rounds', 'final']);
+  const publisher = closedRecord(root.publisher, PUBLISHER_EVIDENCE_KEYS);
+  const edge = closedRecord(root.edge, EDGE_EVIDENCE_KEYS);
+  const core = closedRecord(root.core, CORE_EVIDENCE_KEYS);
   if (!provenance || !automaticJournalEvidence || !corpus || !publisher || !edge || !core
     || !nonNegativeInteger(core.automaticBatchSize)
     || !closedArray(core.rounds, 1, MAX_SELECTIVE_COVERAGE_ROUNDS)) return undefined;
@@ -90,10 +226,7 @@ export function decodeSelectiveCoverageEvidence(
 export function decodeExpectedSelectiveCoverageProvenance(
   input: unknown,
 ): ExpectedSelectiveCoverageProvenanceV1 | undefined {
-  const root = closedRecord(input, [
-    'networkId', 'testedHeadCommit', 'runtimeManifestDigest', 'corpusManifestDigest',
-    'publisherPeerId', 'edgePeerId', 'corePeerId',
-  ]);
+  const root = closedRecord(input, EXPECTED_SELECTIVE_COVERAGE_PROVENANCE_KEYS);
   if (!root) return undefined;
   const { corpusManifestDigest: _omitted, ...provenanceInput } = root;
   const provenance = parseProvenance(provenanceInput);
@@ -109,7 +242,7 @@ export function decodeGraphObservations(
   if (!closedArray(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS)) return undefined;
   const result: GraphObservationV1[] = [];
   for (const inputRow of input) {
-    const row = closedRecord(inputRow, ['contextGraphId', 'vm', 'swm']);
+    const row = closedRecord(inputRow, GRAPH_OBSERVATION_KEYS);
     const contextGraphId = row && identifier(row.contextGraphId);
     const vm = row && parseObservation(row.vm);
     const swm = row && parseObservation(row.swm);
@@ -125,9 +258,7 @@ export function decodeEdgeObservations(
   if (!closedArray(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS)) return undefined;
   const result: EdgeGraphObservationV1[] = [];
   for (const inputRow of input) {
-    const row = closedRecord(inputRow, [
-      'contextGraphId', 'runtimeSyncMode', 'producingJobId', 'vm', 'swm',
-    ]);
+    const row = closedRecord(inputRow, EDGE_GRAPH_OBSERVATION_KEYS);
     if (!row) return undefined;
     const contextGraphId = identifier(row.contextGraphId);
     const vm = parseObservation(row.vm);
@@ -148,7 +279,7 @@ export function decodeCoreFinalObservations(
   if (!closedArray(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS)) return undefined;
   const result: CoreFinalObservationV1[] = [];
   for (const inputRow of input) {
-    const row = closedRecord(inputRow, ['contextGraphId', 'automaticJobIds', 'vm', 'swm']);
+    const row = closedRecord(inputRow, CORE_FINAL_OBSERVATION_KEYS);
     if (!row || !closedArray(row.automaticJobIds, 0, MAX_SELECTIVE_COVERAGE_ROUNDS)) {
       return undefined;
     }
@@ -171,18 +302,23 @@ export function decodeCoreFinalObservations(
 export function decodeGraphSnapshot(
   input: unknown,
 ): GraphSnapshotExpectationV1 | undefined {
-  const root = closedRecord(input, ['vm', 'swm']);
+  const root = closedRecord(input, GRAPH_SNAPSHOT_EXPECTATION_KEYS);
   if (!root) return undefined;
   const vm = parseExpectation(root.vm);
   const swm = parseExpectation(root.swm);
   return vm && swm ? { vm, swm } : undefined;
 }
 
+/** Shared closed decoder for the Edge operation artifact and runtime adapter. */
+export function decodeEdgeSyncOperationPayload(
+  input: unknown,
+): Omit<EdgeSyncOperationV1, 'sequence'> | undefined {
+  const row = closedRecord(input, EDGE_SYNC_OPERATION_PAYLOAD_KEYS);
+  return row ? parseEdgeSyncOperationRecord(row) : undefined;
+}
+
 export function decodeCoreAutomaticRound(input: unknown): CoreAutomaticRoundV1 | undefined {
-  const row = closedRecord(input, [
-    'round', 'jobId', 'planningLane', 'source', 'configuredBatchSize',
-    'explicitSelectedContextGraphIds', 'contextGraphIds', 'completions',
-  ]);
+  const row = closedRecord(input, CORE_AUTOMATIC_ROUND_KEYS);
   if (!row || !nonNegativeInteger(row.round)
     || row.source !== 'automatic-core-public'
     || !positiveInteger(row.configuredBatchSize)
@@ -198,9 +334,7 @@ export function decodeCoreAutomaticRound(input: unknown): CoreAutomaticRoundV1 |
     || contextGraphIds.some((value) => !value)) return undefined;
   const completions = [];
   for (const inputCompletion of row.completions) {
-    const completion = closedRecord(inputCompletion, [
-      'contextGraphId', 'completedWave', 'completedSnapshot',
-    ]);
+    const completion = closedRecord(inputCompletion, CORE_AUTOMATIC_COMPLETION_KEYS);
     const contextGraphId = completion && identifier(completion.contextGraphId);
     const completedSnapshot = completion && decodeGraphSnapshot(completion.completedSnapshot);
     if (!completion || completion.completedWave !== 'final'
@@ -222,9 +356,7 @@ export function decodeCoreAutomaticRound(input: unknown): CoreAutomaticRoundV1 |
 function parseAutomaticJournalEvidence(
   input: unknown,
 ): SelectiveCoverageEvidenceV1['automaticJournalEvidence'] | undefined {
-  const root = closedRecord(input, [
-    'edgeProcess', 'edgeReconciler', 'coreProcess', 'coreRounds',
-  ]);
+  const root = closedRecord(input, AUTOMATIC_JOURNAL_EVIDENCE_KEYS);
   if (!root
     || !closedArray(root.edgeReconciler, 0, MAX_SELECTIVE_COVERAGE_GRAPHS)
     || !closedArray(root.coreRounds, 1, MAX_SELECTIVE_COVERAGE_ROUNDS)) return undefined;
@@ -246,7 +378,7 @@ function parseAutomaticJournalEvidence(
 function parseJournalProcessIdentity(
   input: unknown,
 ): SyncCoverageJournalProcessIdentityV1 | undefined {
-  const root = closedRecord(input, ['processStartedAt', 'evidenceWaveId']);
+  const root = closedRecord(input, JOURNAL_PROCESS_IDENTITY_KEYS);
   const evidenceWaveId = root && identifier(root.evidenceWaveId);
   if (!root || !nonNegativeInteger(root.processStartedAt) || !evidenceWaveId) return undefined;
   return { processStartedAt: root.processStartedAt, evidenceWaveId };
@@ -255,10 +387,7 @@ function parseJournalProcessIdentity(
 export function decodeSelectiveCoverageCorpus(
   input: unknown,
 ): SelectiveCoverageCorpusV1 | undefined {
-  const root = closedRecord(input, [
-    'schema', 'networkId', 'coreAutomaticBatchSize', 'coreCoverageRoundLimit',
-    'graphs', 'manifestDigest',
-  ]);
+  const root = closedRecord(input, SELECTIVE_COVERAGE_CORPUS_KEYS);
   if (!root || root.schema !== SELECTIVE_COVERAGE_CORPUS_SCHEMA) return undefined;
   const networkId = identifier(root.networkId);
   const manifestDigest = digest(root.manifestDigest);
@@ -269,10 +398,7 @@ export function decodeSelectiveCoverageCorpus(
     || !closedArray(root.graphs, 1, MAX_SELECTIVE_COVERAGE_GRAPHS)) return undefined;
   const graphs: SelectiveCoverageGraphV1[] = [];
   for (const inputGraph of root.graphs) {
-    const graph = closedRecord(inputGraph, [
-      'contextGraphId', 'accessPolicy', 'publishPolicy', 'edgePolicy',
-      'selectedSnapshot', 'finalSnapshot',
-    ]);
+    const graph = closedRecord(inputGraph, SELECTIVE_COVERAGE_GRAPH_KEYS);
     if (!graph) return undefined;
     const contextGraphId = identifier(graph.contextGraphId);
     const accessPolicy = binaryPolicy(graph.accessPolicy);
@@ -303,10 +429,7 @@ export function decodeSelectiveCoverageCorpus(
 }
 
 function parseProvenance(input: unknown): SelectiveCoverageEvidenceV1['provenance'] | undefined {
-  const root = closedRecord(input, [
-    'networkId', 'testedHeadCommit', 'runtimeManifestDigest',
-    'publisherPeerId', 'edgePeerId', 'corePeerId',
-  ]);
+  const root = closedRecord(input, SELECTIVE_COVERAGE_PROVENANCE_KEYS);
   if (!root) return undefined;
   const networkId = identifier(root.networkId);
   const runtimeManifestDigest = digest(root.runtimeManifestDigest);
@@ -331,42 +454,46 @@ function parseEdgeOperations(input: unknown): readonly EdgeSyncOperationV1[] | u
   if (!closedArray(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS * 2)) return undefined;
   const result: EdgeSyncOperationV1[] = [];
   for (let index = 0; index < input.length; index += 1) {
-    const row = closedRecord(input[index], [
-      'sequence', 'phase', 'source', 'syncMode', 'contextGraphId', 'jobId',
-      'completedWave', 'completedSnapshot',
-    ]);
-    if (!row || row.sequence !== index) return undefined;
-    const phase = row.phase;
-    const source = row.source;
-    const syncMode = row.syncMode;
-    const contextGraphId = identifier(row.contextGraphId);
-    const jobId = identifier(row.jobId);
-    const completedWave = row.completedWave;
-    const completedSnapshot = decodeGraphSnapshot(row.completedSnapshot);
-    if ((phase !== 'selection' && phase !== 'post-restart-auto'
-      && phase !== 'post-restart-explicit')
-      || (source !== 'reconciler' && source !== 'user')
-      || (syncMode !== 'always-on' && syncMode !== 'on-demand')
-      || (completedWave !== 'selected' && completedWave !== 'final')
-      || !completedSnapshot || !contextGraphId || !jobId) return undefined;
+    const row = closedRecord(input[index], EDGE_SYNC_OPERATION_KEYS);
+    const operation = row && parseEdgeSyncOperationRecord(row);
+    if (!row || row.sequence !== index || !operation) return undefined;
     result.push({
       sequence: index,
-      phase,
-      source,
-      syncMode,
-      contextGraphId,
-      jobId,
-      completedWave,
-      completedSnapshot,
+      ...operation,
     });
   }
   return Object.freeze(result);
 }
 
+function parseEdgeSyncOperationRecord(
+  row: Record<string, unknown>,
+): Omit<EdgeSyncOperationV1, 'sequence'> | undefined {
+  const phase = row.phase;
+  const source = row.source;
+  const syncMode = row.syncMode;
+  const contextGraphId = identifier(row.contextGraphId);
+  const jobId = identifier(row.jobId);
+  const completedWave = row.completedWave;
+  const completedSnapshot = decodeGraphSnapshot(row.completedSnapshot);
+  if ((phase !== 'selection' && phase !== 'post-restart-auto'
+    && phase !== 'post-restart-explicit')
+    || (source !== 'reconciler' && source !== 'user')
+    || (syncMode !== 'always-on' && syncMode !== 'on-demand')
+    || (completedWave !== 'selected' && completedWave !== 'final')
+    || !completedSnapshot || !contextGraphId || !jobId) return undefined;
+  return {
+    phase,
+    source,
+    syncMode,
+    contextGraphId,
+    jobId,
+    completedWave,
+    completedSnapshot,
+  };
+}
+
 function parseExpectation(input: unknown): PlaneExpectationV1 | undefined {
-  const root = closedRecord(input, [
-    'headDigest', 'inventoryDigest', 'assetCount', 'dataTripleCount',
-  ]);
+  const root = closedRecord(input, PLANE_EXPECTATION_KEYS);
   if (!root) return undefined;
   const headDigest = digest(root.headDigest);
   const inventoryDigest = digest(root.inventoryDigest);
@@ -381,10 +508,7 @@ function parseExpectation(input: unknown): PlaneExpectationV1 | undefined {
 }
 
 function parseObservation(input: unknown): PlaneObservationV1 | undefined {
-  const root = closedRecord(input, [
-    'reportedComplete', 'headDigest', 'inventoryDigest', 'assetCount',
-    'metadataTripleCount', 'dataTripleCount',
-  ]);
+  const root = closedRecord(input, PLANE_OBSERVATION_KEYS);
   if (!root || typeof root.reportedComplete !== 'boolean'
     || !nonNegativeInteger(root.assetCount)
     || !nonNegativeInteger(root.metadataTripleCount)

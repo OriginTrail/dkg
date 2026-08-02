@@ -2,6 +2,16 @@
 
 export type PlainDataRecord = Record<string, unknown>;
 
+/**
+ * Declare every string field of a model exactly once. Type-checking fails when
+ * the model gains a field until the closed boundary descriptor is updated.
+ */
+export function defineRecordKeys<T>() {
+  return <const Keys extends readonly Extract<keyof T, string>[]>(
+    ...keys: Exclude<Extract<keyof T, string>, Keys[number]> extends never ? Keys : never
+  ): Keys => keys;
+}
+
 const IDENTIFIER = /^[A-Za-z0-9._:/@-]+$/u;
 
 /** Accept an ordinary object whose own fields are enumerable data properties. */

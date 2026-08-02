@@ -57,25 +57,24 @@ export function readCleanRepositoryHead(repoRootInput: string): string {
   return head;
 }
 
-export interface StableJsonOptions {
-  readonly format?: 'pretty' | 'compact';
-  readonly trailingLf?: boolean;
-  readonly numbers?: 'finite' | 'safe-integer';
-}
+type JsonNumberPolicy = 'finite' | 'safe-integer';
 
-export function stableJson(value: unknown, options: StableJsonOptions = {}): string {
+/** Gate 0 canonical JSON: sorted keys, two-space indentation, and one trailing LF. */
+export function stableJson(value: unknown): string {
   const normalized = normalizePlainJsonValue(
     value,
     '$',
     new WeakSet<object>(),
-    options.numbers ?? 'finite',
+    'finite',
   );
-  const encoded = JSON.stringify(
-    normalized,
-    null,
-    options.format === 'compact' ? undefined : 2,
+  return `${JSON.stringify(normalized, null, 2)}\n`;
+}
+
+/** M1 canonical JSON: sorted keys, compact bytes, and lossless integer numbers only. */
+export function compactSafeIntegerJson(value: unknown): string {
+  return JSON.stringify(
+    normalizePlainJsonValue(value, '$', new WeakSet<object>(), 'safe-integer'),
   );
-  return options.trailingLf === false ? encoded : `${encoded}\n`;
 }
 
 export function atomicWriteStableJson(
@@ -159,7 +158,7 @@ function normalizePlainJsonValue(
   value: unknown,
   path: string,
   seen: WeakSet<object>,
-  numbers: NonNullable<StableJsonOptions['numbers']>,
+  numbers: JsonNumberPolicy,
 ): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
