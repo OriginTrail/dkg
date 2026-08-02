@@ -2699,6 +2699,180 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
+  /**
+   * Stage extra operation subjects for the SAME assertion, so late-receipt
+   * discovery has several candidates to choose between. `shareOperationId`
+   * values are chosen to sort BEFORE the real one, because discovery is
+   * `ORDER BY ?shareId` and that order is unrelated to which candidate matches.
+   */
+  async function stageDecoyOperations(input: {
+    count: number;
+    prefix: string;
+    contentFor: (index: number) => string;
+  }): Promise<string[]> {
+    const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
+    const shareIds: string[] = [];
+    for (let index = 0; index < input.count; index += 1) {
+      const shareOperationId = `${input.prefix}-${index}`;
+      shareIds.push(shareOperationId);
+      const value = input.contentFor(index);
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        shareOperationId,
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+        // Same public triple count as the real assertion, so the count filter
+        // in discovery cannot separate them — only a full payload resolution can.
+        quads: [
+          { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: `"${value}-one"`, graph: '' },
+          { subject: 'urn:asset:two', predicate: 'urn:predicate:value', object: `"${value}-two"`, graph: '' },
+        ],
+        publisherPeerId: '12D3KooWPublisher',
+      });
+    }
+    return shareIds;
+  }
+
+  async function reconcileFromImmutableSnapshot(
+    message: FinalizationMessageMsg,
+  ): Promise<string> {
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    return handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+      // Carries no publicQuadsDigest, so discovery cannot pre-filter by content
+      // and every candidate must be resolved to be told apart. This is the case
+      // a candidate cap silently broke.
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
+    }, createOperationContext('system'));
+  }
+
+  /**
+   * Regression guard against re-introducing a candidate cap.
+   *
+   * Discovery orders by `?shareId`, which has no relationship to which snapshot
+   * actually matches the receipt. Truncating that list therefore does not do
+   * less work, it returns a different answer — and because the list is
+   * deterministic, every retry re-derives the identical truncation, so the
+   * receipt is stranded permanently rather than delayed. Five candidates with
+   * the matching one last is past the boundary of the cap this replaced.
+   */
+  it('verifies a late receipt whose matching snapshot sorts last among many candidates', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+
+    // 'aaa-decoy-*' sorts before 'graph-finalization-share'.
+    await stageDecoyOperations({
+      count: 4,
+      prefix: 'aaa-decoy',
+      contentFor: (index) => `decoy-${index}`,
+    });
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({ graph: graphManager.metaGraphUri(CG), subject: UAL });
+
+    await expect(reconcileFromImmutableSnapshot(message)).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  /**
+   * The subtle half of the content memo: a THROW must not memo.
+   *
+   * Failing to READ one operation's snapshot says nothing about whether that
+   * content is correct, and a sibling operation may hold a readable copy of the
+   * very same content. Memoing on throw would therefore skip the readable copy
+   * and strand the receipt. Both candidates here carry identical content, so
+   * they share a digest — which is exactly when a wrongly-placed memo bites.
+   */
+  it('still verifies a readable snapshot after an identical-content sibling fails to resolve', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+
+    // Same content as the real assertion, so it advertises the same digest, and
+    // it sorts first. Its snapshot payload is then made unreadable.
+    const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'aaa-unreadable-twin',
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      quads: [
+        { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: '"one"', graph: '' },
+        { subject: 'urn:asset:two', predicate: 'urn:predicate:value', object: '"two"', graph: '' },
+      ],
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: message.privateTripleCount,
+      publisherPeerId: '12D3KooWPublisher',
+    });
+    const twinSnapshotGraph = (await store.query(
+      `SELECT ?graph WHERE { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> { `
+        + `<${workspaceOperationSubject(CG, 'aaa-unreadable-twin')}> `
+        + `<http://dkg.io/ontology/publicSnapshotGraph> ?graph } }`,
+    ));
+    if (twinSnapshotGraph.type !== 'bindings' || !twinSnapshotGraph.bindings[0]?.['graph']) {
+      throw new Error('expected a snapshot graph for the twin operation');
+    }
+    await store.dropGraph(twinSnapshotGraph.bindings[0]['graph']!);
+
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({ graph: graphManager.metaGraphUri(CG), subject: UAL });
+
+    await expect(reconcileFromImmutableSnapshot(message)).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  /**
+   * The other half of the memo: a content rejection MUST memo, or the bound on
+   * repeated work does not exist and we are back to a full payload read per
+   * candidate. The answer is identical either way, so this can only be observed
+   * by counting payload resolutions — an output-equality assertion here would
+   * pass with the memo deleted.
+   */
+  it('resolves an already-rejected snapshot digest only once across candidates', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+
+    // Two candidates with IDENTICAL wrong content, so they advertise the same
+    // digest and the second is provably a repeat of work already done.
+    await stageDecoyOperations({ count: 2, prefix: 'aaa-dup', contentFor: () => 'same-wrong' });
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({ graph: graphManager.metaGraphUri(CG), subject: UAL });
+
+    const payloadReads: string[] = [];
+    const originalQuery = store.query.bind(store);
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (
+        options?.source === 'agent.finalization.resolveImmutableSnapshotPayload'
+        && query.startsWith('CONSTRUCT')
+      ) payloadReads.push(query);
+      return originalQuery(query, options);
+    });
+
+    await expect(reconcileFromImmutableSnapshot(message)).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    // One rejected duplicate plus the matching snapshot — never the skipped twin.
+    expect(payloadReads).toHaveLength(2);
+    querySpy.mockRestore();
+  });
+
   it('rejects mixed graph-scope and legacy-root finalization envelopes', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(
