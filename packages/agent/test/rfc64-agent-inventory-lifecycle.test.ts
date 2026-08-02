@@ -153,6 +153,7 @@ function minimalStartedAgent(
   });
   Object.assign(agent, {
     started: true,
+    syncCapacityRuntime: { stopSampling: vi.fn() },
     chainPoller: null,
     coreHostRecordingsClosed: false,
     drainCoreHostRecordings: vi.fn(async () => {}),
@@ -504,6 +505,7 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
       'store',
     ]);
     expect(inventoryClose).toHaveBeenCalledOnce();
+    expect(agent.syncCapacityRuntime.stopSampling).toHaveBeenCalledOnce();
     expect(agent.finalizationRuntime.getRecoveryStore()).toBeUndefined();
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     expect(agent.started).toBe(false);
