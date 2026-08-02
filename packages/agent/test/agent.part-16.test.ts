@@ -165,18 +165,21 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
 
         expect(peerStoreReads).toBe(3);
+        // Background catch-up carries no admission priority override, but it
+        // does tag its origin so node-wide scheduler diagnostics can attribute
+        // queue pressure to a trigger (issue #2006).
         expect(syncFromPeerDetailed.calls.at(-1)).toEqual([
           remotePeer.toString(),
           ['runtime-contextGraph'],
           undefined,
           undefined,
           undefined,
-          undefined,
+          { source: 'catchup-background' },
         ]);
         expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([
           remotePeer.toString(),
           ['runtime-contextGraph'],
-          undefined,
+          { source: 'catchup-background' },
         ]);
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(1);

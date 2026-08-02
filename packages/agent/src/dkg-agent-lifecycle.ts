@@ -313,8 +313,10 @@ import {
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
   orderContextGraphIdsByPriority,
   syncPriorityClass,
+  type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
 import {
@@ -472,6 +474,11 @@ import {
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
+import {
+  authoritativeSyncPeerId,
+  resolveCuratorSyncPeer,
+  type SyncPeerResolution,
+} from './dkg-agent-cg-resolve.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -939,6 +946,19 @@ export type DurableSyncOptions = {
   exactAssetUals?: string[];
   /** Admission override for foreground VM recovery. */
   priority?: number;
+  /**
+   * Which trigger asked for this sync. Recorded as a bounded dimension on
+   * node-wide scheduler diagnostics so queue pressure can be attributed to an
+   * origin.
+   *
+   * The closed union, so an ordinary in-process caller cannot introduce an
+   * unbounded or identifier-bearing label. The catch-up Worker RPC is the one
+   * path where the compile-time union guarantees nothing — a `postMessage`
+   * payload is whatever crossed the wire — and that edge clamps with
+   * `normalizeSyncAdmissionSource` in the CLI bridge before calling in.
+   * The scheduler re-clamps anyway, as defence in depth.
+   */
+  source?: SyncAdmissionSource;
 };
 
 type LegacyDurableContextGraphOptions = {
@@ -1152,9 +1172,54 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     lane: SyncSchedulerLane,
     label: string,
     work: () => Promise<T>,
-    priorityOverride?: number,
-    operationSignal?: AbortSignal,
+    admission: {
+      /** Admission override for foreground catch-up / VM recovery. */
+      priorityOverride?: number;
+      operationSignal?: AbortSignal;
+      /**
+       * Which trigger enqueued this admission. Typed as the closed union for
+       * ordinary callers; still normalized HERE, because this is the single
+       * choke point every admission passes through and a clamp that cannot be
+       * bypassed is worth more than one that merely type-checks.
+       */
+      source?: SyncAdmissionSource;
+    } = {},
+    /**
+     * Nothing may follow `admission`. Typed `never[]` so a TypeScript caller passing
+     * the old 7th positional `operationSignal` fails to compile, and captured at
+     * runtime so a JS one fails too — see the guard below.
+     */
+    ...legacyPositionalArgs: never[]
   ): Promise<T> {
+    // Before #2006 this took `(…, priorityOverride?: number, operationSignal?: AbortSignal)`
+    // positionally. Those collapsed into one `admission` object so the new `source`
+    // dimension did not become a fourth positional argument.
+    //
+    // TypeScript rejects the old shape, but a JS caller compiled against it would
+    // pass a number here, destructure to `undefined`, and silently lose BOTH its
+    // priority override AND its cancellation — an operation that ignores its abort
+    // signal keeps running after the caller gave up. Losing cancellation quietly is
+    // strictly worse than failing, so the old shape fails loudly.
+    //
+    // Deliberately NOT a compatibility shim translating the old arguments: this is an
+    // internal admission helper with no caller outside `packages/agent`, and a
+    // translated second shape would have to be carried and tested forever.
+    // `legacyPositionalArgs` catches the shape the 6th-argument test below cannot:
+    // `(…, work, undefined, signal)`. There the 6th is absent-looking and defaults to
+    // `{}`, so only the presence of a 7th argument reveals that a caller still thinks
+    // it is passing a cancellation signal.
+    if (legacyPositionalArgs.length > 0
+      || typeof admission !== 'object' || admission === null
+      || typeof (admission as { aborted?: unknown }).aborted === 'boolean') {
+      throw new TypeError(
+        'runContextGraphSyncWithBackpressure takes a single `admission` object '
+        + '({ priorityOverride, operationSignal, source }). The positional '
+        + 'priority/signal arguments used before issue #2006 are no longer accepted, '
+        + 'because ignoring them would silently drop the caller\'s cancellation.',
+      );
+    }
+    const { priorityOverride, operationSignal } = admission;
+    const source = normalizeSyncAdmissionSource(admission.source);
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
     const admissionBoundary = combineSyncAdmissionSignals(
@@ -1171,6 +1236,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lane,
           priority,
           priorityClass: syncPriorityClass(priority),
+          source,
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
         },
@@ -3616,6 +3682,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     probe: SyncReconcilerProbe,
+    source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
@@ -3623,7 +3690,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       const outcome = await this.trySyncFromPeer(remotePeer, () => {
         syncAccountingClearedBackoff = true;
-      });
+      }, source);
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
@@ -3671,6 +3738,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
+    source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started) {
       return 'not-started';
@@ -3708,12 +3776,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         undefined,
         undefined,
         undefined,
-        { stopOnBackoffWorthyFailure: true },
+        { stopOnBackoffWorthyFailure: true, source },
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
       syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
         stopOnBackoffWorthyFailure: true,
+        source,
         sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
       }),
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
@@ -3991,7 +4060,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler'))) continue;
       const shortPeer = peerId.slice(-8);
       this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
-      this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe)
+      this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile')
         .then(() => undefined)
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -4361,6 +4430,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphIds,
           onAccessDenied,
           options?.priority,
+          normalizeSyncAdmissionSource(options?.source),
         );
         changelogResult = lane.result;
         legacyContextGraphIds = lane.remainingLegacyCgs;
@@ -4458,8 +4528,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               item.lane,
               item.operationId,
               work,
-              options?.priority,
-              operationBoundary.signal,
+              {
+                priorityOverride: options?.priority,
+                operationSignal: operationBoundary.signal,
+                source: options?.source,
+              },
             ),
             operationBoundary.signal,
           );
@@ -4539,6 +4612,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         exactAssetUals: assetUals,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
+        source: 'vm-recovery',
       },
     );
   }
@@ -4736,6 +4810,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[],
     onAccessDenied?: (contextGraphId: string) => void,
     priority?: number,
+    source?: SyncAdmissionSource,
   ): Promise<{ result?: DurableSyncResult; remainingLegacyCgs: string[] }> {
     const peerProtocols = await this.getPeerProtocols(remotePeerId);
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
@@ -4776,7 +4851,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         item.lane,
         item.operationId,
         run,
-        priority,
+        { priorityOverride: priority, source },
       ),
       merge: mergeDurableSyncAccumulatorInto,
       markDeferred: (summary) => {
@@ -5212,6 +5287,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
       /** Admission override for foreground catch-up. */
       priority?: number;
+      /**
+       * Bounded admission origin for node-wide scheduler diagnostics. The
+       * closed union: the catch-up Worker RPC is the only untrusted producer
+       * and it clamps in the CLI bridge, while `acquire` re-clamps regardless.
+       */
+      source?: SyncAdmissionSource;
     },
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
@@ -5436,7 +5517,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.lane,
           item.operationId,
           run,
-          options?.priority,
+          { priorityOverride: options?.priority, source: options?.source },
         ),
         merge: mergeSharedMemorySyncResults,
         markDeferred: (summary) => ({
@@ -5520,6 +5601,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeerId,
         contextGraphId,
       ),
+      { source: 'swm-recovery' },
     );
   }
 
@@ -5865,18 +5947,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return runCatchupPlanesWithPolicy({
           mode,
           includeSharedMemory,
-          syncDurable: ({ priority }) => this.syncFromPeerDetailed(
+          syncDurable: ({ priority, source }) => this.syncFromPeerDetailed(
             remotePeerId,
             [contextGraphId],
             undefined,
             undefined,
             undefined,
-            priority === undefined ? undefined : { priority },
+            { ...(priority === undefined ? {} : { priority }), source },
           ).catch(() => createFailedPeerDurableSyncResult()),
-          syncSharedMemory: ({ priority }) => this.syncSharedMemoryFromPeerDetailed(
+          syncSharedMemory: ({ priority, source }) => this.syncSharedMemoryFromPeerDetailed(
             remotePeerId,
             [contextGraphId],
-            priority === undefined ? undefined : { priority },
+            { ...(priority === undefined ? {} : { priority }), source },
           ).catch(emptyShared),
         });
       },
@@ -6255,13 +6337,51 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.knownCorePeerIds);
   }
 
+  /**
+   * Resolve the catch-up sync peer ONCE, with both notions the walk needs.
+   *
+   * They are one resolution, not two: ranking takes the best peer available
+   * whatever its provenance, while letting one peer's answer stand for the
+   * whole graph requires a metadata-resolved curator. The authenticated
+   * join-approval hint ranks but never settles — it can be stale, since a
+   * curator that rotated its libp2p key leaves an ordinary member sitting on
+   * the id it names.
+   *
+   * Deriving that distinction from two calls would read `_meta` twice (and run
+   * the registry fallback twice for a wallet-address curator) per catch-up, and
+   * would hide that the resolver has a side effect — it evicts the bootstrap
+   * hint once metadata confirms a curator, so the second call is not the same
+   * call as the first.
+   */
+  async resolveSyncPeerWithProvenance(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<SyncPeerResolution> {
+    return resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId);
+  }
+
   async resolvePreferredSyncPeerId(this: DKGAgent, contextGraphId: string): Promise<string | undefined> {
-    // resolveCuratorPeerId consults authoritative metadata first and only then
-    // falls back to the authenticated join-approval hint. Calling it before
-    // reading preferredSyncPeers prevents that bootstrap hint from pinning all
-    // later catchups to a curator that metadata has superseded.
-    const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
-    return curatorPeerId ?? this.preferredSyncPeers.get(contextGraphId);
+    // Deliberately NOT routed through the sibling method: each of these is one
+    // resolution on its own, and going through `this` would make them
+    // unusable against the hand-built receivers several suites call them on.
+    return (await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId)).peerId;
+  }
+
+  /**
+   * The sync peer ONLY when it is a metadata-resolved curator.
+   *
+   * Provenance comes from {@link resolveCuratorSyncPeer} itself. Deriving it
+   * here — by comparing the resolved id against the hint — would be wrong in
+   * the ordinary case, where the join approval came from the curator and both
+   * routes name the SAME peer.
+   */
+  async resolveAuthoritativeSyncPeerId(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<string | undefined> {
+    return authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId),
+    );
   }
 
   async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {

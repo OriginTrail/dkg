@@ -18,6 +18,8 @@ vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOr
   };
 });
 
+import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
+import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
@@ -335,8 +337,118 @@ describe('durable sync lifecycle chain binding', () => {
       exactAssetUals: [exactUal],
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
+      // The admission SOURCE is what makes this show up as `durable:vm-recovery`
+      // rather than `durable:unspecified` on the sync-global scheduler, which is
+      // the whole point of the label. Without this line, deleting it from the
+      // call site keeps every test green and only the Grafana attribution rots.
+      source: 'vm-recovery',
     });
     expect(runLegacyDurableSync.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
+  });
+
+  it.each([
+    ['a positional priority override', [2000]],
+    ['a positional AbortSignal', ['SIGNAL']],
+    // The shape the 6th-argument check alone cannot see: the 6th is absent-looking
+    // and defaults to `{}`, so only the PRESENCE of a 7th reveals that the caller
+    // still believes it is passing a cancellation signal. Before the rest-parameter
+    // guard this returned normally and dropped the signal.
+    ['a cancellation-only legacy call', [undefined, 'SIGNAL']],
+    ['both legacy positionals', [2000, 'SIGNAL']],
+  ])('rejects the pre-#2006 positional admission shape: %s', async (_label, tail) => {
+    // The old signature was (ctx, cg, lane, label, work, priorityOverride?, signal?).
+    // A JS caller compiled against it would destructure to undefined and silently
+    // lose its priority AND its cancellation — an operation that ignores its abort
+    // signal keeps running after the caller gave up. That must fail loudly.
+    const legacyArgs = (tail as unknown[]).map(
+      (a) => (a === 'SIGNAL' ? new AbortController().signal : a),
+    );
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      node: { stopSignal: undefined },
+      syncScheduler: { acquire: async () => ({ release: () => {} }) },
+    };
+
+    await expect(
+      (LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure as any).call(
+        agentLike,
+        {},
+        'cg-legacy',
+        'durable',
+        'label',
+        async () => 'done',
+        ...legacyArgs,
+      ),
+    ).rejects.toThrow(/takes a single .admission. object/);
+  });
+
+  it('labels changelog-lane admissions at the call site', async () => {
+    // The changelog delta lane (OT-RFC-59) is a SEPARATE production admission path
+    // from the durable and shared-memory ones already covered. A public Context
+    // Graph on a changelog-capable peer never reaches `runLegacyDurableSync`, so a
+    // dropped source here would surface only as `changelog:unspecified` on
+    // /api/diagnostics/backpressure while every existing source test stayed green.
+    const admissions: unknown[][] = [];
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      // Record the admission and return a real accumulator: the lane folds the
+      // result, so an empty object would fail inside the merge before the
+      // assertion below could run.
+      runContextGraphSyncWithBackpressure: async (...args: unknown[]) => {
+        admissions.push(args);
+        return createDurableSyncAccumulator();
+      },
+    };
+
+    await LifecycleSyncMethods.prototype.runChangelogLane.call(
+      agentLike as never,
+      ctx,
+      '12D3KooWChangelogPeer',
+      ['public-cg'],
+      undefined,
+      2_000,
+      'catchup-foreground',
+    );
+
+    expect(admissions).toHaveLength(1);
+    const [, contextGraphId, lane, , , admission] = admissions[0] as unknown[];
+    expect(contextGraphId).toBe('public-cg');
+    expect(lane).toBe('changelog');
+    expect(admission).toMatchObject({
+      priorityOverride: 2_000,
+      source: 'catchup-foreground',
+    });
+  });
+
+  it('labels standalone SWM recovery admissions at the call site', async () => {
+    // The sibling of the VM-recovery assertion above, and the one that had NO
+    // coverage: a regression dropping this source would report SWM recovery
+    // pressure as `shared-memory:unspecified` on the sync-global scheduler.
+    // Asserted on the real prototype so it pins the production call site, not a
+    // re-statement of it.
+    const runContextGraphSyncWithBackpressure = vi.fn(async () => ({}));
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      runContextGraphSyncWithBackpressure,
+    };
+
+    await LifecycleSyncMethods.prototype.recoverContextGraphSwmFromPeer.call(
+      agentLike as any,
+      '12D3KooWSwmRecoveryPeer',
+      'private-cg',
+    );
+
+    expect(runContextGraphSyncWithBackpressure).toHaveBeenCalledTimes(1);
+    const [, contextGraphId, lane, , , admission] =
+      runContextGraphSyncWithBackpressure.mock.calls[0] as unknown as unknown[];
+    expect(contextGraphId).toBe('private-cg');
+    expect(lane).toBe('swm_recovery');
+    expect(admission).toEqual({ source: 'swm-recovery' });
   });
 
   it('honors an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {

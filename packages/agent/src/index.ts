@@ -127,12 +127,15 @@ export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
 export {
+  SYNC_ADMISSION_SOURCES,
   contextGraphPriority,
   countSyncPriorityClasses,
+  normalizeSyncAdmissionSource,
   normalizeSyncContextGraphPriorities,
   orderContextGraphIdsByPriority,
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
+  type SyncAdmissionSource,
   type SyncContextGraphPriorityConfig,
   type SyncPriorityClass,
   type SyncResponderSnapshotLimitsConfig,
@@ -222,6 +225,8 @@ export {
   type ImportedArtifactByteStore,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SharedMemorySyncDiagnostics,
+  type SharedMemorySyncResult,
 } from './dkg-agent-types.js';
 export {
   computeImportedArtifactSelector,
@@ -304,18 +309,43 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
-export { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 export {
-  CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
+  CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+  CATCHUP_STOP_ON_PROOF,
+  catchupWaveSizes,
+} from './sync/catchup-concurrency.js';
+// Only what a cross-package consumer genuinely needs. The CLI daemon's Worker
+// catch-up runner drives the same plane policy and must not deep-import the
+// compiled `dist/`; everything else here — the backoff curve, the env parser,
+// the injected clock seams — is retry-policy internals, and in-package tests
+// import those from `./sync/catchup-policy.js` directly rather than pinning
+// them to the published surface.
+export {
+  CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
   catchupPriorityForMode,
+  catchupSourceForMode,
+  runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
+  type CatchupAdmissionSource,
+  type CatchupBackpressureRetryPolicy,
   type CatchupMode,
   type CatchupPlaneContext,
+  type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlanePolicyResult,
   type CatchupPlaneResult,
 } from './sync/catchup-policy.js';
+// Which peer may let one answer stand for a WHOLE Context Graph is the load-
+// bearing distinction of the foreground catch-up walk (#2006), and the walk
+// lives in the CLI's worker. Publishing the model — rather than letting the
+// bridge re-shape it into a bare string — is what keeps the two sides from
+// drifting: adding or renaming a provenance value must break the consumer, not
+// silently downgrade it to "not authoritative".
+export {
+  authoritativeSyncPeerId,
+  type SyncPeerResolution,
+} from './dkg-agent-cg-resolve.js';
 export {
   classifyDurableProgress,
   createFailedPeerDurableSyncResult,
