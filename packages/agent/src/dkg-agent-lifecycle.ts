@@ -7299,8 +7299,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           && row.subscribed
           && row.onChainId
         ) {
-          const accessPolicy = await this.getExplicitAccessPolicy(row.id);
-          if (accessPolicy === 'public') syncAdmission = 'automatic-public';
+          try {
+            const accessPolicy = await this.getExplicitAccessPolicy(row.id);
+            if (accessPolicy === 'public') syncAdmission = 'automatic-public';
+          } catch (error) {
+            // One unreadable legacy row must not prevent independent durable
+            // subscriptions from rehydrating. Keep the deterministic V31
+            // fallback, canonicalize that fallback, and continue with later rows.
+            this.log.warn(
+              ctx,
+              `Failed to classify legacy sync admission for "${row.id}"; ` +
+                `preserving fallback "${syncAdmission}" and continuing rehydration: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
         }
         this.setContextGraphSubscription(row.id, {
           name: row.name,

@@ -7,6 +7,7 @@ import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   DKG_ONTOLOGY,
+  Logger,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
@@ -720,6 +721,73 @@ describe('Context Graph discovery/subscription boundary', () => {
     } finally {
       await first?.stop().catch(() => {});
       await restarted?.stop().catch(() => {});
+    }
+  }, 60_000);
+
+  it('continues legacy Core rehydration after one access-policy lookup fails', async () => {
+    const failingId = 'legacy-policy-a-fails';
+    const validId = 'legacy-policy-b-valid';
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>([
+      failingId,
+      validId,
+    ].map((id, index) => [
+      id,
+      {
+        id,
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: `0x${String(index + 4).repeat(64)}`,
+        syncScoped: true,
+      },
+    ]));
+    const warnings: string[] = [];
+    let agent: DKGAgent | undefined;
+    Logger.setSink((entry) => {
+      if (entry.level === 'warn') warnings.push(entry.message);
+    });
+
+    try {
+      agent = await DKGAgent.create({
+        name: 'LegacyCoreCoveragePolicyFailure',
+        listenHost: '127.0.0.1',
+        nodeRole: 'core',
+        chainAdapter: new MockChainAdapter(),
+        contextGraphSubscriptionStore: {
+          loadAll: async () => [...persisted.values()].map((row) => ({ ...row })),
+          save: async (record) => { persisted.set(record.id, { ...record }); },
+          delete: async (id) => { persisted.delete(id); },
+        },
+      });
+      (agent as any).getExplicitAccessPolicy = async (id: string) => {
+        if (id === failingId) throw new Error('policy projection unavailable');
+        return 'public';
+      };
+
+      await agent.start();
+
+      expect(agent.getSubscribedContextGraphs().get(failingId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'explicit',
+      });
+      expect(agent.getSubscribedContextGraphs().get(validId)).toMatchObject({
+        subscribed: true,
+        syncAdmission: 'automatic-public',
+      });
+      expect(persisted.get(failingId)).toMatchObject({
+        syncAdmission: 'explicit',
+        syncScoped: true,
+      });
+      expect(persisted.get(validId)).toMatchObject({
+        syncAdmission: 'automatic-public',
+        syncScoped: false,
+      });
+      expect(warnings).toContainEqual(expect.stringContaining(failingId));
+      expect(warnings).toContainEqual(expect.stringContaining('policy projection unavailable'));
+    } finally {
+      await agent?.stop().catch(() => {});
+      Logger.setSink(null);
     }
   }, 60_000);
 
