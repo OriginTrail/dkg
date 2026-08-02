@@ -19,7 +19,12 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { GraphManager, OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  StoreSchedulerBusyError,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { FinalizedSwmCleanupService } from '../src/finalized-swm-cleanup-service.js';
 import { FinalizedSwmCleanupWorker } from '../src/finalized-swm-cleanup-worker.js';
 
@@ -385,6 +390,94 @@ describe('finalized SWM cleanup sweep gates', () => {
     expect(worker.snapshot()).toMatchObject({ runs: 1, pressureSkips: 0, lastError: null });
     expect(timers).toHaveLength(1);
     expect(timers[0]!.delayMs).toBe(321);
+    await worker.close();
+  });
+
+  /**
+   * Wires the real service into the real worker so a store rejection travels
+   * the whole path it travels in production.
+   *
+   * The snapshot gate is a point-in-time sample and cannot see load that lands
+   * between the gate and the query, so the background lane reports saturation
+   * by THROWING instead. `inspectBacklog` even raises that class itself as a
+   * defensive check straight after the gate, so the service can manufacture the
+   * error without any scheduler load at all — just the race between the two.
+   *
+   * Before this was classified, such a throw skipped the worker's retry
+   * scheduling entirely (which exists only on the success path) and stranded
+   * the backlog until the 15-minute backstop.
+   */
+  function schedulerThrowFixture(error: unknown) {
+    const store = new OxigraphStore();
+    installPressureSwitch(store);
+    const originalQuery = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source === 'agent.finalizedSwmCleanup.backlog') throw error;
+      return originalQuery(query, options);
+    });
+    const service = new FinalizedSwmCleanupService({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [
+        new GraphManager(store).sharedMemoryMetaUri(CG),
+      ],
+    });
+    const timers: Array<{ fn: () => void; delayMs: number }> = [];
+    const onError = vi.fn();
+    const worker = new FinalizedSwmCleanupWorker({
+      sweep: () => service.runSweep(),
+      retryDelayMs: 5_000,
+      onError,
+      setTimer: ((fn: () => void, delayMs: number) => {
+        timers.push({ fn, delayMs });
+        return { unref() {} };
+      }) as never,
+      clearTimer: () => {},
+    });
+    return { worker, timers, onError };
+  }
+
+  it('retries and counts a scheduler rejection thrown out of the sweep as pressure', async () => {
+    const { worker, timers, onError } = schedulerThrowFixture(
+      new StoreSchedulerBusyError('queue_full', 'background', 'agent.finalizedSwmCleanup.backlog'),
+    );
+
+    await worker.runNow();
+
+    // Retried on the prompt cadence rather than left to the periodic backstop.
+    expect(timers).toHaveLength(1);
+    expect(timers[0]!.delayMs).toBe(5_000);
+    // Counted as a deferral, not swallowed as a fault: the counters must stay
+    // meaningful exactly when deferral is happening.
+    expect(worker.snapshot()).toMatchObject({
+      runs: 1,
+      pressureSkips: 1,
+      lastError: null,
+      backlogStale: true,
+    });
+    expect(onError).not.toHaveBeenCalled();
+    await worker.close();
+  });
+
+  /**
+   * The negative that makes the classification mean something. Broadening it to
+   * catch every throw would make an unknown fault hot-retry every few seconds
+   * forever, and the positive test above would still pass — so the boundary
+   * needs its own assertion.
+   */
+  it('does not retry an unknown sweep failure', async () => {
+    const { worker, timers, onError } = schedulerThrowFixture(new Error('store exploded'));
+
+    await worker.runNow();
+
+    expect(timers).toHaveLength(0);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(worker.snapshot()).toMatchObject({
+      runs: 1,
+      pressureSkips: 0,
+      lastError: 'store exploded',
+    });
     await worker.close();
   });
 });
