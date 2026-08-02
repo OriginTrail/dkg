@@ -6512,9 +6512,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphWireId(next.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
-    const canonicalNext = next.onChainHash === nextOnChainHash
-      ? next
-      : { ...next, onChainHash: nextOnChainHash };
+    const inheritedSyncMode = next.syncMode ?? previous?.syncMode;
+    const canonicalNext = {
+      ...next,
+      ...(inheritedSyncMode ? { syncMode: inheritedSyncMode } : {}),
+      ...(next.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
+    };
     if (
       previousWireId !== nextWireId
       && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
@@ -6526,7 +6529,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
-    if (options?.persist !== false) {
+    // On-demand subscriptions deliberately keep their live state and
+    // readiness process-local. This guard also covers later state patches
+    // (for example catch-up completion), so they cannot accidentally create a
+    // durable row after the initial subscribe call opted out.
+    if (options?.persist !== false && canonicalNext.syncMode !== 'on-demand') {
       if (this.config.contextGraphSubscriptionStore) {
         const revision = this.nextContextGraphSubscriptionPersistRevision(contextGraphId);
         this.persistContextGraphSubscription(
@@ -6762,6 +6769,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
+    if (sub?.syncMode === 'on-demand') {
+      // Some lifecycle paths persist reconciliation watermarks directly
+      // instead of going through setContextGraphSubscription. Preserve the
+      // process-local lifetime at this lowest shared write boundary too.
+      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
+      return;
+    }
     // Persist member subscriptions AND (Phase D) public CGs this Core hosts —
     // the host-only record MUST survive restart so a Core that was offline
     // during a publish remembers it hosts the CG and fills its gap. Drop the
@@ -7258,6 +7272,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const restorePendingMeta = hasJoinApproval && !approvedAgentAuthorized;
         this.setContextGraphSubscription(row.id, {
           name: row.name,
+          // Every row in the durable store predates or represents explicit
+          // restart persistence, so absence of a mode is always-on.
+          syncMode: 'always-on',
           subscribed: row.subscribed,
           synced: restorePendingMeta ? false : row.synced,
           sharedMemorySynced: restorePendingMeta ? false : row.sharedMemorySynced,

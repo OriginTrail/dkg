@@ -2861,8 +2861,18 @@ export const shutdownNode = () =>
   post<{ ok: boolean }>('/api/shutdown', {});
 
 // --- Integrations ---
-export const subscribeToContextGraph = (contextGraphId: string) =>
-  post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
+export const subscribeToContextGraph = (
+  contextGraphId: string,
+  options?: { syncMode?: 'on-demand' | 'always-on' },
+) =>
+  post<{
+    subscribed: string;
+    syncMode: 'on-demand' | 'always-on';
+    catchup?: { status: string; jobId: string };
+  }>('/api/subscribe', {
+    contextGraphId,
+    syncMode: options?.syncMode ?? 'on-demand',
+  });
 
 // --- Notifications (scoped pane wire contract — implementation-plan §3) ---
 //

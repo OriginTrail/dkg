@@ -197,6 +197,7 @@ export {
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
+  type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type PublishOpts,

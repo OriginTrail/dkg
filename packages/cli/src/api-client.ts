@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
   ContextGraphReconcileResult,
+  ContextGraphSyncMode,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
@@ -1489,8 +1490,12 @@ export class ApiClient {
     return this.post('/api/query-remote', { peerId, ...request });
   }
 
-  async subscribeToContextGraph(contextGraphId: string, options?: { includeSharedMemory?: boolean }): Promise<{
+  async subscribeToContextGraph(contextGraphId: string, options?: {
+    includeSharedMemory?: boolean;
+    syncMode?: ContextGraphSyncMode;
+  }): Promise<{
     subscribed: string;
+    syncMode: ContextGraphSyncMode;
     catchup?:
       | {
         connectedPeers: number;
@@ -1552,7 +1557,11 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.post('/api/context-graph/subscribe', { contextGraphId, includeWorkspace: options?.includeSharedMemory });
+    return this.post('/api/context-graph/subscribe', {
+      contextGraphId,
+      includeWorkspace: options?.includeSharedMemory,
+      syncMode: options?.syncMode,
+    });
   }
 
   /**
@@ -1566,6 +1575,7 @@ export class ApiClient {
   /** @deprecated Use subscribeToContextGraph */
   async subscribe(contextGraphId: string, options?: { includeWorkspace?: boolean }): Promise<{
     subscribed: string;
+    syncMode: ContextGraphSyncMode;
     catchup?:
       | {
         connectedPeers: number;
