@@ -27,6 +27,17 @@ function normalizeBatchSize(value: number | undefined): number {
   return value;
 }
 
+function resolveEffectiveBatchSize(
+  configuredBatchSize: number,
+  effectiveBatchSize: number | undefined,
+): number {
+  if (effectiveBatchSize === undefined) return configuredBatchSize;
+  if (!Number.isInteger(effectiveBatchSize) || effectiveBatchSize < 0) {
+    throw new TypeError('effective Core public sync batch size must be a non-negative integer');
+  }
+  return Math.min(configuredBatchSize, effectiveBatchSize);
+}
+
 function greatestCommonDivisor(a: number, b: number): number {
   let left = a;
   let right = b;
@@ -111,6 +122,7 @@ export class CorePublicSyncCoverageScheduler {
     selectedContextGraphIds: readonly string[],
     priorities?: Readonly<SyncContextGraphPriorityConfig>,
     planningLane = 'default',
+    effectiveBatchSize?: number,
   ): string[] {
     const selected = [...new Set(
       selectedContextGraphIds.map((id) => id.trim()).filter(Boolean),
@@ -127,8 +139,9 @@ export class CorePublicSyncCoverageScheduler {
       .map(({ contextGraphId }) => contextGraphId);
 
     const scheduledCoverage: string[] = [];
-    if (this.batchSize > 0 && coverage.length > 0) {
-      const count = Math.min(this.batchSize, coverage.length);
+    const batchSize = resolveEffectiveBatchSize(this.batchSize, effectiveBatchSize);
+    if (batchSize > 0 && coverage.length > 0) {
+      const count = Math.min(batchSize, coverage.length);
       const previousAnchor = this.laneAnchors.get(planningLane);
       const previousAnchorIndex = previousAnchor === undefined
         ? -1

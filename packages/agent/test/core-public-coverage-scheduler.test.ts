@@ -145,6 +145,57 @@ describe('Core public Context Graph coverage scheduler', () => {
     });
   });
 
+  it('clamps a live automatic-coverage batch without counting selected CGs', () => {
+    const scheduler = new CorePublicSyncCoverageScheduler(4);
+    for (const contextGraphId of ['cg:a', 'cg:b', 'cg:c', 'cg:d']) {
+      scheduler.register(contextGraphId);
+    }
+
+    const constrained = scheduler.planAutomaticCoverage(
+      ['cg:selected'],
+      undefined,
+      'peer-a',
+      1,
+    );
+    expect(constrained).toHaveLength(1);
+
+    const recovered = scheduler.planAutomaticCoverage(
+      ['cg:selected'],
+      undefined,
+      'peer-a',
+      20,
+    );
+    expect(recovered).toHaveLength(4);
+    expect(recovered).not.toContain('cg:selected');
+  });
+
+  it('preserves first-slot rotation while the effective batch changes', () => {
+    const scheduler = new CorePublicSyncCoverageScheduler(3);
+    for (const contextGraphId of ['cg:a', 'cg:b', 'cg:c', 'cg:d', 'cg:e']) {
+      scheduler.register(contextGraphId);
+    }
+
+    const first = scheduler.planAutomaticCoverage([], undefined, 'peer-a', 1);
+    const second = scheduler.planAutomaticCoverage([], undefined, 'peer-a', 2);
+    const third = scheduler.planAutomaticCoverage([], undefined, 'peer-a', 1);
+
+    expect(first).toEqual(['cg:a']);
+    expect(second).toEqual(['cg:c', 'cg:d']);
+    expect(third).toEqual(['cg:d']);
+  });
+
+  it('rejects invalid live automatic-coverage batches', () => {
+    const scheduler = new CorePublicSyncCoverageScheduler(3);
+    scheduler.register('cg:a');
+
+    expect(() => scheduler.planAutomaticCoverage([], undefined, 'peer-a', -1)).toThrow(
+      /effective Core public sync batch size/,
+    );
+    expect(() => scheduler.planAutomaticCoverage([], undefined, 'peer-a', 1.5)).toThrow(
+      /effective Core public sync batch size/,
+    );
+  });
+
   it('resolves the env override and rejects unsafe batch sizes', () => {
     expect(resolveCorePublicSyncBatchSize(undefined, undefined))
       .toBe(DEFAULT_CORE_PUBLIC_SYNC_BATCH_SIZE);
