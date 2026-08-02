@@ -15,6 +15,7 @@ import {
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import type { CatchupStatusResponse } from './catchup-status-wire.js';
+import type { ContextGraphSubscribeResponse } from './context-graph-subscribe-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -1491,79 +1492,14 @@ export class ApiClient {
     return this.post('/api/query-remote', { peerId, ...request });
   }
 
-  async subscribeToContextGraph(contextGraphId: string, options: {
+  async subscribeToContextGraph(contextGraphId: string, options?: {
     includeSharedMemory?: boolean;
-    syncMode: ContextGraphSyncMode;
-  }): Promise<{
-    subscribed: string;
-    syncMode: ContextGraphSyncMode;
-    catchup?:
-      | {
-        connectedPeers: number;
-        totalPeers?: number;
-        selectedPeers?: number;
-        syncCapablePeers: number;
-        peersTried: number;
-        peersResponded: number;
-        peersSucceeded: number;
-        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
-        peersNotAttempted?: number;
-        deferredBackpressure: number;
-        dataSynced: number;
-        sharedMemorySynced: number;
-        denied: boolean;
-        deniedPeers: number;
-        diagnostics?: {
-          noProtocolPeers: number;
-          durable: {
-            fetchedMetaTriples: number;
-            fetchedDataTriples: number;
-            insertedMetaTriples: number;
-            insertedDataTriples: number;
-            bytesReceived: number;
-            resumedPhases: number;
-            timedOutPhases: number;
-            completedPhases: number;
-            checkpointAdvances: number;
-            emptyResponses: number;
-            metaOnlyResponses: number;
-            verifiedPrivateOnlyResponses?: number;
-            dataRejectedMissingMeta: number;
-            rejectedKcs: number;
-            failedPeers: number;
-            failedPhases: number;
-            deferredBackpressure: number;
-          };
-          sharedMemory: {
-            fetchedMetaTriples: number;
-            fetchedDataTriples: number;
-            insertedMetaTriples: number;
-            insertedDataTriples: number;
-            bytesReceived: number;
-            resumedPhases: number;
-            timedOutPhases: number;
-            completedPhases: number;
-            checkpointAdvances: number;
-            emptyResponses: number;
-            droppedDataTriples: number;
-            failedPeers: number;
-            failedPhases: number;
-            deferredBackpressure: number;
-          };
-        };
-      }
-      | {
-        status: 'queued';
-        includeSharedMemory: boolean;
-        /** @deprecated Backward-compatible response alias. */
-        includeWorkspace: boolean;
-        jobId: string;
-      };
-  }> {
+    syncMode?: ContextGraphSyncMode;
+  }): Promise<ContextGraphSubscribeResponse> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
-      includeSharedMemory: options.includeSharedMemory,
-      syncMode: options.syncMode,
+      includeSharedMemory: options?.includeSharedMemory,
+      syncMode: options?.syncMode ?? 'always-on',
     });
   }
 
@@ -1576,72 +1512,10 @@ export class ApiClient {
   }
 
   /** @deprecated Use subscribeToContextGraph */
-  async subscribe(contextGraphId: string, options?: { includeWorkspace?: boolean }): Promise<{
-    subscribed: string;
-    syncMode: ContextGraphSyncMode;
-    catchup?:
-      | {
-        connectedPeers: number;
-        totalPeers?: number;
-        selectedPeers?: number;
-        syncCapablePeers: number;
-        peersTried: number;
-        peersResponded: number;
-        peersSucceeded: number;
-        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
-        peersNotAttempted?: number;
-        deferredBackpressure: number;
-        dataSynced: number;
-        sharedMemorySynced: number;
-        denied: boolean;
-        deniedPeers: number;
-        diagnostics?: {
-          noProtocolPeers: number;
-          durable: {
-            fetchedMetaTriples: number;
-            fetchedDataTriples: number;
-            insertedMetaTriples: number;
-            insertedDataTriples: number;
-            bytesReceived: number;
-            resumedPhases: number;
-            timedOutPhases: number;
-            completedPhases: number;
-            checkpointAdvances: number;
-            emptyResponses: number;
-            metaOnlyResponses: number;
-            verifiedPrivateOnlyResponses?: number;
-            dataRejectedMissingMeta: number;
-            rejectedKcs: number;
-            failedPeers: number;
-            failedPhases: number;
-            deferredBackpressure: number;
-          };
-          sharedMemory: {
-            fetchedMetaTriples: number;
-            fetchedDataTriples: number;
-            insertedMetaTriples: number;
-            insertedDataTriples: number;
-            bytesReceived: number;
-            resumedPhases: number;
-            timedOutPhases: number;
-            completedPhases: number;
-            checkpointAdvances: number;
-            emptyResponses: number;
-            droppedDataTriples: number;
-            failedPeers: number;
-            failedPhases: number;
-            deferredBackpressure: number;
-          };
-        };
-      }
-      | {
-        status: 'queued';
-        includeSharedMemory: boolean;
-        /** @deprecated Backward-compatible response alias. */
-        includeWorkspace: boolean;
-        jobId: string;
-      };
-  }> {
+  async subscribe(
+    contextGraphId: string,
+    options?: { includeWorkspace?: boolean },
+  ): Promise<ContextGraphSubscribeResponse> {
     return this.subscribeToContextGraph(contextGraphId, {
       includeSharedMemory: options?.includeWorkspace,
       syncMode: 'always-on',

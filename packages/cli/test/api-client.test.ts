@@ -480,6 +480,22 @@ describe('ApiClient', () => {
       });
     });
 
+    it('subscribeToContextGraph() preserves omitted-options compatibility', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-default', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-default');
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-default',
+        syncMode: 'always-on',
+      });
+    });
+
     it('subscribe() maps its deprecated workspace option to the canonical request key', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,
