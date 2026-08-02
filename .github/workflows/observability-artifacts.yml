@@ -9,6 +9,16 @@ name: Observability artifacts
 # smoke-tests the operator-facing render mode (concrete datasource UIDs +
 # node-label profile), so a regression there can't hide behind the
 # committed-defaults check.
+#
+# The W1 sync-measurement artifacts (tools/observability/w1/) get two further
+# steps, because "generated" is not "correct" and neither one is "valid
+# PromQL": verify-w1-render.mjs asserts the semantic contract (instrument
+# inventory, dual native/translated metric spellings, the source-family
+# mapping, the all-source denominators, a node filter on every selector, both
+# observation windows, and report/fixture expression identity), and a PINNED
+# promtool container really PARSES the emitted rule fixture. Without those the
+# path filter below would trigger on a W1 edit while validating none of its
+# contents.
 on:
   pull_request:
     paths:
@@ -42,6 +52,17 @@ jobs:
       - name: Verify committed artifacts match the generator
         run: node tools/observability/generate-observability.mjs --check
 
+      # The step above normalizes CRLF/LF before comparing, so a Windows
+      # checkout (core.autocrlf=true rewrites every artifact to CRLF — the
+      # metrics dashboard alone holds ~660 pairs) is not permanently red. But a
+      # comparison that answered "equal" to EVERYTHING would also pass that
+      # step, forever. This one builds its own CRLF and LF artifact trees plus
+      # four corrupted ones and runs the real command against each, pinning
+      # both directions — which also exercises the CRLF path here on Linux,
+      # where git only ever produces LF.
+      - name: Verify check mode is line-ending agnostic but still catches drift
+        run: node tools/observability/verify-check-mode.mjs
+
       # verify-profile-render.mjs PARSES the rendered JSON and asserts the
       # whole profile-sensitive surface (every metrics target, the $node
       # variable, per-node alert exprs + summaries, notification group-bys,
@@ -57,3 +78,27 @@ jobs:
             --vm-uid test-vm-uid --loki-uid test-loki-uid --prom-node-label service_instance_id
           node tools/observability/verify-profile-render.mjs /tmp/render \
             --prom-node-label service_instance_id --vm-uid test-vm-uid --loki-uid test-loki-uid
+
+      # W1 decision queries: the semantic contract behind the numbers, checked
+      # per selector rather than by sampling. Run against BOTH renders so the
+      # W1 queries are proven to follow --prom-node-label like every other
+      # profile-sensitive surface (the /tmp/render tree is produced by the
+      # step above).
+      - name: Verify the W1 sync-measurement artifacts
+        run: |
+          set -euo pipefail
+          node tools/observability/verify-w1-render.mjs tools/observability
+          node tools/observability/verify-w1-render.mjs /tmp/render --prom-node-label service_instance_id
+
+      # Real PromQL validation. `promtool` is not installed on the developer
+      # host, so the container IS the reproducible path on both Windows and
+      # Linux; the tag is readability, the DIGEST is the reproducibility
+      # contract. `--entrypoint promtool` is REQUIRED: the image entrypoint is
+      # ["/bin/prometheus"], so the un-overridden form fails with
+      # `prometheus: error: unexpected promtool`.
+      - name: Parse the W1 rule fixture (pinned promtool)
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}/tools/observability:/w" --entrypoint promtool \
+            prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
+            check rules /w/w1/w1-rules.yaml

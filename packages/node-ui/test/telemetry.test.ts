@@ -1,6 +1,6 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { createServer, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import { trace, metrics, SpanStatusCode } from '@opentelemetry/api';
 import { NodeTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import {
@@ -10,7 +10,13 @@ import {
   AggregationTemporality,
 } from '@opentelemetry/sdk-metrics';
 import { withSpan, getMetrics, rebuildMetrics, currentTraceIds, Logger, type OperationContext } from '@origintrail-official/dkg-core';
-import { initTelemetry, isTelemetryConfigured, shutdownTelemetry } from '../src/telemetry.js';
+import {
+  initTelemetry,
+  isTelemetryConfigured,
+  shutdownTelemetry,
+  flushTelemetry,
+  TERMINAL_FLUSH_BUDGET_MS,
+} from '../src/telemetry.js';
 
 /**
  * Acceptance-criteria tests for the OTel observability foundation:
@@ -245,6 +251,35 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     m.syncRequesterPageCount.record(1, { phase: 'durable_data', outcome: 'completed' });
     m.syncRequesterPhaseDurationMs.record(10, { phase: 'durable_data', outcome: 'completed' });
 
+    // W1 sync-measurement instruments (I1–I9). Every attribute the record
+    // sites can emit appears here, so a new label that escapes the closed
+    // vocabularies fails the allow-list rather than reaching an exporter.
+    m.syncAttemptTotal.add(1, {
+      transport: 'legacy', plane: 'durable', phase: 'data',
+      source: 'catchup-foreground', outcome: 'response',
+    });
+    m.syncAttemptRequestBytes.add(512, {
+      transport: 'changelog', plane: 'shared-memory', phase: 'delta', source: 'on-connect',
+    });
+    m.syncAttemptResponseBytes.add(2048, {
+      transport: 'legacy', plane: 'durable', phase: 'meta',
+      source: 'reconcile', outcome: 'validation_rejected',
+    });
+    m.syncOperationDurationMs.record(4200, {
+      lane: 'durable', source: 'vm-recovery', outcome: 'resolved',
+    });
+    m.syncOperationRejectedTotal.add(1, {
+      lane: 'changelog', source: 'catchup-background', reason: 'queue_full',
+    });
+    m.syncSingleflightJoinsTotal.add(1, {
+      scope: 'context-graph', owner_source: 'on-connect', joiner_source: 'catchup-foreground',
+    });
+    m.contextGraphCatchupRequestsTotal.add(1, {
+      result: 'shutting_down', include_shared_memory: true,
+    });
+    m.contextGraphCatchupJobsTotal.add(1, { status: 'done', admission: 'walk' });
+    m.contextGraphCatchupJobDurationMs.record(305_000, { admission: 'walk' });
+
     await mp.forceFlush();
 
     const keys = new Set<string>();
@@ -257,11 +292,305 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
       'outcome', 'source', 'chain_id', 'rpc_method', 'retryable', 'result',
       'decline_code', 'protocol_id', 'method', 'module', 'role', 'reason', 'error_type',
       'phase', 'boundary',
+      // W1 (I1–I9). All closed vocabularies clamped at the record site.
+      'transport', 'plane', 'lane', 'scope', 'owner_source', 'joiner_source',
+      'include_shared_memory', 'status', 'admission',
     ]);
     expect([...keys].filter((k) => !ALLOWED.has(k))).toEqual([]);
     // high-cardinality keys must never be metric labels
     for (const bad of ['peer_id', 'context_graph_id', 'tx_hash', 'operation_id', 'assertion_id', 'kaId', 'rpc_url']) {
       expect(keys.has(bad)).toBe(false);
+    }
+  });
+});
+
+/**
+ * A collector that accepts the connection, reads the whole request, and then
+ * holds it open without answering. That is a REAL never-settling exporter —
+ * the OTLP exporters' own request timeout is 10 s, five times the 2 s
+ * terminal-flush reserve — so these tests bound the actual SDK rather than a
+ * mock of it.
+ *
+ * `'answering'` mode is the same server replying 200 immediately, used as the
+ * NON-hanging signal in the asymmetric tests below.
+ *
+ * `received` records the signal paths that actually arrived. That is the
+ * precondition check the tracer test cannot do without:
+ * `BatchSpanProcessor.forceFlush()` batches
+ * `ceil(finishedSpans.length / maxExportBatchSize)` times, which for an empty
+ * queue is ZERO — it resolves instantly and never touches the exporter. A
+ * tracer test with no ended span therefore passes identically with and without
+ * the race, recording a kill for a mutant that survived. Asserting the export
+ * was received proves the unbounded path was reached at all.
+ *
+ * Teardown is two steps, and both matter. `release()` starts answering 200 —
+ * held requests and any new ones — so the abandoned export settles and the
+ * teardown flush that follows is fast; the OTLP exporters RETRY a refused
+ * connection with backoff for the whole 10 s export timeout, so simply closing
+ * the port would hand `afterEach` the wait the test had just escaped. `stop()`
+ * closes the listener once telemetry is down.
+ */
+interface TestCollector {
+  port: number;
+  /** Signal paths this collector actually received, e.g. `/v1/metrics`. */
+  received: string[];
+  release: () => Promise<void>;
+  stop: () => Promise<void>;
+}
+
+async function startCollector(mode: 'black-hole' | 'answering'): Promise<TestCollector> {
+  const sockets = new Set<Socket>();
+  const held = new Set<ServerResponse>();
+  const received: string[] = [];
+  let releasing = mode === 'answering';
+  const answer = (res: ServerResponse) => {
+    res.statusCode = 200;
+    res.end();
+  };
+  const server: Server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      received.push(req.url ?? '');
+      if (releasing) answer(res);
+      else held.add(res);
+    });
+  });
+  server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  return {
+    port: (server.address() as AddressInfo).port,
+    received,
+    release: async () => {
+      releasing = true;
+      for (const res of held) answer(res);
+      held.clear();
+      await sleep(50); // let the responses reach the exporter
+    },
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+const startBlackHoleCollector = () => startCollector('black-hole');
+const startAnsweringCollector = () => startCollector('answering');
+
+describe('flushTelemetry — bounded terminal flush that leaves the provider live', () => {
+  /**
+   * Both signals registered in BOTH cases, with only ONE of them hanging.
+   *
+   * A single "everything hangs" case would give M14 and M15 identical kill
+   * sets — it would prove a bound exists somewhere, not that each leg carries
+   * its own. Hanging one leg while the other answers normally also proves the
+   * fast leg cannot mask the slow one, and pairs each leg to its own bounding
+   * mechanism: `{timeoutMillis}` for the meter, `Promise.race` for the tracer.
+   */
+  async function flushWithOneHangingSignal(hanging: 'metrics' | 'traces') {
+    const blackHole = await startBlackHoleCollector();
+    const answering = await startAnsweringCollector();
+    const metricsPort = hanging === 'metrics' ? blackHole.port : answering.port;
+    const tracesPort = hanging === 'traces' ? blackHole.port : answering.port;
+    await initTelemetry({
+      enabled: true,
+      // 600 s so the periodic reader never fires; `forceFlush` is the trigger.
+      metrics: { endpoint: `http://127.0.0.1:${metricsPort}/v1/metrics`, exportIntervalMs: 600_000 },
+      traces: { endpoint: `http://127.0.0.1:${tracesPort}/v1/traces` },
+    });
+    // BOTH signals need queued data or their flush short-circuits without ever
+    // reaching an exporter — see the collector docblock.
+    getMetrics().publishTotal.add(1, { outcome: 'completed', source: 'direct' });
+    await withSpan('chain.tx_send', () => 'done');
+
+    const started = Date.now();
+    let threw: unknown;
+    await flushTelemetry({ log: () => {} }).catch((err: unknown) => {
+      threw = err;
+    });
+    const elapsedMs = Date.now() - started;
+
+    return {
+      elapsedMs,
+      threw,
+      blackHole,
+      answering,
+      cleanup: async () => {
+        await blackHole.release();
+        await shutdownTelemetry();
+        await blackHole.stop();
+        await answering.stop();
+      },
+    };
+  }
+
+  it('returns within the budget when only the METRICS exporter never settles', async () => {
+    // Kills "drop `timeoutMillis` from the meter flush": without the argument
+    // `MetricReader.forceFlush()` applies no timeout at all, and this waits on
+    // the exporter's own 10 s deadline instead of the 2 s reserve.
+    const run = await flushWithOneHangingSignal('metrics');
+    try {
+      expect(run.threw).toBeUndefined();
+      expect(run.elapsedMs).toBeLessThan(TERMINAL_FLUSH_BUDGET_MS + 1_000);
+      // Precondition: the unbounded path was actually reached, and the other
+      // leg really did complete rather than being skipped.
+      expect(run.blackHole.received).toContain('/v1/metrics');
+      expect(run.answering.received).toContain('/v1/traces');
+
+      // A13/A26: the provider must survive the flush. Everything after this
+      // point in daemon shutdown — notably `agent.stop()` quiescing
+      // parent-side sync — still emits, and would emit into nothing if the
+      // flush had disabled or rebound the global meter.
+      expect(isTelemetryConfigured()).toBe(true);
+      expect(metrics.getMeterProvider().constructor.name).toBe('MeterProvider');
+      expect(trace.getTracerProvider().constructor.name).not.toBe('NoopTracerProvider');
+      expect(() =>
+        getMetrics().publishTotal.add(1, { outcome: 'completed', source: 'direct' }),
+      ).not.toThrow();
+    } finally {
+      await run.cleanup();
+    }
+  }, 20_000);
+
+  it('returns within the budget when only the TRACES exporter never settles', async () => {
+    // Kills "drop the tracer `Promise.race`": `BasicTracerProvider.forceFlush()`
+    // takes no arguments and reads the ctor's `forceFlushTimeoutMillis`
+    // (default 30 000), so the race is the ONLY thing bounding this leg.
+    const run = await flushWithOneHangingSignal('traces');
+    try {
+      expect(run.threw).toBeUndefined();
+      expect(run.elapsedMs).toBeLessThan(TERMINAL_FLUSH_BUDGET_MS + 1_000);
+      // THE precondition for this test. An empty span queue makes
+      // `BatchSpanProcessor.forceFlush()` resolve in 0 ms without calling the
+      // exporter, and the test would then pass with or without the race.
+      expect(run.blackHole.received).toContain('/v1/traces');
+      expect(run.answering.received).toContain('/v1/metrics');
+
+      expect(isTelemetryConfigured()).toBe(true);
+      expect(metrics.getMeterProvider().constructor.name).toBe('MeterProvider');
+      expect(trace.getTracerProvider().constructor.name).not.toBe('NoopTracerProvider');
+    } finally {
+      await run.cleanup();
+    }
+  }, 20_000);
+
+  it('lets the shutdown sequence CONTINUE when the bounded flush times out', async () => {
+    // `callWithTimeout` REJECTS with `TimeoutError('Operation timed out.')` —
+    // it does not resolve. Drop the `.catch` around the bounded meter flush and
+    // `Promise.all(legs)` propagates that, so `flushTelemetry()` itself rejects;
+    // in the daemon that escapes `runProducerQuiescentTeardown`, is swallowed by
+    // `cleanup`'s own `.catch`, and SKIPS the rest of shutdown — the catch-up
+    // runner is never closed, `agent.stop()` never runs, telemetry never shuts
+    // down. The flush merely returning is NOT the property under test; the
+    // continuation running is.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+
+    const collector = await startBlackHoleCollector();
+    // Stand-in for §6.7 steps 6-9. node-ui cannot import the daemon — it is a
+    // dependency OF the cli, not the reverse — so the continuation is modelled;
+    // what is real is that a rejecting flush prevents it from running at all.
+    const completed: string[] = [];
+    let abortedBy: unknown;
+    try {
+      await initTelemetry({
+        enabled: true,
+        metrics: {
+          endpoint: `http://127.0.0.1:${collector.port}/v1/metrics`,
+          exportIntervalMs: 600_000,
+        },
+      });
+      getMetrics().publishTotal.add(1, { outcome: 'completed', source: 'direct' });
+
+      try {
+        await flushTelemetry({ log: () => {} });
+        completed.push('flush');
+        completed.push('workers.stop');
+        completed.push('agent.stop');
+        await collector.release();
+        await shutdownTelemetry();
+        completed.push('telemetry.stop');
+      } catch (err) {
+        // Mirrors `cleanup`'s `.catch(...)` in lifecycle.ts: everything below
+        // the throw is skipped.
+        abortedBy = err;
+      }
+    } finally {
+      await collector.release();
+      await collector.stop();
+      // Give a pending rejection a turn to surface before we stop listening.
+      await sleep(50);
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(abortedBy).toBeUndefined();
+    expect(completed).toEqual(['flush', 'workers.stop', 'agent.stop', 'telemetry.stop']);
+    // Covers the variant where the legs are awaited with `allSettled`: the
+    // rejection would leak instead of propagating, and the runner may swallow
+    // it silently.
+    expect(unhandled).toEqual([]);
+  }, 20_000);
+
+  it('is a no-op when nothing was ever registered', async () => {
+    await expect(flushTelemetry({ log: () => {} })).resolves.toBeUndefined();
+  });
+
+  it('logs and continues instead of throwing when a flush rejects', async () => {
+    const logged: string[] = [];
+    const flushSpy = vi
+      .spyOn(MeterProvider.prototype, 'forceFlush')
+      .mockRejectedValue(new Error('exporter exploded'));
+    try {
+      await initTelemetry({
+        enabled: true,
+        metrics: { endpoint: 'http://127.0.0.1:1/v1/metrics', exportIntervalMs: 600_000 },
+      });
+      await expect(flushTelemetry({ log: (m) => logged.push(m) })).resolves.toBeUndefined();
+      expect(logged.join('\n')).toContain('exporter exploded');
+    } finally {
+      flushSpy.mockRestore();
+    }
+  });
+});
+
+describe('shutdownTelemetry — flush completes before shutdown starts', () => {
+  it('does not start a provider shutdown until that provider has finished flushing', async () => {
+    // `MeterProvider.forceFlush()` opens with
+    // `if (this._shutdown) { diag.warn(…); return; }`, so starting both
+    // concurrently made scheduling order decide whether the flush happened.
+    //
+    // Call ORDER cannot pin this: a concurrent `Promise.all` invokes both in
+    // the same tick, in the same order. What discriminates is whether the
+    // flush had already RESOLVED when shutdown began.
+    let flushResolved = false;
+    let shutdownSawResolvedFlush: boolean | undefined;
+    const flushSpy = vi
+      .spyOn(MeterProvider.prototype, 'forceFlush')
+      .mockImplementation(async () => {
+        await sleep(30);
+        flushResolved = true;
+      });
+    const shutdownSpy = vi
+      .spyOn(MeterProvider.prototype, 'shutdown')
+      .mockImplementation(async () => {
+        shutdownSawResolvedFlush = flushResolved;
+      });
+    try {
+      await initTelemetry({
+        enabled: true,
+        metrics: { endpoint: 'http://127.0.0.1:1/v1/metrics', exportIntervalMs: 600_000 },
+      });
+      await shutdownTelemetry();
+
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+      expect(shutdownSpy).toHaveBeenCalledTimes(1);
+      expect(shutdownSawResolvedFlush).toBe(true);
+    } finally {
+      flushSpy.mockRestore();
+      shutdownSpy.mockRestore();
     }
   });
 });

@@ -323,6 +323,7 @@ export {
 export {
   CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  catchupAdmissionSource,
   catchupPriorityForMode,
   catchupSourceForMode,
   runCatchupPlaneWithPolicy,
@@ -334,6 +335,7 @@ export {
   type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlanePolicyResult,
+  type CatchupPlaneSourceOverride,
   type CatchupPlaneResult,
 } from './sync/catchup-policy.js';
 // Which peer may let one answer stand for a WHOLE Context Graph is the load-

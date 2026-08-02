@@ -4013,6 +4013,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
               includeSharedMemory: true,
               maxPeers: 1,
               peerRotationKey: localCgId,
+              // This is recovery, not routine background catch-up. Without the
+              // override it would enter through the default-background path and
+              // be reported as `catchup-background`, merging repair traffic into
+              // the background lane. Attribution only — mode, priority, peer
+              // selection and the coalescing key are all unchanged.
+              sourceOverride: 'vm-recovery',
             });
             if (fixedMaxAttempts === undefined) {
               maxAttempts = Math.max(

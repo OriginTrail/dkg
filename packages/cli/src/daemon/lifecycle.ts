@@ -90,6 +90,7 @@ import {
   OtlpLogWorker,
   initTelemetry,
   shutdownTelemetry,
+  flushTelemetry,
   LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
@@ -213,6 +214,11 @@ import {
   type CatchupTracker,
   toCatchupStatusResponse,
 } from './types.js';
+import { drainCatchupJobs } from './catchup-telemetry.js';
+import {
+  buildProducerQuiescentTeardownSteps,
+  runProducerQuiescentTeardown,
+} from './teardown.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -3738,6 +3744,12 @@ export async function runDaemonInner(
   async function shutdown(exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
+    // FIRST statement, ahead of every await below: the subscribe route has no
+    // other way to see that shutdown started (`shuttingDown` is a closure-local
+    // `let` in this function's scope), and a job minted after this point would
+    // be queued against a runner whose worker is about to be terminated — its
+    // exit handler rejects every pending run. Both mint sites now 503 instead.
+    daemonState.catchupAcceptingJobs = false;
     log("Shutting down...");
     // Tell the supervisor's liveness watcher (PR #664) that this is a graceful
     // shutdown before any slow cleanup runs. The watcher reads `api.port`'s
@@ -3770,28 +3782,47 @@ export async function runDaemonInner(
         rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
-        // Stops log exporters AND flushes + shuts down the OTel SDK.
-        await stopTelemetry();
         natStatusWatcherStop?.();
         resetNatStatus();
-        await publisherState.runtime
-          ?.stop()
-          .catch((err: any) =>
-            log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
-          );
-        // Drain the async-promote worker before closing the agent — once
-        // `agent.stop()` runs the queue's underlying triple store goes
-        // away. We let in-flight promotes complete (or hit
-        // `shutdownTimeoutMs`); RFC §6.2 forbids marking `running →
-        // queued` here so the next boot's `recoverOnStartup()` decides.
-        await promoteWorkerLifecycle?.stop(shuttingDown ? 'daemon shutting down' : null);
-        await daemonState.catchupRunner
-          ?.close()
-          .catch((err: any) =>
-            log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
-          );
-        server.close();
-        await agent.stop();
+
+        // ── Producer-quiescent teardown ────────────────────────────────────
+        // Both the ORDER and the WIRING live in `./teardown.ts` — the order in
+        // `runProducerQuiescentTeardown`, the slot assignment in
+        // `buildProducerQuiescentTeardownSteps` — so a test can execute each
+        // and fail on either a reorder or a mis-wiring. This call site only
+        // names the daemon's own resources.
+        await runProducerQuiescentTeardown(
+          buildProducerQuiescentTeardownSteps({
+            server,
+            drainCatchupJobs,
+            flushTelemetry,
+            stopPublisherRuntime: async () => {
+              await publisherState.runtime
+                ?.stop()
+                .catch((err: any) =>
+                  log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+                );
+            },
+            // We let in-flight promotes complete (or hit `shutdownTimeoutMs`);
+            // RFC §6.2 forbids marking `running → queued` here so the next
+            // boot's `recoverOnStartup()` decides.
+            stopPromoteWorker: async () => {
+              await promoteWorkerLifecycle?.stop(shuttingDown ? 'daemon shutting down' : null);
+            },
+            closeCatchupRunner: async () => {
+              await daemonState.catchupRunner
+                ?.close()
+                .catch((err: any) =>
+                  log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
+                );
+            },
+            stopAgent: () => agent.stop(),
+            // Stops log exporters AND flushes + shuts down the OTel SDK.
+            stopTelemetry,
+            log,
+          }),
+        );
+
         // Stop the managed Oxigraph child AFTER the agent has stopped
         // issuing store queries, so an in-flight SPARQL request never
         // races the killed server. No-op when not using oxigraph-server.

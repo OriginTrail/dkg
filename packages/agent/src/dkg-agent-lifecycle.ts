@@ -284,6 +284,7 @@ import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
+  catchupAdmissionSource,
   runCatchupPlanesWithPolicy,
   type CatchupMode,
 } from './sync/catchup-policy.js';
@@ -319,6 +320,24 @@ import {
   type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
+import {
+  activeSyncAdmissionSource,
+  isSyncOperationCancellation,
+  monotonicNowMs,
+  recordSyncAttempt,
+  recordSyncAttemptRequestBytes,
+  recordSyncAttemptResponseBytes,
+  recordSyncOperationDuration,
+  recordSyncOperationRejected,
+  recordSyncSingleFlightJoin,
+  syncAttemptAttributes,
+  syncOperationRejectionReason,
+  syncPlaneFor,
+  withSyncAdmissionSource,
+  type SyncAttemptOutcome,
+  type SyncOperationOutcome,
+  type SyncSingleFlightScope,
+} from './sync/attempt-telemetry.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -519,11 +538,23 @@ type InFlightSyncPageFetch = {
   promise: Promise<SyncPageResult>;
   controller: AbortController;
   waiters: number;
+  /**
+   * Admission source of the fetch's OWNER — metadata stored BESIDE the shared
+   * promise, never part of the coalescing key. Putting it in the key would fork
+   * one physical page fetch into one per trigger, which is the opposite of what
+   * coalescing is for. I6 records the resulting attribution ambiguity instead.
+   */
+  ownerSource: SyncAdmissionSource;
+};
+type InFlightSyncSingleFlight = {
+  promise: Promise<unknown>;
+  /** Same contract as {@link InFlightSyncPageFetch.ownerSource}. */
+  ownerSource: SyncAdmissionSource;
 };
 type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeers']>>;
 
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
-const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, Promise<unknown>>>();
+const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncSingleFlight>>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 
@@ -667,27 +698,57 @@ function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPa
   return inFlight;
 }
 
+/**
+ * @param meta.scope Which coalescing family this key belongs to — passed
+ *   explicitly rather than parsed back out of the key, so the I6 label cannot
+ *   drift when a key builder is renamed. The source is NOT derived from `key`
+ *   either: it is never in one.
+ * @param meta.source The trigger this caller would admit under. Supplied
+ *   explicitly at every generic scope because all three of them coalesce
+ *   ABOVE the admission boundary — admission happens per Context Graph inside
+ *   the factory — so there is no ambient source to read yet. Reading the
+ *   ambient one here instead would label every join `unspecified` and quietly
+ *   make I6's cross-family check unable to fire.
+ */
 function runSyncSingleFlight<T>(
   agent: DKGAgent,
   key: string,
   factory: () => Promise<T>,
+  meta: { scope: SyncSingleFlightScope; source?: SyncAdmissionSource },
 ): Promise<T> {
   let inFlight = inFlightSyncSingleFlightsByAgent.get(agent);
   if (!inFlight) {
     inFlight = new Map();
     inFlightSyncSingleFlightsByAgent.set(agent, inFlight);
   }
+  const { scope } = meta;
+  const joinerSource = normalizeSyncAdmissionSource(meta.source ?? activeSyncAdmissionSource());
   const existing = inFlight.get(key);
-  if (existing) return existing as Promise<T>;
+  if (existing) {
+    // Recorded at MAP-HIT time, before any bytes move: a join is a decision to
+    // share work, and by the time the shared promise settles there is nothing
+    // left to attribute.
+    recordSyncSingleFlightJoin({
+      scope,
+      ownerSource: existing.ownerSource,
+      joinerSource,
+    });
+    return existing.promise as Promise<T>;
+  }
 
+  // Mirrors the page-fetch map's `let entry!` idiom below: the cleanup closure
+  // must compare the ENTRY it created, not the promise, so a later generation
+  // for the same key cannot be evicted by an earlier one's `finally`.
+  let entry!: InFlightSyncSingleFlight;
   const promise = Promise.resolve()
     .then(factory)
     .finally(() => {
-      if (inFlight.get(key) === promise) {
+      if (inFlight.get(key) === entry) {
         inFlight.delete(key);
       }
     });
-  inFlight.set(key, promise);
+  entry = { promise, ownerSource: joinerSource };
+  inFlight.set(key, entry);
   return promise;
 }
 
@@ -920,6 +981,25 @@ export interface ContextGraphCatchupOptions {
    * retries. Background mode remains best-effort and never waits for capacity.
    */
   mode?: CatchupMode;
+  /**
+   * Bounded, METADATA-ONLY admission source, replacing the one `mode` would
+   * imply. It exists because `source` is trigger attribution on some routes and
+   * execution MODE on others: `catchupSourceForMode('background')` always emits
+   * `catchup-background`, so VM-recovery traffic — which enters through the same
+   * default-background path — was reported as ordinary background catch-up and
+   * silently undercounted against the already-defined `vm-recovery` label.
+   *
+   * It changes NO scheduling decision (priority still follows `mode`) and it
+   * MUST NOT enter any coalescing or single-flight key: two catch-ups that
+   * differ only by this value are the same physical work, and forking the key
+   * on it would turn a label into duplicated network traffic. Clamped to the
+   * closed source set wherever it is applied.
+   *
+   * Post-approval curator/broadcast catch-up deliberately does NOT set it: it
+   * keeps `catchup-background`, now defined as "post-approval and background
+   * catch-up, after VM recovery receives its override".
+   */
+  sourceOverride?: SyncAdmissionSource;
 }
 
 export type DurableSyncOptions = {
@@ -1226,6 +1306,43 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.node.stopSignal ?? undefined,
       operationSignal,
     );
+    // W1 §6.4 — time the INNER closure, not the outer call. `withGlobalSyncBackpressure`
+    // invokes `work()` only after `await admission.release`, so this boundary
+    // excludes admission queue wait while still covering the disabled-policy
+    // fast path (which emits nothing today). It encloses peer auth/fetch,
+    // decode, verification and the atomic store commit, and includes nested
+    // store-scheduler queueing; it excludes the per-(peer, CG) serialization
+    // wait, which happens outside admission.
+    //
+    // `started` discriminates work that ran from work that never began: an
+    // abort while queued and an abort during work both surface as AbortError,
+    // and a never-started call must go to I5 rather than enter the duration
+    // histogram as a 0 ms sample.
+    let started = false;
+    const timedWork = async (): Promise<T> => {
+      started = true;
+      const startedAt = monotonicNowMs();
+      let outcome: SyncOperationOutcome = 'resolved';
+      try {
+        // The admission source becomes ambient for the whole operation here —
+        // this is the single choke point every admission passes through, and it
+        // has already normalized the value. Everything below (both request
+        // lanes, and the changelog lane's legacy `runResync` fallback) reports
+        // its attempts and bytes under this label without carrying it as a
+        // parameter, so it can never reach a coalescing key.
+        return await withSyncAdmissionSource(source, work);
+      } catch (error) {
+        outcome = isSyncOperationCancellation(error) ? 'cancelled' : 'error';
+        throw error;
+      } finally {
+        recordSyncOperationDuration({
+          lane,
+          source,
+          outcome,
+          durationMs: monotonicNowMs() - startedAt,
+        });
+      }
+    };
     try {
       return await withGlobalSyncBackpressure(
         {
@@ -1240,8 +1357,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
         },
-        work,
+        timedWork,
       );
+    } catch (error) {
+      // Rejected BEFORE the work closure ever ran: queue overflow, priority
+      // displacement, or cancellation while queued. Never a 0 ms I4 sample.
+      if (!started) {
+        recordSyncOperationRejected({
+          lane,
+          source,
+          reason: syncOperationRejectionReason(error),
+        });
+      }
+      throw error;
     } finally {
       admissionBoundary.dispose();
     }
@@ -4584,7 +4712,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     };
     return singleFlightKey
-      ? runSyncSingleFlight(this, singleFlightKey, runWithinBoundary)
+      ? runSyncSingleFlight(this, singleFlightKey, runWithinBoundary, {
+        scope: 'durable',
+        source: options?.source,
+      })
       : runWithinBoundary();
   }
 
@@ -4907,10 +5038,51 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return c ? { era: c.era, seq: c.seq } : undefined;
       },
       setCursor: (era, seq) => this.changelogCursors.set(remotePeerId, contextGraphId, era, seq),
-      send: (bytes) => this.messenger.sendToPeer(remotePeerId, PROTOCOL_SYNC_CHANGELOG, bytes, {
-        timeoutMs: SYNC_PAGE_TIMEOUT_MS,
-        signal: this.node.stopSignal ?? undefined,
-      }),
+      // W1 §6.3 — the changelog lane's physical send, instrumented through the
+      // SAME helpers as the legacy lane but deliberately NOT routed through
+      // `sendSyncRequest`: that would drag `withRetry`, single-use payload
+      // semantics and the legacy busy validator into a lane that has none of
+      // them. Byte accounting is added here because this lane reported ZERO
+      // bytes before W1, and its fallbacks re-enter the legacy lane — omitting
+      // it would leave the denominator silently partial and uncorrectable
+      // after collection.
+      //
+      // `plane: 'durable'` is exact rather than approximate: `runChangelogLane`
+      // admits only public Context Graphs, and `isForeignGraph` rejects the
+      // `/_shared_memory` and `/_private` planes, so everything this lane
+      // transfers is durable. Shared-memory content defers to `runResync`,
+      // which is separately instrumented as `transport=legacy`.
+      send: async (bytes) => {
+        const attributes = syncAttemptAttributes({
+          transport: 'changelog',
+          plane: 'durable',
+          phase: 'delta',
+        });
+        recordSyncAttemptRequestBytes(attributes, bytes.byteLength);
+        let outcome: SyncAttemptOutcome = 'transport_error';
+        let responseByteLength: number | undefined;
+        try {
+          const response = await this.messenger.sendToPeer(remotePeerId, PROTOCOL_SYNC_CHANGELOG, bytes, {
+            timeoutMs: SYNC_PAGE_TIMEOUT_MS,
+            signal: this.node.stopSignal ?? undefined,
+          });
+          responseByteLength = response.byteLength;
+          outcome = 'response';
+          return response;
+        } catch (error) {
+          // Terminal state, not message text — the same reasoning as the legacy
+          // bracket. This lane has no in-transport validator, so it can never
+          // produce `validation_rejected`: a `denied` changelog response is a
+          // successfully DELIVERED response that the decoder classifies later.
+          outcome = this.node.stopSignal?.aborted === true ? 'cancelled' : 'transport_error';
+          throw error;
+        } finally {
+          recordSyncAttempt(attributes, outcome);
+          if (responseByteLength !== undefined) {
+            recordSyncAttemptResponseBytes(attributes, responseByteLength, outcome);
+          }
+        }
+      },
       // Resync = the legacy verified lane for just this CG (no re-entry into the changelog
       // branch). Fold its result in, and report completeness so the driver only advances
       // the cursor to headSeq when the resync verifiably fetched everything below it.
@@ -5108,9 +5280,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         assetUals,
       });
     const inFlight = inFlightSyncPageFetchesFor(this);
+    // Read once, here: this fetch runs inside the admitted operation, so the
+    // ambient source is the trigger that both a join and the shared fetch's
+    // own attempts belong to.
+    const pageFetchSource = activeSyncAdmissionSource();
     const existing = coalescingKey ? inFlight.get(coalescingKey) : undefined;
     if (existing) {
       if (!existing.controller.signal.aborted) {
+        // At map-hit time, before any bytes move. An aborted entry below is NOT
+        // a join: it is evicted and this caller starts its own fetch.
+        recordSyncSingleFlightJoin({
+          scope: 'page',
+          ownerSource: existing.ownerSource,
+          joinerSource: pageFetchSource,
+        });
         return waitForSyncPageFetch(existing, signal);
       }
       if (coalescingKey) inFlight.delete(coalescingKey);
@@ -5200,7 +5383,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Keep that from becoming unhandled while still propagating failures to
       // active waiters through the original promise.
     });
-    entry = { promise: sharedFetch, controller, waiters: 0 };
+    entry = { promise: sharedFetch, controller, waiters: 0, ownerSource: pageFetchSource };
     if (coalescingKey) inFlight.set(coalescingKey, entry);
     return waitForSyncPageFetch(entry, signal);
   }
@@ -5534,7 +5717,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
     };
 
-    return runSyncSingleFlight(this, singleFlightKey, runSync);
+    return runSyncSingleFlight(this, singleFlightKey, runSync, {
+      scope: 'shared-memory',
+      source: options?.source,
+    });
   }
 
   /**
@@ -5658,9 +5844,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
     const mode = options?.mode ?? 'background';
+    const sourceOverride = options?.sourceOverride;
 
     this.trackSyncContextGraph(contextGraphId);
 
+    // `sourceOverride` is deliberately ABSENT from this key: it is attribution
+    // metadata, not work identity. Adding it would fork one physical catch-up
+    // into one per trigger — real duplicated network traffic bought with a
+    // label. The resulting attribution ambiguity is what I6 measures.
     const singleFlightKey = contextGraphCatchupSingleFlightKey({
       contextGraphId,
       includeSharedMemory,
@@ -5717,7 +5908,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
         totalPeers: orderedPeers.length,
         mode,
+        sourceOverride,
       });
+    }, {
+      scope: 'context-graph',
+      source: catchupAdmissionSource(mode, sourceOverride),
     });
   }
 
@@ -5807,7 +6002,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     includeSharedMemory: boolean,
     peers: Array<{ toString(): string }>,
-    stats?: { totalPeers?: number; mode?: CatchupMode },
+    stats?: { totalPeers?: number; mode?: CatchupMode; sourceOverride?: SyncAdmissionSource },
   ): Promise<{
     /** Ordered connected peers before optional caller windowing. */
     connectedPeers: number;
@@ -5946,6 +6141,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const mode = stats?.mode ?? 'background';
         return runCatchupPlanesWithPolicy({
           mode,
+          sourceOverride: stats?.sourceOverride,
           includeSharedMemory,
           syncDurable: ({ priority, source }) => this.syncFromPeerDetailed(
             remotePeerId,

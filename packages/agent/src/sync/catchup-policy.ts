@@ -1,4 +1,4 @@
-import type { SyncAdmissionSource } from './policy.js';
+import { normalizeSyncAdmissionSource, type SyncAdmissionSource } from './policy.js';
 
 export type CatchupMode = 'background' | 'foreground';
 
@@ -75,7 +75,47 @@ export interface CatchupPlaneResult {
 
 export interface CatchupPlaneContext {
   priority?: number;
-  source?: CatchupAdmissionSource;
+  /**
+   * Widened from {@link CatchupAdmissionSource} because a caller may override
+   * the mode-derived value (see {@link CatchupPlaneSourceOverride}), and
+   * `vm-recovery` is not expressible in the two-member catch-up subset. Both
+   * consumers already accept the full admission union, and the scheduler
+   * re-clamps regardless, so the label space is unchanged.
+   */
+  source?: SyncAdmissionSource;
+}
+
+export interface CatchupPlaneSourceOverride {
+  /**
+   * Replace the source this catch-up would otherwise be attributed to.
+   *
+   * Kept separate from `mode` on purpose: `mode` decides scheduling (priority
+   * and whether refusals are retried) while this decides only attribution. VM
+   * recovery runs as ordinary background catch-up — it should keep background's
+   * scheduling — but reporting it as `catchup-background` merges recovery
+   * traffic into the background lane and undercounts it.
+   *
+   * Metadata only. It reaches no key, no wire envelope and no scheduling
+   * decision, and is clamped to the closed source set before use.
+   */
+  sourceOverride?: SyncAdmissionSource;
+}
+
+/**
+ * The single point of truth for "what source does this catch-up admit under".
+ *
+ * Shared by the admission seam and by the single-flight join site, because
+ * those two must agree: if the join recorded a mode-derived label while the
+ * admission recorded an overridden one, I6's owner/joiner families and I4's
+ * source would describe the same work differently.
+ */
+export function catchupAdmissionSource(
+  mode: CatchupMode,
+  sourceOverride?: SyncAdmissionSource,
+): SyncAdmissionSource {
+  return sourceOverride === undefined
+    ? catchupSourceForMode(mode)
+    : normalizeSyncAdmissionSource(sourceOverride);
 }
 
 export interface CatchupBackpressureRetryPolicy {
@@ -112,7 +152,7 @@ export interface CatchupPlanePolicyClock {
 export interface CatchupPlanePolicyOptions<
   TDurable extends CatchupPlaneResult,
   TShared extends CatchupPlaneResult,
-> extends CatchupPlanePolicyClock {
+> extends CatchupPlanePolicyClock, CatchupPlaneSourceOverride {
   mode: CatchupMode;
   includeSharedMemory: boolean;
   syncDurable: (context: CatchupPlaneContext) => Promise<TDurable>;
@@ -194,7 +234,7 @@ export function nextCatchupBackpressureDelayMs(input: {
 export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   mode: CatchupMode,
   run: (context: CatchupPlaneContext) => Promise<T>,
-  options: CatchupPlanePolicyClock = {},
+  options: CatchupPlanePolicyClock & CatchupPlaneSourceOverride = {},
 ): Promise<T> {
   // `retryDelaysMs` configured the fixed [100, 250, 500] ladder that #2006 replaced
   // with a wall-clock budget. Retaining it as `?: never` makes a TypeScript caller
@@ -211,9 +251,11 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
     );
   }
 
+  // Priority still follows `mode` alone — the override is attribution, not
+  // scheduling, so an overridden plane queues exactly as it did before.
   const context: CatchupPlaneContext = {
     priority: catchupPriorityForMode(mode),
-    source: catchupSourceForMode(mode),
+    source: catchupAdmissionSource(mode, options.sourceOverride),
   };
   if (mode !== 'foreground') return run(context);
 
