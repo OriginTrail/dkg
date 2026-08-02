@@ -1051,7 +1051,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         const agent = {
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {},
+          subscribeToContextGraph: () => ({
+            subscribed: true,
+            synced: false,
+            syncMode: 'always-on' as const,
+          }),
           contextGraphHasLocalContent: async () => false,
           markContextGraphSubscriptionState: () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
@@ -1166,7 +1170,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         const agent = {
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {},
+          subscribeToContextGraph: () => ({
+            subscribed: true,
+            synced: false,
+            syncMode: 'always-on' as const,
+          }),
           contextGraphHasLocalContent: async () => true,
           markContextGraphSubscriptionState: () => { markedSynced = true; },
           resolveAgentByToken: () => undefined,
@@ -2300,6 +2308,11 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => {
             subscribeCalled = true;
+            return {
+              subscribed: true,
+              synced: false,
+              syncMode: 'always-on' as const,
+            };
           },
           contextGraphHasLocalContent: async () => false,
           markContextGraphSubscriptionState: () => {},

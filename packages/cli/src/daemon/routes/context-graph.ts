@@ -1730,13 +1730,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
-    // A process-local access must not downgrade an already durable
-    // subscription. Omitted mode retains the legacy API contract: always-on.
-    const effectiveSyncMode = existingSub?.subscribed &&
-      (existingSub.syncMode ?? 'always-on') === 'always-on'
-      ? 'always-on'
-      : requestedSyncMode;
-    agent.subscribeToContextGraph(contextGraphId, { syncMode: effectiveSyncMode });
+    // Lifetime policy belongs to the agent: it protects an existing
+    // always-on subscription from a later on-demand open and returns the
+    // normalized mode the route must report.
+    const appliedSubscription = agent.subscribeToContextGraph(contextGraphId, {
+      syncMode: requestedSyncMode,
+    });
+    const effectiveSyncMode = appliedSubscription.syncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);

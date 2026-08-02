@@ -1228,6 +1228,7 @@ export class DKGAgent extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = {
       ...existing,
+      syncMode: existing?.syncMode ?? 'always-on',
       name: metadata.name ?? existing?.name,
       subscribed: existing?.subscribed === true,
       synced: existing?.synced === true,

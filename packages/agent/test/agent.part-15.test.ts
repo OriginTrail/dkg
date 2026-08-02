@@ -232,6 +232,86 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('persists a Core hosting obligation without persisting its on-demand member intent', async () => {
+      const persisted = new Map<string, any>();
+      const subscriptionStore = {
+        loadAll: async () => [...persisted.values()],
+        save: async (record: any) => {
+          persisted.set(record.id, { ...record });
+        },
+        delete: async (contextGraphId: string) => {
+          persisted.delete(contextGraphId);
+        },
+      };
+      const localCgId = 'selected-hosted-cg';
+
+      const agentA = await DKGAgent.create({
+        name: 'OnDemandCoreHostA',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        nodeRole: 'core',
+      });
+      try {
+        await agentA.start();
+        agentA.subscribeToContextGraph(localCgId, { syncMode: 'on-demand' });
+        agentA.markContextGraphSubscriptionState(localCgId, {
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+        });
+        (agentA as any).chain.getContextGraphAccessPolicy = async () => 0;
+        (agentA as any).chain.isContextGraphActiveOnChain = async () => true;
+
+        await (agentA as any).recordCoreHostedPublicCg('14', localCgId);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(agentA.getSubscribedContextGraphs().get(localCgId)).toMatchObject({
+          subscribed: true,
+          syncMode: 'on-demand',
+          synced: true,
+          coreHosted: true,
+          onChainId: '14',
+        });
+        expect(persisted.get(localCgId)).toMatchObject({
+          id: localCgId,
+          subscribed: false,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          coreHosted: true,
+          onChainId: '14',
+          syncScoped: false,
+        });
+      } finally {
+        await agentA.stop().catch(() => {});
+      }
+
+      const agentB = await DKGAgent.create({
+        name: 'OnDemandCoreHostB',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        contextGraphSubscriptionStore: subscriptionStore,
+        nodeRole: 'core',
+      });
+      try {
+        await agentB.start();
+        expect(agentB.getSubscribedContextGraphs().get(localCgId)).toMatchObject({
+          subscribed: false,
+          syncMode: 'always-on',
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          coreHosted: true,
+          onChainId: '14',
+        });
+        expect((agentB as any).config.syncContextGraphs ?? []).not.toContain(localCgId);
+      } finally {
+        await agentB.stop().catch(() => {});
+      }
+    });
+
+
     it('rehydrates persisted subscriptions without forcing sync scope', async () => {
       const subscriptionStore = {
         loadAll: async () => [{
