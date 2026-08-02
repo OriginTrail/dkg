@@ -26,6 +26,7 @@ describe('adaptive capacity sampler', () => {
       normalInflight: 1,
       backgroundInflight: 0,
       ackQueued: 0,
+      healthQueued: 2,
       normalQueued: 2,
       backgroundQueued: 0,
       maxConcurrent: 4,
@@ -45,7 +46,7 @@ describe('adaptive capacity sampler', () => {
       store: {
         telemetryAvailable: true,
         ackQueued: 0,
-        healthQueued: 0,
+        healthQueued: 2,
         normalQueued: 2,
         backgroundQueued: 0,
       },
