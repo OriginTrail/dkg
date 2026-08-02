@@ -45,7 +45,10 @@ independently requires exact nonzero data, counts, heads, and inventory roots.
 
 ## Runtime sequence
 
-The launcher deliberately starts Core cold, after the second publication wave:
+The launcher deliberately starts Core cold, after the second publication wave.
+Its clean runtime manifest includes the built CLI daemon entrypoint as well as
+the Agent and the M1 synchronization dependency closure, so a release-shaped
+process is cryptographically bound to the reviewed source head:
 
 1. Start Publisher and Edge as distinct OS processes and verify their peer,
    network, commit, and loaded-runtime identities against the trust anchor.

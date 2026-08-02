@@ -19,6 +19,7 @@ export const GATE2_RUNTIME_PROVENANCE_DIGEST_DOMAIN =
   'dkg-rfc64-gate2-runtime-provenance-v1\n' as const;
 
 export const GATE2_RUNTIME_PACKAGE_CLOSURE = Object.freeze([
+  Object.freeze({ name: '@origintrail-official/dkg', path: 'packages/cli/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-agent', path: 'packages/agent/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-chain', path: 'packages/chain/dist' }),
   Object.freeze({ name: '@origintrail-official/dkg-core', path: 'packages/core/dist' }),
@@ -35,7 +36,7 @@ export const GATE2_RUNTIME_PACKAGE_CLOSURE = Object.freeze([
 export const GATE2_RUNTIME_CLEAN_ARGS = Object.freeze([
   '-r',
   '--filter',
-  '@origintrail-official/dkg-agent...',
+  '@origintrail-official/dkg...',
   '--filter',
   '!@origintrail-official/dkg-evm-module',
   'run',
@@ -45,7 +46,7 @@ export const GATE2_RUNTIME_CLEAN_ARGS = Object.freeze([
 export const GATE2_RUNTIME_BUILD_ARGS = Object.freeze([
   '-r',
   '--filter',
-  '@origintrail-official/dkg-agent...',
+  '@origintrail-official/dkg...',
   '--filter',
   '!@origintrail-official/dkg-evm-module',
   'run',
