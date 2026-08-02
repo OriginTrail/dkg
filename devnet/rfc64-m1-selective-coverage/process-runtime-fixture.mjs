@@ -36,6 +36,11 @@ lines.on('line', (line) => {
     value,
   };
   const mode = process.env.FIXTURE_MODE;
+  if (input.command === process.env.FIXTURE_MALFORM_COMMAND) {
+    result.value = { unexpected: true };
+    process.stdout.write(`${prefix}${JSON.stringify(result)}\n`, () => process.exit(0));
+    return;
+  }
   if (input.command === 'publish-wave' && mode === 'malformed-publish') {
     process.stdout.write(`${prefix}${JSON.stringify(result)}\n`, () => process.exit(0));
     return;

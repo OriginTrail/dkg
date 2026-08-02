@@ -4,9 +4,9 @@ import type {
   SyncCoverageJournalProcessIdentityV1,
   SyncCoverageJournalReferenceV1,
 } from './manifest.ts';
+import { MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY } from './manifest.ts';
 
 const JOURNAL_CAPACITY = 256;
-const MAX_CONTEXT_GRAPH_IDS = 32;
 const MAX_CONTEXT_GRAPH_ID_LENGTH = 256;
 
 export type {
@@ -66,13 +66,16 @@ export function assertCoreAutomaticRoundJournalV1(
     || entry['explicitSelectedContextGraphCount'] !== explicitIds.length
     || !sameStrings(automaticIds, round.contextGraphIds)
     || !sameStrings(explicitIds, round.explicitSelectedContextGraphIds)
-    || completions.length !== round.completions.length) {
+    || round.completions.length !== round.contextGraphIds.length
+    || completions.length !== automaticIds.length) {
     throw new Error('Core round differs from its immutable scheduler journal plan');
   }
-  for (const expected of round.completions) {
-    const completion = completions.find((candidate) =>
-      isPlainRecord(candidate) && candidate['contextGraphId'] === expected.contextGraphId);
+  for (let index = 0; index < round.completions.length; index += 1) {
+    const expected = round.completions[index]!;
+    const completion = completions[index];
     if (!isPlainRecord(completion)
+      || expected.contextGraphId !== round.contextGraphIds[index]
+      || completion['contextGraphId'] !== automaticIds[index]
       || completion['jobId'] !== round.jobId
       || completion['state'] !== 'complete'
       || !verifiedPlanes(completion['verified'])
@@ -131,7 +134,7 @@ function verifiedPlanes(value: unknown): boolean {
 
 function stringArray(value: unknown): string[] {
   const values = plainArray(value);
-  if (values.length > MAX_CONTEXT_GRAPH_IDS
+  if (values.length > MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY
     || values.some((entry) => typeof entry !== 'string'
       || entry.length === 0
       || entry.length > MAX_CONTEXT_GRAPH_ID_LENGTH)

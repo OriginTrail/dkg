@@ -148,6 +148,7 @@ function coreJournal(
   round: number,
   jobId: string,
   contextGraphIds: readonly string[],
+  configuredBatchSize = 2,
 ) {
   return journalReference({
     kind: 'core-automatic-round',
@@ -157,8 +158,8 @@ function coreJournal(
     planningLane: 'publisher-peer',
     source: 'automatic-core-public',
     trigger: 'peer-sync',
-    configuredBatchSize: 2,
-    effectiveBatchSize: 2,
+    configuredBatchSize,
+    effectiveBatchSize: configuredBatchSize,
     explicitSelectedContextGraphIds: [],
     explicitSelectedContextGraphCount: 0,
     automaticContextGraphIds: contextGraphIds,
@@ -363,6 +364,136 @@ test('published artifact must retain matching automatic journal proof', () => {
   syntheticCore.core.final[1].automaticJobIds = ['synthetic-core-round'];
   const coreVerdict = verifySelectiveCoverage(syntheticCore);
   assert.equal(coreVerdict.checks.coreAutomaticProvenance, false);
+});
+
+test('supports 33 public graphs through multiple bounded journal rounds', () => {
+  const extra = Array.from({ length: 30 }, (_, index): SelectiveCoverageGraphV1 => {
+    const name = `03-public-unselected-${String(index).padStart(2, '0')}`;
+    return {
+      contextGraphId: id(name),
+      accessPolicy: 0,
+      publishPolicy: 1,
+      edgePolicy: 'unselected',
+      selectedSnapshot: snapshot(name, 'selected'),
+      finalSnapshot: snapshot(name, 'final'),
+    };
+  });
+  const largeCorpus = createSelectiveCoverageCorpus({
+    networkId: corpus.networkId,
+    coreAutomaticBatchSize: 32,
+    coreCoverageRoundLimit: 2,
+    graphs: [...graphs, ...extra],
+  });
+  const evidence = clone();
+  evidence.corpus = largeCorpus;
+  evidence.publisher.selected = largeCorpus.graphs.map((graph) =>
+    exact(graph, graph.selectedSnapshot));
+  evidence.publisher.final = largeCorpus.graphs.map((graph) => exact(graph, graph.finalSnapshot));
+  evidence.edge.beforeSelection = largeCorpus.graphs.map((graph) => edgeAbsent(graph.contextGraphId));
+  evidence.edge.afterSelection = largeCorpus.graphs.map((graph) => {
+    if (graph.contextGraphId === graphs[0]!.contextGraphId) {
+      return edgeExact(graph, graph.selectedSnapshot, 'edge-select-on-demand');
+    }
+    if (graph.contextGraphId === graphs[1]!.contextGraphId) {
+      return edgeExact(graph, graph.selectedSnapshot, 'edge-select-always-on');
+    }
+    return edgeAbsent(graph.contextGraphId);
+  });
+  evidence.edge.afterRestart = largeCorpus.graphs.map((graph) => {
+    if (graph.contextGraphId === graphs[0]!.contextGraphId) {
+      return {
+        ...edgeExact(graph, graph.selectedSnapshot, 'edge-select-on-demand'),
+        runtimeSyncMode: null,
+      };
+    }
+    if (graph.contextGraphId === graphs[1]!.contextGraphId) {
+      return edgeExact(graph, graph.finalSnapshot, 'edge-auto-always-on');
+    }
+    return edgeAbsent(graph.contextGraphId);
+  });
+  evidence.edge.afterSecondOnDemand = largeCorpus.graphs.map((graph) => {
+    if (graph.contextGraphId === graphs[0]!.contextGraphId) {
+      return edgeExact(graph, graph.finalSnapshot, 'edge-second-on-demand');
+    }
+    if (graph.contextGraphId === graphs[1]!.contextGraphId) {
+      return edgeExact(graph, graph.finalSnapshot, 'edge-auto-always-on');
+    }
+    return edgeAbsent(graph.contextGraphId);
+  });
+  const publicGraphs = largeCorpus.graphs.filter((graph) => graph.accessPolicy === 0);
+  const chunks = [publicGraphs.slice(0, 32), publicGraphs.slice(32)];
+  evidence.core.automaticBatchSize = 32;
+  evidence.core.rounds = chunks.map((chunk, round) => ({
+    round,
+    jobId: `core-large-${round}`,
+    planningLane: 'publisher-peer',
+    source: 'automatic-core-public',
+    configuredBatchSize: 32,
+    explicitSelectedContextGraphIds: [],
+    contextGraphIds: chunk.map((graph) => graph.contextGraphId),
+    completions: chunk.map((graph) => ({
+      contextGraphId: graph.contextGraphId,
+      completedWave: 'final',
+      completedSnapshot: graph.finalSnapshot,
+    })),
+  }));
+  evidence.automaticJournalEvidence.coreRounds = chunks.map((chunk, round) =>
+    coreJournal(
+      round,
+      `core-large-${round}`,
+      chunk.map((graph) => graph.contextGraphId),
+      32,
+    ));
+  const jobByGraph = new Map(chunks.flatMap((chunk, round) =>
+    chunk.map((graph) => [graph.contextGraphId, `core-large-${round}`] as const)));
+  evidence.core.final = largeCorpus.graphs.map((graph) => ({
+    ...(graph.accessPolicy === 0 ? exact(graph, graph.finalSnapshot) : absent(graph.contextGraphId)),
+    automaticJobIds: graph.accessPolicy === 0 ? [jobByGraph.get(graph.contextGraphId)!] : [],
+  }));
+
+  const verdict = verifyWithProvenance(evidence, {
+    ...EXPECTED_PROVENANCE,
+    corpusManifestDigest: largeCorpus.manifestDigest,
+  });
+  assert.equal(verdict.pass, true, verdict.rejectReasons.join('; '));
+});
+
+test('rejects a batch that cannot fit one untruncated journal entry', () => {
+  assert.throws(() => createSelectiveCoverageCorpus({
+    networkId: corpus.networkId,
+    coreAutomaticBatchSize: 33,
+    coreCoverageRoundLimit: 1,
+    graphs,
+  }), /exceeds one bounded journal entry/);
+});
+
+test('scheduled Core IDs require exact same-round terminal completions', () => {
+  const evidence = clone();
+  evidence.core.rounds[0].completions.pop();
+  evidence.automaticJournalEvidence.coreRounds[0].snapshot.entries[0].completions.pop();
+
+  const deferred = graphs[1]!;
+  evidence.core.rounds[1].contextGraphIds.unshift(deferred.contextGraphId);
+  evidence.core.rounds[1].completions.unshift({
+    contextGraphId: deferred.contextGraphId,
+    completedWave: 'final',
+    completedSnapshot: deferred.finalSnapshot,
+  });
+  const later = evidence.automaticJournalEvidence.coreRounds[1].snapshot.entries[0];
+  later.automaticContextGraphIds.unshift(deferred.contextGraphId);
+  later.automaticContextGraphCount += 1;
+  later.completions.unshift({
+    jobId: 'core-auto-1',
+    contextGraphId: deferred.contextGraphId,
+    state: 'complete',
+    verified: { metadata: true, durable: true, sharedMemory: true },
+    finishedAt: 22,
+  });
+  evidence.core.final[1].automaticJobIds = ['core-auto-1'];
+
+  const verdict = verifySelectiveCoverage(evidence);
+  assert.equal(verdict.checks.coreAutomaticProvenance, false);
+  assert.equal(verdict.pass, false);
 });
 
 test('corpus and evidence serialization is deterministic', () => {

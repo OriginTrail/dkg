@@ -414,6 +414,20 @@ test('collects the anchored three-process Edge/Core sequence and cleans up', asy
   assert.equal(evidence.provenance.edgePeerId, expected.edgePeerId);
   assert.doesNotThrow(() => canonicalJson(evidence));
   assert.deepEqual(evidence.core.rounds.map((round) => round.contextGraphIds.length), [2, 1]);
+  assert.deepEqual(
+    evidence.edge.operations.map((operation) => [
+      operation.sequence,
+      operation.phase,
+      operation.syncMode,
+      operation.contextGraphId,
+    ]),
+    [
+      [0, 'selection', 'on-demand', graphs[0]!.contextGraphId],
+      [1, 'selection', 'always-on', graphs[1]!.contextGraphId],
+      [2, 'post-restart-auto', 'always-on', graphs[1]!.contextGraphId],
+      [3, 'post-restart-explicit', 'on-demand', graphs[0]!.contextGraphId],
+    ],
+  );
   assert.deepEqual(runtime.stopped, ['core', 'edge', 'publisher']);
   assert.ok(
     runtime.calls.indexOf('publish:final') < runtime.calls.indexOf('start:core'),

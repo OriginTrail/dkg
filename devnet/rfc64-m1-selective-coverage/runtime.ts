@@ -8,6 +8,7 @@ import {
   type SelectiveCoverageCorpusV1,
   type SelectiveCoverageEvidenceV1,
   SELECTIVE_COVERAGE_EVIDENCE_SCHEMA,
+  MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY,
   computeSelectiveCoverageCorpusDigest,
 } from './manifest.ts';
 import { verifySelectiveCoverage } from './verifier.ts';
@@ -95,6 +96,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
   readonly runtime: SelectiveCoverageRuntimeV1;
 }): Promise<SelectiveCoverageEvidenceV1> {
   assertAnchoredCorpus(input.corpus, input.expectedProvenance);
+  const edgePlan = buildEdgePhasePlan(input.corpus);
   const attempted = new Set<SelectiveCoverageRuntimeRole>();
   let primaryFailure: unknown;
   try {
@@ -120,11 +122,11 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
 
     const edgeOperations: EdgeSyncOperationV1[] = [];
     const edgeReconcilerJournals: SyncCoverageJournalReferenceV1[] = [];
-    for (const graph of selectedPublicGraphs(input.corpus)) {
+    for (const step of edgePlan.selection) {
       const result = await input.runtime.synchronizeEdge({
-        contextGraphId: graph.contextGraphId,
+        contextGraphId: step.contextGraphId,
         phase: 'selection',
-        syncMode: graph.edgePolicy as 'always-on' | 'on-demand',
+        syncMode: step.syncMode,
         wave: 'selected',
       });
       edgeOperations.push(withSequence(result.operation, edgeOperations.length));
@@ -147,10 +149,9 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
     assertReady(edgeAfterRestartReady, 'edge', input.expectedProvenance);
     assertDistinctProcesses([publisher, edgeBeforeRestart, edgeAfterRestartReady]);
 
-    for (const graph of selectedPublicGraphs(input.corpus)
-      .filter((candidate) => candidate.edgePolicy === 'always-on')) {
+    for (const step of edgePlan.reconciler) {
       const result = await input.runtime.waitForEdgeReconciler({
-        contextGraphId: graph.contextGraphId,
+        contextGraphId: step.contextGraphId,
       });
       assertEdgeReconcilerJournalV1(
         result.journal,
@@ -166,10 +167,9 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
       'Edge after restart',
     );
 
-    for (const graph of selectedPublicGraphs(input.corpus)
-      .filter((candidate) => candidate.edgePolicy === 'on-demand')) {
+    for (const step of edgePlan.secondOnDemand) {
       const result = await input.runtime.synchronizeEdge({
-        contextGraphId: graph.contextGraphId,
+        contextGraphId: step.contextGraphId,
         phase: 'post-restart-explicit',
         syncMode: 'on-demand',
         wave: 'final',
@@ -306,9 +306,33 @@ function detachJsonEvidence(
   }
 }
 
-function selectedPublicGraphs(corpus: SelectiveCoverageCorpusV1) {
-  return corpus.graphs.filter((graph) =>
-    graph.accessPolicy === 0 && graph.edgePolicy !== 'unselected');
+interface EdgePhasePlanV1 {
+  readonly selection: readonly {
+    readonly contextGraphId: string;
+    readonly syncMode: 'always-on' | 'on-demand';
+  }[];
+  readonly reconciler: readonly { readonly contextGraphId: string }[];
+  readonly secondOnDemand: readonly { readonly contextGraphId: string }[];
+}
+
+function buildEdgePhasePlan(corpus: SelectiveCoverageCorpusV1): EdgePhasePlanV1 {
+  const selection: Array<EdgePhasePlanV1['selection'][number]> = [];
+  const reconciler: Array<EdgePhasePlanV1['reconciler'][number]> = [];
+  const secondOnDemand: Array<EdgePhasePlanV1['secondOnDemand'][number]> = [];
+  for (const graph of corpus.graphs) {
+    if (graph.accessPolicy !== 0 || graph.edgePolicy === 'unselected') continue;
+    selection.push({ contextGraphId: graph.contextGraphId, syncMode: graph.edgePolicy });
+    if (graph.edgePolicy === 'always-on') {
+      reconciler.push({ contextGraphId: graph.contextGraphId });
+    } else {
+      secondOnDemand.push({ contextGraphId: graph.contextGraphId });
+    }
+  }
+  return {
+    selection: Object.freeze(selection),
+    reconciler: Object.freeze(reconciler),
+    secondOnDemand: Object.freeze(secondOnDemand),
+  };
 }
 
 function withSequence(
@@ -330,6 +354,9 @@ function assertAnchoredCorpus(
   }
   if (corpus.networkId !== expected.networkId) {
     throw new Error('M1 corpus network differs from the external trust anchor');
+  }
+  if (corpus.coreAutomaticBatchSize > MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY) {
+    throw new Error('M1 Core batch exceeds the bounded journal entry capacity');
   }
   for (const graph of corpus.graphs) {
     if (graph.accessPolicy === 1 && graph.edgePolicy !== 'unselected') {

@@ -9,6 +9,8 @@ export const SELECTIVE_COVERAGE_VERDICT_SCHEMA =
 
 export const MAX_SELECTIVE_COVERAGE_GRAPHS = 64;
 export const MAX_SELECTIVE_COVERAGE_ROUNDS = 256;
+/** Matches the bounded producer journal; larger corpora span multiple rounds. */
+export const MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY = 32;
 
 export type EdgeCoveragePolicy = 'always-on' | 'on-demand' | 'unselected';
 
@@ -209,6 +211,11 @@ export function createSelectiveCoverageCorpus(input: {
   coreCoverageRoundLimit: number;
   graphs: readonly SelectiveCoverageGraphV1[];
 }): SelectiveCoverageCorpusV1 {
+  if (!Number.isSafeInteger(input.coreAutomaticBatchSize)
+    || input.coreAutomaticBatchSize < 1
+    || input.coreAutomaticBatchSize > MAX_SYNC_COVERAGE_IDS_PER_JOURNAL_ENTRY) {
+    throw new RangeError('Core automatic batch exceeds one bounded journal entry');
+  }
   const payload: CorpusPayload = {
     schema: SELECTIVE_COVERAGE_CORPUS_SCHEMA,
     networkId: input.networkId,

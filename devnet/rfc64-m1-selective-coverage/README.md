@@ -23,6 +23,11 @@ The verifier passes only when all of these user-visible outcomes are proven:
 - every public graph is eventually scheduled and converges to exact final VM
   and SWM heads, inventory digests, asset counts, and payload triple counts.
 
+The corpus may contain up to 64 graphs, while one automatic journal entry may
+contain at most 32 graph IDs. Accordingly, `coreAutomaticBatchSize` is capped at
+32 and a 33-64 graph corpus must converge through multiple bounded rounds. A
+truncated single-round claim cannot satisfy the gate.
+
 Edge results are bound to runtime subscription modes and distinct operation job
 IDs whose completion records carry the exact resulting snapshot. After restart,
 always-on work must come from the reconciler; on-demand payload remains at its
@@ -117,7 +122,9 @@ and all metadata/durable/shared-memory verification bits. It binds:
 - `core-automatic-round` entries to the actual job ID, planning lane,
   configured batch, frozen explicit/automatic ID lists, and every terminal
   per-CG completion. Every completion carries the same real scheduler-round
-  job ID; a detached or synthetic per-CG ID is rejected.
+  job ID; a detached or synthetic per-CG ID is rejected. Planned IDs and
+  completion IDs must match exactly in count and order, so later completion
+  cannot retroactively validate an incomplete earlier admission round.
 
 `droppedBeforeSequence` and `nextSequence` prove the selected entry was not
 overwritten. Any truncated, missing, nonterminal, or mismatched record fails the

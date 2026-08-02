@@ -1,13 +1,17 @@
 import {
-  MAX_SELECTIVE_COVERAGE_GRAPHS,
-  MAX_SELECTIVE_COVERAGE_ROUNDS,
   type CoreAutomaticRoundV1,
   type CoreFinalObservationV1,
   type EdgeGraphObservationV1,
   type EdgeSyncOperationV1,
   type GraphObservationV1,
-  type GraphSnapshotExpectationV1,
 } from './manifest.ts';
+import {
+  decodeCoreAutomaticRound,
+  decodeCoreFinalObservations as parseCoreFinalObservations,
+  decodeEdgeObservations as parseEdgeObservations,
+  decodeGraphObservations as parseGraphObservations,
+  decodeGraphSnapshot,
+} from './evidence-codec.ts';
 import {
   SELECTIVE_COVERAGE_RUNTIME_PROTOCOL,
   type SelectiveCoverageEdgeRestartReceiptV1,
@@ -17,8 +21,6 @@ import {
   parseSyncCoverageJournalReferenceV1,
   type SyncCoverageJournalReferenceV1,
 } from './sync-coverage-journal.ts';
-
-type Decoder<T> = (input: unknown) => T;
 
 export function decodeRuntimeReady(input: unknown): SelectiveCoverageRuntimeReadyV1 {
   const row = record(input, [
@@ -63,24 +65,15 @@ export function decodeRestartReceipt(input: unknown): SelectiveCoverageEdgeResta
 }
 
 export function decodeGraphObservations(input: unknown): readonly GraphObservationV1[] {
-  return array(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS, decodeGraphObservation);
+  return requiredCodec(parseGraphObservations(input), 'graph observations');
 }
 
 export function decodeEdgeObservations(input: unknown): readonly EdgeGraphObservationV1[] {
-  return array(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS, decodeEdgeObservation);
+  return requiredCodec(parseEdgeObservations(input), 'Edge observations');
 }
 
 export function decodeCoreFinalObservations(input: unknown): readonly CoreFinalObservationV1[] {
-  return array(input, 1, MAX_SELECTIVE_COVERAGE_GRAPHS, (value) => {
-    const row = record(value, ['contextGraphId', 'automaticJobIds', 'vm', 'swm']);
-    return {
-      contextGraphId: text(row.contextGraphId, 'contextGraphId'),
-      vm: decodePlaneObservation(row.vm),
-      swm: decodePlaneObservation(row.swm),
-      automaticJobIds: array(row.automaticJobIds, 0, MAX_SELECTIVE_COVERAGE_ROUNDS,
-        (entry) => text(entry, 'automaticJobId')),
-    };
-  });
+  return requiredCodec(parseCoreFinalObservations(input), 'Core final observations');
 }
 
 export function decodeEdgeSyncResult(input: unknown): {
@@ -110,61 +103,15 @@ export function decodeCoreRoundResult(input: unknown): {
   readonly journal: SyncCoverageJournalReferenceV1;
 } {
   const row = record(input, ['round', 'journal']);
-  return { round: decodeCoreRound(row.round), journal: requiredJournal(row.journal) };
+  return {
+    round: requiredCodec(decodeCoreAutomaticRound(row.round), 'Core round'),
+    journal: requiredJournal(row.journal),
+  };
 }
 
 export function decodeNull(input: unknown): null {
   if (input !== null) fail('null acknowledgement');
   return null;
-}
-
-function decodeGraphObservation(input: unknown): GraphObservationV1 {
-  const row = record(input, ['contextGraphId', 'vm', 'swm']);
-  return {
-    contextGraphId: text(row.contextGraphId, 'contextGraphId'),
-    vm: decodePlaneObservation(row.vm),
-    swm: decodePlaneObservation(row.swm),
-  };
-}
-
-function decodeEdgeObservation(input: unknown): EdgeGraphObservationV1 {
-  const row = record(input, [
-    'contextGraphId', 'runtimeSyncMode', 'producingJobId', 'vm', 'swm',
-  ]);
-  const runtimeSyncMode = row.runtimeSyncMode;
-  if (runtimeSyncMode !== null
-    && runtimeSyncMode !== 'always-on'
-    && runtimeSyncMode !== 'on-demand') fail('Edge runtime sync mode');
-  return {
-    contextGraphId: text(row.contextGraphId, 'contextGraphId'),
-    runtimeSyncMode,
-    producingJobId: row.producingJobId === null
-      ? null
-      : text(row.producingJobId, 'producingJobId'),
-    vm: decodePlaneObservation(row.vm),
-    swm: decodePlaneObservation(row.swm),
-  };
-}
-
-function decodePlaneObservation(input: unknown) {
-  const row = record(input, [
-    'reportedComplete', 'headDigest', 'inventoryDigest', 'assetCount',
-    'metadataTripleCount', 'dataTripleCount',
-  ]);
-  if (typeof row.reportedComplete !== 'boolean'
-    || (row.headDigest !== null && typeof row.headDigest !== 'string')
-    || (row.inventoryDigest !== null && typeof row.inventoryDigest !== 'string')
-    || !nonNegativeInteger(row.assetCount)
-    || !nonNegativeInteger(row.metadataTripleCount)
-    || !nonNegativeInteger(row.dataTripleCount)) fail('plane observation');
-  return {
-    reportedComplete: row.reportedComplete,
-    headDigest: row.headDigest,
-    inventoryDigest: row.inventoryDigest,
-    assetCount: row.assetCount as number,
-    metadataTripleCount: row.metadataTripleCount as number,
-    dataTripleCount: row.dataTripleCount as number,
-  };
 }
 
 function decodeEdgeOperation(input: unknown): Omit<EdgeSyncOperationV1, 'sequence'> {
@@ -186,82 +133,17 @@ function decodeEdgeOperation(input: unknown): Omit<EdgeSyncOperationV1, 'sequenc
     contextGraphId: text(row.contextGraphId, 'contextGraphId'),
     jobId: text(row.jobId, 'jobId'),
     completedWave: row.completedWave,
-    completedSnapshot: decodeSnapshot(row.completedSnapshot),
-  };
-}
-
-function decodeCoreRound(input: unknown): CoreAutomaticRoundV1 {
-  const row = record(input, [
-    'round', 'jobId', 'planningLane', 'source', 'configuredBatchSize',
-    'explicitSelectedContextGraphIds', 'contextGraphIds', 'completions',
-  ]);
-  if (!nonNegativeInteger(row.round)
-    || row.source !== 'automatic-core-public'
-    || !positiveInteger(row.configuredBatchSize)) fail('Core round');
-  return {
-    round: row.round as number,
-    jobId: text(row.jobId, 'jobId'),
-    planningLane: text(row.planningLane, 'planningLane'),
-    source: 'automatic-core-public',
-    configuredBatchSize: row.configuredBatchSize as number,
-    explicitSelectedContextGraphIds: array(
-      row.explicitSelectedContextGraphIds,
-      0,
-      MAX_SELECTIVE_COVERAGE_GRAPHS,
-      (entry) => text(entry, 'contextGraphId'),
+    completedSnapshot: requiredCodec(
+      decodeGraphSnapshot(row.completedSnapshot),
+      'graph snapshot',
     ),
-    contextGraphIds: array(row.contextGraphIds, 0, MAX_SELECTIVE_COVERAGE_GRAPHS,
-      (entry) => text(entry, 'contextGraphId')),
-    completions: array(row.completions, 0, MAX_SELECTIVE_COVERAGE_GRAPHS, (entry) => {
-      const completion = record(entry, [
-        'contextGraphId', 'completedWave', 'completedSnapshot',
-      ]);
-      if (completion.completedWave !== 'final') fail('Core completion');
-      return {
-        contextGraphId: text(completion.contextGraphId, 'contextGraphId'),
-        completedWave: 'final' as const,
-        completedSnapshot: decodeSnapshot(completion.completedSnapshot),
-      };
-    }),
   };
-}
-
-function decodeSnapshot(input: unknown): GraphSnapshotExpectationV1 {
-  const row = record(input, ['vm', 'swm']);
-  const plane = (value: unknown) => {
-    const item = record(value, [
-      'headDigest', 'inventoryDigest', 'assetCount', 'dataTripleCount',
-    ]);
-    if (!positiveInteger(item.assetCount) || !positiveInteger(item.dataTripleCount)) {
-      fail('snapshot plane');
-    }
-    return {
-      headDigest: text(item.headDigest, 'headDigest'),
-      inventoryDigest: text(item.inventoryDigest, 'inventoryDigest'),
-      assetCount: item.assetCount as number,
-      dataTripleCount: item.dataTripleCount as number,
-    };
-  };
-  return { vm: plane(row.vm), swm: plane(row.swm) };
 }
 
 function requiredJournal(input: unknown): SyncCoverageJournalReferenceV1 {
   const parsed = parseSyncCoverageJournalReferenceV1(input);
   if (!parsed) fail('journal reference');
   return parsed;
-}
-
-function array<T>(
-  input: unknown,
-  minimum: number,
-  maximum: number,
-  decode: Decoder<T>,
-): readonly T[] {
-  if (!Array.isArray(input)
-    || Object.getPrototypeOf(input) !== Array.prototype
-    || input.length < minimum
-    || input.length > maximum) fail('array');
-  return Object.freeze(input.map(decode));
 }
 
 function record(input: unknown, keys: readonly string[]): Record<string, unknown> {
@@ -282,6 +164,11 @@ function optionalRecord(
 
 function text(input: unknown, label: string): string {
   if (typeof input !== 'string' || input.length < 1 || input.length > 4_096) fail(label);
+  return input;
+}
+
+function requiredCodec<T>(input: T | undefined, label: string): T {
+  if (input === undefined) fail(label);
   return input;
 }
 

@@ -94,7 +94,42 @@ test('decodes non-start command results at the adapter boundary', async () => {
   }
 });
 
-function fixtureRuntime(mode?: string): ProcessSelectiveCoverageRuntimeV1 {
+for (const [command, invoke] of [
+  ['observe-edge', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
+    runtime.observeEdge('before-selection')],
+  ['synchronize-edge', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
+    runtime.synchronizeEdge({
+      contextGraphId: '0x1111111111111111111111111111111111111111/public',
+      phase: 'selection',
+      syncMode: 'on-demand',
+      wave: 'selected',
+    })],
+  ['restart-edge', (runtime: ProcessSelectiveCoverageRuntimeV1) => runtime.restartEdge()],
+  ['wait-edge-reconciler', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
+    runtime.waitForEdgeReconciler({
+      contextGraphId: '0x1111111111111111111111111111111111111111/public',
+    })],
+  ['core-automatic-round', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
+    runtime.runCoreAutomaticRound(0)],
+  ['observe-core-final', (runtime: ProcessSelectiveCoverageRuntimeV1) =>
+    runtime.observeCoreFinal()],
+  ['shutdown', (runtime: ProcessSelectiveCoverageRuntimeV1) => runtime.close()],
+] as const) {
+  test(`rejects malformed ${command} values at the adapter boundary`, async () => {
+    const runtime = fixtureRuntime(undefined, command);
+    try {
+      await runtime.start('publisher');
+      await assert.rejects(invoke(runtime), /response failed decoding/);
+    } finally {
+      await runtime.close().catch(() => undefined);
+    }
+  });
+}
+
+function fixtureRuntime(
+  mode?: string,
+  malformedCommand?: string,
+): ProcessSelectiveCoverageRuntimeV1 {
   return new ProcessSelectiveCoverageRuntimeV1({
     command: process.execPath,
     args: [resolve(import.meta.dirname, 'process-runtime-fixture.mjs')],
@@ -103,6 +138,7 @@ function fixtureRuntime(mode?: string): ProcessSelectiveCoverageRuntimeV1 {
     env: {
       ...process.env,
       ...(mode ? { FIXTURE_MODE: mode } : {}),
+      ...(malformedCommand ? { FIXTURE_MALFORM_COMMAND: malformedCommand } : {}),
       FIXTURE_NETWORK_ID: 'otp:20430',
       FIXTURE_SOURCE_COMMIT: 'a'.repeat(40),
       FIXTURE_RUNTIME_MANIFEST: `sha256:${'b'.repeat(64)}`,
