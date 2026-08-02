@@ -17,6 +17,87 @@ function deferred(): {
 }
 
 describe('context graph catch-up route coalescing', () => {
+  it('makes a reused broad job latest after broad, narrow, broad requests', async () => {
+    const firstRunStarted = deferred();
+    const releaseFirstRun = deferred();
+    const harness = await ContextGraphSubscribeRouteHarness.create({
+      hasConfirmedMeta: true,
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+      runner: async () => {
+        firstRunStarted.resolve();
+        await releaseFirstRun.promise;
+        return publicDurableAndSharedMemoryResult();
+      },
+    });
+
+    try {
+      const broad = await harness.postSubscribe({ includeSharedMemory: true });
+      await firstRunStarted.promise;
+      const narrow = await harness.postSubscribe({ includeSharedMemory: false });
+      await expect(harness.getStatusByContextGraph()).resolves.toMatchObject({
+        jobId: narrow.body.catchup.jobId,
+        includeSharedMemory: false,
+      });
+
+      const reusedBroad = await harness.postSubscribe({ includeSharedMemory: true });
+      expect(reusedBroad.body.catchup.jobId).toBe(broad.body.catchup.jobId);
+      await expect(harness.getStatusByContextGraph()).resolves.toMatchObject({
+        jobId: broad.body.catchup.jobId,
+        includeSharedMemory: true,
+      });
+    } finally {
+      releaseFirstRun.resolve();
+      await harness.close();
+    }
+  });
+
+  it('makes a reused narrow job latest after narrow, upgrade, narrow requests', async () => {
+    const firstRunStarted = deferred();
+    const releaseFirstRun = deferred();
+    const harness = await ContextGraphSubscribeRouteHarness.create({
+      hasConfirmedMeta: true,
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+      runner: async (_request, callNumber) => {
+        if (callNumber === 1) {
+          firstRunStarted.resolve();
+          await releaseFirstRun.promise;
+          return privateDataOnlyResult();
+        }
+        return publicDurableAndSharedMemoryResult();
+      },
+    });
+
+    try {
+      const narrow = await harness.postSubscribe({ includeSharedMemory: false });
+      await firstRunStarted.promise;
+      const broad = await harness.postSubscribe({ includeSharedMemory: true });
+      await expect(harness.getStatusByContextGraph()).resolves.toMatchObject({
+        jobId: broad.body.catchup.jobId,
+        includeSharedMemory: true,
+      });
+
+      const reusedNarrow = await harness.postSubscribe({ includeSharedMemory: false });
+      expect(reusedNarrow.body.catchup.jobId).toBe(narrow.body.catchup.jobId);
+      await expect(harness.getStatusByContextGraph()).resolves.toMatchObject({
+        jobId: narrow.body.catchup.jobId,
+        includeSharedMemory: false,
+      });
+    } finally {
+      releaseFirstRun.resolve();
+      await harness.close();
+    }
+  });
+
   it('serially upgrades an active VM-only request with a distinct VM plus SWM job', async () => {
     const firstRunStarted = deferred();
     const releaseFirstRun = deferred();

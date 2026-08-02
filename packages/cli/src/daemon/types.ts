@@ -19,16 +19,37 @@ export interface CatchupJob {
   error?: string;
 }
 
+export type CatchupScope = 'durable' | 'durable-and-shared-memory';
+
+export interface CatchupExecution {
+  jobId: string;
+  scope: CatchupScope;
+}
+
+export type CatchupJobView =
+  | {
+      jobId: string;
+      scope: CatchupScope;
+      kind: 'execution';
+    }
+  | {
+      jobId: string;
+      scope: CatchupScope;
+      sourceExecutionJobId: string;
+      kind: 'projection';
+    };
+
 /**
- * Mutable orchestration state for one serialized per-CG catch-up. Public job
- * records stay immutable in scope; a later SWM upgrade receives its own jobId
- * while reusing this coordinator and the same background worker.
+ * Mutable orchestration state for one serialized per-CG catch-up. Executions
+ * describe actual runner work; views describe the immutable public job for
+ * each requested scope. A narrow view can project a broad execution without
+ * pretending to be another execution, while a wider request queues one real
+ * serialized execution.
  */
 export interface CatchupCoordinator {
   contextGraphId: string;
-  baseJobId: string;
-  upgradeJobId?: string;
-  narrowProjectionJobId?: string;
+  executions: CatchupExecution[];
+  viewsByScope: Map<CatchupScope, CatchupJobView>;
 }
 
 export interface CatchupTracker {

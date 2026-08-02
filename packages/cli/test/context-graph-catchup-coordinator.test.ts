@@ -41,6 +41,7 @@ function deniedResult() {
 function coordinatorFixture(options: {
   failUpgrade?: boolean;
   baseOutcome?: 'success' | 'throw' | 'denied';
+  blockBroadBase?: boolean;
 } = {}) {
   const tracker: CatchupTracker = {
     jobs: new Map(),
@@ -56,8 +57,10 @@ function coordinatorFixture(options: {
   let sequence = 0;
   const firstRunStarted = deferred();
   const releaseFirstRun = deferred();
+  let runNumber = 0;
   const run = vi.fn(async (request: { includeSharedMemory: boolean }) => {
-    if (!request.includeSharedMemory) {
+    runNumber += 1;
+    if (runNumber === 1 && (!request.includeSharedMemory || options.blockBroadBase)) {
       firstRunStarted.resolve();
       await releaseFirstRun.promise;
       if (options.baseOutcome === 'throw') {
@@ -92,6 +95,76 @@ function coordinatorFixture(options: {
 }
 
 describe('ContextGraphCatchupCoordinatorService', () => {
+  it('refreshes latest status when broad, narrow, then broad reuses existing views', async () => {
+    const fixture = coordinatorFixture({ blockBroadBase: true });
+    const broad = fixture.service.start({
+      contextGraphId: 'cg:broad-narrow-broad',
+      includeSharedMemory: true,
+      readinessBeforeCatchup: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: false,
+        updatedAt: 1,
+      },
+    });
+    await fixture.firstRunStarted.promise;
+
+    const narrow = fixture.service.coalesceActive({
+      contextGraphId: 'cg:broad-narrow-broad',
+      includeSharedMemory: false,
+    });
+    expect(fixture.tracker.latestByContextGraph.get('cg:broad-narrow-broad'))
+      .toBe(narrow?.jobId);
+
+    const reusedBroad = fixture.service.coalesceActive({
+      contextGraphId: 'cg:broad-narrow-broad',
+      includeSharedMemory: true,
+    });
+    expect(reusedBroad?.jobId).toBe(broad.jobId);
+    expect(fixture.tracker.latestByContextGraph.get('cg:broad-narrow-broad'))
+      .toBe(broad.jobId);
+
+    fixture.releaseFirstRun.resolve();
+    await waitForJob(broad);
+    if (!narrow) throw new Error('narrow view missing');
+    await waitForJob(narrow);
+  });
+
+  it('refreshes latest status when narrow, upgrade, then narrow reuses the base view', async () => {
+    const fixture = coordinatorFixture();
+    const narrow = fixture.service.start({
+      contextGraphId: 'cg:narrow-broad-narrow',
+      includeSharedMemory: false,
+      readinessBeforeCatchup: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: false,
+        updatedAt: 1,
+      },
+    });
+    await fixture.firstRunStarted.promise;
+
+    const broad = fixture.service.coalesceActive({
+      contextGraphId: 'cg:narrow-broad-narrow',
+      includeSharedMemory: true,
+    });
+    expect(fixture.tracker.latestByContextGraph.get('cg:narrow-broad-narrow'))
+      .toBe(broad?.jobId);
+
+    const reusedNarrow = fixture.service.coalesceActive({
+      contextGraphId: 'cg:narrow-broad-narrow',
+      includeSharedMemory: false,
+    });
+    expect(reusedNarrow?.jobId).toBe(narrow.jobId);
+    expect(fixture.tracker.latestByContextGraph.get('cg:narrow-broad-narrow'))
+      .toBe(narrow.jobId);
+
+    fixture.releaseFirstRun.resolve();
+    await waitForJob(narrow);
+    if (!broad) throw new Error('broad upgrade missing');
+    await waitForJob(broad);
+  });
+
   it('keeps job scopes immutable and serializes one wider upgrade', async () => {
     const fixture = coordinatorFixture();
     const base = fixture.service.start({
