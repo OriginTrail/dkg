@@ -20,7 +20,14 @@ import {
   type SelectiveCoverageEvidenceV1,
   type SelectiveCoverageGraphV1,
   type SelectiveCoverageVerdictV1,
+  type SyncCoverageJournalProcessIdentityV1,
+  type SyncCoverageJournalReferenceV1,
 } from './manifest.ts';
+import {
+  assertCoreAutomaticRoundJournalV1,
+  assertEdgeReconcilerJournalV1,
+  parseSyncCoverageJournalReferenceV1,
+} from './sync-coverage-journal.ts';
 
 const DIGEST = /^(?:0x|sha256:)[0-9a-f]{64}$/u;
 const ID = /^[A-Za-z0-9._:/@-]+$/u;
@@ -98,19 +105,72 @@ function verifyParsed(
   evidence: SelectiveCoverageEvidenceV1,
   expected: ExpectedSelectiveCoverageProvenanceV1,
 ): SelectiveCoverageVerdictV1 {
-  const { corpus } = evidence;
-  const graphIds = corpus.graphs.map((graph) => graph.contextGraphId);
-  const publicGraphs = corpus.graphs.filter((graph) => graph.accessPolicy === 0);
-  const privateGraphs = corpus.graphs.filter((graph) => graph.accessPolicy === 1);
-  const byId = new Map(corpus.graphs.map((graph) => [graph.contextGraphId, graph]));
-  const publisherSelected = byObservationId(evidence.publisher.selected);
-  const publisherFinal = byObservationId(evidence.publisher.final);
-  const edgeBefore = byObservationId(evidence.edge.beforeSelection);
-  const edgeSelected = byObservationId(evidence.edge.afterSelection);
-  const edgeRestarted = byObservationId(evidence.edge.afterRestart);
-  const edgeSecondOnDemand = byObservationId(evidence.edge.afterSecondOnDemand);
-  const coreFinal = byObservationId(evidence.core.final);
+  const context = buildVerificationContext(evidence, expected);
+  const envelope = verifyEnvelope(context);
+  const publisher = verifyPublisher(context);
+  const edge = verifyEdge(context);
+  const core = verifyCore(context);
+  const checks = Object.freeze({
+    schemaWellFormed: true,
+    ...envelope,
+    ...publisher,
+    ...edge,
+    ...core.checks,
+    noMetadataOnlyCompletion: verifyExactPayloads(context),
+  }) satisfies SelectiveCoverageChecksV1;
+  const rejectReasons = CHECK_NAMES.filter((name) => !checks[name]).map((name) => REASONS[name]);
+  return Object.freeze({
+    schema: SELECTIVE_COVERAGE_VERDICT_SCHEMA,
+    pass: CHECK_NAMES.every((name) => checks[name]),
+    checks,
+    missingCoreContextGraphIds: core.missingContextGraphIds,
+    rejectReasons: Object.freeze(rejectReasons),
+    recomputedCorpusDigest: computeSelectiveCoverageCorpusDigest(context.corpus),
+  });
+}
 
+interface VerificationContext {
+  readonly evidence: SelectiveCoverageEvidenceV1;
+  readonly expected: ExpectedSelectiveCoverageProvenanceV1;
+  readonly corpus: SelectiveCoverageCorpusV1;
+  readonly graphIds: readonly string[];
+  readonly publicGraphs: readonly SelectiveCoverageGraphV1[];
+  readonly privateGraphs: readonly SelectiveCoverageGraphV1[];
+  readonly byId: ReadonlyMap<string, SelectiveCoverageGraphV1>;
+  readonly publisherSelected: ReadonlyMap<string, GraphObservationV1>;
+  readonly publisherFinal: ReadonlyMap<string, GraphObservationV1>;
+  readonly edgeBefore: ReadonlyMap<string, EdgeGraphObservationV1>;
+  readonly edgeSelected: ReadonlyMap<string, EdgeGraphObservationV1>;
+  readonly edgeRestarted: ReadonlyMap<string, EdgeGraphObservationV1>;
+  readonly edgeSecondOnDemand: ReadonlyMap<string, EdgeGraphObservationV1>;
+  readonly coreFinal: ReadonlyMap<string, CoreFinalObservationV1>;
+}
+
+function buildVerificationContext(
+  evidence: SelectiveCoverageEvidenceV1,
+  expected: ExpectedSelectiveCoverageProvenanceV1,
+): VerificationContext {
+  const corpus = evidence.corpus;
+  return {
+    evidence,
+    expected,
+    corpus,
+    graphIds: corpus.graphs.map((graph) => graph.contextGraphId),
+    publicGraphs: corpus.graphs.filter((graph) => graph.accessPolicy === 0),
+    privateGraphs: corpus.graphs.filter((graph) => graph.accessPolicy === 1),
+    byId: new Map(corpus.graphs.map((graph) => [graph.contextGraphId, graph])),
+    publisherSelected: byObservationId(evidence.publisher.selected),
+    publisherFinal: byObservationId(evidence.publisher.final),
+    edgeBefore: byObservationId(evidence.edge.beforeSelection),
+    edgeSelected: byObservationId(evidence.edge.afterSelection),
+    edgeRestarted: byObservationId(evidence.edge.afterRestart),
+    edgeSecondOnDemand: byObservationId(evidence.edge.afterSecondOnDemand),
+    coreFinal: byObservationId(evidence.core.final),
+  };
+}
+
+function verifyEnvelope(context: VerificationContext) {
+  const { evidence, expected, corpus, graphIds } = context;
   const observationsCanonical = [
     evidence.publisher.selected,
     evidence.publisher.final,
@@ -120,24 +180,34 @@ function verifyParsed(
     evidence.edge.afterSecondOnDemand,
     evidence.core.final,
   ].every((rows) => exactCanonicalIds(rows.map((row) => row.contextGraphId), graphIds));
-  const corpusCanonicalOrder = strictlyIncreasing(graphIds) && observationsCanonical;
-  const provenanceMatches = evidence.provenance.networkId === expected.networkId
-    && evidence.provenance.testedHeadCommit === expected.testedHeadCommit
-    && evidence.provenance.runtimeManifestDigest === expected.runtimeManifestDigest
-    && evidence.provenance.publisherPeerId === expected.publisherPeerId
-    && evidence.provenance.edgePeerId === expected.edgePeerId
-    && evidence.provenance.corePeerId === expected.corePeerId
-    && corpus.networkId === expected.networkId
-    && corpus.manifestDigest === expected.corpusManifestDigest;
-  const corpusDigestMatches = computeSelectiveCoverageCorpusDigest(corpus)
-    === corpus.manifestDigest;
-  const requiredPolicyCellsPresent = hasRequiredPolicyCells(corpus.graphs);
-  const publisherSnapshotsExact = corpus.graphs.every((graph) =>
-    exactGraph(publisherSelected.get(graph.contextGraphId), graph.selectedSnapshot)
-      && exactGraph(publisherFinal.get(graph.contextGraphId), graph.finalSnapshot));
-  const publicSecondWaveAdvances = publicGraphs.every((graph) =>
-    snapshotsAdvance(graph.selectedSnapshot, graph.finalSnapshot));
+  return {
+    provenanceMatches: evidence.provenance.networkId === expected.networkId
+      && evidence.provenance.testedHeadCommit === expected.testedHeadCommit
+      && evidence.provenance.runtimeManifestDigest === expected.runtimeManifestDigest
+      && evidence.provenance.publisherPeerId === expected.publisherPeerId
+      && evidence.provenance.edgePeerId === expected.edgePeerId
+      && evidence.provenance.corePeerId === expected.corePeerId
+      && corpus.networkId === expected.networkId
+      && corpus.manifestDigest === expected.corpusManifestDigest,
+    corpusDigestMatches: computeSelectiveCoverageCorpusDigest(corpus) === corpus.manifestDigest,
+    corpusCanonicalOrder: strictlyIncreasing(graphIds) && observationsCanonical,
+    requiredPolicyCellsPresent: hasRequiredPolicyCells(corpus.graphs),
+  };
+}
 
+function verifyPublisher(context: VerificationContext) {
+  return {
+    publisherSnapshotsExact: context.corpus.graphs.every((graph) =>
+      exactGraph(context.publisherSelected.get(graph.contextGraphId), graph.selectedSnapshot)
+        && exactGraph(context.publisherFinal.get(graph.contextGraphId), graph.finalSnapshot)),
+    publicSecondWaveAdvances: context.publicGraphs.every((graph) =>
+      snapshotsAdvance(graph.selectedSnapshot, graph.finalSnapshot)),
+  };
+}
+
+function verifyEdge(context: VerificationContext) {
+  const { corpus, evidence, edgeBefore, edgeSelected, edgeRestarted,
+    edgeSecondOnDemand } = context;
   const edgePassiveBeforeSelection = corpus.graphs.every((graph) =>
     absentGraph(edgeBefore.get(graph.contextGraphId))
       && edgeBefore.get(graph.contextGraphId)?.runtimeSyncMode === null
@@ -147,7 +217,8 @@ function verifyParsed(
     return graph.accessPolicy === 0 && graph.edgePolicy !== 'unselected'
       ? exactGraph(observed, graph.selectedSnapshot)
         && observed?.runtimeSyncMode === graph.edgePolicy
-        && observed.producingJobId === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'selection')
+        && observed.producingJobId
+          === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'selection')
       : absentGraph(observed) && observed?.runtimeSyncMode === null
         && observed.producingJobId === null;
   });
@@ -159,14 +230,11 @@ function verifyParsed(
         === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'selection'));
   const edgeAlwaysOnRefreshesAfterRestart = corpus.graphs
     .filter((graph) => graph.edgePolicy === 'always-on')
-    .every((graph) => (
-      snapshotsAdvance(graph.selectedSnapshot, graph.finalSnapshot)
+    .every((graph) => snapshotsAdvance(graph.selectedSnapshot, graph.finalSnapshot)
       && exactGraph(edgeRestarted.get(graph.contextGraphId), graph.finalSnapshot)
       && edgeRestarted.get(graph.contextGraphId)?.runtimeSyncMode === 'always-on'
       && edgeRestarted.get(graph.contextGraphId)?.producingJobId
-        === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'post-restart-auto')
-    ));
-  const edgeOperationProvenance = verifyEdgeOperations(evidence.edge.operations, corpus.graphs);
+        === edgeJobId(evidence.edge.operations, graph.contextGraphId, 'post-restart-auto'));
   const edgeSecondOnDemandConverges = corpus.graphs.every((graph) => {
     const observed = edgeSecondOnDemand.get(graph.contextGraphId);
     if (graph.accessPolicy !== 0 || graph.edgePolicy === 'unselected') {
@@ -182,33 +250,39 @@ function verifyParsed(
       && observed.producingJobId
         === edgeJobId(evidence.edge.operations, graph.contextGraphId, phase);
   });
-  const edgeUnselectedExcluded = publicGraphs
-    .filter((graph) => graph.edgePolicy === 'unselected')
-    .every((graph) => absentGraph(edgeSelected.get(graph.contextGraphId))
-      && absentGraph(edgeRestarted.get(graph.contextGraphId))
-      && absentGraph(edgeSecondOnDemand.get(graph.contextGraphId))
-      && [edgeSelected, edgeRestarted, edgeSecondOnDemand].every((phase) =>
-        phase.get(graph.contextGraphId)?.runtimeSyncMode === null
-          && phase.get(graph.contextGraphId)?.producingJobId === null));
-  const edgePrivateExcluded = privateGraphs.every((graph) =>
+  const excluded = (graph: SelectiveCoverageGraphV1) =>
     absentGraph(edgeSelected.get(graph.contextGraphId))
       && absentGraph(edgeRestarted.get(graph.contextGraphId))
       && absentGraph(edgeSecondOnDemand.get(graph.contextGraphId))
       && [edgeSelected, edgeRestarted, edgeSecondOnDemand].every((phase) =>
         phase.get(graph.contextGraphId)?.runtimeSyncMode === null
-          && phase.get(graph.contextGraphId)?.producingJobId === null));
+          && phase.get(graph.contextGraphId)?.producingJobId === null);
+  return {
+    edgePassiveBeforeSelection,
+    edgeSelectedSnapshotsExact,
+    edgeOnDemandRemainsPointInTime,
+    edgeAlwaysOnRefreshesAfterRestart,
+    edgeOperationProvenance: verifyEdgeOperations(evidence.edge.operations, corpus.graphs)
+      && verifyAutomaticEdgeJournals(evidence),
+    edgeSecondOnDemandConverges,
+    edgeUnselectedExcluded: context.publicGraphs
+      .filter((graph) => graph.edgePolicy === 'unselected').every(excluded),
+    edgePrivateExcluded: context.privateGraphs.every(excluded),
+  };
+}
 
-  const coreBatchMatchesManifest = evidence.core.automaticBatchSize
-    === corpus.coreAutomaticBatchSize;
-  const coreBatchWithinBound = evidence.core.rounds.every((round) =>
-    round.contextGraphIds.length <= corpus.coreAutomaticBatchSize);
-  const coreRoundsPublicOnly = evidence.core.rounds.every((round) => {
-    const unique = new Set(round.contextGraphIds);
-    return unique.size === round.contextGraphIds.length
-      && round.contextGraphIds.every((contextGraphId) => byId.get(contextGraphId)?.accessPolicy === 0);
-  });
+function verifyCore(context: VerificationContext) {
+  const { evidence, expected, corpus, byId, coreFinal } = context;
   const automaticJobs = new Map(evidence.core.rounds.map((round) => [round.jobId, round]));
+  const scheduled = new Set(evidence.core.rounds.flatMap((round) => round.contextGraphIds));
+  const missingContextGraphIds = Object.freeze(context.publicGraphs
+    .map((graph) => graph.contextGraphId)
+    .filter((contextGraphId) => !scheduled.has(contextGraphId)));
+  const scheduledWithinWindow = new Set(evidence.core.rounds
+    .slice(0, corpus.coreCoverageRoundLimit)
+    .flatMap((round) => round.contextGraphIds));
   const coreAutomaticProvenance = automaticJobs.size === evidence.core.rounds.length
+    && verifyAutomaticCoreJournals(evidence)
     && evidence.core.rounds.every((round) =>
       round.source === 'automatic-core-public'
       && round.planningLane === expected.publisherPeerId
@@ -234,95 +308,67 @@ function verifyParsed(
             completion.contextGraphId === observation.contextGraphId
               && exactSnapshot(completion.completedSnapshot, graph.finalSnapshot)));
     });
-  const scheduled = new Set(evidence.core.rounds.flatMap((round) => round.contextGraphIds));
-  const missingCoreContextGraphIds = publicGraphs
-    .map((graph) => graph.contextGraphId)
-    .filter((contextGraphId) => !scheduled.has(contextGraphId));
-  const coreEveryPublicScheduled = missingCoreContextGraphIds.length === 0;
-  const scheduledWithinWindow = new Set(
-    evidence.core.rounds
-      .slice(0, corpus.coreCoverageRoundLimit)
-      .flatMap((round) => round.contextGraphIds),
-  );
-  const coreCoverageWithinWindow = publicGraphs.every((graph) =>
-    scheduledWithinWindow.has(graph.contextGraphId));
-  const coreFinalPublicExact = publicGraphs.every((graph) =>
-    exactGraph(coreFinal.get(graph.contextGraphId), graph.finalSnapshot));
-  const corePrivateExcluded = privateGraphs.every((graph) =>
-    absentGraph(coreFinal.get(graph.contextGraphId)) && !scheduled.has(graph.contextGraphId));
+  return {
+    checks: {
+      coreBatchMatchesManifest: evidence.core.automaticBatchSize
+        === corpus.coreAutomaticBatchSize,
+      coreBatchWithinBound: evidence.core.rounds.every((round) =>
+        round.contextGraphIds.length <= corpus.coreAutomaticBatchSize),
+      coreRoundsPublicOnly: evidence.core.rounds.every((round) =>
+        new Set(round.contextGraphIds).size === round.contextGraphIds.length
+          && round.contextGraphIds.every((id) => byId.get(id)?.accessPolicy === 0)),
+      coreAutomaticProvenance,
+      coreEveryPublicScheduled: missingContextGraphIds.length === 0,
+      coreCoverageWithinWindow: context.publicGraphs.every((graph) =>
+        scheduledWithinWindow.has(graph.contextGraphId)),
+      coreFinalPublicExact: context.publicGraphs.every((graph) =>
+        exactGraph(coreFinal.get(graph.contextGraphId), graph.finalSnapshot)),
+      corePrivateExcluded: context.privateGraphs.every((graph) =>
+        absentGraph(coreFinal.get(graph.contextGraphId)) && !scheduled.has(graph.contextGraphId)),
+    },
+    missingContextGraphIds,
+  };
+}
 
-  const requiredExactPlanes: Array<readonly [PlaneObservationV1 | undefined, PlaneExpectationV1]> = [];
-  for (const graph of corpus.graphs) {
+function verifyExactPayloads(context: VerificationContext): boolean {
+  const required: Array<readonly [PlaneObservationV1 | undefined, PlaneExpectationV1]> = [];
+  for (const graph of context.corpus.graphs) {
     if (graph.accessPolicy === 0 && graph.edgePolicy !== 'unselected') {
-      const selected = edgeSelected.get(graph.contextGraphId);
-      requiredExactPlanes.push([selected?.vm, graph.selectedSnapshot.vm], [selected?.swm, graph.selectedSnapshot.swm]);
-      const restarted = edgeRestarted.get(graph.contextGraphId);
+      const selected = context.edgeSelected.get(graph.contextGraphId);
+      required.push([selected?.vm, graph.selectedSnapshot.vm], [selected?.swm, graph.selectedSnapshot.swm]);
+      const restarted = context.edgeRestarted.get(graph.contextGraphId);
       const expected = graph.edgePolicy === 'always-on' ? graph.finalSnapshot : graph.selectedSnapshot;
-      requiredExactPlanes.push([restarted?.vm, expected.vm], [restarted?.swm, expected.swm]);
-      const secondOnDemand = edgeSecondOnDemand.get(graph.contextGraphId);
-      requiredExactPlanes.push(
-        [secondOnDemand?.vm, graph.finalSnapshot.vm],
-        [secondOnDemand?.swm, graph.finalSnapshot.swm],
-      );
+      required.push([restarted?.vm, expected.vm], [restarted?.swm, expected.swm]);
+      const final = context.edgeSecondOnDemand.get(graph.contextGraphId);
+      required.push([final?.vm, graph.finalSnapshot.vm], [final?.swm, graph.finalSnapshot.swm]);
     }
     if (graph.accessPolicy === 0) {
-      const final = coreFinal.get(graph.contextGraphId);
-      requiredExactPlanes.push([final?.vm, graph.finalSnapshot.vm], [final?.swm, graph.finalSnapshot.swm]);
+      const final = context.coreFinal.get(graph.contextGraphId);
+      required.push([final?.vm, graph.finalSnapshot.vm], [final?.swm, graph.finalSnapshot.swm]);
     }
   }
-  const noMetadataOnlyCompletion = requiredExactPlanes.every(([observed, expected]) =>
+  return required.every(([observed, expected]) =>
     exactPlane(observed, expected) && (observed?.dataTripleCount ?? 0) > 0);
-
-  const checks = Object.freeze({
-    schemaWellFormed: true,
-    provenanceMatches,
-    corpusDigestMatches,
-    corpusCanonicalOrder,
-    requiredPolicyCellsPresent,
-    publisherSnapshotsExact,
-    publicSecondWaveAdvances,
-    edgePassiveBeforeSelection,
-    edgeSelectedSnapshotsExact,
-    edgeOnDemandRemainsPointInTime,
-    edgeAlwaysOnRefreshesAfterRestart,
-    edgeOperationProvenance,
-    edgeSecondOnDemandConverges,
-    edgeUnselectedExcluded,
-    edgePrivateExcluded,
-    coreBatchMatchesManifest,
-    coreBatchWithinBound,
-    coreRoundsPublicOnly,
-    coreAutomaticProvenance,
-    coreEveryPublicScheduled,
-    coreCoverageWithinWindow,
-    coreFinalPublicExact,
-    corePrivateExcluded,
-    noMetadataOnlyCompletion,
-  }) satisfies SelectiveCoverageChecksV1;
-  const rejectReasons = CHECK_NAMES.filter((name) => !checks[name]).map((name) => REASONS[name]);
-  return Object.freeze({
-    schema: SELECTIVE_COVERAGE_VERDICT_SCHEMA,
-    pass: CHECK_NAMES.every((name) => checks[name]),
-    checks,
-    missingCoreContextGraphIds: Object.freeze(missingCoreContextGraphIds),
-    rejectReasons: Object.freeze(rejectReasons),
-    recomputedCorpusDigest: computeSelectiveCoverageCorpusDigest(corpus),
-  });
 }
 
 function parseEvidence(input: unknown): SelectiveCoverageEvidenceV1 | undefined {
   const root = closedRecord(input, [
-    'schema', 'provenance', 'corpus', 'publisher', 'edge', 'core',
+    'schema', 'provenance', 'automaticJournalEvidence', 'corpus', 'publisher', 'edge', 'core',
   ]);
   if (!root || root.schema !== SELECTIVE_COVERAGE_EVIDENCE_SCHEMA) return undefined;
   const provenance = parseProvenance(root.provenance);
+  const automaticJournalEvidence = parseAutomaticJournalEvidence(
+    root.automaticJournalEvidence,
+  );
   const corpus = parseCorpus(root.corpus);
   const publisher = closedRecord(root.publisher, ['selected', 'final']);
   const edge = closedRecord(root.edge, [
     'beforeSelection', 'afterSelection', 'afterRestart', 'afterSecondOnDemand', 'operations',
   ]);
   const core = closedRecord(root.core, ['automaticBatchSize', 'rounds', 'final']);
-  if (!provenance || !corpus || !publisher || !edge || !core) return undefined;
+  if (!provenance || !automaticJournalEvidence || !corpus || !publisher || !edge || !core) {
+    return undefined;
+  }
   const publisherSelected = parseObservations(publisher.selected);
   const publisherFinal = parseObservations(publisher.final);
   const beforeSelection = parseEdgeObservations(edge.beforeSelection);
@@ -391,6 +437,7 @@ function parseEvidence(input: unknown): SelectiveCoverageEvidenceV1 | undefined 
   return {
     schema: SELECTIVE_COVERAGE_EVIDENCE_SCHEMA,
     provenance,
+    automaticJournalEvidence,
     corpus,
     publisher: { selected: publisherSelected, final: publisherFinal },
     edge: {
@@ -406,6 +453,39 @@ function parseEvidence(input: unknown): SelectiveCoverageEvidenceV1 | undefined 
       final,
     },
   };
+}
+
+function parseAutomaticJournalEvidence(
+  input: unknown,
+): SelectiveCoverageEvidenceV1['automaticJournalEvidence'] | undefined {
+  const root = closedRecord(input, [
+    'edgeProcess', 'edgeReconciler', 'coreProcess', 'coreRounds',
+  ]);
+  if (!root
+    || !closedArray(root.edgeReconciler, 0, MAX_SELECTIVE_COVERAGE_GRAPHS)
+    || !closedArray(root.coreRounds, 1, MAX_SELECTIVE_COVERAGE_ROUNDS)) return undefined;
+  const edgeProcess = parseJournalProcessIdentity(root.edgeProcess);
+  const coreProcess = parseJournalProcessIdentity(root.coreProcess);
+  const edgeReconciler = root.edgeReconciler.map(parseSyncCoverageJournalReferenceV1);
+  const coreRounds = root.coreRounds.map(parseSyncCoverageJournalReferenceV1);
+  if (!edgeProcess || !coreProcess
+    || edgeReconciler.some((entry) => entry === undefined)
+    || coreRounds.some((entry) => entry === undefined)) return undefined;
+  return {
+    edgeProcess,
+    edgeReconciler: Object.freeze(edgeReconciler as SyncCoverageJournalReferenceV1[]),
+    coreProcess,
+    coreRounds: Object.freeze(coreRounds as SyncCoverageJournalReferenceV1[]),
+  };
+}
+
+function parseJournalProcessIdentity(
+  input: unknown,
+): SyncCoverageJournalProcessIdentityV1 | undefined {
+  const root = closedRecord(input, ['processStartedAt', 'evidenceWaveId']);
+  const evidenceWaveId = root && identifier(root.evidenceWaveId);
+  if (!root || !nonNegativeInteger(root.processStartedAt) || !evidenceWaveId) return undefined;
+  return { processStartedAt: root.processStartedAt as number, evidenceWaveId };
 }
 
 function parseCorpus(input: unknown): SelectiveCoverageCorpusV1 | undefined {
@@ -648,6 +728,40 @@ function hasRequiredPolicyCells(graphs: readonly SelectiveCoverageGraphV1[]): bo
     && graphs.some((graph) => graph.accessPolicy === 0 && graph.publishPolicy === 0)
     && graphs.some((graph) => graph.accessPolicy === 1 && graph.publishPolicy === 1)
     && graphs.some((graph) => graph.accessPolicy === 1 && graph.publishPolicy === 0);
+}
+
+function verifyAutomaticEdgeJournals(evidence: SelectiveCoverageEvidenceV1): boolean {
+  const operations = evidence.edge.operations.filter((operation) =>
+    operation.phase === 'post-restart-auto');
+  if (operations.length !== evidence.automaticJournalEvidence.edgeReconciler.length) {
+    return false;
+  }
+  try {
+    operations.forEach((operation, index) => assertEdgeReconcilerJournalV1(
+      evidence.automaticJournalEvidence.edgeReconciler[index],
+      operation,
+      evidence.automaticJournalEvidence.edgeProcess,
+    ));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifyAutomaticCoreJournals(evidence: SelectiveCoverageEvidenceV1): boolean {
+  if (evidence.core.rounds.length !== evidence.automaticJournalEvidence.coreRounds.length) {
+    return false;
+  }
+  try {
+    evidence.core.rounds.forEach((round, index) => assertCoreAutomaticRoundJournalV1(
+      evidence.automaticJournalEvidence.coreRounds[index],
+      round,
+      evidence.automaticJournalEvidence.coreProcess,
+    ));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function verifyEdgeOperations(

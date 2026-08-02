@@ -125,10 +125,86 @@ function edgeExact(
   };
 }
 
+function journalReference(
+  entry: Record<string, unknown>,
+  processStartedAt: number,
+) {
+  const sequence = entry.sequence as number;
+  return {
+    sequence,
+    snapshot: {
+      schemaVersion: 1,
+      processStartedAt,
+      waveId: entry.waveId,
+      capacity: 256,
+      nextSequence: sequence + 1,
+      droppedBeforeSequence: 0,
+      entries: [entry],
+    },
+  };
+}
+
+function coreJournal(
+  round: number,
+  jobId: string,
+  contextGraphIds: readonly string[],
+) {
+  return journalReference({
+    kind: 'core-automatic-round',
+    sequence: round + 1,
+    waveId: 'core-wave',
+    jobId,
+    planningLane: 'publisher-peer',
+    source: 'automatic-core-public',
+    trigger: 'peer-sync',
+    configuredBatchSize: 2,
+    effectiveBatchSize: 2,
+    explicitSelectedContextGraphIds: [],
+    explicitSelectedContextGraphCount: 0,
+    automaticContextGraphIds: contextGraphIds,
+    automaticContextGraphCount: contextGraphIds.length,
+    evidenceTruncated: false,
+    state: 'complete',
+    startedAt: 20 + round,
+    finishedAt: 21 + round,
+    completions: contextGraphIds.map((contextGraphId) => ({
+      jobId,
+      contextGraphId,
+      state: 'complete',
+      verified: { metadata: true, durable: true, sharedMemory: true },
+      finishedAt: 21 + round,
+    })),
+  }, 2);
+}
+
 function fixture(): SelectiveCoverageEvidenceV1 {
   return {
     schema: SELECTIVE_COVERAGE_EVIDENCE_SCHEMA,
     provenance: PROVENANCE,
+    automaticJournalEvidence: {
+      edgeProcess: { processStartedAt: 1, evidenceWaveId: 'edge-wave' },
+      edgeReconciler: [journalReference({
+        kind: 'edge-reconciler-job',
+        sequence: 1,
+        waveId: 'edge-wave',
+        jobId: 'edge-auto-always-on',
+        contextGraphId: graphs[1]!.contextGraphId,
+        source: 'reconciler',
+        trigger: 'periodic-reconciler',
+        syncMode: 'always-on',
+        rehydratedSelectionCount: 1,
+        evidenceTruncated: false,
+        state: 'complete',
+        verified: { metadata: true, durable: true, sharedMemory: true },
+        startedAt: 10,
+        finishedAt: 11,
+      }, 1)],
+      coreProcess: { processStartedAt: 2, evidenceWaveId: 'core-wave' },
+      coreRounds: [
+        coreJournal(0, 'core-auto-0', [graphs[0]!.contextGraphId, graphs[1]!.contextGraphId]),
+        coreJournal(1, 'core-auto-1', [graphs[2]!.contextGraphId]),
+      ],
+    },
     corpus,
     publisher: {
       selected: corpus.graphs.map((graph) => exact(graph, graph.selectedSnapshot)),
@@ -267,6 +343,26 @@ test('accepts exact Edge selection and bounded Core public convergence evidence'
   for (const [name, value] of Object.entries(verdict.checks)) {
     assert.equal(value, true, name);
   }
+});
+
+test('published artifact must retain matching automatic journal proof', () => {
+  const missing = clone();
+  delete missing.automaticJournalEvidence;
+  assert.equal(verifySelectiveCoverage(missing).checks.schemaWellFormed, false);
+
+  const relabelled = clone();
+  relabelled.edge.operations[2].jobId = 'synthetic-reconciler-job';
+  relabelled.edge.afterRestart[1].producingJobId = 'synthetic-reconciler-job';
+  relabelled.edge.afterSecondOnDemand[1].producingJobId = 'synthetic-reconciler-job';
+  const edgeVerdict = verifySelectiveCoverage(relabelled);
+  assert.equal(edgeVerdict.checks.edgeOperationProvenance, false);
+
+  const syntheticCore = clone();
+  syntheticCore.core.rounds[0].jobId = 'synthetic-core-round';
+  syntheticCore.core.final[0].automaticJobIds = ['synthetic-core-round'];
+  syntheticCore.core.final[1].automaticJobIds = ['synthetic-core-round'];
+  const coreVerdict = verifySelectiveCoverage(syntheticCore);
+  assert.equal(coreVerdict.checks.coreAutomaticProvenance, false);
 });
 
 test('corpus and evidence serialization is deterministic', () => {

@@ -119,6 +119,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
     );
 
     const edgeOperations: EdgeSyncOperationV1[] = [];
+    const edgeReconcilerJournals: SyncCoverageJournalReferenceV1[] = [];
     for (const graph of selectedPublicGraphs(input.corpus)) {
       const result = await input.runtime.synchronizeEdge({
         contextGraphId: graph.contextGraphId,
@@ -156,6 +157,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
         result.operation,
         edgeAfterRestartReady,
       );
+      edgeReconcilerJournals.push(result.journal);
       edgeOperations.push(withSequence(result.operation, edgeOperations.length));
     }
     const edgeAfterRestart = canonicalEdgeObservations(
@@ -186,6 +188,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
     assertDistinctProcesses([publisher, edgeAfterRestartReady, core]);
 
     const rounds: CoreAutomaticRoundV1[] = [];
+    const coreRoundJournals: SyncCoverageJournalReferenceV1[] = [];
     const scheduled = new Set<string>();
     const publicIds = new Set(
       input.corpus.graphs
@@ -198,6 +201,7 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
       assertCoreRoundEnvelope(observed, round, input.corpus, publisher.peerId);
       assertCoreAutomaticRoundJournalV1(result.journal, observed, core);
       rounds.push(observed);
+      coreRoundJournals.push(result.journal);
       for (const contextGraphId of observed.contextGraphIds) scheduled.add(contextGraphId);
       if ([...publicIds].every((contextGraphId) => scheduled.has(contextGraphId))) break;
     }
@@ -216,6 +220,18 @@ export async function collectSelectiveCoverageEvidenceV1(input: {
         publisherPeerId: publisher.peerId,
         edgePeerId: edgeAfterRestartReady.peerId,
         corePeerId: core.peerId,
+      },
+      automaticJournalEvidence: {
+        edgeProcess: {
+          processStartedAt: edgeAfterRestartReady.processStartedAt,
+          evidenceWaveId: edgeAfterRestartReady.evidenceWaveId,
+        },
+        edgeReconciler: Object.freeze(edgeReconcilerJournals),
+        coreProcess: {
+          processStartedAt: core.processStartedAt,
+          evidenceWaveId: core.evidenceWaveId,
+        },
+        coreRounds: Object.freeze(coreRoundJournals),
       },
       corpus: input.corpus,
       publisher: {

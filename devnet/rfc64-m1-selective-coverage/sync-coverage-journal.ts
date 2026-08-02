@@ -1,22 +1,29 @@
 import type {
   CoreAutomaticRoundV1,
   EdgeSyncOperationV1,
+  SyncCoverageJournalProcessIdentityV1,
+  SyncCoverageJournalReferenceV1,
 } from './manifest.ts';
 
 const JOURNAL_CAPACITY = 256;
 const MAX_CONTEXT_GRAPH_IDS = 32;
 const MAX_CONTEXT_GRAPH_ID_LENGTH = 256;
 
-export interface SyncCoverageJournalReferenceV1 {
-  /** Raw node-admin response from /api/diagnostics/sync-coverage-evidence. */
-  readonly snapshot: unknown;
-  /** Exact terminal entry selected by the adapter. */
-  readonly sequence: number;
-}
+export type {
+  SyncCoverageJournalProcessIdentityV1,
+  SyncCoverageJournalReferenceV1,
+} from './manifest.ts';
 
-export interface SyncCoverageJournalProcessIdentityV1 {
-  readonly processStartedAt: number;
-  readonly evidenceWaveId: string;
+/** Parse the closed outer reference before retaining untrusted journal JSON. */
+export function parseSyncCoverageJournalReferenceV1(
+  input: unknown,
+): SyncCoverageJournalReferenceV1 | undefined {
+  if (!isPlainRecord(input)
+    || Reflect.ownKeys(input).length !== 2
+    || !Object.hasOwn(input, 'snapshot')
+    || !Object.hasOwn(input, 'sequence')
+    || !nonNegativeInteger(input['sequence'])) return undefined;
+  return { snapshot: input['snapshot'], sequence: input['sequence'] };
 }
 
 /**

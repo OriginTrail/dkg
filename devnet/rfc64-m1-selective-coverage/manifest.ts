@@ -105,6 +105,26 @@ export interface CoreFinalObservationV1 extends GraphObservationV1 {
   readonly automaticJobIds: readonly string[];
 }
 
+/** Bounded raw node-admin journal response retained in the published artifact. */
+export interface SyncCoverageJournalReferenceV1 {
+  readonly snapshot: unknown;
+  readonly sequence: number;
+}
+
+export interface SyncCoverageJournalProcessIdentityV1 {
+  readonly processStartedAt: number;
+  readonly evidenceWaveId: string;
+}
+
+export interface SelectiveCoverageAutomaticJournalEvidenceV1 {
+  readonly edgeProcess: SyncCoverageJournalProcessIdentityV1;
+  /** Ordered exactly like post-restart automatic Edge operations. */
+  readonly edgeReconciler: readonly SyncCoverageJournalReferenceV1[];
+  readonly coreProcess: SyncCoverageJournalProcessIdentityV1;
+  /** Ordered exactly like Core automatic rounds. */
+  readonly coreRounds: readonly SyncCoverageJournalReferenceV1[];
+}
+
 export interface SelectiveCoverageProvenanceV1 {
   readonly networkId: string;
   readonly testedHeadCommit: string;
@@ -122,6 +142,8 @@ export interface ExpectedSelectiveCoverageProvenanceV1
 export interface SelectiveCoverageEvidenceV1 {
   readonly schema: typeof SELECTIVE_COVERAGE_EVIDENCE_SCHEMA;
   readonly provenance: SelectiveCoverageProvenanceV1;
+  /** Raw automatic-work proof required for independent artifact verification. */
+  readonly automaticJournalEvidence: SelectiveCoverageAutomaticJournalEvidenceV1;
   readonly corpus: SelectiveCoverageCorpusV1;
   /** Publisher-owned source snapshots; receivers cannot define their expectations. */
   readonly publisher: {
