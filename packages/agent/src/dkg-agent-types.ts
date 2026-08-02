@@ -1062,9 +1062,42 @@ export interface DurableSyncResult extends DurableSyncDiagnostics {
   complete: boolean;
 }
 
-export interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
+export interface SharedMemoryContextGraphResult extends SharedMemorySyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
+}
+
+export type SharedMemoryContextGraphTerminal =
+  | {
+    readonly contextGraphId: string;
+    readonly lane: 'shared_memory' | 'swm_recovery';
+    readonly disposition: 'settled';
+    readonly result: Readonly<SharedMemoryContextGraphResult>;
+  }
+  | {
+    readonly contextGraphId: string;
+    readonly lane: 'shared_memory' | 'swm_recovery' | null;
+    readonly disposition: 'deferred';
+  }
+  | {
+    readonly contextGraphId: string;
+    readonly lane: 'shared_memory' | 'swm_recovery' | null;
+    readonly disposition: 'skipped';
+    readonly reason:
+      | 'continuation-stopped'
+      | 'stop-policy'
+      | 'prior-deferral'
+      | 'disabled'
+      | 'not-eligible';
+  };
+
+export interface SharedMemorySyncResult extends SharedMemoryContextGraphResult {
+  /**
+   * Exact terminal outcome for each requested Context Graph. Production sync
+   * always populates this field. It remains optional so existing structural
+   * mocks and external implementations stay source-compatible.
+   */
+  contextGraphTerminals?: readonly SharedMemoryContextGraphTerminal[];
 }
 
 // ── DKGAgent configuration ──────────────────────────────────────────

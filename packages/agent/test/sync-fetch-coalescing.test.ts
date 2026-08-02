@@ -118,6 +118,7 @@ async function createAgentWithSend(
     syncGlobalMaxInflight: number;
     syncGlobalQueueLimit: number;
     syncContextGraphPriorities?: Record<string, number>;
+    nodeRole?: 'edge' | 'core';
   },
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
@@ -597,16 +598,16 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it('isolates shared-memory terminal observers from sync results and fanout', async () => {
+  it('returns immutable per-CG shared-memory terminals without changing aggregate fanout', async () => {
     let fetchCalls = 0;
-    let observerCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
-    const contextGraphIds = ['observer-cg-a', 'observer-cg-b'];
+    const contextGraphIds = ['observer-cg-a', 'observer-cg-b', 'observer-cg-ineligible'];
     const sharedMemorySyncPlan = {
-      eligibleContextGraphIds: contextGraphIds,
-      publicContextGraphIds: contextGraphIds,
+      eligibleContextGraphIds: contextGraphIds.slice(0, 2),
+      publicContextGraphIds: contextGraphIds.slice(0, 2),
       privateRecoverFromCurator: [],
     };
+    (agent as any).planSharedMemorySyncContextGraphs = async () => sharedMemorySyncPlan;
     (agent as any).listSubGraphs = async () => [];
     stubLifecycleFetch(agent, async ({ phase }) => {
       fetchCalls += 1;
@@ -631,21 +632,117 @@ describe('DKGAgent sync fetch coalescing', () => {
         {
           sharedMemorySyncPlan,
           stopOnBackoffWorthyFailure: true,
-          onContextGraphTerminal: (_contextGraphId: string, terminal: object) => {
-            observerCalls += 1;
-            expect(Object.isFrozen(terminal)).toBe(true);
-            (terminal as { failedPhases: number }).failedPhases = 99;
-            throw new Error('observer failure must remain diagnostic-only');
-          },
         },
       );
 
-      expect(observerCalls).toBe(2);
       expect(fetchCalls).toBe(4);
+      expect(result.contextGraphTerminals.map((terminal: any) => terminal.contextGraphId))
+        .toEqual(contextGraphIds);
+      expect(Object.isFrozen(result.contextGraphTerminals)).toBe(true);
+      for (const terminal of result.contextGraphTerminals.slice(0, 2)) {
+        expect(Object.isFrozen(terminal)).toBe(true);
+        expect(terminal.disposition).toBe('settled');
+        expect(Object.isFrozen(terminal.result)).toBe(true);
+        expect(() => {
+          (terminal.result as { failedPhases: number }).failedPhases = 99;
+        }).toThrow(TypeError);
+      }
+      expect(result.contextGraphTerminals[2]).toEqual({
+        contextGraphId: 'observer-cg-ineligible',
+        lane: null,
+        disposition: 'skipped',
+        reason: 'not-eligible',
+      });
+      expect(Object.isFrozen(result.contextGraphTerminals[2])).toBe(true);
       expect(result).toMatchObject({
         failedPhases: 0,
         failedPeers: 0,
         backoffWorthyFailures: 0,
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('records complete automatic evidence when it joins an existing manual SWM flight', async () => {
+    const contextGraphId = 'coalesced-evidence-cg';
+    const firstMetaFetch = deferred<SyncPageResult>();
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0, nodeRole: 'core' },
+    );
+    const sharedMemorySyncPlan = {
+      eligibleContextGraphIds: [contextGraphId],
+      publicContextGraphIds: [contextGraphId],
+      privateRecoverFromCurator: [],
+    };
+    (agent as any).started = true;
+    (agent as any).networkAdmissionCoordinator.isAcceptedPeer = () => true;
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).getSyncReconcilerProbe = async () => ({
+      protocolsKey: PROTOCOL_SYNC,
+      connectionKey: PEER_A,
+    });
+    (agent as any).syncFromPeerDetailed = async () => ({
+      ...cleanDurableSyncResult(),
+      complete: true,
+    });
+    (agent as any).refreshMetaSyncedFlags = async () => new Set([contextGraphId]);
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    (agent as any).planSharedMemorySyncContextGraphs = async () => sharedMemorySyncPlan;
+    (agent as any).subscribedContextGraphs.set(contextGraphId, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(contextGraphId);
+    (agent as any).listSubGraphs = async () => [];
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+
+    try {
+      const manual = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        [contextGraphId],
+        { sharedMemorySyncPlan, stopOnBackoffWorthyFailure: true },
+      );
+      await waitFor(() => fetchCalls === 1);
+
+      const errors: unknown[] = [];
+      const automatic = (agent as any).runSyncFromPeerOnConnect(
+        PEER_A,
+        (_peerId: string, error: unknown) => errors.push(error),
+      );
+      await flushMicrotasks();
+      expect(fetchCalls).toBe(1);
+
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+      await Promise.all([manual, automatic]);
+
+      expect(errors).toEqual([]);
+      expect(fetchCalls).toBe(2);
+      expect(agent.getSyncCoverageEvidence().entries.at(-1)).toMatchObject({
+        kind: 'core-automatic-round',
+        state: 'complete',
+        completions: [{
+          contextGraphId,
+          state: 'complete',
+          verified: { metadata: true, durable: true, sharedMemory: true },
+        }],
       });
     } finally {
       await agent.stop().catch(() => {});

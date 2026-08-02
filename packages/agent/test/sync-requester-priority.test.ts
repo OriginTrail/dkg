@@ -6,7 +6,10 @@ import {
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import { runOrderedContextGraphSyncs } from '../src/sync/requester/ordered-sync.js';
+import {
+  runOrderedContextGraphSyncs,
+  runOrderedContextGraphSyncsWithOutcomes,
+} from '../src/sync/requester/ordered-sync.js';
 import {
   resolveSyncGlobalBackpressure,
   SyncBackpressureBusyError,
@@ -103,6 +106,49 @@ function lifecycleAgent(
 }
 
 describe('requester per-CG priority admission', () => {
+  it('returns an immutable terminal outcome for every planned ordered item', async () => {
+    const execution = await runOrderedContextGraphSyncsWithOutcomes({
+      work: ['settled', 'deferred', 'tail'].map((contextGraphId) => ({
+        contextGraphId,
+        lane: 'shared_memory' as const,
+        operationId: contextGraphId,
+        run: async () => 1,
+      })),
+      emptyResult: () => 0,
+      runWithAdmission: async (item, work) => {
+        if (item.contextGraphId === 'deferred') {
+          throw new SyncBackpressureBusyError('queue full');
+        }
+        return work();
+      },
+      merge: (summary, part) => summary + part,
+      markDeferred: (summary) => summary,
+    });
+
+    expect(execution.summary).toBe(1);
+    expect(execution.outcomes).toEqual([
+      {
+        contextGraphId: 'settled',
+        lane: 'shared_memory',
+        disposition: 'settled',
+        result: 1,
+      },
+      {
+        contextGraphId: 'deferred',
+        lane: 'shared_memory',
+        disposition: 'deferred',
+      },
+      {
+        contextGraphId: 'tail',
+        lane: 'shared_memory',
+        disposition: 'skipped',
+        reason: 'prior-deferral',
+      },
+    ]);
+    expect(Object.isFrozen(execution.outcomes)).toBe(true);
+    expect(execution.outcomes.every(Object.isFrozen)).toBe(true);
+  });
+
   it('wires configured priority order through the durable lifecycle admission boundary', async () => {
     const admissions: string[] = [];
     const agent = lifecycleAgent(

@@ -54,6 +54,21 @@ function cleanSharedMemorySyncResult() {
   };
 }
 
+function withSettledSharedMemoryTerminals(
+  summary: ReturnType<typeof cleanSharedMemorySyncResult>,
+  contextGraphIds: readonly string[],
+) {
+  return {
+    ...summary,
+    contextGraphTerminals: Object.freeze(contextGraphIds.map((contextGraphId) => Object.freeze({
+      contextGraphId,
+      lane: 'shared_memory' as const,
+      disposition: 'settled' as const,
+      result: Object.freeze({ ...summary }),
+    }))),
+  };
+}
+
 async function createEvidenceAgent(
   nodeRole: 'edge' | 'core',
   selected: string[],
@@ -72,12 +87,9 @@ async function createEvidenceAgent(
   (agent as any).syncSharedMemoryFromPeerDetailed = async (
     _peerId: string,
     contextGraphIds: string[],
-    options?: { onContextGraphTerminal?: (id: string, result: unknown) => void },
   ) => {
-    for (const contextGraphId of contextGraphIds) {
-      options?.onContextGraphTerminal?.(contextGraphId, cleanSharedMemorySyncResult());
-    }
-    return cleanSharedMemorySyncResult();
+    const summary = cleanSharedMemorySyncResult();
+    return withSettledSharedMemoryTerminals(summary, contextGraphIds);
   };
   (agent as any).discoverContextGraphsFromStore = async () => 0;
   (agent as any).planSharedMemorySyncContextGraphs = async (
@@ -225,17 +237,13 @@ describe('automatic sync coverage runtime evidence', () => {
     (agent as any).syncSharedMemoryFromPeerDetailed = async (
       _peerId: string,
       contextGraphIds: string[],
-      options?: { onContextGraphTerminal?: (id: string, result: unknown) => void },
     ) => {
       const failed = {
         ...cleanSharedMemorySyncResult(),
         failedPhases: 1,
         backoffWorthyFailures: 1,
       };
-      for (const contextGraphId of contextGraphIds) {
-        options?.onContextGraphTerminal?.(contextGraphId, failed);
-      }
-      return failed;
+      return withSettledSharedMemoryTerminals(failed, contextGraphIds);
     };
 
     await runConnectionOpenSync(agent);
@@ -260,16 +268,12 @@ describe('automatic sync coverage runtime evidence', () => {
     (agent as any).syncSharedMemoryFromPeerDetailed = async (
       _peerId: string,
       contextGraphIds: string[],
-      options?: { onContextGraphTerminal?: (id: string, result: unknown) => void },
     ) => {
       const incomplete = {
         ...cleanSharedMemorySyncResult(),
         droppedDataTriples: 1,
       };
-      for (const contextGraphId of contextGraphIds) {
-        options?.onContextGraphTerminal?.(contextGraphId, incomplete);
-      }
-      return incomplete;
+      return withSettledSharedMemoryTerminals(incomplete, contextGraphIds);
     };
 
     await runConnectionOpenSync(agent);

@@ -229,6 +229,8 @@ export {
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncDiagnostics,
+  type SharedMemoryContextGraphResult,
+  type SharedMemoryContextGraphTerminal,
   type SharedMemorySyncResult,
 } from './dkg-agent-types.js';
 export {

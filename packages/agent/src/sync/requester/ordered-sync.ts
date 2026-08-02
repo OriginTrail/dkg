@@ -31,6 +31,30 @@ export interface OrderedContextGraphSyncOptions<Result> {
   onDeferred?: (item: ContextGraphSyncWork<Result>, error: Error) => void;
 }
 
+export type OrderedContextGraphSyncOutcome<Result> =
+  | {
+    readonly contextGraphId: string;
+    readonly lane: SyncSchedulerLane;
+    readonly disposition: 'settled';
+    readonly result: Result;
+  }
+  | {
+    readonly contextGraphId: string;
+    readonly lane: SyncSchedulerLane;
+    readonly disposition: 'deferred';
+  }
+  | {
+    readonly contextGraphId: string;
+    readonly lane: SyncSchedulerLane;
+    readonly disposition: 'skipped';
+    readonly reason: 'continuation-stopped' | 'stop-policy' | 'prior-deferral';
+  };
+
+export interface OrderedContextGraphSyncExecution<Result> {
+  summary: Result;
+  outcomes: readonly OrderedContextGraphSyncOutcome<Result>[];
+}
+
 function orderWork<Result>(
   work: readonly ContextGraphSyncWork<Result>[],
   priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
@@ -59,11 +83,26 @@ function orderWork<Result>(
 export async function runOrderedContextGraphSyncs<Result>(
   options: OrderedContextGraphSyncOptions<Result>,
 ): Promise<Result> {
+  return (await runOrderedContextGraphSyncsWithOutcomes(options)).summary;
+}
+
+/** Same scheduler contract with an exact outcome for every planned work item. */
+export async function runOrderedContextGraphSyncsWithOutcomes<Result>(
+  options: OrderedContextGraphSyncOptions<Result>,
+): Promise<OrderedContextGraphSyncExecution<Result>> {
   let summary = options.emptyResult();
   const orderedWork = orderWork(options.work, options.priorities);
+  const outcomes: OrderedContextGraphSyncOutcome<Result>[] = [];
   for (const [index, item] of orderedWork.entries()) {
     if (options.shouldContinue && !options.shouldContinue()) {
-      summary = options.markSkipped?.(summary, orderedWork.slice(index)) ?? summary;
+      const skipped = orderedWork.slice(index);
+      summary = options.markSkipped?.(summary, skipped) ?? summary;
+      outcomes.push(...skipped.map((candidate) => ({
+        contextGraphId: candidate.contextGraphId,
+        lane: candidate.lane,
+        disposition: 'skipped' as const,
+        reason: 'continuation-stopped' as const,
+      })));
       break;
     }
     const remaining = orderedWork.length - index;
@@ -72,15 +111,40 @@ export async function runOrderedContextGraphSyncs<Result>(
         item,
         () => item.run(remaining),
       );
+      outcomes.push({
+        contextGraphId: item.contextGraphId,
+        lane: item.lane,
+        disposition: 'settled',
+        result: part,
+      });
       summary = options.merge(summary, part);
-      if (options.shouldStop?.(part)) break;
+      if (options.shouldStop?.(part)) {
+        outcomes.push(...orderedWork.slice(index + 1).map((candidate) => ({
+          contextGraphId: candidate.contextGraphId,
+          lane: candidate.lane,
+          disposition: 'skipped' as const,
+          reason: 'stop-policy' as const,
+        })));
+        break;
+      }
     } catch (error) {
       const backpressureError = getSyncBackpressureBusyError(error);
       if (!backpressureError) throw error;
+      outcomes.push({
+        contextGraphId: item.contextGraphId,
+        lane: item.lane,
+        disposition: 'deferred',
+      });
+      outcomes.push(...orderedWork.slice(index + 1).map((candidate) => ({
+        contextGraphId: candidate.contextGraphId,
+        lane: candidate.lane,
+        disposition: 'skipped' as const,
+        reason: 'prior-deferral' as const,
+      })));
       summary = options.markDeferred(summary);
       options.onDeferred?.(item, backpressureError);
       break;
     }
   }
-  return summary;
+  return { summary, outcomes: Object.freeze(outcomes.map((outcome) => Object.freeze(outcome))) };
 }

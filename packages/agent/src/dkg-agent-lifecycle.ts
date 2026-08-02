@@ -8,7 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -268,6 +268,7 @@ import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/r
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
+  runOrderedContextGraphSyncsWithOutcomes,
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
 import {
@@ -472,6 +473,8 @@ import {
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
   type DurableSyncResult,
+  type SharedMemoryContextGraphResult,
+  type SharedMemoryContextGraphTerminal,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
   type ReplicationEvent,
@@ -897,6 +900,13 @@ type SharedMemorySyncContextGraphPlan = {
   eligibleContextGraphIds: string[];
 };
 
+type SharedMemorySyncDetailedOptions = {
+  stopOnBackoffWorthyFailure?: boolean;
+  sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
+  /** Admission override for foreground catch-up. */
+  priority?: number;
+};
+
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
 interface RecoverContextGraphSwmFromPeerDependencies {
@@ -923,43 +933,6 @@ type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'defe
 // This preserves the public/internal call shapes while ensuring a direct
 // library call cannot label itself as reconciler-owned automatic work.
 const syncCoverageInvocation = new AsyncLocalStorage<SyncCoverageEvidenceTrigger>();
-
-const UNVERIFIED_SYNC_COVERAGE_PLANES: Readonly<SyncCoverageVerifiedPlanes> = Object.freeze({
-  metadata: false,
-  durable: false,
-  sharedMemory: false,
-});
-
-function sharedMemorySyncCompletedCleanly(
-  result: Readonly<SharedMemorySyncResult>,
-  expectedContextGraphs: number,
-): boolean {
-  return result.failedPhases === 0
-    && result.failedPeers === 0
-    && result.timedOutPhases === 0
-    && result.deniedPhases === 0
-    && result.droppedDataTriples === 0
-    && (result.backoffWorthyFailures ?? 0) === 0
-    && (result.deferredBackpressure ?? 0) === 0
-    && result.completedPhases + result.emptyResponses >= expectedContextGraphs;
-}
-
-function syncCoveragePlanesFor(
-  contextGraphId: string,
-  metadataVerified: ReadonlySet<string>,
-  durableVerified: ReadonlySet<string>,
-  sharedMemoryVerified: ReadonlySet<string>,
-): SyncCoverageVerifiedPlanes {
-  return {
-    metadata: metadataVerified.has(contextGraphId),
-    durable: durableVerified.has(contextGraphId),
-    sharedMemory: sharedMemoryVerified.has(contextGraphId),
-  };
-}
-
-function syncCoveragePlanesComplete(planes: SyncCoverageVerifiedPlanes): boolean {
-  return planes.metadata && planes.durable && planes.sharedMemory;
-}
 
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
@@ -1200,6 +1173,23 @@ function mergeSharedMemorySyncResults(
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
   };
+}
+
+function withSharedMemoryContextGraphTerminals(
+  summary: SharedMemoryContextGraphResult,
+  terminals: readonly SharedMemoryContextGraphTerminal[],
+): SharedMemorySyncResult {
+  const immutableTerminals = Object.freeze(
+    terminals.map((terminal) => Object.freeze(terminal)),
+  );
+  return { ...summary, contextGraphTerminals: immutableTerminals };
+}
+
+function asSharedMemoryTerminalLane(
+  lane: SyncSchedulerLane,
+): 'shared_memory' | 'swm_recovery' {
+  if (lane === 'shared_memory' || lane === 'swm_recovery') return lane;
+  throw new TypeError(`Unexpected shared-memory terminal lane: ${lane}`);
 }
 
 function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
@@ -5416,26 +5406,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return { peerIds: [curatorPeerId], curatorIsLocal: false, legacyTripleResolved: true };
   }
 
-  async syncSharedMemoryFromPeerDetailed(this: DKGAgent,
+  async syncSharedMemoryFromPeerDetailed(
+    this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
-    options?: {
-      stopOnBackoffWorthyFailure?: boolean;
-      sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
-      /** Admission override for foreground catch-up. */
-      priority?: number;
-      /**
-       * Bounded admission origin for node-wide scheduler diagnostics. The
-       * closed union: the catch-up Worker RPC is the only untrusted producer
-       * and it clamps in the CLI bridge, while `acquire` re-clamps regardless.
-       */
-      source?: SyncAdmissionSource;
-    },
+    options?: SharedMemorySyncDetailedOptions,
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
-      return emptySharedMemorySyncResult();
+      return withSharedMemoryContextGraphTerminals(
+        emptySharedMemorySyncResult(),
+        [...new Set(contextGraphIds)].map((contextGraphId) => ({
+          contextGraphId,
+          lane: null,
+          disposition: 'skipped',
+          reason: 'disabled',
+        })),
+      );
     }
     const recoverPrivateContextGraph = (contextGraphId: string) => runRecoverContextGraphSwmFromPeer(
       {
@@ -5502,20 +5490,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
 
     const runSync = async (): Promise<SharedMemorySyncResult> => {
-      const observeContextGraphTerminal = (
-        contextGraphId: string,
-        result: SharedMemorySyncResult,
-      ): SharedMemorySyncResult => {
-        try {
-          options?.onContextGraphTerminal?.(
-            contextGraphId,
-            Object.freeze({ ...result }),
-          );
-        } catch {
-          // Diagnostics must never alter sync decisions or terminal results.
-        }
-        return result;
-      };
       const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
       const getSubGraphAdmission = (contextGraphId: string) => {
         let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
@@ -5607,10 +5581,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             lane: 'shared_memory',
             operationId: `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
             run: async (remainingContextGraphs: number) =>
-              observeContextGraphTerminal(
-                contextGraphId,
-                await syncPublicContextGraph(contextGraphId, remainingContextGraphs),
-              ),
+              syncPublicContextGraph(contextGraphId, remainingContextGraphs),
           });
           continue;
         }
@@ -5655,12 +5626,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 backoffWorthyFailures: 1,
               };
             }
-            return observeContextGraphTerminal(contextGraphId, result);
+            return result;
           },
         });
       }
 
-      return runOrderedContextGraphSyncs({
+      const execution = await runOrderedContextGraphSyncsWithOutcomes({
         work,
         priorities: this.config.syncContextGraphPriorities,
         emptyResult: emptySharedMemorySyncResult,
@@ -5685,6 +5656,43 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
         ),
       });
+      const terminalContextGraphIds = new Set(
+        execution.outcomes.map((outcome) => outcome.contextGraphId),
+      );
+      const terminals: SharedMemoryContextGraphTerminal[] = execution.outcomes.map((outcome) => {
+        if (outcome.disposition === 'settled') {
+          return {
+            contextGraphId: outcome.contextGraphId,
+            lane: asSharedMemoryTerminalLane(outcome.lane),
+            disposition: 'settled',
+            result: Object.freeze({ ...outcome.result } satisfies SharedMemoryContextGraphResult),
+          };
+        }
+        if (outcome.disposition === 'deferred') {
+          return {
+            contextGraphId: outcome.contextGraphId,
+            lane: asSharedMemoryTerminalLane(outcome.lane),
+            disposition: 'deferred',
+          };
+        }
+        return {
+          contextGraphId: outcome.contextGraphId,
+          lane: asSharedMemoryTerminalLane(outcome.lane),
+          disposition: 'skipped',
+          reason: outcome.reason,
+        };
+      });
+      for (const contextGraphId of [...new Set(contextGraphIds)]) {
+        if (!terminalContextGraphIds.has(contextGraphId)) {
+          terminals.push({
+            contextGraphId,
+            lane: null,
+            disposition: 'skipped',
+            reason: 'not-eligible',
+          });
+        }
+      }
+      return withSharedMemoryContextGraphTerminals(execution.summary, terminals);
     };
 
     return runSyncSingleFlight(this, singleFlightKey, runSync);
