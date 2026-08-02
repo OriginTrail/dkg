@@ -162,6 +162,23 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(createArg.syncGlobalQueueLimit).toBe(0);
   });
 
+  it('passes the nested adaptive-capacity policy through unchanged', async () => {
+    const syncAdaptiveCapacity = {
+      enabled: true,
+      minInflight: 2,
+      maxInflight: 7,
+    } as const;
+    const createArg = await captureCreateArg({ syncAdaptiveCapacity });
+
+    expect(createArg.syncAdaptiveCapacity).toBe(syncAdaptiveCapacity);
+  });
+
+  it('keeps adaptive-capacity policy omitted when the operator omits it', async () => {
+    const createArg = await captureCreateArg();
+
+    expect(createArg).not.toHaveProperty('syncAdaptiveCapacity');
+  });
+
   it('passes the Core public-CG peer-round batch size through unchanged', async () => {
     const createArg = await captureCreateArg({ syncCorePublicBatchSize: 13 });
 

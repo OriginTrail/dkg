@@ -1160,6 +1160,23 @@ export interface Rfc64PublicCatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
+/**
+ * Optional bounds for role-aware adaptive sync concurrency.
+ *
+ * These values are operator policy, not instantaneous capacity:
+ * `minInflight` is the floor the controller may reduce to and `maxInflight` is
+ * the ceiling it may grow to. Omitting the whole block preserves role-aware
+ * defaults; `enabled` can explicitly opt in or out without restating bounds.
+ */
+export interface SyncAdaptiveCapacityConfig {
+  /** Explicitly enable or disable adaptive sync capacity. Omit for the role-aware default. */
+  readonly enabled?: boolean;
+  /** Minimum effective global sync concurrency the controller may select. */
+  readonly minInflight?: number;
+  /** Maximum effective global sync concurrency the controller may select. */
+  readonly maxInflight?: number;
+}
+
 export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
@@ -1272,6 +1289,11 @@ export interface DKGAgentConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /**
+   * Optional role-aware adaptive sync-concurrency policy. Omission preserves
+   * role-aware defaults and is distinct from an explicit disable.
+   */
+  syncAdaptiveCapacity?: SyncAdaptiveCapacityConfig;
   /**
    * Maximum automatically discovered public CGs a Core adds to one peer-sync
    * round. Explicitly selected CGs are not capped. Defaults to 8; 0 disables

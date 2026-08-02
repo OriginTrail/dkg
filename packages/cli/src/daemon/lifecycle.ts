@@ -1777,6 +1777,9 @@ export async function runDaemonInner(
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
+    ...(config.syncAdaptiveCapacity === undefined
+      ? {}
+      : { syncAdaptiveCapacity: config.syncAdaptiveCapacity }),
     syncCorePublicBatchSize: config.syncCorePublicBatchSize,
     syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
     syncContextGraphPriorities: config.syncContextGraphPriorities,

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
+  SyncAdaptiveCapacityConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
@@ -628,6 +629,11 @@ export interface DkgConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /**
+   * Optional role-aware adaptive sync-concurrency policy forwarded unchanged
+   * to the agent. Omit the block to preserve role-aware defaults.
+   */
+  syncAdaptiveCapacity?: SyncAdaptiveCapacityConfig;
   /**
    * Public-CG coverage admitted per Core peer-sync round. Explicit Edge/Core
    * selections are never capped. Default 8; 0 disables automatic Core catch-up.

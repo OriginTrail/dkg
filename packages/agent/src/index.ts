@@ -194,6 +194,7 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type SyncAdaptiveCapacityConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type DKGAgentACKTransportOptions,
   type ContextGraphSub,
