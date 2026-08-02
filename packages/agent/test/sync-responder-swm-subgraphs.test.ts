@@ -420,6 +420,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
         const cleanupTask = 'urn:dkg:finalized-swm-cleanup:responder-test';
         const head = `${ual}#dkg-swm-head`;
         const assertionGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/9`;
+        const markedAt = new Date(Date.now() - 2_000).toISOString();
         const markedEntity = 'urn:swm:finalized:still-syncable';
         const unmarkedGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ac/10`;
         const unmarkedRoot = 'urn:swm:unmarked:must-sync';
@@ -440,8 +441,25 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
           { graph: ROOT_SWM_META, subject: cleanupTask, predicate: RDF_TYPE, object: `${DKG_NS}FinalizedSwmCleanupTask` },
           { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
+          // The task subject carries all three local predicates, exactly as
+          // buildFinalizedSwmCleanupTaskQuads writes them.
           { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupMarkedAt`, object: `"${markedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupHeadFingerprint`, object: `"${'cd'.repeat(32)}"` },
+          // The OPERATION subject is the one that matters for the predicate
+          // guard. It is served to peers, so the subject-level
+          // `FILTER NOT EXISTS { ?s a FinalizedSwmCleanupTask }` does not cover
+          // it and only the predicate list keeps these rows local.
+          //
+          // Root and markedAt are what markFinalizedGraphScopedSwmForCleanup
+          // actually writes here (finalization-handler.ts:1602-1612). The head
+          // fingerprint is NOT written on an operation subject today — it is
+          // seeded anyway so the predicate guard is pinned as load-bearing
+          // rather than incidental: a future writer must not be able to leak it
+          // by putting it on a subject the responder serves.
           { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupMarkedAt`, object: `"${markedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupHeadFingerprint`, object: `"${'cd'.repeat(32)}"` },
           { graph: assertionGraph, subject: markedEntity, predicate: 'http://schema.org/name', object: '"finalized-copy"' },
           { graph: unmarkedGraph, subject: unmarkedRoot, predicate: 'http://schema.org/name', object: '"live-copy"' },
           { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
@@ -471,10 +489,39 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           phase: 'meta',
         });
 
+        // Every local predicate, asserted by name. One predicate standing in
+        // for three is how two thirds of this guard went unheld: the fixtures
+        // only ever carried `finalizedSwmCleanupRoot`, so dropping either other
+        // entry from the filter leaked it to peers with the suite still green.
+        const expectNoLocalGcLeak = (payload: string) => {
+          expect(payload).not.toContain('finalizedSwmCleanupRoot');
+          expect(payload).not.toContain('finalizedSwmCleanupMarkedAt');
+          expect(payload).not.toContain('finalizedSwmCleanupHeadFingerprint');
+          expect(payload).not.toContain(cleanupTask);
+        };
+
         expect(out).toContain(head);
         expect(out).toContain(op);
-        expect(out).not.toContain(cleanupTask);
-        expect(out).not.toContain('finalizedSwmCleanupRoot');
+        // Positive half: filtering everything would satisfy the absence checks.
+        expect(out).toContain(`${DKG_NS}shareOperationId`);
+        expect(out).toContain(`${DKG_NS}assertionGraph`);
+        expectNoLocalGcLeak(out);
+
+        // The TTL-disabled lane serves two different readers: without a session
+        // it store-pages via readSwmMetaRowsPage, with one it loads the bounded
+        // snapshot. They filter in different places — store-side SPARQL vs the
+        // in-process strip — so a per-predicate hole can exist in one and not
+        // the other.
+        const sessionOut = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          syncSessionId: `finalized-cleanup-session-${sharedMemoryTtlMs}`,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+        expect(sessionOut).toContain(op);
+        expectNoLocalGcLeak(sessionOut);
 
         const dataOut = await markedCap.invoke({
           contextGraphId: CG_ID,
@@ -508,7 +555,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
           phase: 'meta',
         });
         expect(afterCleanup).toContain(op);
-        expect(afterCleanup).not.toContain('finalizedSwmCleanupRoot');
+        expectNoLocalGcLeak(afterCleanup);
         await markedStore.close();
       },
     );
