@@ -525,6 +525,25 @@ export interface CatchupPlaneCompletionEvidence {
    * {@link catchupPlaneProvenByUnanimousEmpty}.
    */
   authorityEmptyPeers?: number;
+  /**
+   * Peers that ANSWERED this plane but whose round did not complete cleanly.
+   *
+   * Every other field here records what a peer proved. This one records what a
+   * peer left unresolved, and it exists because the absence of a peer from the
+   * positive counters is ambiguous: `catchupPeerPlaneEvidence` returns an
+   * all-zero record for an incomplete round, so a peer that answered EMPTY but
+   * did not finish paging is indistinguishable from a peer that was never
+   * contacted. That ambiguity is invisible to the round diagnostics too — an
+   * explicit `complete: false` is not a transport failure, so it never reaches
+   * `failedPeers`.
+   *
+   * Without it, a round of one clean-empty peer plus one incomplete-empty peer
+   * reads as unanimously empty. Pure transport failures are deliberately NOT
+   * counted here: an unreachable stranger is already `failedPeers`, and folding
+   * it in would pin legitimately empty graphs in a retry loop on a lossy
+   * network.
+   */
+  incompleteResponders?: number;
 }
 
 /** The aggregate per-plane counters a whole-round verdict is allowed to consult. */
@@ -587,7 +606,15 @@ export function catchupPeerPlaneEvidence(
     emptyPeers: 0,
     authorityEmptyPeers: 0,
   };
-  if (!plane || !catchupPlaneCompletedWithoutFailure(plane, options.complete)) return none;
+  if (!plane) return none;
+  if (!catchupPlaneCompletedWithoutFailure(plane, options.complete)) {
+    // The peer answered and its round was not clean. A pure transport failure is
+    // NOT that: we never heard from it, it is already counted in `failedPeers`,
+    // and treating unreachable strangers as unresolved evidence would stop a
+    // genuinely empty graph from ever settling on a lossy network.
+    const answeredButUnresolved = (plane.failedPeers ?? 0) === 0;
+    return answeredButUnresolved ? { ...none, incompleteResponders: 1 } : none;
+  }
   // "The host says there is nothing here." Only the curator can say it: a
   // response is content-free either by being wire-empty or by carrying nothing
   // but `_meta`, and only the metadata-resolved curator's silence about data
@@ -641,6 +668,9 @@ export function addCatchupPlaneEvidence(
   total.emptyPeers += peer.emptyPeers;
   if (peer.authorityEmptyPeers) {
     total.authorityEmptyPeers = (total.authorityEmptyPeers ?? 0) + peer.authorityEmptyPeers;
+  }
+  if (peer.incompleteResponders) {
+    total.incompleteResponders = (total.incompleteResponders ?? 0) + peer.incompleteResponders;
   }
 }
 
@@ -781,6 +811,13 @@ export function catchupPlaneProvenByUnanimousEmpty(
   // A non-curator that has `_meta` and no data cannot tell "the graph is empty"
   // from "I have not synced it yet". See the note above.
   if ((diagnostics?.metaOnlyResponses ?? 0) > 0) return false;
+  // A peer that answered but did not finish paging leaves the round unresolved:
+  // "nobody had anything" cannot be concluded while somebody's answer is still
+  // half-delivered. This is not covered by the phase counters below — an
+  // explicit `complete: false` is neither a failure nor a timeout — and it is
+  // the one shape that survives `catchupPeerPlaneEvidence` erasing the peer to
+  // an all-zero record.
+  if ((completion?.incompleteResponders ?? 0) > 0) return false;
   // Completion evidence is PER-PEER and says explicitly whether that peer's
   // round was clean; `diagnostics.emptyResponses` is a raw aggregate that counts
   // an empty payload even when the peer's round was NOT complete. Where the

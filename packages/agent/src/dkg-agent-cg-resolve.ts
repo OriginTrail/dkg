@@ -622,9 +622,29 @@ async function ownMetaConfirmsCuratorBinding(
     return false;
   }
 
-  // The graph must name this curator itself…
-  const ownCurators = [own.curator, ...own.curators].filter(Boolean);
-  if (!ownCurators.includes(curatorDid)) return false;
+  // The graph must DECLARE itself here, not merely be mentioned.
+  //
+  // `<cg>/_meta` accumulates rows from several writers — durable-meta sync,
+  // curator refresh, gossip, per-node backfill — so the presence of a curator
+  // triple says only that some row arrived, not that this node holds the graph's
+  // canonical definition. Two stray triples were enough to earn authority.
+  //
+  // A complete definition is the cheapest honest proxy, and on a receiver it
+  // costs nothing: `curator-meta-refresh` REJECTS any curator snapshot missing
+  // type/access-policy/creator/curator before it will replace `_meta`, and the
+  // subscriber bootstrap writes type and policy but never a curator. So a
+  // curator row essentially cannot be present without them. Graphs predating
+  // that invariant lose the early stop and fall back to bounded fan-out.
+  if (!own.declared || own.accessPolicy === undefined) return false;
+
+  // The graph must name this curator, unambiguously.
+  //
+  // Deduplicate first: `applyFact` records the SAME triple twice — it pushes to
+  // `curators` and also sets the `curator` scalar — so a single declared curator
+  // arrives here as two entries. Counting the raw array would reject every real
+  // graph while passing any fixture that leaves `curators` empty.
+  const ownCurators = new Set([own.curator, ...own.curators].filter(Boolean));
+  if (ownCurators.size !== 1 || !ownCurators.has(curatorDid)) return false;
 
   const didPrefix = 'did:dkg:agent:';
   const curatorIdentifier = curatorDid.slice(didPrefix.length);
@@ -649,10 +669,24 @@ async function ownMetaConfirmsCuratorBinding(
   // ORDERS the walk, but ordering is all it may do: ending the walk means
   // accepting one peer's snapshot as the whole graph, and an untrusted peer's
   // `complete` flag says only that it served its own view.
-  return [own.creator, ...own.creators]
-    .filter((value): value is string => Boolean(value))
-    .some((creatorDid) => creatorDid.startsWith(didPrefix)
-      && creatorDid.slice(didPrefix.length) === curatorPeerId);
+  //
+  // The binding must also be UNIQUE. Accepting "some declared creator matches
+  // the candidate" lets a stale or duplicated creator row — the shape
+  // `createContextGraph` calls out as "stray creator/curator triples (e.g. from
+  // a previous build that backfilled per node)" — decide which peer speaks for
+  // the graph, and the merged projection picks among creators in arbitrary
+  // order. Two candidate bindings mean no binding: rank, never settle.
+  const declaredPeerBindings = new Set(
+    [own.creator, ...own.creators]
+      .filter((value): value is string => Boolean(value))
+      .filter((creatorDid) => creatorDid.startsWith(didPrefix))
+      .map((creatorDid) => creatorDid.slice(didPrefix.length))
+      // A wallet-form creator is not a peer binding; it cannot name a peer and
+      // must not count toward the ambiguity it would otherwise manufacture.
+      .filter((creatorId) => !creatorId.startsWith('0x')),
+  );
+  if (declaredPeerBindings.size !== 1) return false;
+  return declaredPeerBindings.has(curatorPeerId);
 }
 
 export async function resolveCuratorSyncPeer(

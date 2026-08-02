@@ -29,9 +29,17 @@ import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.
 // up — but it mutates the REAL process env, and vitest can reuse a worker
 // process across files in a shard. Anything loaded afterwards, including a
 // daemon spawned by a sibling suite, would otherwise inherit the shortened backpressure budget.
+//
+// The budget must stay comfortably ABOVE `CATCHUP_BACKPRESSURE_BASE_DELAY_MS`
+// (250 ms). At exactly 250 ms the first backoff is clamped to the whole
+// remaining budget, so the sleep ends ON the deadline and every retry in this
+// file depended on the loop admitting an attempt there — which the post-sleep
+// deadline check now declines. That ratio does not occur in production (the
+// default budget is 180 s against the same 250 ms base), so pinning it would
+// have pinned an artefact of the fixture rather than a behaviour.
 const previousCATCHUPBACKPRESSUREMAXWAITMS = vi.hoisted(() => {
   const before = process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
-  process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = '250';
+  process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = '900';
   return before;
 });
 
@@ -1422,8 +1430,11 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
         verifiedPrivateOnlyPeers: 0,
         emptyPeers: 0,
         authorityEmptyPeers: 0,
+        // The peer answered and did not complete cleanly: recorded so a whole-round
+        // empty verdict cannot be drawn over a half-delivered answer.
+        incompleteResponders: 1,
       },
-      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0, incompleteResponders: 1 },
     });
     expect(result.diagnostics?.durable.verifiedPrivateOnlyResponses).toBe(0);
   });
@@ -1473,6 +1484,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
       authorityEmptyPeers: 0,
+      // The peer answered and did not complete cleanly: recorded so a whole-round
+      // empty verdict cannot be drawn over a half-delivered answer.
+      incompleteResponders: 1,
     });
   });
 
@@ -1512,6 +1526,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
       authorityEmptyPeers: 0,
+      // The peer answered and did not complete cleanly: recorded so a whole-round
+      // empty verdict cannot be drawn over a half-delivered answer.
+      incompleteResponders: 1,
     });
   });
 
@@ -1558,6 +1575,8 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedPrivateOnlyPeers: 1,
       emptyPeers: 0,
       authorityEmptyPeers: 0,
+      // No `incompleteResponders`: this peer COMPLETED cleanly. The counter
+      // must not appear merely because a plane carried no public data.
     });
   });
 
@@ -1599,6 +1618,9 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       verifiedPrivateOnlyPeers: 0,
       emptyPeers: 0,
       authorityEmptyPeers: 0,
+      // The peer answered and did not complete cleanly: recorded so a whole-round
+      // empty verdict cannot be drawn over a half-delivered answer.
+      incompleteResponders: 1,
     });
   });
 

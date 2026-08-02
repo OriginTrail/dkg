@@ -242,6 +242,34 @@ describe('context graph catch-up readiness classification', () => {
       .toBe(classification.readinessPatch?.durableVerified);
   });
 
+  it('does not settle a round where one peer answered empty but never completed', () => {
+    // The shape the fully-accounted check alone cannot see. Peer A completes
+    // empty; peer B returns an empty payload but `complete: false`.
+    // `catchupPeerPlaneEvidence` erases B to an all-zero record, so `emptyPeers`
+    // stays 1 and — because an incomplete round is NOT a transport failure —
+    // `failedPeers` stays 0. Both the unanimous-empty proof and the
+    // fully-accounted gate would therefore pass, and the graph would be frozen
+    // as synced on half an answer.
+    const mixed = publicEmptyRoundResult();
+    mixed.cleanPlaneCompletions!.durable.emptyPeers = 1;
+    mixed.cleanPlaneCompletions!.durable.incompleteResponders = 1;
+    mixed.diagnostics!.durable.emptyResponses = 2;
+    mixed.diagnostics!.durable.failedPeers = 0;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result: mixed,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification.jobStatus).not.toBe('done');
+    expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
+    // …and nothing opens the writeability gate either.
+    expect(classification.statePatch?.synced).toBe(false);
+  });
+
   it('re-derives an empty verdict instead of carrying it into the next run', () => {
     // The false-`done` residual: with no authoritative curator, one unrelated
     // empty response alongside transport-level peer failures satisfies the

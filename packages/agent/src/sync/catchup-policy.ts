@@ -283,6 +283,16 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
     });
     if (delayMs === undefined) return result;
     await wait(delayMs);
+    // Re-check the deadline AFTER sleeping. `nextCatchupBackpressureDelayMs`
+    // sized the delay against the budget that remained before the sleep, but a
+    // timer is a lower bound: under event-loop pressure the wake-up can land
+    // well past `retryUntil`, and starting a fresh admission there would spend
+    // scheduler capacity outside the budget this plane advertised.
+    //
+    // This declines to START an attempt; an attempt already in flight is never
+    // interrupted. The deliberate collateral is that capacity clearing exactly
+    // at or just after the deadline no longer gets one extra try.
+    if (now() >= retryUntil) return result;
     result = await run(context);
   }
 }

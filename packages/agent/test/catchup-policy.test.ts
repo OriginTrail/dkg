@@ -160,6 +160,34 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(syncDurable).toHaveBeenCalledTimes(2);
   });
 
+  it('does not start a fresh attempt when the timer wakes past the deadline', async () => {
+    // A timer is a LOWER bound. `nextCatchupBackpressureDelayMs` sizes the sleep
+    // against the budget remaining BEFORE it, so under event-loop pressure the
+    // wake-up can land past `retryUntil` — and starting another admission there
+    // spends sync-global capacity outside the budget this plane advertised.
+    //
+    // The clock below models exactly that: every sleep overruns its request.
+    const overshootMs = 5_000;
+    let nowMs = 1_000;
+    const clock = {
+      now: () => nowMs,
+      wait: async (delayMs: number) => { nowMs += delayMs + overshootMs; },
+    };
+    const syncDurable = vi.fn(async () => ({ deferredBackpressure: 1 }));
+
+    await runCatchupPlaneWithPolicy('foreground', syncDurable, {
+      retry: { maxWaitMs: 1_000 },
+      now: clock.now,
+      wait: clock.wait,
+      random: () => 0,
+    });
+
+    // The opening attempt, and nothing after the overrun. Without the post-sleep
+    // deadline check this is 2 — the loop sleeps once, wakes 5 s past a 1 s
+    // budget, and admits anyway.
+    expect(syncDurable).toHaveBeenCalledTimes(1);
+  });
+
   it('never sleeps past the retry deadline', async () => {
     const clock = virtualClock();
     const deadlineMs = 1_000;

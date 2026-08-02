@@ -1232,10 +1232,14 @@ describe('refreshMetaFromCurator', () => {
     const authoritativePeer = 'peer-from-authoritative-meta';
     const preferredSyncPeers = new Map([[contextGraphId, bootstrapPeer]]);
     const declaredFacts = {
+      // A complete canonical definition, in the shape the projection produces:
+      // each declared fact appears as the scalar AND in its array.
+      declared: true,
+      accessPolicy: 'private',
       curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
-      curators: [],
+      curators: ['did:dkg:agent:0x0000000000000000000000000000000000000abc'],
       creator: `did:dkg:agent:${authoritativePeer}`,
-      creators: [],
+      creators: [`did:dkg:agent:${authoritativePeer}`],
     };
     const agent = {
       preferredSyncPeers,

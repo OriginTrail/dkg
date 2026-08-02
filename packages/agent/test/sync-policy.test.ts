@@ -108,13 +108,39 @@ describe('curator sync-peer provenance', () => {
     curators?: string[];
     creator?: string;
     creators?: string[];
+    declared?: boolean;
+    accessPolicy?: string;
   };
+
+  /**
+   * Shape a fixture the way the projection actually shapes a record.
+   *
+   * `applyFact` records ONE declared curator twice — `pushUnique(record.curators,
+   * o)` AND `record.curator ??= o` — so a real single-curator graph arrives with
+   * `curators.length === 1` and a matching scalar, i.e. two entries once the
+   * scalar is prepended. Fixtures that set only the scalar and leave the array
+   * empty do NOT look like production, and a cardinality bug that rejects every
+   * real graph would pass against them. Deriving the arrays here keeps every
+   * fixture in the production shape by construction.
+   */
+  function projected(facts: MetaFacts) {
+    return {
+      ...facts,
+      curators: facts.curators ?? (facts.curator ? [facts.curator] : []),
+      creators: facts.creators ?? (facts.creator ? [facts.creator] : []),
+    };
+  }
 
   /**
    * `getCgMeta` is the MERGED projection (`_meta` + AGENTS + `_catalog` +
    * ONTOLOGY); `getOwnCgMetaFacts` is what the Context Graph declared about
    * itself. `ownMeta` defaults to `meta` — the ordinary case where they agree —
    * so any test exercising the difference has to say so out loud.
+   *
+   * `ownMeta` also carries a COMPLETE canonical definition by default
+   * (`declared` + an access policy), because that is what a receiver's `_meta`
+   * always holds: `curator-meta-refresh` refuses to install a snapshot without
+   * it. A test that wants the partial shape states it explicitly.
    */
   function agentWithMeta(
     meta: MetaFacts,
@@ -122,8 +148,12 @@ describe('curator sync-peer provenance', () => {
     ownMeta: MetaFacts = meta,
   ) {
     return {
-      getCgMeta: async () => ({ curators: [], creators: [], ...meta }),
-      getOwnCgMetaFacts: async () => ({ curators: [], creators: [], ...ownMeta }),
+      getCgMeta: async () => projected(meta),
+      getOwnCgMetaFacts: async () => projected({
+        declared: true,
+        accessPolicy: 'private',
+        ...ownMeta,
+      }),
       discovery: { findAgents },
     };
   }
@@ -253,6 +283,67 @@ describe('curator sync-peer provenance', () => {
     expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
   });
 
+  it('refuses authority to a graph that never declared itself', async () => {
+    // The reviewer's "identity-only partial own _meta": a couple of rows landed
+    // in `<cg>/_meta` without the canonical definition. `_meta` accumulates from
+    // several writers, so a curator row alone does not mean this node holds the
+    // graph's definition — and two stray triples must not be able to end a walk.
+    const declared = {
+      curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
+      creator: `did:dkg:agent:${CURATOR}`,
+    };
+    const agent = agentWithMeta(declared, async () => [], {
+      ...declared,
+      declared: false,
+      accessPolicy: undefined,
+    });
+
+    const resolved = await resolveCuratorSyncPeer(agent as never, new Map(), CG);
+    expect(resolved.peerId).toBe(CURATOR);
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+  });
+
+  it('refuses authority when the graph declares two candidate creator peers', async () => {
+    // `createContextGraph` calls this shape out directly — "stray creator/curator
+    // triples (e.g. from a previous build that backfilled per node)" — and the
+    // merged projection picks among creators in arbitrary order. Accepting
+    // whichever one happens to match the candidate peer lets a stale member
+    // speak for the graph.
+    const agent = agentWithMeta(
+      {
+        curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
+        creator: `did:dkg:agent:${CURATOR}`,
+      },
+      async () => {
+        throw new Error('the registry fallback must not be reached here');
+      },
+      {
+        curator: 'did:dkg:agent:0x00000000000000000000000000000000000000ab',
+        creators: [`did:dkg:agent:${CURATOR}`, 'did:dkg:agent:12D3KooWStaleMember'],
+      },
+    );
+
+    const resolved = await resolveCuratorSyncPeer(agent as never, new Map(), CG);
+    expect(resolved.peerId).toBe(CURATOR);
+    expect(resolved.provenance).toBe('projection');
+    expect(authoritativeSyncPeerId(resolved)).toBeUndefined();
+  });
+
+  it('refuses authority when the graph declares two different curators', async () => {
+    const agent = agentWithMeta(
+      { curator: `did:dkg:agent:${CURATOR}` },
+      async () => [],
+      {
+        curator: `did:dkg:agent:${CURATOR}`,
+        curators: [`did:dkg:agent:${CURATOR}`, 'did:dkg:agent:12D3KooWOtherCurator'],
+      },
+    );
+
+    expect(authoritativeSyncPeerId(
+      await resolveCuratorSyncPeer(agent as never, new Map(), CG),
+    )).toBeUndefined();
+  });
+
   it('demotes when the graph does not name that curator at all', async () => {
     // A curator the merged projection asserts but the graph never claimed.
     const agent = agentWithMeta(
@@ -341,7 +432,15 @@ describe('curator sync-peer provenance', () => {
     // metadata confirms a curator, so the second call runs against a different
     // map than the first.
     let metaReads = 0;
-    const declared = { curator: `did:dkg:agent:${CURATOR}`, curators: [], creators: [] };
+    // Production shape: the projection records the declared curator both as the
+    // scalar and in the array, alongside the canonical definition facts.
+    const declared = {
+      declared: true,
+      accessPolicy: 'private',
+      curator: `did:dkg:agent:${CURATOR}`,
+      curators: [`did:dkg:agent:${CURATOR}`],
+      creators: [],
+    };
     const agent = {
       preferredSyncPeers: new Map([[CG, CURATOR]]),
       getCgMeta: async () => {
