@@ -90,7 +90,6 @@ export class CorePublicSyncCoverageScheduler {
   private readonly laneAnchors = new Map<string, string>();
   private lastPlanAt?: number;
   private lastPlan?: CorePublicSyncCoverageStatus['lastPlan'];
-  private lastCoverageCandidates?: number;
 
   constructor(
     private readonly batchSize: number,
@@ -108,13 +107,11 @@ export class CorePublicSyncCoverageScheduler {
     if (!normalized) return false;
     const sizeBefore = this.tracked.size;
     this.tracked.add(normalized);
-    if (this.tracked.size !== sizeBefore) this.lastCoverageCandidates = undefined;
     return this.tracked.size !== sizeBefore;
   }
 
   unregister(contextGraphId: string): boolean {
     const removed = this.tracked.delete(contextGraphId);
-    if (removed) this.lastCoverageCandidates = undefined;
     if (this.tracked.size === 0) {
       this.laneAnchors.clear();
     } else if (removed) {
@@ -164,7 +161,6 @@ export class CorePublicSyncCoverageScheduler {
 
     const scheduledCoverage: string[] = [];
     const batchSize = resolveEffectiveBatchSize(this.batchSize, effectiveBatchSize);
-    this.lastCoverageCandidates = coverage.length;
     if (batchSize > 0 && coverage.length > 0) {
       const count = Math.min(batchSize, coverage.length);
       const previousAnchor = this.laneAnchors.get(planningLane);
@@ -198,12 +194,23 @@ export class CorePublicSyncCoverageScheduler {
     return scheduledCoverage;
   }
 
-  /** True when automatic public coverage was truncated by the current batch. */
-  hasAutomaticCoverageBacklog(effectiveBatchSize?: number): boolean {
+  /** Pure demand check for automatic public coverage beyond the current batch. */
+  hasAutomaticCoverageBacklog(
+    selectedContextGraphIds: readonly string[],
+    effectiveBatchSize?: number,
+  ): boolean {
     if (this.batchSize === 0) return false;
     const batchSize = resolveEffectiveBatchSize(this.batchSize, effectiveBatchSize);
-    const candidates = this.lastCoverageCandidates ?? this.tracked.size;
-    return candidates > batchSize;
+    const selected = new Set(
+      selectedContextGraphIds.map((id) => id.trim()).filter(Boolean),
+    );
+    let candidates = 0;
+    for (const contextGraphId of this.tracked) {
+      if (selected.has(contextGraphId)) continue;
+      candidates += 1;
+      if (candidates > batchSize) return true;
+    }
+    return false;
   }
 
   getStatus(enabled: boolean): CorePublicSyncCoverageStatus {

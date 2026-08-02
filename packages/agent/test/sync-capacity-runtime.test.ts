@@ -101,6 +101,7 @@ describe('sync capacity runtime resolution', () => {
     heapRatio = 0.3;
     expect(runtime.startSampling({
       hasSupplementalDemand: () => coverage.hasAutomaticCoverageBacklog(
+        [],
         runtime.getEffectiveCoverageBatch(),
       ),
       intervalMs: 5_000,
@@ -211,6 +212,47 @@ describe('sync capacity runtime resolution', () => {
       mode: 'adaptive',
       currentInflight: 2,
       maxInflight: 3,
+    });
+  });
+
+  it('does not reapply a larger global-limit env after deriving the adaptive hard maximum', () => {
+    vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '100');
+    const runtime = SyncCapacityRuntime.create({
+      nodeRole: 'core',
+      syncAdaptiveCapacity: { enabled: true },
+    }, fakeStore(STORE_PRESSURE), { parallelism: 64 });
+
+    expect(runtime.policy).toMatchObject({ limit: 3, queueLimit: 6 });
+    expect(runtime.getStatus()).toMatchObject({
+      mode: 'adaptive',
+      currentInflight: 2,
+      maxInflight: 3,
+    });
+  });
+
+  it('honors the config-level adaptive opt-out', () => {
+    const runtime = SyncCapacityRuntime.create({
+      nodeRole: 'core',
+      syncAdaptiveCapacity: { enabled: false },
+    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+
+    expect(runtime.isAdaptive()).toBe(false);
+    expect(runtime.getStatus()).toMatchObject({ mode: 'static', currentInflight: 2 });
+  });
+
+  it('applies valid config-level adaptive min and max bounds', () => {
+    const runtime = SyncCapacityRuntime.create({
+      nodeRole: 'core',
+      syncAdaptiveCapacity: { minInflight: 1, maxInflight: 2 },
+    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+
+    expect(runtime.isAdaptive()).toBe(true);
+    expect(runtime.policy).toMatchObject({ limit: 2, queueLimit: 4 });
+    expect(runtime.getStatus()).toMatchObject({
+      mode: 'adaptive',
+      currentInflight: 2,
+      minInflight: 1,
+      maxInflight: 2,
     });
   });
 

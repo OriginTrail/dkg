@@ -19,6 +19,7 @@ import {
   type ContextGraphSubscriptionRecord,
 } from '../src/index.js';
 import { normalizeLegacyContextGraphSubscriptionInput } from '../src/context-graph-subscription-policy.js';
+import { SyncCapacityRuntime } from '../src/sync/capacity-runtime.js';
 
 describe('Context Graph discovery/subscription boundary', () => {
   it('normalizes the legacy public subscription shape before it enters live state', () => {
@@ -402,15 +403,51 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 30_000);
 
-  it('bounds store-discovered public coverage without capping explicit scope', async () => {
-    const publicIds = ['store-public-a', 'store-public-b', 'store-public-c'];
+  it('keeps static Core peer-round planning on the configured batch', async () => {
+    const agent = await DKGAgent.create({
+      name: 'StaticCoreCoverageBoundary',
+      listenHost: '127.0.0.1',
+      nodeRole: 'core',
+      chainAdapter: new MockChainAdapter(),
+      syncContextGraphs: ['explicit-selection'],
+      syncCorePublicBatchSize: 2,
+      syncGlobalMaxInflight: 3,
+    });
+
+    try {
+      await agent.start();
+      expect(agent.getSyncCapacityStatus()).toMatchObject({ mode: 'static' });
+      const scheduler = (agent as any).corePublicSyncCoverageScheduler;
+      for (const id of ['static-public-a', 'static-public-b', 'static-public-c']) {
+        scheduler.register(id);
+      }
+
+      const scope = (agent as any).planCorePublicSyncPeerRound('static-peer');
+      expect(scope.initialDurableContextGraphIds[0]).toBe('explicit-selection');
+      expect(scope.automaticContextGraphIds).toHaveLength(2);
+      expect(scope.automaticContextGraphIds.every((id: string) => id.startsWith('static-public-')))
+        .toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('applies the live adaptive coverage batch without capping explicit scope', async () => {
+    const publicIds = [
+      'store-public-a',
+      'store-public-b',
+      'store-public-c',
+      'store-public-d',
+      'store-public-e',
+      'store-public-f',
+    ];
     const agent = await DKGAgent.create({
       name: 'BoundedCoreStoreDiscovery',
       listenHost: '127.0.0.1',
       nodeRole: 'core',
       chainAdapter: new MockChainAdapter(),
       syncContextGraphs: ['explicit-selection'],
-      syncCorePublicBatchSize: 2,
+      syncCorePublicBatchSize: 8,
     });
 
     try {
@@ -436,15 +473,38 @@ describe('Context Graph discovery/subscription boundary', () => {
         },
       ])));
 
-      expect(await agent.discoverContextGraphsFromStore()).toBe(3);
+      expect(await agent.discoverContextGraphsFromStore()).toBe(6);
       expect((agent as any).config.syncContextGraphs).toEqual(['explicit-selection']);
-      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(3);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(6);
+
+      let cpuIdle = 0;
+      let cpuTotal = 0;
+      const constrainedRuntime = SyncCapacityRuntime.create({
+        nodeRole: 'core',
+        syncCorePublicBatchSize: 8,
+      }, agent.store, {
+        parallelism: 16,
+        samplerDependencies: {
+          readCpuTimes: () => {
+            cpuIdle += 80;
+            cpuTotal += 100;
+            return { idle: cpuIdle, total: cpuTotal };
+          },
+          readEventLoopUtilization: () => ({ idle: 1, active: 1, utilization: 0.5 }),
+          eventLoopUtilizationDelta: () => 0.2,
+          readHeapRatio: () => 0.82,
+        },
+      });
+      constrainedRuntime.sample(true);
+      expect(constrainedRuntime.getStatus().currentCoverageBatch).toBe(4);
+      (agent as any).syncCapacityRuntime.stopSampling();
+      (agent as any).syncCapacityRuntime = constrainedRuntime;
 
       const scope = (agent as any).planCorePublicSyncPeerRound('store-peer');
       const planned = scope.initialDurableContextGraphIds;
       expect(planned[0]).toBe('explicit-selection');
-      expect(planned.slice(1)).toHaveLength(2);
-      expect(new Set(planned.slice(1)).size).toBe(2);
+      expect(planned.slice(1)).toHaveLength(4);
+      expect(new Set(planned.slice(1)).size).toBe(4);
       expect(planned.slice(1).every((id: string) => publicIds.includes(id))).toBe(true);
     } finally {
       await agent.stop().catch(() => {});

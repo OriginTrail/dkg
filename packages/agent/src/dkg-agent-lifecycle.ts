@@ -3256,6 +3256,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.syncCapacityRuntime.startSampling({
       hasSupplementalDemand: () => (
         this.corePublicSyncCoverageScheduler.hasAutomaticCoverageBacklog(
+          this.config.syncContextGraphs ?? [],
           this.syncCapacityRuntime.getEffectiveCoverageBatch(),
         )
       ),

@@ -13,6 +13,7 @@ import {
   type AdaptiveCapacitySamplerDependencies,
 } from './adaptive-capacity-sampler.js';
 import {
+  createSyncGlobalBackpressurePolicy,
   getSyncBackpressureSnapshot,
   notifyGlobalSyncBackpressureCapacityChanged,
   parseBooleanEnv,
@@ -152,14 +153,15 @@ export class SyncCapacityRuntime {
     }
 
     const controller = new AdaptiveCapacityController(bounds, { now: options.now });
-    const adaptivePolicy = resolveSyncGlobalBackpressure({
+    const adaptivePolicy = createSyncGlobalBackpressurePolicy(
       // The controller can never exceed hardMax, so use that same ceiling for
       // queue sizing and admission observability. Basing the queue on a larger
       // explicit operator limit would allow a backlog that the adaptive Core
       // can never drain at the advertised policy capacity.
-      syncGlobalMaxInflight: hardMax,
-      syncGlobalQueueLimit: config.syncGlobalQueueLimit,
-    }, () => controller.getCurrentInflight());
+      hardMax,
+      config.syncGlobalQueueLimit,
+      () => controller.getCurrentInflight(),
+    );
     return new SyncCapacityRuntime(
       adaptivePolicy,
       configuredCoverageBatch,

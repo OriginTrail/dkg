@@ -313,13 +313,16 @@ export function resolveExplicitSyncGlobalLimit(
     ?? nonNegativeInteger(config.syncGlobalLimit);
 }
 
-/** Resolve one node-wide policy; the optional live limit is shared by every admission. */
-export function resolveSyncGlobalBackpressure(
-  config: SyncGlobalBackpressureConfig,
+/** Build a policy from a final hard limit without re-reading global-limit env inputs. */
+export function createSyncGlobalBackpressurePolicy(
+  resolvedLimit: number,
+  configuredQueueLimit?: number,
   currentLimit?: SyncBackpressureCurrentLimit,
 ): SyncGlobalBackpressurePolicy {
-  const limit = resolveExplicitSyncGlobalLimit(config)
-    ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
+  const limit = nonNegativeInteger(resolvedLimit);
+  if (limit === undefined) {
+    throw new TypeError('resolved sync global limit must be a non-negative integer');
+  }
   if (limit === 0) {
     return Object.freeze({
       limit: undefined,
@@ -327,14 +330,30 @@ export function resolveSyncGlobalBackpressure(
     }) as SyncGlobalBackpressurePolicy;
   }
 
+  // Queue capacity remains an independent operator control. Only the already-
+  // resolved hard limit is protected from a second global-limit env lookup.
   const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
-    ?? nonNegativeInteger(config.syncGlobalQueueLimit)
+    ?? nonNegativeInteger(configuredQueueLimit)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
   return Object.freeze({
     limit,
     queueLimit,
     ...(currentLimit ? { currentLimit } : {}),
   }) as SyncGlobalBackpressurePolicy;
+}
+
+/** Resolve one node-wide policy; the optional live limit is shared by every admission. */
+export function resolveSyncGlobalBackpressure(
+  config: SyncGlobalBackpressureConfig,
+  currentLimit?: SyncBackpressureCurrentLimit,
+): SyncGlobalBackpressurePolicy {
+  const limit = resolveExplicitSyncGlobalLimit(config)
+    ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
+  return createSyncGlobalBackpressurePolicy(
+    limit,
+    config.syncGlobalQueueLimit,
+    currentLimit,
+  );
 }
 
 export function getSyncBackpressureSnapshot(

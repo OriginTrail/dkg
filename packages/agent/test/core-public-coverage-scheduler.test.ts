@@ -137,7 +137,7 @@ describe('Core public Context Graph coverage scheduler', () => {
     scheduler.register('public-a');
 
     expect(scheduler.planAutomaticCoverage(['selected'])).toEqual([]);
-    expect(scheduler.hasAutomaticCoverageBacklog(0)).toBe(false);
+    expect(scheduler.hasAutomaticCoverageBacklog(['selected'], 0)).toBe(false);
     expect(scheduler.getStatus(true)).toMatchObject({
       enabled: false,
       batchSize: 0,
@@ -190,19 +190,15 @@ describe('Core public Context Graph coverage scheduler', () => {
     expect(third).toEqual(['cg:d']);
   });
 
-  it('reports automatic coverage demand only while the live batch truncates candidates', () => {
+  it('computes automatic coverage demand from current selections without a prior plan', () => {
     const scheduler = new CorePublicSyncCoverageScheduler(4);
     for (const contextGraphId of ['cg:a', 'cg:b', 'cg:c', 'cg:d', 'cg:e']) {
       scheduler.register(contextGraphId);
     }
 
-    expect(scheduler.hasAutomaticCoverageBacklog(2)).toBe(true);
-    scheduler.planAutomaticCoverageWithOptions(['cg:a', 'cg:b'], {
-      planningLane: 'peer-a',
-      effectiveBatchSize: 2,
-    });
-    expect(scheduler.hasAutomaticCoverageBacklog(2)).toBe(true);
-    expect(scheduler.hasAutomaticCoverageBacklog(3)).toBe(false);
+    expect(scheduler.hasAutomaticCoverageBacklog([], 2)).toBe(true);
+    expect(scheduler.hasAutomaticCoverageBacklog(['cg:a', 'cg:b'], 2)).toBe(true);
+    expect(scheduler.hasAutomaticCoverageBacklog(['cg:a', 'cg:b'], 3)).toBe(false);
   });
 
   it('rejects invalid live automatic-coverage batches', () => {
