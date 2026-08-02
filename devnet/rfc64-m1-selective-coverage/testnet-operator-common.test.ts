@@ -8,6 +8,7 @@ import test from 'node:test';
 import { createRfc64SemanticSnapshot } from '../_bootstrap/rfc64-evidence.ts';
 import {
   TESTNET_OPERATOR_CONFIG_SCHEMA,
+  buildTestnetContextGraphCreateRequest,
   observeGraph,
   readTestnetOperatorConfig,
   type TestnetOperatorConfigV1,
@@ -55,6 +56,27 @@ test('operator config decoder accepts the closed five-graph plan and rejects unk
 
   writeFileSync(path, JSON.stringify({ ...config(), typoThatWouldOtherwiseBeIgnored: true }));
   assert.throws(() => readTestnetOperatorConfig(path), /operator config has an invalid key set/u);
+});
+
+test('testnet corpus registration never turns a public cell private through an allowlist', () => {
+  const common = {
+    contextGraphId: 'm1-test',
+    name: 'M1 test',
+    agentAddress: `0x${'a'.repeat(40)}`,
+    publishPolicy: 0 as const,
+  };
+  const publicRequest = buildTestnetContextGraphCreateRequest({
+    ...common,
+    accessPolicy: 0,
+  });
+  const privateRequest = buildTestnetContextGraphCreateRequest({
+    ...common,
+    accessPolicy: 1,
+  });
+  assert.equal(Object.hasOwn(publicRequest, 'allowedAgents'), false);
+  assert.deepEqual(privateRequest['allowedAgents'], [common.agentAddress]);
+  assert.equal(publicRequest['register'], true);
+  assert.equal(privateRequest['register'], true);
 });
 
 test('exact graph observation derives VM and SWM evidence from scoped data and metadata queries', async (context) => {

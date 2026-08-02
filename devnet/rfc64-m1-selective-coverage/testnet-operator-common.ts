@@ -52,6 +52,25 @@ export interface HttpResult {
   readonly body: unknown;
 }
 
+export function buildTestnetContextGraphCreateRequest(input: {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly agentAddress: string;
+  readonly accessPolicy: 0 | 1;
+  readonly publishPolicy: 0 | 1;
+}): Record<string, unknown> {
+  return {
+    id: boundedText(input.contextGraphId, 'context graph ID'),
+    name: boundedText(input.name, 'context graph name'),
+    accessPolicy: input.accessPolicy,
+    publishPolicy: input.publishPolicy,
+    ...(input.accessPolicy === 1
+      ? { allowedAgents: [boundedText(input.agentAddress, 'agent address')] }
+      : {}),
+    register: true,
+  };
+}
+
 export type SparqlBindingCell = string | {
   readonly value?: string;
   readonly datatype?: string;

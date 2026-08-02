@@ -17,6 +17,7 @@ import {
 } from './manifest.ts';
 import {
   TESTNET_OPERATOR_CONFIG_SCHEMA,
+  buildTestnetContextGraphCreateRequest,
   requireJson,
   type TestnetOperatorAssetV1,
   type TestnetOperatorGraphV1,
@@ -59,14 +60,13 @@ for (const [graphIndex, policy] of policyCells.entries()) {
   const contextGraphId = `m1-${runId}-${graphIndex + 1}`;
   const create = await requireJson(publisher, '/api/context-graph/create', {
     method: 'POST',
-    body: JSON.stringify({
-      id: contextGraphId,
+    body: JSON.stringify(buildTestnetContextGraphCreateRequest({
+      contextGraphId,
       name: `RFC64 M1 ${runId} ${policy.suffix}`,
       accessPolicy: policy.accessPolicy,
       publishPolicy: policy.publishPolicy,
-      allowedAgents: [agentAddress],
-      register: true,
-    }),
+      agentAddress,
+    })),
   });
   if (create['registered'] !== true || create['onChainId'] === undefined) {
     throw new Error(`context graph ${contextGraphId} did not register: ${JSON.stringify(create)}`);
