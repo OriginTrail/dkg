@@ -3865,6 +3865,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
+  /** Canonical live subset of this process's startup-rehydrated Edge intent. */
+  protected getRehydratedAlwaysOnEvidenceContextGraphIds(
+    this: DKGAgent,
+    selectedContextGraphIds: readonly string[],
+  ): string[] {
+    const startupRehydrated = new Set(
+      this.contextGraphSubscriptionRehydrationStatus?.rehydratedAlwaysOnIds ?? [],
+    );
+    return [...new Set(selectedContextGraphIds)].filter((contextGraphId) => {
+      const subscription = this.subscribedContextGraphs.get(contextGraphId);
+      return startupRehydrated.has(contextGraphId)
+        && subscription?.subscribed === true
+        && subscription.syncAdmission === 'explicit'
+        && subscription.syncMode === 'always-on';
+    });
+  }
+
   /**
    * Pull all triples for the given context graphs from a remote peer and merge
    * them into our local store. Used on peer:connect for initial catch-up,
@@ -3906,10 +3923,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       evidence.beginRound({
         selectedContextGraphIds,
         automaticContextGraphIds: scopePlan.automaticContextGraphIds,
-        rehydratedAlwaysOnContextGraphIds: selectedContextGraphIds.filter((contextGraphId) =>
-          this.rehydratedAlwaysOnSyncContextGraphs.has(contextGraphId)
-          && (this.subscribedContextGraphs.get(contextGraphId)?.syncMode ?? 'always-on')
-            === 'always-on'),
+        rehydratedAlwaysOnContextGraphIds:
+          this.getRehydratedAlwaysOnEvidenceContextGraphIds(selectedContextGraphIds),
       });
       return scopePlan;
     };
@@ -7352,6 +7367,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return {
       ...status,
       hostedActivatedIds: [...(status.hostedActivatedIds ?? [])],
+      rehydratedAlwaysOnIds: [...(status.rehydratedAlwaysOnIds ?? [])],
       dormantIds: [...status.dormantIds],
     };
   }
@@ -7360,7 +7376,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');
-    this.rehydratedAlwaysOnSyncContextGraphs.clear();
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -7484,6 +7499,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
       const toActivate = [...hostedRows, ...cappedUserRows];
       const dormantRows = cap > 0 ? userRows.slice(cap) : [];
+      const rehydratedAlwaysOnIds: string[] = [];
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         const approvedAgentAddress = row.subscribed
@@ -7568,7 +7584,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           && row.subscribed
           && syncAdmission === 'explicit'
         ) {
-          this.rehydratedAlwaysOnSyncContextGraphs.add(row.id);
+          rehydratedAlwaysOnIds.push(row.id);
         }
         if (row.subscribed) {
           this.subscribeToContextGraph(row.id, {
@@ -7623,6 +7639,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         systemExcluded: persistedRows.length - rows.length,
         hostedActivated: hostedRows.length,
         hostedActivatedIds: hostedRows.map((r) => r.id),
+        rehydratedAlwaysOnIds,
         activated: toActivate.length,
         dormant: skipped,
         activationCap: cap,

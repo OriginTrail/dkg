@@ -71,6 +71,43 @@ describe('SyncCoverageEvidenceJournal', () => {
     expect(bounded).toEqual({ ids: ['cg-ok'], count: 2, truncated: true });
   });
 
+  it('cannot finish truncated Core evidence as complete', () => {
+    const journal = new SyncCoverageEvidenceJournal(100, 'wave-1');
+    const automaticContextGraphIds = Array.from(
+      { length: 33 },
+      (_, index) => `automatic-cg-${index}`,
+    );
+    const handle = journal.startCoreAutomaticRound({
+      planningLane: 'peer-a',
+      trigger: 'connection-open',
+      configuredBatchSize: 33,
+      effectiveBatchSize: 33,
+      explicitSelectedContextGraphIds: [],
+      automaticContextGraphIds,
+      startedAt: 101,
+    });
+    const verifiedByContextGraph = new Map(
+      automaticContextGraphIds.slice(0, 32).map((contextGraphId) => [
+        contextGraphId,
+        { metadata: true, durable: true, sharedMemory: true },
+      ] as const),
+    );
+
+    const terminal = journal.finishCoreAutomaticRound(handle, {
+      operationCompleted: true,
+      verifiedByContextGraph,
+      finishedAt: 102,
+    });
+
+    expect(terminal).toMatchObject({
+      state: 'failed',
+      evidenceTruncated: true,
+      automaticContextGraphCount: 33,
+    });
+    expect(terminal.completions).toHaveLength(32);
+    expect(terminal.completions.every((completion) => completion.state === 'complete')).toBe(true);
+  });
+
   it('rejects invalid cursors and capacities', () => {
     expect(() => new SyncCoverageEvidenceJournal(100, 'wave', 0)).toThrow(/capacity/);
     const journal = new SyncCoverageEvidenceJournal(100, 'wave');

@@ -809,6 +809,8 @@ export interface ContextGraphSubscriptionRehydrationStatus {
   systemExcluded: number;
   hostedActivated: number;
   hostedActivatedIds: string[];
+  /** Edge always-on selections restored during this process's startup wave. */
+  rehydratedAlwaysOnIds?: string[];
   activated: number;
   dormant: number;
   activationCap: number;

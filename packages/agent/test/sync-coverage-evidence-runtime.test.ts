@@ -306,11 +306,14 @@ describe('automatic sync coverage runtime evidence', () => {
     (agent as any).subscribedContextGraphs.set(runtimeSelected, {
       subscribed: true,
       syncMode: 'always-on',
+      syncAdmission: 'explicit',
       metaSynced: false,
     });
     expect((agent as any).config.syncContextGraphs).toEqual(
       expect.arrayContaining([rehydrated, runtimeSelected]),
     );
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.rehydratedAlwaysOnIds)
+      .toEqual([rehydrated]);
 
     (agent.node as any).node = {
       getPeers: () => [{ toString: () => PEER }],
@@ -320,6 +323,17 @@ describe('automatic sync coverage runtime evidence', () => {
       protocolsKey: PROTOCOL_SYNC,
       connectionKey: PEER,
     });
+    (agent as any).subscribedContextGraphs.get(rehydrated).syncMode = 'on-demand';
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if ((agent as any).lastSuccessfulSyncAt.has(PEER)) break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(agent.getSyncCoverageEvidence().entries).toEqual([]);
+
+    (agent as any).lastSuccessfulSyncAt.delete(PEER);
+    (agent as any).lastSyncProgressAt.delete(PEER);
+    (agent as any).subscribedContextGraphs.get(rehydrated).syncMode = 'always-on';
     await (agent as any).reconcileSyncFromConnectedPeers();
     for (let attempt = 0; attempt < 20; attempt += 1) {
       if (agent.getSyncCoverageEvidence().entries.length >= 2) break;

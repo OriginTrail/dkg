@@ -1078,8 +1078,6 @@ export class DKGAgentBase {
     Math.floor(performance.timeOrigin),
     randomUUID(),
   );
-  /** Always-on Edge selections restored during this process's startup wave. */
-  protected readonly rehydratedAlwaysOnSyncContextGraphs = new Set<string>();
   protected started = false;
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
