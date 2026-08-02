@@ -35,9 +35,22 @@ export interface CatchupJob {
   error?: string;
 }
 
+/**
+ * Mutable orchestration state for one serialized per-CG catch-up. Public job
+ * records stay immutable in scope; a later SWM upgrade receives its own jobId
+ * while reusing this coordinator and the same background worker.
+ */
+export interface CatchupCoordinator {
+  contextGraphId: string;
+  baseJobId: string;
+  requestedIncludeSharedMemory: boolean;
+  upgradeJobId?: string;
+}
+
 export interface CatchupTracker {
   jobs: Map<string, CatchupJob>;
   latestByContextGraph: Map<string, string>;
+  inFlightByContextGraph?: Map<string, CatchupCoordinator>;
 }
 
 export interface CatchupConvergenceStatus extends ContextGraphConvergenceSnapshot {

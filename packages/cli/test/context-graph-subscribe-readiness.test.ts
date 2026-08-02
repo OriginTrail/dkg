@@ -169,6 +169,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     readiness: Record<string, unknown> | undefined;
     statusResponse: any;
     coalescedResponse?: any;
+    coalescedJob?: any;
+    coalescedStatusResponse?: any;
   }> {
     const contextGraphId = `readiness-${Math.random().toString(36).slice(2, 8)}`;
     const state = new Map<string, Record<string, any>>();
@@ -327,8 +329,13 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       releaseFirstRun();
     }
 
+    const coalescedJobId = coalescedResponse?.catchup?.jobId as string | undefined;
+
     for (let i = 0; jobId && i < 50; i++) {
-      if (catchupTracker.jobs.get(jobId)?.finishedAt) break;
+      const originalFinished = catchupTracker.jobs.get(jobId)?.finishedAt;
+      const coalescedFinished = !coalescedJobId ||
+        catchupTracker.jobs.get(coalescedJobId)?.finishedAt;
+      if (originalFinished && coalescedFinished) break;
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
@@ -353,6 +360,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         `http://127.0.0.1:${address.port}/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`,
       ).then((result) => result.json())
       : null;
+    const coalescedStatusResponse = coalescedJobId
+      ? await fetch(
+        `http://127.0.0.1:${address.port}/api/sync/catchup-status?jobId=${encodeURIComponent(coalescedJobId)}`,
+      ).then((result) => result.json())
+      : null;
 
     return {
       response,
@@ -366,6 +378,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       readiness,
       statusResponse,
       coalescedResponse,
+      coalescedJob: coalescedJobId
+        ? catchupTracker.jobs.get(coalescedJobId)
+        : undefined,
+      coalescedStatusResponse,
     };
   }
 
@@ -874,11 +890,13 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.coalescedResponse).toMatchObject({
       subscribed: result.response.subscribed,
       catchup: {
-        status: 'running',
+        status: 'queued',
         includeWorkspace: true,
-        jobId: result.response.catchup.jobId,
       },
     });
+    expect(result.coalescedResponse.catchup.jobId).not.toBe(
+      result.response.catchup.jobId,
+    );
     expect(result.runRequests).toEqual([
       {
         contextGraphId: result.response.subscribed,
@@ -891,12 +909,76 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     ]);
     expect(result.job).toMatchObject({
       jobId: result.response.catchup.jobId,
+      includeWorkspace: false,
+      status: 'done',
+    });
+    expect(result.coalescedJob).toMatchObject({
+      jobId: result.coalescedResponse.catchup.jobId,
       includeWorkspace: true,
       status: 'done',
     });
     expect(result.statusResponse.convergence).toMatchObject({
       state: 'complete',
+      required: { sharedMemory: false },
       missing: [],
+    });
+    expect(result.coalescedStatusResponse.convergence).toMatchObject({
+      state: 'complete',
+      required: { sharedMemory: true },
+      missing: [],
+    });
+  });
+
+  it('keeps VM-only success stable when a coalesced SWM upgrade fails', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      includeSharedMemory: false,
+      result: privateDataOnlyResult(),
+      coalescedUpgradeResult: privateDataOnlyResult(),
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.runRequests).toEqual([
+      {
+        contextGraphId: result.response.subscribed,
+        includeSharedMemory: false,
+      },
+      {
+        contextGraphId: result.response.subscribed,
+        includeSharedMemory: true,
+      },
+    ]);
+    expect(result.job).toMatchObject({
+      includeWorkspace: false,
+      status: 'done',
+    });
+    expect(result.statusResponse).toMatchObject({
+      status: 'done',
+      includeSharedMemory: false,
+      convergence: {
+        state: 'complete',
+        required: { sharedMemory: false },
+        missing: [],
+      },
+    });
+    expect(result.coalescedJob).toMatchObject({
+      includeWorkspace: true,
+      status: 'unreachable',
+      error: expect.stringContaining('requested data plane'),
+    });
+    expect(result.coalescedStatusResponse).toMatchObject({
+      status: 'unreachable',
+      includeSharedMemory: true,
+      convergence: {
+        state: 'partial',
+        required: { sharedMemory: true },
+        missing: ['sharedMemory'],
+      },
     });
   });
 

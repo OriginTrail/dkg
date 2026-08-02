@@ -61,17 +61,22 @@ export interface ContextGraphConvergenceSnapshot {
   observedAt: number;
 }
 
+export interface ContextGraphReadinessPlanes
+  extends Omit<ContextGraphConvergenceSnapshot, 'observedAt'> {
+  currentReadinessProvenance: boolean;
+}
+
 /**
- * Describe the live, per-plane convergence of one selected context graph.
- * A VM/SWM proof is only effective while authoritative CG metadata is local;
- * stale provenance must not make a graph look complete after metadata loss.
+ * Canonical interpretation of persisted readiness as independently verified
+ * metadata, durable VM, and optional SWM planes. Every caller that needs to
+ * decide whether a selected graph is ready must go through this helper so
+ * metadata loss and readiness-version changes cannot drift between paths.
  */
-export function describeContextGraphConvergence(input: {
+export function describeReadinessPlanes(input: {
   readiness: ContextGraphReadinessProvenance;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
-  observedAt?: number;
-}): ContextGraphConvergenceSnapshot {
+}): ContextGraphReadinessPlanes {
   const currentReadinessProvenance =
     input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
   const metadataVerified = input.hasConfirmedMeta;
@@ -90,6 +95,7 @@ export function describeContextGraphConvergence(input: {
     (input.includeSharedMemory && sharedMemoryVerified);
 
   return {
+    currentReadinessProvenance,
     state: missing.length === 0 ? 'complete' : anyVerified ? 'partial' : 'pending',
     required: {
       metadata: true,
@@ -105,6 +111,27 @@ export function describeContextGraphConvergence(input: {
     ...(currentReadinessProvenance
       ? { readinessUpdatedAt: input.readiness.updatedAt }
       : {}),
+  };
+}
+
+/**
+ * Describe the live, per-plane convergence of one selected context graph.
+ * A VM/SWM proof is only effective while authoritative CG metadata is local;
+ * stale provenance must not make a graph look complete after metadata loss.
+ */
+export function describeContextGraphConvergence(input: {
+  readiness: ContextGraphReadinessProvenance;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+  observedAt?: number;
+}): ContextGraphConvergenceSnapshot {
+  const {
+    currentReadinessProvenance: _currentReadinessProvenance,
+    ...planes
+  } = describeReadinessPlanes(input);
+
+  return {
+    ...planes,
     observedAt: input.observedAt ?? Date.now(),
   };
 }
@@ -140,15 +167,9 @@ export function classifyExistingContextGraphReadiness(input: {
   statePatch?: ContextGraphSubscriptionStatePatch;
   readinessPatch?: ContextGraphReadinessPatch;
 } {
-  const currentReadinessProvenance =
-    input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
-  const requestedPlanesVerified =
-    currentReadinessProvenance &&
-    input.readiness.durableVerified &&
-    (!input.includeSharedMemory || input.readiness.sharedMemoryVerified);
+  const planes = describeReadinessPlanes(input);
   const alreadyReady =
-    input.hasConfirmedMeta &&
-    requestedPlanesVerified &&
+    planes.state === 'complete' &&
     input.subscription.synced === true &&
     (!input.includeSharedMemory || input.subscription.sharedMemorySynced === true);
 
@@ -174,10 +195,8 @@ export function classifyExistingContextGraphReadiness(input: {
     };
   }
 
-  const durableVerified =
-    currentReadinessProvenance && input.readiness.durableVerified;
-  const sharedMemoryVerified =
-    currentReadinessProvenance && input.readiness.sharedMemoryVerified;
+  const durableVerified = planes.verified.durable;
+  const sharedMemoryVerified = planes.verified.sharedMemory;
   const statePatch =
     input.subscription.synced !== durableVerified ||
     input.subscription.sharedMemorySynced !== sharedMemoryVerified
@@ -192,7 +211,7 @@ export function classifyExistingContextGraphReadiness(input: {
   return {
     alreadyReady: false,
     statePatch,
-    readinessPatch: currentReadinessProvenance
+    readinessPatch: planes.currentReadinessProvenance
       ? undefined
       : {
           durableVerified: false,
@@ -407,17 +426,27 @@ export function classifyContextGraphCatchupReadiness(input: {
       currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
     const sharedMemoryVerifiedBefore =
       currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
-    const durableVerified = durableVerifiedBefore || durableReadyThisRun;
-    const sharedMemoryVerified = sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun;
+    const planes = describeReadinessPlanes({
+      readiness: {
+        version: CONTEXT_GRAPH_READINESS_VERSION,
+        durableVerified: durableVerifiedBefore || durableReadyThisRun,
+        sharedMemoryVerified:
+          sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun,
+        updatedAt: input.readinessBeforeCatchup.updatedAt,
+      },
+      includeSharedMemory: input.includeSharedMemory,
+      hasConfirmedMeta: input.hasConfirmedMeta,
+    });
+    const durableVerified = planes.verified.durable;
+    const sharedMemoryVerified = planes.verified.sharedMemory;
     // What this run is allowed to FREEZE, as opposed to what it reports. These
     // diverge only for a unanimous-empty verdict, which stays re-derived per run
     // so that a wrong empty verdict cannot become permanent.
     const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
     const sharedMemoryVerifiedPersisted =
       sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
-    const missingDurable = !durableVerified;
-    const missingRequestedSharedMemory =
-      input.includeSharedMemory && !sharedMemoryVerified;
+    const missingDurable = planes.missing.includes('durable');
+    const missingRequestedSharedMemory = planes.missing.includes('sharedMemory');
     const madeIncompleteProgress =
       (durableDataProgress && !durableReadyThisRun) ||
       (sharedMemoryProgress && !sharedMemoryReadyThisRun);

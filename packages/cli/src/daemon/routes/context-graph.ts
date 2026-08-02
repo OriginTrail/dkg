@@ -167,6 +167,7 @@ import {
 import {
   type CatchupJobState,
   type CatchupJob,
+  type CatchupCoordinator,
   type CatchupTracker,
   toCatchupStatusResponse,
 } from '../types.js';
@@ -1741,25 +1742,53 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: requestedSyncMode,
     });
     const effectiveSyncMode = appliedSubscription.syncMode;
+    const inFlightByContextGraph = catchupTracker.inFlightByContextGraph ??=
+      new Map<string, CatchupCoordinator>();
+    const existingCoordinator = inFlightByContextGraph.get(contextGraphId);
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
-      if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
-        // Coalesce repeated selection into the one in-flight job. Required
-        // planes are monotonic: a later VM+SWM request upgrades a VM-only
-        // attempt, while a narrower request can never remove SWM from work
-        // that is already queued or running.
-        existingJob.includeWorkspace = existingJob.includeWorkspace ||
-          shouldSyncSharedMemory;
+      const baseJob = existingCoordinator
+        ? catchupTracker.jobs.get(existingCoordinator.baseJobId)
+        : undefined;
+      const upgradeJob = existingCoordinator?.upgradeJobId
+        ? catchupTracker.jobs.get(existingCoordinator.upgradeJobId)
+        : undefined;
+      const coordinatorActive = existingCoordinator &&
+        [baseJob, upgradeJob].some((candidate) =>
+          candidate?.status === 'queued' || candidate?.status === 'running');
+      if (existingCoordinator && baseJob && coordinatorActive) {
+        // Coalesce onto one serialized worker without changing the contract of
+        // an already-issued jobId. A later VM+SWM request gets a separate
+        // public job record while the coordinator records the monotonic work
+        // upgrade for the running worker.
+        let responseJob = baseJob;
+        if (shouldSyncSharedMemory && !baseJob.includeWorkspace) {
+          existingCoordinator.requestedIncludeSharedMemory = true;
+          responseJob = upgradeJob ?? (() => {
+            const upgradeJobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            const createdUpgradeJob: CatchupJob = {
+              jobId: upgradeJobId,
+              contextGraphId,
+              includeWorkspace: true,
+              status: 'queued',
+              queuedAt: Date.now(),
+            };
+            catchupTracker.jobs.set(upgradeJobId, createdUpgradeJob);
+            catchupTracker.latestByContextGraph.set(contextGraphId, upgradeJobId);
+            existingCoordinator.upgradeJobId = upgradeJobId;
+            return createdUpgradeJob;
+          })();
+        }
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
           catchup: {
-            status: existingJob.status,
-            includeWorkspace: existingJob.includeWorkspace,
-            jobId: existingJob.jobId,
+            status: responseJob.status,
+            includeWorkspace: responseJob.includeWorkspace,
+            jobId: responseJob.jobId,
           },
         });
       }
@@ -1777,7 +1806,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         hasConfirmedMeta: hasConfirmedExistingMeta,
       });
       if (existingReadiness.alreadyReady) {
-        const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
+        const reusableDoneJob = existingJob?.status === 'done' &&
+          existingJob.includeWorkspace === shouldSyncSharedMemory
+          ? existingJob
+          : undefined;
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         if (!reusableDoneJob) {
           const syntheticJob: CatchupJob = {
@@ -1837,6 +1869,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     };
     catchupTracker.jobs.set(jobId, job);
     catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
+    const coordinator: CatchupCoordinator = {
+      contextGraphId,
+      baseJobId: jobId,
+      requestedIncludeSharedMemory: shouldSyncSharedMemory,
+    };
+    inFlightByContextGraph.set(contextGraphId, coordinator);
 
     while (catchupTracker.jobs.size > 100) {
       let oldestId: string | undefined;
@@ -1859,28 +1897,44 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
 
     void (async () => {
-      job.status = "running";
-      job.startedAt = Date.now();
-      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
+      let attemptJob = job;
+      const settleQueuedUpgradeFrom = (source: CatchupJob) => {
+        const queuedUpgrade = coordinator.upgradeJobId
+          ? catchupTracker.jobs.get(coordinator.upgradeJobId)
+          : undefined;
+        if (!queuedUpgrade || queuedUpgrade.status !== 'queued') return;
+        queuedUpgrade.status = source.status;
+        queuedUpgrade.error = source.error;
+        queuedUpgrade.result = source.result;
+        queuedUpgrade.startedAt = source.startedAt;
+        queuedUpgrade.finishedAt = Date.now();
+      };
       try {
         let attemptReadinessBeforeCatchup = readinessBeforeCatchup;
         while (true) {
-          const attemptIncludeSharedMemory = job.includeWorkspace;
+          attemptJob.status = 'running';
+          attemptJob.startedAt ??= Date.now();
+          const attemptIncludeSharedMemory = attemptJob.includeWorkspace;
+          if (DEBUG_SYNC_TRACE) {
+            console.log(
+              `[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} started`,
+            );
+          }
           const result = await daemonState.catchupRunner!.run({
             contextGraphId: contextGraphId,
             includeSharedMemory: attemptIncludeSharedMemory,
           });
-          job.result = result;
-          job.error = undefined;
+          attemptJob.result = result;
+          attemptJob.error = undefined;
           // Local scheduler pressure cut the round short. An incomplete round has
           // no readiness to inspect and must never finalize the subscription, so
           // short-circuit the whole classification path and report a distinct
           // retryable status. A remote denial still wins: waiting for local
           // capacity will never clear it.
           if (result.deferredBackpressure > 0 && !result.denied) {
-            job.status = "deferred";
-            job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-            if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
+            attemptJob.status = "deferred";
+            attemptJob.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+            if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
           } else {
             const inspectReadiness = catchupResultHasCleanResponse(result);
             const hasConfirmedMeta = inspectReadiness
@@ -1897,8 +1951,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
               readinessBeforeCatchup: attemptReadinessBeforeCatchup,
             });
 
-            job.status = classification.jobStatus;
-            job.error = classification.error;
+            attemptJob.status = classification.jobStatus;
+            attemptJob.error = classification.error;
             if (classification.readinessPatch) {
               writeContextGraphReadiness(
                 dashDb,
@@ -1921,18 +1975,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
             // Denial took precedence above, but a denied-yet-still-deferred round
             // is likewise incomplete: never let it settle as a successful "done".
-            if (job.status === "done" && result.deferredBackpressure > 0) {
-              job.status = "deferred";
-              job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
+            if (attemptJob.status === "done" && result.deferredBackpressure > 0) {
+              attemptJob.status = "deferred";
+              attemptJob.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
             }
           }
+          attemptJob.finishedAt = Date.now();
 
           if (DEBUG_SYNC_TRACE) {
-            if (job.status === 'denied') {
-              console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
+            if (attemptJob.status === 'denied') {
+              console.log(`[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
             }
             console.log(
-              `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
+              `[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} status=${attemptJob.status} ` +
                 `peers=${result.peersTried}/${result.syncCapablePeers} ` +
                 `connected=${result.totalPeers ?? result.connectedPeers} ` +
                 `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
@@ -1940,29 +1995,39 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           }
 
           // A caller may upgrade a running VM-only selection to VM+SWM. Finish
-          // the narrow attempt, then satisfy the wider request in the same job
-          // instead of launching a competing per-CG catch-up.
+          // the narrow public job, then satisfy the wider public job through
+          // this same serialized coordinator instead of launching competing
+          // per-CG catch-up work.
           if (
-            job.includeWorkspace &&
+            coordinator.requestedIncludeSharedMemory &&
             !attemptIncludeSharedMemory &&
-            job.status !== 'denied'
+            attemptJob.status !== 'denied'
           ) {
-            job.status = 'running';
-            job.error = undefined;
+            const upgradeJob = coordinator.upgradeJobId
+              ? catchupTracker.jobs.get(coordinator.upgradeJobId)
+              : undefined;
+            if (!upgradeJob) break;
+            attemptJob = upgradeJob;
             attemptReadinessBeforeCatchup = readContextGraphReadiness(
               dashDb,
               contextGraphId,
             );
             continue;
           }
+          if (!attemptIncludeSharedMemory) settleQueuedUpgradeFrom(attemptJob);
           break;
         }
       } catch (err) {
-        job.error = err instanceof Error ? err.message : String(err);
-        job.status = "failed";
-        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} threw: ${job.error}`);
+        attemptJob.error = err instanceof Error ? err.message : String(err);
+        attemptJob.status = "failed";
+        attemptJob.finishedAt = Date.now();
+        settleQueuedUpgradeFrom(attemptJob);
+        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} threw: ${attemptJob.error}`);
       } finally {
-        job.finishedAt = Date.now();
+        attemptJob.finishedAt ??= Date.now();
+        if (inFlightByContextGraph.get(contextGraphId) === coordinator) {
+          inFlightByContextGraph.delete(contextGraphId);
+        }
       }
     })();
 
