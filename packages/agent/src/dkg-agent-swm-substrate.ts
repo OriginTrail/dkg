@@ -349,6 +349,7 @@ import {
   type DKGAgentConfig,
   type ReplicationEvent,
 } from './dkg-agent-types.js';
+import { resolveContextGraphSyncMode } from './context-graph-subscription-policy.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -399,10 +400,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // process-local subscription. An explicit always-on request may promote an
     // existing on-demand subscription, while an omitted mode preserves the
     // current lifetime (or the legacy always-on default for a new graph).
-    const requestedSyncMode = options?.syncMode ?? existing?.syncMode ?? 'always-on';
-    const syncMode = existing?.subscribed && existing.syncMode === 'always-on'
-      ? 'always-on'
-      : requestedSyncMode;
+    const syncMode = resolveContextGraphSyncMode({
+      existing,
+      requested: options?.syncMode,
+      hasDormantDurableIntent:
+        this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
+    });
     const persist = syncMode === 'on-demand' ? false : options?.persist;
 
     // SWM gossip subscribe runs `canReadContextGraph` against the local

@@ -698,11 +698,11 @@ export interface ContextGraphSub {
 }
 
 /**
- * Compatibility input accepted at subscription-update boundaries.
+ * Legacy compatibility input for the standalone gossip handler only.
  *
- * Historical call sites and persisted records predate synchronization modes,
- * so they may omit the field. The agent normalizes this shape exactly once
- * before storing it in the live {@link ContextGraphSub} registry.
+ * Agent-owned live-state mutations use normalized {@link ContextGraphSub}
+ * values and must choose a synchronization lifetime explicitly. This shape is
+ * retained solely for older standalone handler callbacks that predate modes.
  */
 export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
   syncMode?: ContextGraphSyncMode;

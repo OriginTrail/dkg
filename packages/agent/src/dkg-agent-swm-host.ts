@@ -352,7 +352,6 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
-  type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
@@ -1129,6 +1128,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // translate either direction without an extra RPC.
     if (storageCgId !== contextGraphId) {
       const storageSubscription = this.subscribedContextGraphs.get(storageCgId) ?? {
+        syncMode: 'always-on' as const,
         subscribed: false,
         synced: false,
         pendingMeta: true,
@@ -1697,6 +1697,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // that did not create or join the CG.
     if (!this.subscribedContextGraphs.has(wireId)) {
       this.setContextGraphSubscription(wireId, {
+        syncMode: 'always-on',
         subscribed: false,
         synced: false,
         onChainHash: wireId,
@@ -2438,7 +2439,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(localCgId);
     if (existing?.coreHosted && existing.onChainId === numericStr) return; // already recorded
 
-    let next: ContextGraphSubInput;
+    let next: ContextGraphSub;
     if (existing) {
       // Rebind through the helper so a CG re-created/rebound under the same
       // local id drops its stale reconcile watermark + in-memory cursor before
@@ -2449,7 +2450,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       existing.coreHosted = true;
       next = existing;
     } else {
-      next = { subscribed: false, synced: false, onChainId: numericStr, coreHosted: true };
+      next = {
+        syncMode: 'always-on',
+        subscribed: false,
+        synced: false,
+        onChainId: numericStr,
+        coreHosted: true,
+      };
     }
     this.setContextGraphSubscription(localCgId, next);
     this.log.info(

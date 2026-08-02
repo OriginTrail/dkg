@@ -696,6 +696,7 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
+      syncMode: 'always-on',
       subscribed: !opts.private,
       synced: true,
       metaSynced: true,
