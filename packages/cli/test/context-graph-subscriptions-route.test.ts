@@ -25,7 +25,7 @@ describe('context graph subscription diagnostics route', () => {
   beforeEach(async () => {
     rehydrationStatus = rehydration;
     subscriptions = new Map<string, any>([
-      ['cg-000', { subscribed: true, synced: true, coreHosted: false }],
+      ['cg-000', { subscribed: true, synced: true, coreHosted: false, syncMode: 'on-demand' }],
       ['cg-hosted', { subscribed: true, synced: false, coreHosted: true }],
       ['cg-host-only', { subscribed: false, synced: false, coreHosted: true }],
       ['cg-discoverable', { subscribed: false, synced: false, coreHosted: false }],
@@ -126,8 +126,8 @@ describe('context graph subscription diagnostics route', () => {
     expect(response.status).toBe(200);
     expect(body.count).toBe(2);
     expect(body.subscriptions).toEqual([
-      { contextGraphId: 'cg-000', subscribed: true, synced: true, coreHosted: false },
-      { contextGraphId: 'cg-hosted', subscribed: true, synced: false, coreHosted: true },
+      { contextGraphId: 'cg-000', subscribed: true, synced: true, coreHosted: false, syncMode: 'on-demand' },
+      { contextGraphId: 'cg-hosted', subscribed: true, synced: false, coreHosted: true, syncMode: 'always-on' },
     ]);
     expect(body.rehydration).toEqual(rehydration);
   });
@@ -158,7 +158,7 @@ describe('context graph subscription diagnostics route', () => {
     expect(response.status).toBe(200);
     expect(body.count).toBe(1);
     expect(body.subscriptions).toEqual([
-      { contextGraphId: 'cg-hosted', subscribed: true, synced: false, coreHosted: true },
+      { contextGraphId: 'cg-hosted', subscribed: true, synced: false, coreHosted: true, syncMode: 'always-on' },
     ]);
     expect(body.rehydration).toEqual({
       ...rehydration,

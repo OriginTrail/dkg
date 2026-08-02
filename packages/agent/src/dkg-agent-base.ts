@@ -168,6 +168,10 @@ import {
   SyncCapacityRuntime,
   type SyncCapacityStatus,
 } from './sync/capacity-runtime.js';
+import {
+  SyncCoverageEvidenceJournal,
+  type SyncCoverageEvidenceSnapshotV1,
+} from './sync/coverage-evidence-journal.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1066,6 +1070,16 @@ export class DKGAgentBase {
   protected readonly corePublicSyncCoverageScheduler: CorePublicSyncCoverageScheduler;
   /** Role-aware requester admission and Core automatic-coverage capacity. */
   protected readonly syncCapacityRuntime: SyncCapacityRuntime;
+  /**
+   * Bounded process-local proof that automatic sync work was actually planned
+   * and reached a terminal result. Exposed only through a node-admin route.
+   */
+  protected readonly syncCoverageEvidenceJournal = new SyncCoverageEvidenceJournal(
+    Math.floor(performance.timeOrigin),
+    randomUUID(),
+  );
+  /** Always-on Edge selections restored during this process's startup wave. */
+  protected readonly rehydratedAlwaysOnSyncContextGraphs = new Set<string>();
   protected started = false;
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
@@ -1759,6 +1773,10 @@ export class DKGAgentBase {
 
   getSyncCapacityStatus(): SyncCapacityStatus {
     return this.syncCapacityRuntime.getStatus();
+  }
+
+  getSyncCoverageEvidence(afterSequence = 0): SyncCoverageEvidenceSnapshotV1 {
+    return this.syncCoverageEvidenceJournal.snapshot(afterSequence);
   }
 
   /**

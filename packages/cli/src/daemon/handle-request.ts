@@ -312,6 +312,7 @@ import {
 import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
+import { handleSyncCoverageEvidenceRoutes } from './routes/sync-coverage-evidence.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
 import { handleHermesRoutes } from './routes/hermes.js';
@@ -362,6 +363,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handleBackpressureRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleSyncCoverageEvidenceRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleAgentChatRoutes(ctx);

@@ -232,6 +232,21 @@ export {
   type SharedMemorySyncResult,
 } from './dkg-agent-types.js';
 export {
+  SYNC_COVERAGE_EVIDENCE_SCHEMA_VERSION,
+  DEFAULT_SYNC_COVERAGE_EVIDENCE_CAPACITY,
+  MAX_SYNC_COVERAGE_EVIDENCE_CONTEXT_GRAPHS,
+  SyncCoverageEvidenceJournal,
+  boundedSyncCoverageContextGraphIds,
+  type SyncCoverageEvidenceState,
+  type SyncCoverageEvidenceTrigger,
+  type SyncCoverageVerifiedPlanes,
+  type EdgeReconcilerSyncCoverageEvidence,
+  type CoreAutomaticSyncCoverageCompletion,
+  type CoreAutomaticSyncCoverageEvidence,
+  type SyncCoverageEvidenceEntry,
+  type SyncCoverageEvidenceSnapshotV1,
+} from './sync/coverage-evidence-journal.js';
+export {
   computeImportedArtifactSelector,
   IMPORTED_ARTIFACT_AUTH_PURPOSE,
   IMPORTED_ARTIFACT_MAX_PAGE_BYTES,

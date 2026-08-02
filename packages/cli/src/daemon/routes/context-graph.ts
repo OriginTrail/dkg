@@ -1901,6 +1901,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             subscribed: s?.subscribed === true,
             synced: s?.synced === true,
             coreHosted: s?.coreHosted === true,
+            syncMode: s?.syncMode ?? 'always-on',
           }))
       : [];
     return jsonResponse(res, 200, {

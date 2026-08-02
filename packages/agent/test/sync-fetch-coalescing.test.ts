@@ -597,6 +597,61 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('isolates shared-memory terminal observers from sync results and fanout', async () => {
+    let fetchCalls = 0;
+    let observerCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphIds = ['observer-cg-a', 'observer-cg-b'];
+    const sharedMemorySyncPlan = {
+      eligibleContextGraphIds: contextGraphIds,
+      publicContextGraphIds: contextGraphIds,
+      privateRecoverFromCurator: [],
+    };
+    (agent as any).listSubGraphs = async () => [];
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetchCalls += 1;
+      return emptySyncPage(phase);
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+
+    try {
+      const result = await (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        contextGraphIds,
+        {
+          sharedMemorySyncPlan,
+          stopOnBackoffWorthyFailure: true,
+          onContextGraphTerminal: (_contextGraphId: string, terminal: object) => {
+            observerCalls += 1;
+            expect(Object.isFrozen(terminal)).toBe(true);
+            (terminal as { failedPhases: number }).failedPhases = 99;
+            throw new Error('observer failure must remain diagnostic-only');
+          },
+        },
+      );
+
+      expect(observerCalls).toBe(2);
+      expect(fetchCalls).toBe(4);
+      expect(result).toMatchObject({
+        failedPhases: 0,
+        failedPeers: 0,
+        backoffWorthyFailures: 0,
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not join direct shared-memory syncs with different admission priorities', async () => {
     let fetchCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
