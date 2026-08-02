@@ -533,5 +533,100 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         FINALIZED_SWM_CLEANUP_TASK_TYPE,
       )).toHaveLength(1);
     });
+
+    /**
+     * The re-arm invariant, pinned on EVERY decision path — not just the two a
+     * happy-path catch-up happens to take.
+     *
+     * `runSharedMemorySync` reaches four distinct outcomes inside the per-KA
+     * write lock, and only two of them call `replaceHeadMetadata` (which re-arms
+     * the GC task from the tombstone read it already performs). The other two
+     * write nothing at all and must re-arm via `ensureFinalizedCleanupTask`.
+     * Covering only the writing paths lets the whole gate be removed — the ASK
+     * can be forced to `false`, or either explicit call deleted — while a
+     * happy-path suite stays green and a finalized SWM copy is resurrected with
+     * no GC task to collect it. That is the exact resurrection this work exists
+     * to prevent, so each path is asserted on its own.
+     *
+     * The negative half matters just as much: a KA that was never finalized must
+     * arm NOTHING, or the GC gains a backlog entry for a live asset.
+     */
+    describe('re-arms the finalized-cleanup GC task on every decision path', () => {
+      const tombstone = (operationSubject: string): Quad[] => [
+        {
+          subject: operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+        {
+          subject: operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+          object: '"2026-07-31T10:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          graph: WS_META,
+        },
+      ];
+
+      const armedTasks = (store: TripleStore): Promise<string[]> => distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      );
+
+      /**
+       * Each seed steers the lock body to exactly ONE outcome for a served v1
+       * snapshot. Keep them distinguishable: if two seeds collapsed onto the same
+       * branch the suite would look complete while leaving a path unguarded.
+       */
+      const paths: Record<string, (store: TripleStore) => Promise<void>> = {
+        // Stored head is NEWER than the descriptor: sync must not write.
+        'superseded head': async (store) => {
+          await store.insert([...v2.meta]);
+        },
+        // Content already present, head rows absent: repair via replaceHeadMetadata.
+        'materialized with a missing head': async (store) => {
+          await store.insert([
+            ...v1.meta.filter((quad) => quad.subject !== v1.headSubject),
+            ...inGraph(v1.payload, v1.assertionGraph),
+          ]);
+        },
+        // Content present and head already clean: sync must not write.
+        'materialized with a clean head': async (store) => {
+          await store.insert([...v1.meta, ...inGraph(v1.payload, v1.assertionGraph)]);
+        },
+        // Content absent: full replaceGraph + replaceHeadMetadata.
+        'absent content': async (store) => {
+          await store.insert([...v1.meta]);
+        },
+      };
+
+      for (const [label, seed] of Object.entries(paths)) {
+        it(`arms exactly one task for a finalized operation: ${label}`, async () => {
+          const store = new OxigraphStore();
+          await seed(store);
+          await store.insert(tombstone(v1.operationSubject));
+
+          const summary = await realHarness(store, v1).run();
+
+          expect(summary.failedPhases).toBe(0);
+          const tasks = await armedTasks(store);
+          expect(tasks).toHaveLength(1);
+          // Bound to THIS lifecycle: an arbitrary task subject would satisfy a
+          // bare length check while pointing the GC at the wrong asset.
+          expect(await distinctObjects(store, WS_META, tasks[0]!, `${DKG}kaUal`)).toEqual([UAL]);
+        });
+
+        it(`arms nothing when the operation was never finalized: ${label}`, async () => {
+          const store = new OxigraphStore();
+          await seed(store);
+
+          const summary = await realHarness(store, v1).run();
+
+          expect(summary.failedPhases).toBe(0);
+          expect(await armedTasks(store)).toEqual([]);
+        });
+      }
+    });
   });
 });
