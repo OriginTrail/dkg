@@ -220,113 +220,128 @@ export class FinalizedSwmCleanupService {
     }
     const pending = this.resumeRotation(contextGraphIds);
 
-    for (let index = 0; index < pending.length; index += 1) {
-      const contextGraphId = pending[index]!;
-      // Yielding keeps the unvisited tail, so the cursor never advances past a
-      // context graph this sweep did not finish measuring.
-      let metaGraphStart = 0;
-      let metaGraphsMeasured = 0;
-      const yieldRotation = (reason: 'pressure' | 'budget'): FinalizedSwmCleanupSweepResult => {
-        this.rotationPending = pending.slice(index);
-        // Resume the meta-graph walk past what this slice already measured, so
-        // a context graph too large for one slice still covers all of them.
-        if (metaGraphsMeasured > 0) {
-          this.metaGraphResumeCursor = {
-            contextGraphId,
-            offset: metaGraphStart + metaGraphsMeasured,
-          };
-        }
-        return deferredResult(deletedItems, reason);
-      };
-      if (underPressure()) return yieldRotation('pressure');
-      if (this.now() >= deadline) return yieldRotation('budget');
-      let metaGraphs: string[];
-      try {
-        metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
-      } catch (error) {
-        if (deadlineSignal.aborted) return yieldRotation('budget');
-        if (isTransientStorePressure(error)) return yieldRotation('pressure');
-        throw error;
-      }
-      // Resume where the last slice stopped inside this context graph, wrapping,
-      // so a graph too large for one slice still reaches every meta graph rather
-      // than re-walking the same prefix. The walk still covers all of them, so
-      // the contribution below stays a whole-graph sum.
-      if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId && metaGraphs.length > 0) {
-        metaGraphStart = this.metaGraphResumeCursor.offset % metaGraphs.length;
-        if (metaGraphStart > 0) {
-          metaGraphs = [...metaGraphs.slice(metaGraphStart), ...metaGraphs.slice(0, metaGraphStart)];
-        }
-      }
-      // A context graph contributes to the rotation total only once every one of
-      // its meta graphs has been measured. Yielding part-way discards the partial
-      // sum, so the re-measure on resume cannot double-count it.
-      let contextGraphBacklogDepth = 0;
-      let contextGraphOldestMarkerAt: number | null = null;
-      for (const swmMetaGraph of metaGraphs) {
-        if (underPressure()) return yieldRotation('pressure');
-        if (this.now() >= deadline) return yieldRotation('budget');
-        if (remaining > 0) {
-          let cleanup: { deletedItems: number; examinedCandidates: number };
-          try {
-            cleanup = await this.cleanupMetaGraph({
+    let index = 0;
+    try {
+      for (; index < pending.length; index += 1) {
+        const contextGraphId = pending[index]!;
+        // Yielding keeps the unvisited tail, so the cursor never advances past a
+        // context graph this sweep did not finish measuring.
+        let metaGraphStart = 0;
+        let metaGraphsMeasured = 0;
+        const yieldRotation = (reason: 'pressure' | 'budget'): FinalizedSwmCleanupSweepResult => {
+          this.rotationPending = pending.slice(index);
+          // Resume the meta-graph walk past what this slice already measured, so
+          // a context graph too large for one slice still covers all of them.
+          if (metaGraphsMeasured > 0) {
+            this.metaGraphResumeCursor = {
               contextGraphId,
-              swmMetaGraph,
-              maxCandidates: remaining,
-              signal: deadlineSignal,
-            });
-          } catch (error) {
-            if (deadlineSignal.aborted) return yieldRotation('budget');
-            if (isTransientStorePressure(error)) return yieldRotation('pressure');
-            throw error;
+              offset: metaGraphStart + metaGraphsMeasured,
+            };
           }
-          deletedItems += cleanup.deletedItems;
-          remaining -= cleanup.examinedCandidates;
-        }
+          return deferredResult(deletedItems, reason);
+        };
         if (underPressure()) return yieldRotation('pressure');
         if (this.now() >= deadline) return yieldRotation('budget');
-        // Deliberately not gated on `remaining`: that budget bounds deletion
-        // work (head resolution, VM/SWM verification, lock, atomic replace),
-        // while this is one cheap background aggregate and the sole source of
-        // the backlog metric. Capping the metric with the deletion budget would
-        // make it under-report exactly when the backlog is deepest.
-        let backlog: { depth: number; oldestMarkerAt: number | null };
+        let metaGraphs: string[];
         try {
-          backlog = await this.inspectBacklog(swmMetaGraph, deadlineSignal);
+          metaGraphs = await this.listSharedMemoryMetaGraphs(contextGraphId, discoveryOptions);
         } catch (error) {
           if (deadlineSignal.aborted) return yieldRotation('budget');
-          // Also covers this method's own defensive pressure throw, which the
-          // snapshot gate above races with rather than prevents.
           if (isTransientStorePressure(error)) return yieldRotation('pressure');
           throw error;
         }
-        contextGraphBacklogDepth += backlog.depth;
+        // Resume where the last slice stopped inside this context graph, wrapping,
+        // so a graph too large for one slice still reaches every meta graph rather
+        // than re-walking the same prefix. The walk still covers all of them, so
+        // the contribution below stays a whole-graph sum.
+        if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId && metaGraphs.length > 0) {
+          metaGraphStart = this.metaGraphResumeCursor.offset % metaGraphs.length;
+          if (metaGraphStart > 0) {
+            metaGraphs = [...metaGraphs.slice(metaGraphStart), ...metaGraphs.slice(0, metaGraphStart)];
+          }
+        }
+        // A context graph contributes to the rotation total only once every one of
+        // its meta graphs has been measured. Yielding part-way discards the partial
+        // sum, so the re-measure on resume cannot double-count it.
+        let contextGraphBacklogDepth = 0;
+        let contextGraphOldestMarkerAt: number | null = null;
+        for (const swmMetaGraph of metaGraphs) {
+          if (underPressure()) return yieldRotation('pressure');
+          if (this.now() >= deadline) return yieldRotation('budget');
+          if (remaining > 0) {
+            let cleanup: { deletedItems: number; examinedCandidates: number };
+            try {
+              cleanup = await this.cleanupMetaGraph({
+                contextGraphId,
+                swmMetaGraph,
+                maxCandidates: remaining,
+                signal: deadlineSignal,
+              });
+            } catch (error) {
+              if (deadlineSignal.aborted) return yieldRotation('budget');
+              if (isTransientStorePressure(error)) return yieldRotation('pressure');
+              throw error;
+            }
+            deletedItems += cleanup.deletedItems;
+            remaining -= cleanup.examinedCandidates;
+          }
+          if (underPressure()) return yieldRotation('pressure');
+          if (this.now() >= deadline) return yieldRotation('budget');
+          // Deliberately not gated on `remaining`: that budget bounds deletion
+          // work (head resolution, VM/SWM verification, lock, atomic replace),
+          // while this is one cheap background aggregate and the sole source of
+          // the backlog metric. Capping the metric with the deletion budget would
+          // make it under-report exactly when the backlog is deepest.
+          let backlog: { depth: number; oldestMarkerAt: number | null };
+          try {
+            backlog = await this.inspectBacklog(swmMetaGraph, deadlineSignal);
+          } catch (error) {
+            if (deadlineSignal.aborted) return yieldRotation('budget');
+            // Also covers this method's own defensive pressure throw, which the
+            // snapshot gate above races with rather than prevents.
+            if (isTransientStorePressure(error)) return yieldRotation('pressure');
+            throw error;
+          }
+          contextGraphBacklogDepth += backlog.depth;
+          if (
+            backlog.oldestMarkerAt !== null
+            && (
+              contextGraphOldestMarkerAt === null
+              || backlog.oldestMarkerAt < contextGraphOldestMarkerAt
+            )
+          ) {
+            contextGraphOldestMarkerAt = backlog.oldestMarkerAt;
+          }
+          metaGraphsMeasured += 1;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        // Every meta graph was measured, so the next visit starts from the top.
+        if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId) {
+          this.metaGraphResumeCursor = null;
+        }
+        this.rotationBacklogDepth += contextGraphBacklogDepth;
         if (
-          backlog.oldestMarkerAt !== null
+          contextGraphOldestMarkerAt !== null
           && (
-            contextGraphOldestMarkerAt === null
-            || backlog.oldestMarkerAt < contextGraphOldestMarkerAt
+            this.rotationOldestMarkerAt === null
+            || contextGraphOldestMarkerAt < this.rotationOldestMarkerAt
           )
         ) {
-          contextGraphOldestMarkerAt = backlog.oldestMarkerAt;
+          this.rotationOldestMarkerAt = contextGraphOldestMarkerAt;
         }
-        metaGraphsMeasured += 1;
-        await new Promise<void>((resolve) => setImmediate(resolve));
       }
-      // Every meta graph was measured, so the next visit starts from the top.
-      if (this.metaGraphResumeCursor?.contextGraphId === contextGraphId) {
-        this.metaGraphResumeCursor = null;
-      }
-      this.rotationBacklogDepth += contextGraphBacklogDepth;
-      if (
-        contextGraphOldestMarkerAt !== null
-        && (
-          this.rotationOldestMarkerAt === null
-          || contextGraphOldestMarkerAt < this.rotationOldestMarkerAt
-        )
-      ) {
-        this.rotationOldestMarkerAt = contextGraphOldestMarkerAt;
-      }
+    } catch (error) {
+      // Every exit from this loop must persist the cursor, including a terminal
+      // fault. Context graphs completed earlier in this sweep are already
+      // credited to `rotationBacklogDepth`, and `resumeRotation` only zeroes the
+      // accumulator when `rotationPending` is null — which a throw never
+      // produces. Leaving the cursor stale makes the next sweep resume from the
+      // old tail, re-measure those graphs and add them a second time, and the
+      // inflated sum eventually publishes as `stale: false`: presented as a
+      // trustworthy fresh whole-node measurement. Catching around the whole loop
+      // rather than at each throw site means a future raise site cannot miss it.
+      this.rotationPending = pending.slice(index);
+      throw error;
     }
 
     // The rotation closed: every context graph was measured exactly once, so the
