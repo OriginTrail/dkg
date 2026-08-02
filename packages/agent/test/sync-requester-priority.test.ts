@@ -149,6 +149,83 @@ describe('requester per-CG priority admission', () => {
     expect(execution.outcomes.every(Object.isFrozen)).toBe(true);
   });
 
+  it('records stop-policy outcomes for every item after the terminating result', async () => {
+    const executed: string[] = [];
+    const execution = await runOrderedContextGraphSyncsWithOutcomes({
+      work: ['first', 'stop', 'tail'].map((contextGraphId) => ({
+        contextGraphId,
+        lane: 'shared_memory' as const,
+        operationId: contextGraphId,
+        run: async () => {
+          executed.push(contextGraphId);
+          return contextGraphId;
+        },
+      })),
+      emptyResult: () => [] as string[],
+      runWithAdmission: async (_item, work) => work(),
+      merge: (summary, part) => [...summary, part],
+      markDeferred: (summary) => summary,
+      shouldStop: (part) => part === 'stop',
+    });
+
+    expect(executed).toEqual(['first', 'stop']);
+    expect(execution.summary).toEqual(['first', 'stop']);
+    expect(execution.outcomes).toEqual([
+      expect.objectContaining({ contextGraphId: 'first', disposition: 'settled' }),
+      expect.objectContaining({ contextGraphId: 'stop', disposition: 'settled' }),
+      {
+        contextGraphId: 'tail',
+        lane: 'shared_memory',
+        disposition: 'skipped',
+        reason: 'stop-policy',
+      },
+    ]);
+    expect(Object.isFrozen(execution.outcomes)).toBe(true);
+    expect(execution.outcomes.every(Object.isFrozen)).toBe(true);
+  });
+
+  it('records continuation-stopped outcomes for the entire remaining tail', async () => {
+    let shouldContinue = true;
+    const executed: string[] = [];
+    const execution = await runOrderedContextGraphSyncsWithOutcomes({
+      work: ['first', 'second', 'third'].map((contextGraphId) => ({
+        contextGraphId,
+        lane: 'shared_memory' as const,
+        operationId: contextGraphId,
+        run: async () => {
+          executed.push(contextGraphId);
+          shouldContinue = false;
+          return contextGraphId;
+        },
+      })),
+      emptyResult: () => [] as string[],
+      runWithAdmission: async (_item, work) => work(),
+      merge: (summary, part) => [...summary, part],
+      markDeferred: (summary) => summary,
+      shouldContinue: () => shouldContinue,
+    });
+
+    expect(executed).toEqual(['first']);
+    expect(execution.summary).toEqual(['first']);
+    expect(execution.outcomes).toEqual([
+      expect.objectContaining({ contextGraphId: 'first', disposition: 'settled' }),
+      {
+        contextGraphId: 'second',
+        lane: 'shared_memory',
+        disposition: 'skipped',
+        reason: 'continuation-stopped',
+      },
+      {
+        contextGraphId: 'third',
+        lane: 'shared_memory',
+        disposition: 'skipped',
+        reason: 'continuation-stopped',
+      },
+    ]);
+    expect(Object.isFrozen(execution.outcomes)).toBe(true);
+    expect(execution.outcomes.every(Object.isFrozen)).toBe(true);
+  });
+
   it('wires configured priority order through the durable lifecycle admission boundary', async () => {
     const admissions: string[] = [];
     const agent = lifecycleAgent(

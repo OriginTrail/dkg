@@ -96,6 +96,14 @@ describe('SyncCoverageEvidenceJournal', () => {
     expect(() => {
       (handle as { jobId: string }).jobId = 'forged';
     }).toThrow(TypeError);
+    expect(() => journal.finishCoreAutomaticRound({
+      kind: 'core-automatic-round',
+      jobId: handle.jobId,
+    } as typeof handle, {
+      operationCompleted: true,
+      verifiedByContextGraph: new Map(),
+      finishedAt: 102,
+    })).toThrow(/not issued by this module/);
 
     const terminal = journal.finishCoreAutomaticRound(handle, {
       operationCompleted: true,

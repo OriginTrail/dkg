@@ -93,7 +93,7 @@ export interface FinishSyncCoverageEvidenceInput {
   finishedAt: number;
 }
 
-declare const syncCoverageEvidenceHandleBrand: unique symbol;
+const syncCoverageEvidenceHandleBrand = Symbol('syncCoverageEvidenceHandle');
 
 export interface CoreAutomaticRoundHandle {
   readonly [syncCoverageEvidenceHandleBrand]: true;
@@ -213,7 +213,11 @@ export class SyncCoverageEvidenceJournal {
       })),
     });
     this.runningByJobId.set(jobId, cloneEntry(running));
-    return Object.freeze({ kind: 'core-automatic-round', jobId }) as CoreAutomaticRoundHandle;
+    return Object.freeze({
+      [syncCoverageEvidenceHandleBrand]: true as const,
+      kind: 'core-automatic-round',
+      jobId,
+    });
   }
 
   finishCoreAutomaticRound(
@@ -284,10 +288,11 @@ export class SyncCoverageEvidenceJournal {
       });
       this.runningByJobId.set(jobId, cloneEntry(running));
       return Object.freeze({
+        [syncCoverageEvidenceHandleBrand]: true as const,
         kind: 'edge-reconciler-job',
         jobId,
         contextGraphId,
-      }) as EdgeReconcilerJobHandle;
+      });
     });
   }
 
@@ -341,6 +346,9 @@ export class SyncCoverageEvidenceJournal {
   private takeRunning(
     handle: CoreAutomaticRoundHandle | EdgeReconcilerJobHandle,
   ): SyncCoverageEvidenceEntry {
+    if (handle[syncCoverageEvidenceHandleBrand] !== true) {
+      throw new TypeError('sync coverage evidence handle was not issued by this module');
+    }
     const running = this.runningByJobId.get(handle.jobId);
     if (!running || running.kind !== handle.kind) {
       throw new TypeError('sync coverage evidence handle is unknown or already finished');
