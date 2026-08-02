@@ -2676,6 +2676,75 @@ describe('graph-scoped finalization handler', () => {
     expect(await countCleanupTasks()).toBe(1);
   });
 
+  /**
+   * `retireStaleTask`'s own in-lock TOCTOU re-check — the twin of the guard in
+   * `clearIfStillExact`. The pre-lock triage found a stale head, but by the
+   * time the writer lock is held the head has moved BACK to matching, so the
+   * task is live again and must not be retired. Retiring it strands a finalized
+   * SWM copy with nothing left to collect it.
+   *
+   * Narrower than the deletion-path twin — this removes a marker rather than
+   * payload, so the damage is a stranded copy rather than destroyed data — but
+   * the same class, and unpinned for the same reason: reaching it needs the
+   * head to change BETWEEN the two reads, which no static fixture produces.
+   *
+   * THE SEAM IS POSITIONAL, NOT BY SOURCE. Both head resolutions on this path
+   * carry `source: 'agent.finalizedSwmCleanup.discover'`, so the fixture counts
+   * occurrences: 1st = the pre-lock triage in `cleanupMetaGraph`, 2nd = the
+   * in-lock re-read. Adding a third query with that source ahead of these
+   * silently retargets the seam — the test would keep passing while no longer
+   * exercising the guard.
+   */
+  it('does not retire a task whose head becomes current again inside the lock', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Pre-lock triage must see a stale head, so advance it to v2.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+
+    const originalQuery = store.query.bind(store);
+    let headReads = 0;
+    let restoredInsideLock = false;
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (query.startsWith(WORKSPACE_HEAD_READ_PREFIX)) {
+        headReads += 1;
+        if (headReads === 2 && !restoredInsideLock) {
+          restoredInsideLock = true;
+          // Drop the seam first so the restore and the rest of the commit path
+          // run against the real store.
+          querySpy.mockRestore();
+          // The lifecycle this task names is current again.
+          await storeKnowledgeAssetWorkspaceHead({
+            store,
+            graphManager,
+            contextGraphId: CG,
+            shareOperationId: SHARE_ID,
+            kaUal: UAL,
+            assertionVersion: '1',
+          });
+        }
+      }
+      return originalQuery(query, options);
+    });
+
+    await drainFinalizedSwm();
+
+    expect(restoredInsideLock).toBe(true);
+    // Still armed: the task describes a lifecycle that is live again.
+    expect(await countCleanupTasks()).toBe(1);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '1', shareOperationId: SHARE_ID });
+  });
+
   it('defers durable cleanup while the store is busy and resumes after restart when idle', async () => {
     const { message, swmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
