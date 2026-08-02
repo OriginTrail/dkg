@@ -10,5 +10,5 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../_bootstrap/rdf-canonize.d.ts"]
 }

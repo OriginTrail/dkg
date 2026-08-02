@@ -149,12 +149,61 @@ malformed command values all fail closed. The launcher also has a direct
 regression test proving that corpus, trust-anchor, and artifact paths are absent
 from the spawned adapter environment.
 
-This repository supplies the fail-closed orchestrator and framed adapter
-protocol, not a deployment-specific adapter executable. The live command is
-therefore intentionally blocked unless `DKG_RFC64_M1_ADAPTER_COMMAND` names an
-operator-reviewed implementation. The launcher removes corpus, trust-anchor,
-and output paths from the adapter environment; the adapter must report runtime
-identity from the processes it launched, not echo expected values.
+This repository also supplies `testnet-operator-adapter.ts`, a configuration-
+driven implementation for isolated local or SSH-controlled testnet processes.
+SSH is used only for deployment control; every publication, catalog exchange,
+selection, catch-up, and automatic Core round still travels through the DKG and
+chain paths. The adapter starts the configured release CLI, reads runtime
+identity from the live node, checks its short reported commit against the full
+tested head, and derives exact VM/SWM evidence through scoped node queries. It
+fails immediately on a terminal catch-up result instead of hiding it behind the
+general transient retry window.
+
+The launcher removes corpus, trust-anchor, and output paths from the adapter
+environment, so the adapter cannot echo expected values. Operator configuration
+is closed-schema and contains only process-control inputs plus the pre-created
+five-graph observation plan.
+
+### User-visible impact
+
+Before this adapter, the checked M1 contract stopped at an implementation-
+neutral process protocol: an operator could unit-test the gate but could not run
+the exact gate against release-shaped nodes without writing a separate bridge.
+After this adapter, the same gate can create a reproducible five-CG testnet
+corpus and drive a local Publisher, a local Edge, and an isolated remote Core,
+while preserving all process, peer, repository, runtime-manifest, journal, and
+exact-payload evidence required by the verifier.
+
+```mermaid
+sequenceDiagram
+  participant O as Operator
+  participant G as M1 gate
+  participant X as Missing deployment adapter
+  O->>G: Start live test
+  G->>X: Framed runtime command
+  X--xG: No implementation supplied
+  G-->>O: No testnet evidence
+```
+
+```mermaid
+sequenceDiagram
+  participant O as Operator
+  participant G as M1 gate
+  participant A as Testnet operator adapter
+  participant P as Isolated Publisher
+  participant E as Isolated Edge
+  participant C as Isolated Core
+  O->>G: Start anchored live test
+  G->>A: Sequenced runtime commands
+  A->>P: Start and publish two VM and SWM waves
+  A->>E: Select, sync, restart, and observe
+  A->>C: Start cold and observe automatic public coverage
+  P-->>A: Live identity and exact snapshots
+  E-->>A: Job and reconciler journal evidence
+  C-->>A: Bounded scheduler journal evidence
+  A-->>G: Closed decoded observations
+  G-->>O: Verified canonical PASS artifact
+```
 
 ## Running the live gate
 
@@ -169,6 +218,15 @@ export DKG_RFC64_M1_ADAPTER_COMMAND=/secure/operator/dkg-m1-adapter
 export DKG_RFC64_M1_ADAPTER_ARGS_JSON='[]'
 pnpm test:m1:rfc64-selective-coverage
 ```
+
+For the shipped TypeScript adapter, set the command to `node`, pass
+`["--import","tsx","devnet/rfc64-m1-selective-coverage/testnet-operator-adapter.ts"]`
+as `DKG_RFC64_M1_ADAPTER_ARGS_JSON`, and provide the closed operator file via
+`DKG_RFC64_M1_OPERATOR_CONFIG`. `prepare-testnet-corpus.ts` creates and seals
+exactly two KAs in each of the five policy/selection cells, then writes both the
+immutable corpus and the adapter graph plan. After probing stable identities for
+the three isolated data directories, `create-testnet-trust-anchor.ts` binds
+those peer IDs to the clean source/runtime manifest and corpus digest.
 
 The trust anchor contains `networkId`, exact `testedHeadCommit`, computed
 `runtimeManifestDigest`, `corpusManifestDigest`, and the three expected peer
