@@ -9,7 +9,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -475,6 +474,7 @@ import {
   type DurableSyncResult,
   type SharedMemoryContextGraphResult,
   type SharedMemoryContextGraphTerminal,
+  type SharedMemorySyncDetailedResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
   type ReplicationEvent,
@@ -905,6 +905,8 @@ type SharedMemorySyncDetailedOptions = {
   sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
   /** Admission override for foreground catch-up. */
   priority?: number;
+  /** Bounded admission origin for node-wide scheduler diagnostics. */
+  source?: SyncAdmissionSource;
 };
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
@@ -929,10 +931,21 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
-// Evidence provenance is intentionally module-private and async-context-bound.
-// This preserves the public/internal call shapes while ensuring a direct
-// library call cannot label itself as reconciler-owned automatic work.
-const syncCoverageInvocation = new AsyncLocalStorage<SyncCoverageEvidenceTrigger>();
+const automaticSyncInvocationBrand: unique symbol = Symbol('automatic-sync-invocation');
+
+interface AutomaticSyncInvocation {
+  readonly [automaticSyncInvocationBrand]: true;
+  readonly trigger: SyncCoverageEvidenceTrigger;
+}
+
+function automaticSyncInvocation(
+  trigger: SyncCoverageEvidenceTrigger,
+): AutomaticSyncInvocation {
+  return Object.freeze({
+    [automaticSyncInvocationBrand]: true as const,
+    trigger,
+  });
+}
 
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
@@ -1178,7 +1191,7 @@ function mergeSharedMemorySyncResults(
 function withSharedMemoryContextGraphTerminals(
   summary: SharedMemoryContextGraphResult,
   terminals: readonly SharedMemoryContextGraphTerminal[],
-): SharedMemorySyncResult {
+): SharedMemorySyncDetailedResult {
   const immutableTerminals = Object.freeze(
     terminals.map((terminal) => Object.freeze(terminal)),
   );
@@ -3734,28 +3747,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const probe = await this.getSyncReconcilerProbe(remotePeer);
     try {
-      await syncCoverageInvocation.run(
+      await this.attemptSyncFromPeerWithReconcilerAccounting(
+        remotePeer,
+        probe,
         'connection-open',
-        () => this.attemptSyncFromPeerWithReconcilerAccounting(remotePeer, probe),
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
     }
   }
 
-  async attemptSyncFromPeerWithReconcilerAccounting(
+  protected async attemptSyncFromPeerWithReconcilerAccounting(
     this: DKGAgent,
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
+    trigger?: SyncCoverageEvidenceTrigger,
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
     let syncAccountingClearedBackoff = false;
     try {
-      const outcome = await this.trySyncFromPeer(remotePeer, () => {
-        syncAccountingClearedBackoff = true;
-      }, source);
+      const outcome = await this.trySyncFromPeer(
+        remotePeer,
+        () => {
+          syncAccountingClearedBackoff = true;
+        },
+        source,
+        trigger ? automaticSyncInvocation(trigger) : undefined,
+      );
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
@@ -3818,6 +3838,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const coverageStatus = this.getCorePublicSyncCoverageStatus();
     const evidence = new SyncCoverageEvidenceRecorder({
       journal: this.syncCoverageEvidenceJournal,
+      // Runtime-check the module-private brand as well as relying on the type:
+      // plain JavaScript callers cannot forge automatic provenance by passing
+      // an object with a trigger-shaped public property.
       trigger: invocation?.[automaticSyncInvocationBrand] === true
         ? invocation.trigger
         : undefined,
@@ -4122,7 +4145,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.skippedNoSyncPeers.delete(peerId);
       this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
       setTimeout(() => {
-        syncCoverageInvocation.run('peer-update', () => this.trySyncFromPeer(peerId))
+        this.trySyncFromPeer(
+          peerId,
+          undefined,
+          automaticSyncInvocation('peer-update'),
+        )
           .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
@@ -5411,7 +5438,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphIds: string[],
     options?: SharedMemorySyncDetailedOptions,
-  ): Promise<SharedMemorySyncResult> {
+  ): Promise<SharedMemorySyncDetailedResult> {
     const ctx = createOperationContext('sync');
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
@@ -5489,7 +5516,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       priority: options?.priority,
     });
 
-    const runSync = async (): Promise<SharedMemorySyncResult> => {
+    const runSync = async (): Promise<SharedMemorySyncDetailedResult> => {
       const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
       const getSubGraphAdmission = (contextGraphId: string) => {
         let admission = subGraphAdmissionByContextGraph.get(contextGraphId);

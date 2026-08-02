@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { performance } from 'node:perf_hooks';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import {
+  DKGAgent,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+} from '../src/index.js';
 
 const PEER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
@@ -72,6 +76,7 @@ function withSettledSharedMemoryTerminals(
 async function createEvidenceAgent(
   nodeRole: 'edge' | 'core',
   selected: string[],
+  contextGraphSubscriptionStore?: ContextGraphSubscriptionStore,
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: `SyncEvidence${nodeRole}`,
@@ -79,6 +84,7 @@ async function createEvidenceAgent(
     nodeRole,
     syncContextGraphs: selected,
     chainAdapter: new MockChainAdapter(),
+    contextGraphSubscriptionStore,
   });
   (agent as any).started = true;
   (agent as any).networkAdmissionCoordinator.isAcceptedPeer = () => true;
@@ -138,6 +144,11 @@ describe('automatic sync coverage runtime evidence', () => {
     (agent as any).registerCorePublicSyncContextGraph('cg-automatic');
 
     await (agent as any).trySyncFromPeer(PEER);
+    await (agent as any).trySyncFromPeer(
+      PEER,
+      undefined,
+      { trigger: 'connection-open' },
+    );
 
     expect(agent.getSyncCoverageEvidence().entries).toEqual([]);
   });
@@ -186,15 +197,34 @@ describe('automatic sync coverage runtime evidence', () => {
   it('records only startup-rehydrated always-on Edge selections on periodic work', async () => {
     const rehydrated = 'cg-rehydrated';
     const runtimeSelected = 'cg-runtime-selected';
-    const agent = await createEvidenceAgent('edge', [rehydrated, runtimeSelected]);
-    for (const contextGraphId of [rehydrated, runtimeSelected]) {
-      (agent as any).subscribedContextGraphs.set(contextGraphId, {
-        subscribed: true,
-        syncMode: 'always-on',
-        metaSynced: false,
-      });
-    }
-    (agent as any).rehydratedAlwaysOnSyncContextGraphs.add(rehydrated);
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>([[rehydrated, {
+      id: rehydrated,
+      subscribed: false,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      syncScoped: true,
+    }]]);
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId) => {
+        persisted.delete(contextGraphId);
+      },
+    };
+    const agent = await createEvidenceAgent('edge', [runtimeSelected], subscriptionStore);
+
+    await (agent as any).rehydrateContextGraphSubscriptions();
+    (agent as any).subscribedContextGraphs.set(runtimeSelected, {
+      subscribed: true,
+      syncMode: 'always-on',
+      metaSynced: false,
+    });
+    expect((agent as any).config.syncContextGraphs).toEqual(
+      expect.arrayContaining([rehydrated, runtimeSelected]),
+    );
 
     (agent.node as any).node = {
       getPeers: () => [{ toString: () => PEER }],
@@ -226,6 +256,44 @@ describe('automatic sync coverage runtime evidence', () => {
       jobId: entries[0]!.jobId,
       state: 'complete',
       verified: { metadata: true, durable: true, sharedMemory: true },
+    });
+  });
+
+  it('records peer-update automatic work through the real retry boundary', async () => {
+    const automatic = 'cg-peer-update';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    (agent as any).skippedNoSyncPeers.add(PEER);
+    (agent.node as any).node = {
+      peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
+    };
+
+    (agent as any).handlePeerUpdateForSyncRetry(PEER, [PROTOCOL_SYNC]);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (agent.getSyncCoverageEvidence().entries.length >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      kind: 'core-automatic-round',
+      trigger: 'peer-update',
+      state: 'running',
+      automaticContextGraphIds: [automatic],
+    });
+    expect(entries[1]).toMatchObject({
+      jobId: entries[0]!.jobId,
+      state: 'complete',
+      completions: [{
+        contextGraphId: automatic,
+        state: 'complete',
+        verified: { metadata: true, durable: true, sharedMemory: true },
+      }],
     });
   });
 

@@ -231,14 +231,11 @@ export {
   type SharedMemorySyncDiagnostics,
   type SharedMemoryContextGraphResult,
   type SharedMemoryContextGraphTerminal,
+  type SharedMemorySyncDetailedResult,
   type SharedMemorySyncResult,
 } from './dkg-agent-types.js';
 export {
   SYNC_COVERAGE_EVIDENCE_SCHEMA_VERSION,
-  DEFAULT_SYNC_COVERAGE_EVIDENCE_CAPACITY,
-  MAX_SYNC_COVERAGE_EVIDENCE_CONTEXT_GRAPHS,
-  SyncCoverageEvidenceJournal,
-  boundedSyncCoverageContextGraphIds,
   type SyncCoverageEvidenceState,
   type SyncCoverageEvidenceTrigger,
   type SyncCoverageVerifiedPlanes,

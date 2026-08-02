@@ -1100,6 +1100,15 @@ export interface SharedMemorySyncResult extends SharedMemoryContextGraphResult {
   contextGraphTerminals?: readonly SharedMemoryContextGraphTerminal[];
 }
 
+/**
+ * Exact production result of the detailed shared-memory sync path. Aggregate
+ * compatibility callers may continue to use SharedMemorySyncResult, while
+ * automatic coverage evidence requires the per-CG terminal contract.
+ */
+export interface SharedMemorySyncDetailedResult extends SharedMemorySyncResult {
+  contextGraphTerminals: readonly SharedMemoryContextGraphTerminal[];
+}
+
 // ── DKGAgent configuration ──────────────────────────────────────────
 
 /**
