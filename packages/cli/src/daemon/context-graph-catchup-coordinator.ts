@@ -55,6 +55,17 @@ type CatchupResultClassification =
       eventPayload?: undefined;
     };
 
+/** Normalize the explicitly optional legacy tracker boundary exactly once. */
+export function getOrCreateCatchupCoordinatorIndex(
+  tracker: CatchupTracker,
+): Map<string, CatchupCoordinator> {
+  const existing = tracker.inFlightByContextGraph;
+  if (existing) return existing;
+  const created = new Map<string, CatchupCoordinator>();
+  tracker.inFlightByContextGraph = created;
+  return created;
+}
+
 export class ContextGraphCatchupCoordinatorService {
   private readonly now: () => number;
   private readonly createJobId: () => string;
@@ -67,10 +78,7 @@ export class ContextGraphCatchupCoordinatorService {
     this.now = effects.now ?? Date.now;
     this.createJobId = effects.createJobId ?? (() =>
       `${this.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
-    // Preserve the historical two-map tracker shape used by embedded callers
-    // and older route fixtures. The coordinator owns the new orchestration
-    // index, so it can provision that index without changing those call sites.
-    this.inFlightByContextGraph = tracker.inFlightByContextGraph ??= new Map();
+    this.inFlightByContextGraph = getOrCreateCatchupCoordinatorIndex(tracker);
   }
 
   /** Reuse active work while preserving each caller's immutable plane scope. */

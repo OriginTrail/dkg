@@ -133,10 +133,12 @@ describe('ContextGraphCatchupCoordinatorService', () => {
   });
 
   it('provisions orchestration state for the historical two-map tracker shape', () => {
-    const tracker = {
+    // Compile-time regression: the public tracker boundary explicitly accepts
+    // the historical two-map shape without a cast.
+    const tracker: CatchupTracker = {
       jobs: new Map(),
       latestByContextGraph: new Map(),
-    } as CatchupTracker;
+    };
     const service = new ContextGraphCatchupCoordinatorService(tracker, {
       runner: { run: vi.fn() },
       readReadiness: vi.fn(),
@@ -263,7 +265,7 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     ]);
     expect(base).toMatchObject({ includeWorkspace: false, status: 'done' });
     expect(upgrade).toMatchObject({ includeWorkspace: true, status: 'done' });
-    expect(fixture.tracker.inFlightByContextGraph.has('cg:one')).toBe(false);
+    expect(fixture.tracker.inFlightByContextGraph?.has('cg:one')).toBe(false);
   });
 
   it('does not retroactively fail VM-only success when the wider upgrade is incomplete', async () => {

@@ -55,5 +55,10 @@ export interface CatchupCoordinator {
 export interface CatchupTracker {
   jobs: Map<string, CatchupJob>;
   latestByContextGraph: Map<string, string>;
-  inFlightByContextGraph: Map<string, CatchupCoordinator>;
+  /**
+   * Coordinator-only index added after the original two-map tracker contract.
+   * Optional at the public boundary so embedded callers can supply that legacy
+   * shape; the coordinator normalizes it through one canonical helper.
+   */
+  inFlightByContextGraph?: Map<string, CatchupCoordinator>;
 }
