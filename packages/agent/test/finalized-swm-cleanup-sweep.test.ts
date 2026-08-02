@@ -480,4 +480,133 @@ describe('finalized SWM cleanup sweep gates', () => {
     });
     await worker.close();
   });
+
+  /**
+   * The classification exists at FOUR independent `await` boundaries inside a
+   * sweep, and a single end-to-end test covers only whichever one it happens to
+   * trigger — the other three can be deleted with the suite green. Each is
+   * therefore driven separately here.
+   *
+   * The two enumeration boundaries and the two query boundaries also differ in
+   * what they must preserve: the context-graph enumeration fails before a
+   * rotation exists, so it defers outright, while the later three must yield
+   * the rotation and keep the cursor.
+   */
+  type PressureSite = 'context-graph enumeration' | 'meta-graph enumeration'
+    | 'candidate discovery' | 'the backlog probe';
+
+  function serviceThrowingAt(site: PressureSite, error: unknown) {
+    const store = new OxigraphStore();
+    installPressureSwitch(store);
+    const metaGraph = new GraphManager(store).sharedMemoryMetaUri(CG);
+    const originalQuery = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (site === 'candidate discovery' && options?.source === 'agent.finalizedSwmCleanup.discover') {
+        throw error;
+      }
+      if (site === 'the backlog probe' && options?.source === 'agent.finalizedSwmCleanup.backlog') {
+        throw error;
+      }
+      return originalQuery(query, options);
+    });
+    return new FinalizedSwmCleanupService({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      listContextGraphIds: async () => {
+        if (site === 'context-graph enumeration') throw error;
+        return [CG];
+      },
+      listSharedMemoryMetaGraphs: async () => {
+        if (site === 'meta-graph enumeration') throw error;
+        return [metaGraph];
+      },
+    });
+  }
+
+  const PRESSURE_SITES: PressureSite[] = [
+    'context-graph enumeration',
+    'meta-graph enumeration',
+    'candidate discovery',
+    'the backlog probe',
+  ];
+
+  it.each(PRESSURE_SITES)(
+    'classifies a scheduler rejection raised at %s as a retryable deferral',
+    async (site) => {
+      const service = serviceThrowingAt(
+        site,
+        new StoreSchedulerBusyError('queue_full', 'background', 'agent.finalizedSwmCleanup'),
+      );
+
+      await expect(service.runSweep()).resolves.toMatchObject({
+        pressureSkipped: true,
+        stale: true,
+        deletedItems: 0,
+      });
+    },
+  );
+
+  it.each(PRESSURE_SITES)(
+    'lets an unknown failure at %s stay terminal',
+    async (site) => {
+      const service = serviceThrowingAt(site, new Error(`unknown failure at ${site}`));
+
+      await expect(service.runSweep()).rejects.toThrow(`unknown failure at ${site}`);
+    },
+  );
+
+  /**
+   * A converted throw must behave like a pressure yield, not merely return the
+   * right shape: the context graph it interrupted has to be re-measured whole
+   * on the next slice. Committing its partial contribution would double-count
+   * it on resume — the same defect the rotation accumulator exists to prevent,
+   * arriving through the error path instead of the gate.
+   */
+  it('re-measures an interrupted context graph whole after a converted rejection', async () => {
+    const store = new OxigraphStore();
+    installPressureSwitch(store);
+    const graphManager = new GraphManager(store);
+    const rootMeta = graphManager.sharedMemoryMetaUri(CG);
+    const subMeta = graphManager.sharedMemoryMetaUri(CG, 'named');
+    const marker = (label: string, graph: string) => ([
+      { subject: `urn:dkg:finalized-swm-cleanup:${label}`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/FinalizedSwmCleanupTask', graph },
+      { subject: `urn:dkg:finalized-swm-cleanup:${label}`, predicate: 'http://dkg.io/ontology/finalizedSwmCleanupRoot', object: JSON.stringify(`0x${'11'.repeat(32)}`), graph },
+    ]);
+    await store.insert([...marker('a', rootMeta), ...marker('b', subMeta)]);
+
+    let backlogReads = 0;
+    const originalQuery = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source === 'agent.finalizedSwmCleanup.backlog') {
+        backlogReads += 1;
+        // Interrupt AFTER the first meta graph has been measured, so a
+        // partial contribution exists to be wrongly committed.
+        if (backlogReads === 2) {
+          throw new StoreSchedulerBusyError('queue_full', 'background', 'agent.finalizedSwmCleanup.backlog');
+        }
+      }
+      return originalQuery(query, options);
+    });
+
+    const service = new FinalizedSwmCleanupService({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [rootMeta, subMeta],
+    });
+
+    await expect(service.runSweep()).resolves.toMatchObject({
+      pressureSkipped: true,
+      stale: true,
+      // The one marker measured before the throw is NOT published.
+      backlogDepth: 0,
+    });
+
+    await expect(service.runSweep()).resolves.toMatchObject({
+      pressureSkipped: false,
+      stale: false,
+      // Two markers total — the interrupted graph re-measured whole, not three.
+      backlogDepth: 2,
+    });
+  });
 });
