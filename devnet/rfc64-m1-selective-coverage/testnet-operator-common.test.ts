@@ -11,6 +11,7 @@ import {
   buildTestnetContextGraphCreateRequest,
   observeGraph,
   readTestnetOperatorConfig,
+  resolveTestnetOperatorShutdownExitTimeoutMs,
   type TestnetOperatorConfigV1,
   type TestnetOperatorGraphV1,
   type TestnetOperatorRoleV1,
@@ -77,6 +78,20 @@ test('testnet corpus registration never turns a public cell private through an a
   assert.deepEqual(privateRequest['allowedAgents'], [common.agentAddress]);
   assert.equal(publicRequest['register'], true);
   assert.equal(privateRequest['register'], true);
+});
+
+test('shutdown observer budget follows the worker and cannot be undercut', () => {
+  const baseRole = config().roles.publisher;
+  assert.equal(resolveTestnetOperatorShutdownExitTimeoutMs(baseRole, 45_000), 30_000);
+  const extendedRole: TestnetOperatorRoleV1 = {
+    ...baseRole,
+    environment: { DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000' },
+  };
+  assert.equal(resolveTestnetOperatorShutdownExitTimeoutMs(extendedRole, 120_000), 66_000);
+  assert.throws(
+    () => resolveTestnetOperatorShutdownExitTimeoutMs(extendedRole, 65_000),
+    /undercuts the 66000ms shutdown exit budget/u,
+  );
 });
 
 test('exact graph observation derives VM and SWM evidence from scoped data and metadata queries', async (context) => {

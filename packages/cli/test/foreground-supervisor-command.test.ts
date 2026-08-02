@@ -7,9 +7,21 @@ import { promisify } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
 
+import { resolveSupervisorShutdownGraceMs } from '../src/cli-supervisor.js';
+
 const execFileAsync = promisify(execFile);
 
 describe('foreground supervisor restart command', () => {
+  it('derives watcher grace from the exact child environment', () => {
+    expect(resolveSupervisorShutdownGraceMs({})).toBe(30_000);
+    expect(resolveSupervisorShutdownGraceMs({
+      DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
+    })).toBe(66_000);
+    expect(() => resolveSupervisorShutdownGraceMs({
+      DKG_SHUTDOWN_HARD_TIMEOUT_MS: 'invalid',
+    })).toThrow(/DKG_SHUTDOWN_HARD_TIMEOUT_MS/u);
+  });
+
   it('spawns the active entrypoint with Node exec argv and the foreground worker argument', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dkg-foreground-command-'));
     try {

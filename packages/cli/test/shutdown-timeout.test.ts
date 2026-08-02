@@ -11,6 +11,7 @@ import {
   raceShutdownWithTimeout,
 } from '../src/daemon/shutdown.js';
 import { DAEMON_EXIT_CODE_RESTART } from '../src/daemon/manifest.js';
+import { resolveDaemonShutdownHardTimeoutMs } from '../src/daemon/lifecycle.js';
 
 describe('shutdown constants', () => {
   it('declares SHUTDOWN_FORCED_OFFSET = 100 so 0+offset and 75+offset both fit in an 8-bit exit code', () => {
@@ -45,6 +46,16 @@ describe('resolveShutdownHardTimeoutMs', () => {
       );
     },
   );
+
+  it('is resolved from the explicit daemon startup environment', () => {
+    expect(resolveDaemonShutdownHardTimeoutMs({})).toBe(15_000);
+    expect(resolveDaemonShutdownHardTimeoutMs({
+      DKG_SHUTDOWN_HARD_TIMEOUT_MS: '60000',
+    })).toBe(60_000);
+    expect(() => resolveDaemonShutdownHardTimeoutMs({
+      DKG_SHUTDOWN_HARD_TIMEOUT_MS: 'invalid',
+    })).toThrow(/DKG_SHUTDOWN_HARD_TIMEOUT_MS/u);
+  });
 });
 
 describe('isForcedShutdownExitCode', () => {

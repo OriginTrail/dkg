@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs';
 
 import {
+  resolveShutdownHardTimeoutMs,
+  SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
+} from '../../packages/cli/src/daemon/shutdown.ts';
+
+import {
   createRfc64SemanticSnapshot,
   type Rfc64KnowledgeAssetObservation,
 } from '../_bootstrap/rfc64-evidence.ts';
@@ -12,6 +17,8 @@ import type {
 
 export const TESTNET_OPERATOR_CONFIG_SCHEMA =
   'dkg-rfc64-m1-testnet-operator-config-v1' as const;
+export const TESTNET_OPERATOR_DEFAULT_SHUTDOWN_EXIT_TIMEOUT_MS = 30_000;
+export const TESTNET_OPERATOR_SHUTDOWN_EXIT_SLACK_MS = 5_000;
 
 export interface TestnetOperatorAssetV1 {
   readonly name: string;
@@ -50,6 +57,32 @@ export interface TestnetOperatorConfigV1 {
 export interface HttpResult {
   readonly status: number;
   readonly body: unknown;
+}
+
+/**
+ * Resolve the adapter observer budget from the exact worker environment.
+ * The run-wide operation timeout is a hard ceiling, but may never cut short
+ * the daemon's own hard timeout plus forced-cleanup and process-exit slack.
+ */
+export function resolveTestnetOperatorShutdownExitTimeoutMs(
+  role: TestnetOperatorRoleV1,
+  operationTimeoutMs: number,
+): number {
+  const hardTimeoutMs = resolveShutdownHardTimeoutMs(
+    role.environment['DKG_SHUTDOWN_HARD_TIMEOUT_MS'],
+  );
+  const requiredMs = Math.max(
+    TESTNET_OPERATOR_DEFAULT_SHUTDOWN_EXIT_TIMEOUT_MS,
+    hardTimeoutMs
+      + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS
+      + TESTNET_OPERATOR_SHUTDOWN_EXIT_SLACK_MS,
+  );
+  if (!Number.isSafeInteger(operationTimeoutMs) || operationTimeoutMs < requiredMs) {
+    throw new RangeError(
+      `operationTimeoutMs ${operationTimeoutMs} undercuts the ${requiredMs}ms shutdown exit budget`,
+    );
+  }
+  return requiredMs;
 }
 
 export function buildTestnetContextGraphCreateRequest(input: {

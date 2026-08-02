@@ -9,7 +9,8 @@
  * (`kill -9`) is the only recovery. This module provides:
  *
  *   1. A wall-clock deadline ({@link raceShutdownWithTimeout}) so a stuck
- *      graceful path always yields to a forced exit within {@link SHUTDOWN_HARD_TIMEOUT_MS}
+ *      graceful path always yields to a forced exit within the explicitly
+ *      resolved shutdown hard timeout
  *      (plus at most {@link SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS} for best-effort
  *      forced cleanup — see below).
  *   2. An exit-code convention ({@link SHUTDOWN_FORCED_OFFSET}) so the supervisor
@@ -39,7 +40,7 @@ export const MAX_SHUTDOWN_HARD_TIMEOUT_MS = 300_000;
  * silently disabling the anti-zombie guard.
  */
 export function resolveShutdownHardTimeoutMs(
-  value = process.env['DKG_SHUTDOWN_HARD_TIMEOUT_MS'],
+  value: string | undefined,
 ): number {
   if (value === undefined || value.trim() === '') return DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
   const parsed = Number(value);
@@ -54,7 +55,8 @@ export function resolveShutdownHardTimeoutMs(
   return parsed;
 }
 
-export const SHUTDOWN_HARD_TIMEOUT_MS = resolveShutdownHardTimeoutMs();
+/** Backward-compatible name for the unchanged fleet default. */
+export const SHUTDOWN_HARD_TIMEOUT_MS = DEFAULT_SHUTDOWN_HARD_TIMEOUT_MS;
 
 /**
  * Per-callsite budget for the best-effort forced-cleanup hook (state-file

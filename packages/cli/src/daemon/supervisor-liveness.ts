@@ -43,6 +43,8 @@
 
 import { connect, type Socket } from 'node:net';
 
+import { SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS } from './shutdown.js';
+
 /** Default tick — 30s. Picked to be longer than typical request handling but short enough that a 5-failure quorum triggers within ~2.5 min. */
 export const LIVENESS_PROBE_INTERVAL_MS = 30_000;
 
@@ -51,6 +53,23 @@ export const LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 
 /** Default trigger threshold — 5 consecutive failures. With 30s tick → ~2.5 min unresponsive before SIGKILL. */
 export const LIVENESS_CONSECUTIVE_FAILURES_TO_KILL = 5;
+
+/** Preserve the existing fleet default while allowing longer worker budgets. */
+export const DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS = 30_000;
+
+/**
+ * Give the worker its full hard timeout, forced-cleanup budget, and one
+ * in-flight probe timeout before the supervisor can begin counting failures.
+ */
+export function shutdownGraceMsForHardTimeout(hardTimeoutMs: number): number {
+  if (!Number.isSafeInteger(hardTimeoutMs) || hardTimeoutMs < 1) {
+    throw new TypeError('shutdown hard timeout must be a positive integer');
+  }
+  return Math.max(
+    DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS,
+    hardTimeoutMs + SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS + LIVENESS_PROBE_TIMEOUT_MS,
+  );
+}
 
 /**
  * One-shot probe: connect to `host:port`, return `true` on success, `false`
@@ -152,11 +171,10 @@ export interface LivenessWatcherOpts {
   /**
    * Maximum time to wait after the worker enters graceful shutdown before
    * the watcher resumes counting failures toward `consecutiveFailuresToKill`.
-   * Default is 2× `SHUTDOWN_HARD_TIMEOUT_MS` (30s) — comfortably longer than
-   * the daemon's own self-force-exit deadline so a healthy graceful shutdown
-   * finishes inside the window; only a wedged teardown reaches the SIGKILL
-   * path. Set to a negative value to disable the bounded fallback (legacy
-   * "disarm forever" behavior).
+   * Default remains 30s. The CLI supervisor supplies a value derived from the
+   * worker's resolved hard timeout so an operator override cannot be
+   * preempted. Set to a negative value to disable the bounded fallback
+   * (legacy "disarm forever" behavior).
    */
   shutdownGraceMs?: number;
 }
@@ -177,9 +195,7 @@ export function startLivenessWatcher(opts: LivenessWatcherOpts): { stop(): void 
   const threshold = opts.consecutiveFailuresToKill ?? LIVENESS_CONSECUTIVE_FAILURES_TO_KILL;
   const probe = opts.probe ?? probeWorkerAlive;
   const host = opts.host ?? '127.0.0.1';
-  // Default to 2× the worker's own hard-shutdown deadline; if the worker's
-  // self-force-exit fires first the watcher never needs to kill anyway.
-  const shutdownGraceMs = opts.shutdownGraceMs ?? 2 * 15_000;
+  const shutdownGraceMs = opts.shutdownGraceMs ?? DEFAULT_LIVENESS_SHUTDOWN_GRACE_MS;
 
   let consecutiveFailures = 0;
   let probing = false;

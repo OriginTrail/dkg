@@ -23,6 +23,7 @@ import type {
 import {
   observeGraph,
   readTestnetOperatorConfig,
+  resolveTestnetOperatorShutdownExitTimeoutMs,
   requestJson,
   requireJson,
   type TestnetOperatorConfigV1,
@@ -169,7 +170,10 @@ class TestnetOperatorController {
       }
       outcome = await withTimeout(
         running.exited,
-        Math.min(90_000, this.cfg.operationTimeoutMs),
+        resolveTestnetOperatorShutdownExitTimeoutMs(
+          this.cfg.roles[roleName],
+          this.cfg.operationTimeoutMs,
+        ),
         `${roleName} process exit after shutdown`,
       );
     } finally {

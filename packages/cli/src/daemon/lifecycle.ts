@@ -256,9 +256,9 @@ import {
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
 import {
-  SHUTDOWN_HARD_TIMEOUT_MS,
   encodeForcedShutdownExitCode,
   raceShutdownWithTimeout,
+  resolveShutdownHardTimeoutMs,
 } from './shutdown.js';
 import {
   resolveNameToPeerId,
@@ -1148,6 +1148,9 @@ export async function runDaemonInner(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
 ): Promise<void> {
+  // Resolve operator input once at the canonical daemon startup boundary.
+  // Shutdown mechanics stay independent of ambient module-import order.
+  const shutdownHardTimeoutMs = resolveDaemonShutdownHardTimeoutMs(process.env);
   configureKaPublishLifecycleDebugLogging(config);
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
@@ -3798,7 +3801,7 @@ export async function runDaemonInner(
     });
     const { forced } = await raceShutdownWithTimeout(
       cleanup,
-      SHUTDOWN_HARD_TIMEOUT_MS,
+      shutdownHardTimeoutMs,
       log,
       cleanupStateFiles,
     );
@@ -3807,4 +3810,8 @@ export async function runDaemonInner(
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+}
+
+export function resolveDaemonShutdownHardTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return resolveShutdownHardTimeoutMs(env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
 }
