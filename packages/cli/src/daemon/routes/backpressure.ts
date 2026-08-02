@@ -1,6 +1,7 @@
 import { backpressureRegistry } from '@origintrail-official/dkg-core';
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { isNodeAdminCaller } from './node-admin-auth.js';
 
 /**
  * Node-admin diagnostics for every registered scheduler/backlog source.
@@ -13,24 +14,12 @@ export async function handleBackpressureRoutes(ctx: RequestContext): Promise<voi
   const {
     req,
     res,
-    agent,
-    config,
-    validTokens,
     path,
-    requestToken,
   } = ctx;
 
   if (req.method !== 'GET' || path !== '/api/diagnostics/backpressure') return;
 
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdminCaller =
-    !authEnabled
-    || (
-      !!requestToken
-      && validTokens.has(requestToken)
-      && !agent.resolveAgentByToken(requestToken)
-    );
-  if (!isNodeAdminCaller) {
+  if (!isNodeAdminCaller(ctx)) {
     return jsonResponse(res, 403, {
       error:
         'GET /api/diagnostics/backpressure requires a node-level admin token '

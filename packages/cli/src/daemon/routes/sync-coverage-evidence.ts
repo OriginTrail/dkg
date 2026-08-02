@@ -1,5 +1,6 @@
 import { jsonResponse } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { isNodeAdminCaller } from './node-admin-auth.js';
 
 function parseAfterSequence(value: string | null): number | null {
   if (value === null || value === '') return 0;
@@ -14,22 +15,13 @@ export async function handleSyncCoverageEvidenceRoutes(ctx: RequestContext): Pro
     req,
     res,
     agent,
-    config,
-    validTokens,
     path,
-    requestToken,
     url,
   } = ctx;
 
   if (req.method !== 'GET' || path !== '/api/diagnostics/sync-coverage-evidence') return;
 
-  const authEnabled = config.auth?.enabled !== false;
-  const isNodeAdminCaller = !authEnabled || (
-    !!requestToken
-    && validTokens.has(requestToken)
-    && !agent.resolveAgentByToken(requestToken)
-  );
-  if (!isNodeAdminCaller) {
+  if (!isNodeAdminCaller(ctx)) {
     return jsonResponse(res, 403, {
       error:
         'GET /api/diagnostics/sync-coverage-evidence requires a node-level admin token '

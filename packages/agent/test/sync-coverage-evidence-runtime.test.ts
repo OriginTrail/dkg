@@ -208,6 +208,87 @@ describe('automatic sync coverage runtime evidence', () => {
     expect(complete!.sequence).toBe(running!.sequence + 1);
   });
 
+  it('fails durable evidence closed on non-throwing incomplete sync progress', async () => {
+    const automatic = 'cg-automatic-incomplete-durable';
+    const agent = await createEvidenceAgent('core', []);
+    (agent as any).subscribedContextGraphs.set(automatic, {
+      subscribed: false,
+      metaSynced: false,
+    });
+    (agent as any).registerCorePublicSyncContextGraph(automatic);
+    (agent as any).syncFromPeerDetailed = async () => ({
+      ...cleanDurableSyncResult(),
+      insertedTriples: 1,
+      insertedDataTriples: 1,
+      fetchedDataTriples: 1,
+      checkpointAdvances: 1,
+      complete: false,
+    });
+
+    const errors = await runConnectionOpenSyncWithErrors(agent);
+    const entries = agent.getSyncCoverageEvidence().entries;
+
+    expect(errors).toEqual([]);
+    expect((agent as any).lastSyncProgressAt.get(PEER)).toEqual(expect.any(Number));
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER)).toBe(false);
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({
+      kind: 'core-automatic-round',
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+      completions: [{
+        contextGraphId: automatic,
+        state: 'failed',
+        verified: { metadata: true, durable: false, sharedMemory: true },
+      }],
+    });
+  });
+
+  it.each([
+    {
+      label: 'an empty confirmation set',
+      automatic: ['cg-metadata-empty'],
+      confirmed: [],
+    },
+    {
+      label: 'a subset confirmation set',
+      automatic: ['cg-metadata-confirmed', 'cg-metadata-unconfirmed'],
+      confirmed: ['cg-metadata-confirmed'],
+    },
+  ])('fails metadata evidence closed with $label', async ({ automatic, confirmed }) => {
+    const agent = await createEvidenceAgent('core', []);
+    for (const contextGraphId of automatic) {
+      (agent as any).subscribedContextGraphs.set(contextGraphId, {
+        subscribed: false,
+        metaSynced: false,
+      });
+      (agent as any).registerCorePublicSyncContextGraph(contextGraphId);
+    }
+    (agent as any).refreshMetaSyncedFlags = async () => new Set(confirmed);
+
+    const errors = await runConnectionOpenSyncWithErrors(agent);
+    const entries = agent.getSyncCoverageEvidence().entries;
+    const terminal = entries[1] as any;
+
+    expect(errors).toEqual([]);
+    expect((agent as any).lastSuccessfulSyncAt.get(PEER)).toEqual(expect.any(Number));
+    expect(entries).toHaveLength(2);
+    expect(terminal).toMatchObject({
+      kind: 'core-automatic-round',
+      jobId: entries[0]!.jobId,
+      state: 'failed',
+    });
+    expect(terminal.completions).toHaveLength(automatic.length);
+    for (const contextGraphId of automatic) {
+      const metadata = confirmed.includes(contextGraphId);
+      expect(terminal.completions).toContainEqual(expect.objectContaining({
+        contextGraphId,
+        state: metadata ? 'complete' : 'failed',
+        verified: { metadata, durable: true, sharedMemory: true },
+      }));
+    }
+  });
+
   it('keeps Core automatic sync successful when a legacy result omits terminals', async () => {
     const automatic = 'cg-automatic-legacy-result';
     const agent = await createEvidenceAgent('core', []);
