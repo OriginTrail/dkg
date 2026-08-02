@@ -1637,7 +1637,10 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.subscribeToContextGraph(contextGraphId, { includeSharedMemory: options?.includeWorkspace });
+    return this.subscribeToContextGraph(contextGraphId, {
+      includeSharedMemory: options?.includeWorkspace,
+      syncMode: 'always-on',
+    });
   }
 
   async catchupStatus(contextGraphId: string): Promise<{

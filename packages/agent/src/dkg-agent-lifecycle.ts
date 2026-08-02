@@ -2951,6 +2951,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // update/finalization) wire up immediately as before.
             this.subscribeToContextGraph(contextGraphId, {
               deferSharedMemoryGossipSubscribe: true,
+              syncMode: 'always-on',
               // The exact approval snapshot was committed above. Scheduling
               // the ordinary background persistence here would reintroduce
               // untracked writes around the compensating transaction.
@@ -3240,7 +3241,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     // Subscribe to both system context graph GossipSub topics
     for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
-      this.subscribeToContextGraph(systemContextGraph);
+      this.subscribeToContextGraph(systemContextGraph, { syncMode: 'always-on' });
     }
 
     // Connect to bootstrap peers
@@ -7274,7 +7275,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
     contextGraphId: string,
-    next?: ContextGraphSub,
+    next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>,
   ): void {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
@@ -7447,29 +7448,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
     }
     const persistMemberIntent = sub.syncMode !== 'on-demand';
-    const persistedSnapshot: ContextGraphSub = persistMemberIntent
-      ? sub
-      : {
-        ...sub,
-        // Preserve only the independent Core-hosting contract. Member
-        // activation/readiness stays process-local with the on-demand intent.
-        syncMode: 'always-on',
-        subscribed: false,
-        synced: false,
-        sharedMemorySynced: false,
-        metaSynced: false,
-      };
-    const record = {
+    // Project the durable record directly from the real live state. An
+    // on-demand member can coexist with an independent Core-hosting duty, but
+    // that host-only row must not masquerade as a second live subscription.
+    const record: ContextGraphSubscriptionRecord = {
       id: contextGraphId,
-      name: persistedSnapshot.name,
-      subscribed: persistedSnapshot.subscribed,
-      synced: persistedSnapshot.synced,
-      sharedMemorySynced: persistedSnapshot.sharedMemorySynced,
-      metaSynced: persistedSnapshot.metaSynced,
-      onChainId: persistedSnapshot.onChainId,
-      onChainHash: persistedSnapshot.onChainHash,
-      lastReconciledOrdinal: persistedSnapshot.lastReconciledOrdinal,
-      coreHosted: persistedSnapshot.coreHosted,
+      name: sub.name,
+      subscribed: persistMemberIntent && sub.subscribed,
+      synced: persistMemberIntent && sub.synced,
+      sharedMemorySynced: persistMemberIntent ? sub.sharedMemorySynced : false,
+      metaSynced: persistMemberIntent ? sub.metaSynced : false,
+      onChainId: sub.onChainId,
+      onChainHash: sub.onChainHash,
+      lastReconciledOrdinal: sub.lastReconciledOrdinal,
+      coreHosted: sub.coreHosted,
       syncScoped:
         persistMemberIntent && (this.config.syncContextGraphs ?? []).includes(contextGraphId),
     };
@@ -7479,7 +7471,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           options?.updateRehydrationStatus === true &&
           this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
         ) {
-          this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, persistedSnapshot);
+          this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, record);
         }
       }).catch((err) => {
         this.log.warn(
@@ -7986,7 +7978,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.trackSyncContextGraph(row.id);
         }
         if (row.subscribed) {
-          this.subscribeToContextGraph(row.id, { trackSyncScope: false, persist: false });
+          this.subscribeToContextGraph(row.id, {
+            trackSyncScope: false,
+            persist: false,
+            syncMode: 'always-on',
+          });
           this.persistLocalNodeMembership(row.id, 'rehydrated-subscription');
         }
         // Upgrade/self-heal path for late private-CG members whose payload and

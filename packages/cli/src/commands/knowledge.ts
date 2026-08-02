@@ -347,7 +347,7 @@ program
       });
       console.log(`Subscribed to context graph: ${contextGraph}`);
       console.log(
-        opts.save
+        result.syncMode === 'always-on'
           ? 'Synchronization mode: always on (restored after restart).'
           : 'Synchronization mode: on demand (current node process only).',
       );

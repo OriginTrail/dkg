@@ -74,4 +74,21 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     }));
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
   });
+
+  it('reports the server-normalized mode when an on-demand request stays always-on', async () => {
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: 'selected-cg',
+      syncMode: 'always-on',
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', 'selected-cg']);
+
+    expect(subscribeToContextGraph).toHaveBeenCalledWith('selected-cg', {
+      syncMode: 'on-demand',
+    });
+    expect(configMocks.saveConfig).not.toHaveBeenCalled();
+    expect(logLines.join('\n')).toContain('Synchronization mode: always on');
+    expect(logLines.join('\n')).not.toContain('Synchronization mode: on demand');
+  });
 });
