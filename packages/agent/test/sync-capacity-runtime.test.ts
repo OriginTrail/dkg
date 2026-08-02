@@ -1,14 +1,30 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { StorePressureSnapshot, TripleStore } from '@origintrail-official/dkg-storage';
-import { SyncCapacityRuntime } from '../src/sync/capacity-runtime.js';
-import { CorePublicSyncCoverageScheduler } from '../src/sync/core-public-coverage-scheduler.js';
+import {
+  SyncCapacityRuntime,
+  type SyncCapacityRuntimeOptions,
+} from '../src/sync/capacity-runtime.js';
+import {
+  CorePublicSyncCoverageScheduler,
+  DEFAULT_CORE_PUBLIC_SYNC_BATCH_SIZE,
+  resolveCorePublicSyncBatchSize,
+} from '../src/sync/core-public-coverage-scheduler.js';
 import { withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 
 function fakeStore(pressure?: StorePressureSnapshot): TripleStore {
   return {
     getPressureSnapshot: () => pressure,
   } as unknown as TripleStore;
+}
+
+function capacityOptions(
+  overrides: Partial<SyncCapacityRuntimeOptions> = {},
+): SyncCapacityRuntimeOptions {
+  return {
+    resolvedCoverageBatch: DEFAULT_CORE_PUBLIC_SYNC_BATCH_SIZE,
+    ...overrides,
+  };
 }
 
 const STORE_PRESSURE: StorePressureSnapshot = {
@@ -36,7 +52,7 @@ describe('sync capacity runtime resolution', () => {
       nodeRole: 'edge',
       syncGlobalMaxInflight: 4,
       syncAdaptiveCapacity: { enabled: true },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
 
     expect(runtime.isAdaptive()).toBe(false);
     expect(runtime.getResolvedPolicyStatus()).toMatchObject({ inflightLimit: 4 });
@@ -47,8 +63,11 @@ describe('sync capacity runtime resolution', () => {
   it('defaults Core nodes without an explicit global limit to adaptive mode', () => {
     const runtime = SyncCapacityRuntime.create({
       nodeRole: 'core',
-      syncCorePublicBatchSize: 7,
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16, now: () => 100 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({
+      resolvedCoverageBatch: 7,
+      parallelism: 16,
+      now: () => 100,
+    }));
 
     expect(runtime.isAdaptive()).toBe(true);
     expect(runtime.getResolvedPolicyStatus()).toMatchObject({
@@ -67,6 +86,31 @@ describe('sync capacity runtime resolution', () => {
     expect(runtime.getBackpressureSnapshot().limit).toBe(2);
   });
 
+  it('shares one boundary-resolved coverage batch across scheduler and runtime', () => {
+    const config = { nodeRole: 'core' as const, syncCorePublicBatchSize: 7 };
+    vi.stubEnv('DKG_SYNC_CORE_PUBLIC_BATCH_SIZE', '3');
+    const resolvedCoverageBatch = resolveCorePublicSyncBatchSize(
+      config.syncCorePublicBatchSize,
+    );
+    const scheduler = new CorePublicSyncCoverageScheduler(resolvedCoverageBatch);
+
+    // A later environment change would expose any second owner that re-resolved
+    // the original config instead of consuming the agent-boundary value.
+    vi.stubEnv('DKG_SYNC_CORE_PUBLIC_BATCH_SIZE', '5');
+    const runtime = SyncCapacityRuntime.create(
+      config,
+      fakeStore(STORE_PRESSURE),
+      capacityOptions({ resolvedCoverageBatch }),
+    );
+
+    expect(resolveCorePublicSyncBatchSize(config.syncCorePublicBatchSize)).toBe(5);
+    expect(scheduler.getStatus(true).batchSize).toBe(3);
+    expect(runtime.getStatus()).toMatchObject({
+      configuredCoverageBatch: 3,
+      currentCoverageBatch: 3,
+    });
+  });
+
   it('owns sampling and restores constrained coverage from supplemental Core demand', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -75,8 +119,7 @@ describe('sync capacity runtime resolution', () => {
     let cpuTotal = 0;
     const runtime = SyncCapacityRuntime.create({
       nodeRole: 'core',
-      syncCorePublicBatchSize: 8,
-    }, fakeStore(STORE_PRESSURE), {
+    }, fakeStore(STORE_PRESSURE), capacityOptions({
       parallelism: 16,
       samplerDependencies: {
         readCpuTimes: () => {
@@ -88,7 +131,7 @@ describe('sync capacity runtime resolution', () => {
         eventLoopUtilizationDelta: () => 0.2,
         readHeapRatio: () => heapRatio,
       },
-    });
+    }));
     const coverage = new CorePublicSyncCoverageScheduler(8);
     for (const contextGraphId of ['cg:a', 'cg:b', 'cg:c', 'cg:d', 'cg:e']) {
       coverage.register(contextGraphId);
@@ -126,20 +169,24 @@ describe('sync capacity runtime resolution', () => {
     let heapRatio = 0.82;
     let cpuIdle = 0;
     let cpuTotal = 0;
-    const runtime = SyncCapacityRuntime.create({ nodeRole: 'core' }, fakeStore(STORE_PRESSURE), {
-      parallelism: 16,
-      now: () => now,
-      samplerDependencies: {
-        readCpuTimes: () => {
-          cpuIdle += 80;
-          cpuTotal += 100;
-          return { idle: cpuIdle, total: cpuTotal };
+    const runtime = SyncCapacityRuntime.create(
+      { nodeRole: 'core' },
+      fakeStore(STORE_PRESSURE),
+      capacityOptions({
+        parallelism: 16,
+        now: () => now,
+        samplerDependencies: {
+          readCpuTimes: () => {
+            cpuIdle += 80;
+            cpuTotal += 100;
+            return { idle: cpuIdle, total: cpuTotal };
+          },
+          readEventLoopUtilization: () => ({ idle: 1, active: 1, utilization: 0.5 }),
+          eventLoopUtilizationDelta: () => 0.2,
+          readHeapRatio: () => heapRatio,
         },
-        readEventLoopUtilization: () => ({ idle: 1, active: 1, utilization: 0.5 }),
-        eventLoopUtilizationDelta: () => 0.2,
-        readHeapRatio: () => heapRatio,
-      },
-    });
+      }),
+    );
     runtime.sample(true);
     expect(runtime.getStatus().currentInflight).toBe(1);
 
@@ -189,12 +236,12 @@ describe('sync capacity runtime resolution', () => {
     const staticRuntime = SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncGlobalMaxInflight: 6,
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
     const adaptiveRuntime = SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncGlobalMaxInflight: 6,
       syncAdaptiveCapacity: { enabled: true },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
 
     expect(staticRuntime.isAdaptive()).toBe(false);
     expect(staticRuntime.getResolvedPolicyStatus().inflightLimit).toBe(6);
@@ -211,7 +258,7 @@ describe('sync capacity runtime resolution', () => {
       nodeRole: 'core',
       syncGlobalMaxInflight: 100,
       syncAdaptiveCapacity: { enabled: true },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 64 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 64 }));
 
     expect(runtime.getResolvedPolicyStatus()).toEqual({
       inflightLimit: 3,
@@ -229,7 +276,7 @@ describe('sync capacity runtime resolution', () => {
     const runtime = SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncAdaptiveCapacity: { enabled: true },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 64 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 64 }));
 
     expect(runtime.getResolvedPolicyStatus()).toEqual({
       inflightLimit: 3,
@@ -246,7 +293,7 @@ describe('sync capacity runtime resolution', () => {
     const runtime = SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncAdaptiveCapacity: { enabled: false },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
 
     expect(runtime.isAdaptive()).toBe(false);
     expect(runtime.getStatus()).toMatchObject({ mode: 'static', currentInflight: 2 });
@@ -256,7 +303,7 @@ describe('sync capacity runtime resolution', () => {
     const runtime = SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncAdaptiveCapacity: { minInflight: 1, maxInflight: 2 },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
 
     expect(runtime.isAdaptive()).toBe(true);
     expect(runtime.getResolvedPolicyStatus()).toEqual({
@@ -277,7 +324,7 @@ describe('sync capacity runtime resolution', () => {
       nodeRole: 'core',
       syncGlobalMaxInflight: 6,
       syncAdaptiveCapacity: { enabled: true },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
 
     expect(runtime.isAdaptive()).toBe(true);
     expect(runtime.getResolvedPolicyStatus().inflightLimit).toBe(1);
@@ -293,7 +340,7 @@ describe('sync capacity runtime resolution', () => {
     expect(() => SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncAdaptiveCapacity: { maxInflight },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 })).toThrow(
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }))).toThrow(
       'syncAdaptiveCapacity.maxInflight must be a positive integer',
     );
   });
@@ -303,7 +350,7 @@ describe('sync capacity runtime resolution', () => {
     expect(() => SyncCapacityRuntime.create({
       nodeRole: 'core',
       syncAdaptiveCapacity: { maxInflight: 1 },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 })).toThrow(
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }))).toThrow(
       'DKG_SYNC_ADAPTIVE_MAX_INFLIGHT must be a positive integer',
     );
   });
@@ -312,7 +359,7 @@ describe('sync capacity runtime resolution', () => {
     vi.stubEnv('DKG_SYNC_ADAPTIVE_MIN_INFLIGHT', '1.5');
     expect(() => SyncCapacityRuntime.create({
       nodeRole: 'core',
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 })).toThrow(
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }))).toThrow(
       'DKG_SYNC_ADAPTIVE_MIN_INFLIGHT must be a positive integer',
     );
   });
@@ -322,7 +369,7 @@ describe('sync capacity runtime resolution', () => {
       nodeRole: 'core',
       syncGlobalMaxInflight: 0,
       syncAdaptiveCapacity: { enabled: true },
-    }, fakeStore(STORE_PRESSURE), { parallelism: 16 });
+    }, fakeStore(STORE_PRESSURE), capacityOptions({ parallelism: 16 }));
 
     expect(runtime.isAdaptive()).toBe(false);
     expect(runtime.getResolvedPolicyStatus().inflightLimit).toBeNull();
@@ -331,7 +378,11 @@ describe('sync capacity runtime resolution', () => {
 
   it('honors the adaptive environment disable over inferred Core defaults', () => {
     vi.stubEnv('DKG_SYNC_ADAPTIVE_CAPACITY_ENABLED', '0');
-    const runtime = SyncCapacityRuntime.create({ nodeRole: 'core' }, fakeStore(STORE_PRESSURE));
+    const runtime = SyncCapacityRuntime.create(
+      { nodeRole: 'core' },
+      fakeStore(STORE_PRESSURE),
+      capacityOptions(),
+    );
     expect(runtime.isAdaptive()).toBe(false);
   });
 });

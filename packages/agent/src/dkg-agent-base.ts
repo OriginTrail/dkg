@@ -1630,13 +1630,18 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
   ) {
     this.config = config;
+    const resolvedCoverageBatch = resolveCorePublicSyncBatchSize(
+      config.syncCorePublicBatchSize,
+    );
     this.corePublicSyncCoverageScheduler = new CorePublicSyncCoverageScheduler(
-      resolveCorePublicSyncBatchSize(config.syncCorePublicBatchSize),
+      resolvedCoverageBatch,
     );
     this.wallet = wallet;
     this.node = node;
     this.store = store;
-    this.syncCapacityRuntime = SyncCapacityRuntime.create(config, store);
+    this.syncCapacityRuntime = SyncCapacityRuntime.create(config, store, {
+      resolvedCoverageBatch,
+    });
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;

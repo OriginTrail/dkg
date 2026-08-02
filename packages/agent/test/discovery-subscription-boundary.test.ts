@@ -481,8 +481,8 @@ describe('Context Graph discovery/subscription boundary', () => {
       let cpuTotal = 0;
       const constrainedRuntime = SyncCapacityRuntime.create({
         nodeRole: 'core',
-        syncCorePublicBatchSize: 8,
       }, agent.store, {
+        resolvedCoverageBatch: 8,
         parallelism: 16,
         samplerDependencies: {
           readCpuTimes: () => {

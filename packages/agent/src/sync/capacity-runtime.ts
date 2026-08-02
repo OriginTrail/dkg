@@ -23,14 +23,12 @@ import {
   type SyncGlobalBackpressureConfig,
   type SyncGlobalBackpressurePolicy,
 } from './backpressure.js';
-import { resolveCorePublicSyncBatchSize } from './core-public-coverage-scheduler.js';
 
 export const DEFAULT_SYNC_CAPACITY_SAMPLE_INTERVAL_MS = 5_000;
 
 export interface SyncCapacityRuntimeConfig extends SyncGlobalBackpressureConfig {
   nodeRole?: 'core' | 'edge';
   syncAdaptiveCapacity?: SyncAdaptiveCapacityConfig;
-  syncCorePublicBatchSize?: number;
 }
 
 export interface SyncCapacityStatus {
@@ -49,6 +47,8 @@ export interface SyncCapacityStatus {
 }
 
 export interface SyncCapacityRuntimeOptions {
+  /** Agent-boundary value shared with the Core coverage scheduler. */
+  resolvedCoverageBatch: number;
   parallelism?: number;
   samplerDependencies?: AdaptiveCapacitySamplerDependencies;
   now?: () => number;
@@ -114,11 +114,9 @@ export class SyncCapacityRuntime {
   static create(
     config: SyncCapacityRuntimeConfig,
     store: TripleStore,
-    options: SyncCapacityRuntimeOptions = {},
+    options: SyncCapacityRuntimeOptions,
   ): SyncCapacityRuntime {
-    const configuredCoverageBatch = resolveCorePublicSyncBatchSize(
-      config.syncCorePublicBatchSize,
-    );
+    const configuredCoverageBatch = options.resolvedCoverageBatch;
     const staticPolicy = resolveSyncGlobalBackpressure(config);
     const explicitGlobalLimit = resolveExplicitSyncGlobalLimit(config);
     const explicitlyEnabled = parseBooleanEnv('DKG_SYNC_ADAPTIVE_CAPACITY_ENABLED')
