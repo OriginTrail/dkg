@@ -13,105 +13,15 @@ import {
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import type { CatchupJobResult } from './catchup-result-wire.js';
+
+export type { CatchupJobResult } from './catchup-result-wire.js';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 const DURABLE_CATCHUP_PHASE_HEADROOM_MS = 1_000;
 const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
 const DURABLE_CATCHUP_SETTLEMENT_GRACE_MS = 30_000;
-
-export interface CatchupJobResult {
-  connectedPeers: number;
-  totalPeers?: number;
-  selectedPeers?: number;
-  syncCapablePeers: number;
-  peersTried: number;
-  /**
-   * Subset of `peersTried` whose per-peer sync round reached a responder
-   * and did not collapse into a transport failure. A responder can still
-   * time out part-way through, deny access, or serve metadata-only rows; this
-   * counter exists so daemon status mapping can distinguish "curator offline"
-   * from "reachable peer answered but did not complete cleanly".
-   */
-  peersResponded: number;
-  /**
-   * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, timeout, or explicit ACL denial, and with either real
-   * progress or a clean non-metadata-only empty completion.
-   */
-  peersSucceeded: number;
-  /**
-   * Sync-capable peers this run deliberately never contacted because an earlier
-   * wave already proved every requested plane. These are neither failures nor
-   * successes; they exist so status mapping and operators can tell an
-   * early-stopped run from a run where peers were unreachable.
-   */
-  peersNotAttempted?: number;
-  /** Context Graph phases deferred by this node's local sync scheduler. */
-  deferredBackpressure: number;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  denied: boolean;
-  deniedPeers: number;
-  /**
-   * Per-plane evidence produced before peer results are aggregated. Aggregate
-   * diagnostics intentionally retain every timeout/denial for observability,
-   * but readiness must not let one bad peer mask another peer that completed
-   * the same plane cleanly and stored verified data.
-   */
-  cleanPlaneCompletions?: {
-    /** Always carries `verifiedPrivateOnlyPeers`; only the durable plane can produce it. */
-    durable: CatchupPlaneCompletionEvidence & { verifiedPrivateOnlyPeers: number };
-    sharedMemory: CatchupPlaneCompletionEvidence;
-  };
-  diagnostics?: {
-    noProtocolPeers: number;
-    durable: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
-      verifiedPrivateOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-      failedPhases: number;
-      deferredBackpressure: number;
-      deniedPhases?: number;
-      /** A resolvable curator never cleanly answered this plane; see
-       * `catchupPlaneProvenByUnanimousEmpty`. */
-      authorityUnanswered?: boolean;
-    };
-    sharedMemory: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      emptyResponses: number;
-      droppedDataTriples: number;
-      failedPeers: number;
-      failedPhases: number;
-      deferredBackpressure: number;
-      deniedPhases?: number;
-      /** A resolvable curator never cleanly answered this plane; see
-       * `catchupPlaneProvenByUnanimousEmpty`. */
-      authorityUnanswered?: boolean;
-    };
-  };
-}
 
 export interface CatchupRunRequest {
   contextGraphId: string;

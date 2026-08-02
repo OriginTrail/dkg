@@ -120,6 +120,7 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
   describeContextGraphConvergence,
+  hasAuthoritativeContextGraphMetadata,
   readContextGraphReadiness,
 } from '../../context-graph-readiness.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
@@ -170,8 +171,8 @@ import {
   type CatchupJobState,
   type CatchupJob,
   type CatchupTracker,
-  toCatchupStatusResponse,
 } from '../types.js';
+import { toCatchupStatusResponse } from '../catchup-status-response.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -1038,8 +1039,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     }
 
     const subscription = agent.getSubscribedContextGraphs().get(job.contextGraphId);
-    const hasConfirmedMeta = await agent.hasConfirmedMetaState(job.contextGraphId)
-      .catch(() => false);
+    const hasConfirmedMeta = await hasAuthoritativeContextGraphMetadata({
+      agent,
+      contextGraphId: job.contextGraphId,
+    });
     const convergence = {
       ...describeContextGraphConvergence({
         readiness: readContextGraphReadiness(dashDb, job.contextGraphId),

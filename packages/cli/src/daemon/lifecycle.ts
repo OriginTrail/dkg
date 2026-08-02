@@ -211,7 +211,6 @@ import {
   type CatchupJobState,
   type CatchupJob,
   type CatchupTracker,
-  toCatchupStatusResponse,
 } from './types.js';
 import {
   type MarkItDownTarget,
@@ -3352,6 +3351,7 @@ export async function runDaemonInner(
   const catchupTracker: CatchupTracker = {
     jobs: new Map(),
     latestByContextGraph: new Map(),
+    inFlightByContextGraph: new Map(),
   };
 
   // --- Extraction Pipelines ---

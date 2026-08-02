@@ -3,6 +3,7 @@ import type { CatchupJobResult } from '../src/catchup-runner.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
   classifyContextGraphCatchupReadiness,
+  combineCatchupPlaneEvidence,
   describeContextGraphConvergence,
 } from '../src/context-graph-readiness.js';
 
@@ -534,6 +535,36 @@ describe('context graph catch-up readiness classification', () => {
 });
 
 describe('selected context-graph convergence snapshot', () => {
+  it('combines this-run evidence without reviving stale persisted proof', () => {
+    const planes = combineCatchupPlaneEvidence({
+      readinessBeforeCatchup: {
+        version: 0,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+        updatedAt: 42,
+      },
+      durableReadyThisRun: true,
+      sharedMemoryReadyThisRun: false,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+    });
+
+    expect(planes).toEqual({
+      state: 'partial',
+      required: {
+        metadata: true,
+        durable: true,
+        sharedMemory: true,
+      },
+      verified: {
+        metadata: true,
+        durable: true,
+        sharedMemory: false,
+      },
+      missing: ['sharedMemory'],
+    });
+  });
+
   it('requires independently verified VM and requested SWM planes', () => {
     const snapshot = describeContextGraphConvergence({
       readiness: {

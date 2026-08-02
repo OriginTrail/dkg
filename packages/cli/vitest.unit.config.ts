@@ -47,7 +47,12 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/context-graph-catchup-coalescing-route.test.ts',
+          'test/context-graph-catchup-coordinator.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
+          'test/catchup-status-response.test.ts',
+          'test/catchup-status-convergence-route.test.ts',
+          'test/catchup-status-cli.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.

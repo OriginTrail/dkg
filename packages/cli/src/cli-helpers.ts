@@ -202,9 +202,9 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   console.log(`Context Graph: ${status.contextGraphId}`);
   console.log(`Job:           ${status.jobId}`);
   console.log(`Status:        ${status.status}`);
-  if (status.attemptStatus !== status.status) {
-    console.log(`Last attempt:  ${status.attemptStatus}`);
-    if (status.attemptError) console.log(`Attempt error: ${status.attemptError}`);
+  if (status.attempt) {
+    console.log(`Last attempt:  ${status.attempt.status}`);
+    if (status.attempt.error) console.log(`Attempt error: ${status.attempt.error}`);
   }
   console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);

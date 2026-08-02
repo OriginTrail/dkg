@@ -14,6 +14,7 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type { CatchupStatusResponse } from './catchup-status-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -1643,91 +1644,7 @@ export class ApiClient {
     });
   }
 
-  async catchupStatus(contextGraphId: string): Promise<{
-    jobId: string;
-    contextGraphId: string;
-    includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
-    attemptStatus: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
-    queuedAt: number;
-    startedAt?: number;
-    finishedAt?: number;
-    result?: {
-      connectedPeers: number;
-      totalPeers?: number;
-      selectedPeers?: number;
-      syncCapablePeers: number;
-      peersTried: number;
-      peersResponded: number;
-      peersSucceeded: number;
-      /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
-      peersNotAttempted?: number;
-      deferredBackpressure: number;
-      dataSynced: number;
-      sharedMemorySynced: number;
-      denied: boolean;
-      deniedPeers: number;
-      diagnostics?: {
-        noProtocolPeers: number;
-        durable: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          metaOnlyResponses: number;
-          verifiedPrivateOnlyResponses?: number;
-          dataRejectedMissingMeta: number;
-          rejectedKcs: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-        sharedMemory: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          droppedDataTriples: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-      };
-    };
-    error?: string;
-    attemptError?: string;
-    convergence?: {
-      state: 'pending' | 'partial' | 'complete';
-      required: {
-        metadata: true;
-        durable: true;
-        sharedMemory: boolean;
-      };
-      verified: {
-        metadata: boolean;
-        durable: boolean;
-        sharedMemory: boolean;
-      };
-      missing: Array<'metadata' | 'durable' | 'sharedMemory'>;
-      readinessUpdatedAt?: number;
-      observedAt: number;
-      syncMode: 'on-demand' | 'always-on';
-      automaticRetryActive: boolean;
-    };
-    completedAfterAttempt?: true;
-  }> {
+  async catchupStatus(contextGraphId: string): Promise<CatchupStatusResponse> {
     return this.get(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
   }
 

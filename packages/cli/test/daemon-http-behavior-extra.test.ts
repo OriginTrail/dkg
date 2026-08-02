@@ -994,7 +994,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
 
   it('marks timeout-after-response catchup as failed rather than unreachable', async () => {
     const contextGraphId = 'catchup-timeout-response-' + Math.random().toString(36).slice(2, 8);
-    const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
+    const catchupTracker = {
+      jobs: new Map<string, any>(),
+      latestByContextGraph: new Map<string, string>(),
+      inFlightByContextGraph: new Map(),
+    };
     const previousCatchupRunner = daemonState.catchupRunner;
     daemonState.catchupRunner = {
       run: async () => ({
@@ -1144,7 +1148,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
 
   it('marks local scheduler deferral retryable without setting shared-memory completion', async () => {
     const contextGraphId = 'catchup-local-deferral-' + Math.random().toString(36).slice(2, 8);
-    const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
+    const catchupTracker = {
+      jobs: new Map<string, any>(),
+      latestByContextGraph: new Map<string, string>(),
+      inFlightByContextGraph: new Map(),
+    };
     const previousCatchupRunner = daemonState.catchupRunner;
     daemonState.catchupRunner = {
       run: async () => ({
@@ -2403,6 +2411,7 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
+      inFlightByContextGraph: new Map(),
     };
     const previousCatchupRunner = daemonState.catchupRunner;
     // Benign runner: the queued job runs fire-and-forget after the response and

@@ -114,9 +114,8 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
-  catchupResultHasCleanResponse,
-  classifyContextGraphCatchupReadiness,
   classifyExistingContextGraphReadiness,
+  hasAuthoritativeContextGraphMetadata,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
@@ -167,10 +166,9 @@ import {
 import {
   type CatchupJobState,
   type CatchupJob,
-  type CatchupCoordinator,
   type CatchupTracker,
-  toCatchupStatusResponse,
 } from '../types.js';
+import { ContextGraphCatchupCoordinatorService } from '../context-graph-catchup-coordinator.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -1742,46 +1740,40 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: requestedSyncMode,
     });
     const effectiveSyncMode = appliedSubscription.syncMode;
-    const inFlightByContextGraph = catchupTracker.inFlightByContextGraph ??=
-      new Map<string, CatchupCoordinator>();
-    const existingCoordinator = inFlightByContextGraph.get(contextGraphId);
+    const catchupCoordinator = new ContextGraphCatchupCoordinatorService(
+      catchupTracker,
+      {
+        runner: daemonState.catchupRunner!,
+        readReadiness: (id) => readContextGraphReadiness(dashDb, id),
+        hasConfirmedMeta: (id) => hasAuthoritativeContextGraphMetadata({
+          agent,
+          contextGraphId: id,
+        }),
+        isPrivate: (id) => agent.isPrivateContextGraph(id).catch(() => true),
+        writeReadiness: (id, patch) => writeContextGraphReadiness(dashDb, id, patch),
+        markSubscriptionState: (id, patch) =>
+          agent.markContextGraphSubscriptionState(id, patch),
+        emitProjectSynced: (id, payload) => {
+          agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
+            contextGraphId: id,
+            ...payload,
+          });
+        },
+        ...(DEBUG_SYNC_TRACE
+          ? { trace: (message: string) => console.log(message) }
+          : {}),
+      },
+    );
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
-      const baseJob = existingCoordinator
-        ? catchupTracker.jobs.get(existingCoordinator.baseJobId)
-        : undefined;
-      const upgradeJob = existingCoordinator?.upgradeJobId
-        ? catchupTracker.jobs.get(existingCoordinator.upgradeJobId)
-        : undefined;
-      const coordinatorActive = existingCoordinator &&
-        [baseJob, upgradeJob].some((candidate) =>
-          candidate?.status === 'queued' || candidate?.status === 'running');
-      if (existingCoordinator && baseJob && coordinatorActive) {
-        // Coalesce onto one serialized worker without changing the contract of
-        // an already-issued jobId. A later VM+SWM request gets a separate
-        // public job record while the coordinator records the monotonic work
-        // upgrade for the running worker.
-        let responseJob = baseJob;
-        if (shouldSyncSharedMemory && !baseJob.includeWorkspace) {
-          existingCoordinator.requestedIncludeSharedMemory = true;
-          responseJob = upgradeJob ?? (() => {
-            const upgradeJobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-            const createdUpgradeJob: CatchupJob = {
-              jobId: upgradeJobId,
-              contextGraphId,
-              includeWorkspace: true,
-              status: 'queued',
-              queuedAt: Date.now(),
-            };
-            catchupTracker.jobs.set(upgradeJobId, createdUpgradeJob);
-            catchupTracker.latestByContextGraph.set(contextGraphId, upgradeJobId);
-            existingCoordinator.upgradeJobId = upgradeJobId;
-            return createdUpgradeJob;
-          })();
-        }
+      const responseJob = catchupCoordinator.coalesceActive({
+        contextGraphId,
+        includeSharedMemory: shouldSyncSharedMemory,
+      });
+      if (responseJob) {
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
@@ -1859,177 +1851,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode}`,
     );
 
-    const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const job: CatchupJob = {
-      jobId,
+    const job = catchupCoordinator.start({
       contextGraphId,
-      includeWorkspace: shouldSyncSharedMemory,
-      status: "queued",
-      queuedAt: Date.now(),
-    };
-    catchupTracker.jobs.set(jobId, job);
-    catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
-    const coordinator: CatchupCoordinator = {
-      contextGraphId,
-      baseJobId: jobId,
-      requestedIncludeSharedMemory: shouldSyncSharedMemory,
-    };
-    inFlightByContextGraph.set(contextGraphId, coordinator);
-
-    while (catchupTracker.jobs.size > 100) {
-      let oldestId: string | undefined;
-      let oldestQueuedAt = Number.POSITIVE_INFINITY;
-      for (const [id, entry] of catchupTracker.jobs.entries()) {
-        if (entry.queuedAt < oldestQueuedAt) {
-          oldestQueuedAt = entry.queuedAt;
-          oldestId = id;
-        }
-      }
-      if (!oldestId) break;
-      const removed = catchupTracker.jobs.get(oldestId);
-      catchupTracker.jobs.delete(oldestId);
-      if (
-        removed &&
-        catchupTracker.latestByContextGraph.get(removed.contextGraphId) === oldestId
-      ) {
-        catchupTracker.latestByContextGraph.delete(removed.contextGraphId);
-      }
-    }
-
-    void (async () => {
-      let attemptJob = job;
-      const settleQueuedUpgradeFrom = (source: CatchupJob) => {
-        const queuedUpgrade = coordinator.upgradeJobId
-          ? catchupTracker.jobs.get(coordinator.upgradeJobId)
-          : undefined;
-        if (!queuedUpgrade || queuedUpgrade.status !== 'queued') return;
-        queuedUpgrade.status = source.status;
-        queuedUpgrade.error = source.error;
-        queuedUpgrade.result = source.result;
-        queuedUpgrade.startedAt = source.startedAt;
-        queuedUpgrade.finishedAt = Date.now();
-      };
-      try {
-        let attemptReadinessBeforeCatchup = readinessBeforeCatchup;
-        while (true) {
-          attemptJob.status = 'running';
-          attemptJob.startedAt ??= Date.now();
-          const attemptIncludeSharedMemory = attemptJob.includeWorkspace;
-          if (DEBUG_SYNC_TRACE) {
-            console.log(
-              `[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} started`,
-            );
-          }
-          const result = await daemonState.catchupRunner!.run({
-            contextGraphId: contextGraphId,
-            includeSharedMemory: attemptIncludeSharedMemory,
-          });
-          attemptJob.result = result;
-          attemptJob.error = undefined;
-          // Local scheduler pressure cut the round short. An incomplete round has
-          // no readiness to inspect and must never finalize the subscription, so
-          // short-circuit the whole classification path and report a distinct
-          // retryable status. A remote denial still wins: waiting for local
-          // capacity will never clear it.
-          if (result.deferredBackpressure > 0 && !result.denied) {
-            attemptJob.status = "deferred";
-            attemptJob.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-            if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
-          } else {
-            const inspectReadiness = catchupResultHasCleanResponse(result);
-            const hasConfirmedMeta = inspectReadiness
-              ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
-              : false;
-            const isPrivate = hasConfirmedMeta
-              ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-              : false;
-            const classification = classifyContextGraphCatchupReadiness({
-              result,
-              includeSharedMemory: attemptIncludeSharedMemory,
-              hasConfirmedMeta,
-              isPrivate,
-              readinessBeforeCatchup: attemptReadinessBeforeCatchup,
-            });
-
-            attemptJob.status = classification.jobStatus;
-            attemptJob.error = classification.error;
-            if (classification.readinessPatch) {
-              writeContextGraphReadiness(
-                dashDb,
-                contextGraphId,
-                classification.readinessPatch,
-              );
-            }
-            if (classification.statePatch) {
-              agent.markContextGraphSubscriptionState(
-                contextGraphId,
-                classification.statePatch,
-              );
-            }
-            if (classification.eventPayload) {
-              agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-                contextGraphId,
-                ...classification.eventPayload,
-              });
-            }
-
-            // Denial took precedence above, but a denied-yet-still-deferred round
-            // is likewise incomplete: never let it settle as a successful "done".
-            if (attemptJob.status === "done" && result.deferredBackpressure > 0) {
-              attemptJob.status = "deferred";
-              attemptJob.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-            }
-          }
-          attemptJob.finishedAt = Date.now();
-
-          if (DEBUG_SYNC_TRACE) {
-            if (attemptJob.status === 'denied') {
-              console.log(`[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
-            }
-            console.log(
-              `[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} status=${attemptJob.status} ` +
-                `peers=${result.peersTried}/${result.syncCapablePeers} ` +
-                `connected=${result.totalPeers ?? result.connectedPeers} ` +
-                `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-            );
-          }
-
-          // A caller may upgrade a running VM-only selection to VM+SWM. Finish
-          // the narrow public job, then satisfy the wider public job through
-          // this same serialized coordinator instead of launching competing
-          // per-CG catch-up work.
-          if (
-            coordinator.requestedIncludeSharedMemory &&
-            !attemptIncludeSharedMemory &&
-            attemptJob.status !== 'denied'
-          ) {
-            const upgradeJob = coordinator.upgradeJobId
-              ? catchupTracker.jobs.get(coordinator.upgradeJobId)
-              : undefined;
-            if (!upgradeJob) break;
-            attemptJob = upgradeJob;
-            attemptReadinessBeforeCatchup = readContextGraphReadiness(
-              dashDb,
-              contextGraphId,
-            );
-            continue;
-          }
-          if (!attemptIncludeSharedMemory) settleQueuedUpgradeFrom(attemptJob);
-          break;
-        }
-      } catch (err) {
-        attemptJob.error = err instanceof Error ? err.message : String(err);
-        attemptJob.status = "failed";
-        attemptJob.finishedAt = Date.now();
-        settleQueuedUpgradeFrom(attemptJob);
-        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${attemptJob.jobId} contextGraph=${contextGraphId} threw: ${attemptJob.error}`);
-      } finally {
-        attemptJob.finishedAt ??= Date.now();
-        if (inFlightByContextGraph.get(contextGraphId) === coordinator) {
-          inFlightByContextGraph.delete(contextGraphId);
-        }
-      }
-    })();
+      includeSharedMemory: shouldSyncSharedMemory,
+      readinessBeforeCatchup,
+    });
 
     return jsonResponse(res, 200, {
       subscribed: contextGraphId,
@@ -2037,7 +1863,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       catchup: {
         status: "queued",
         includeWorkspace: shouldSyncSharedMemory,
-        jobId,
+        jobId: job.jobId,
       },
     });
   }

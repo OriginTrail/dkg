@@ -13,8 +13,16 @@ import {
   type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
 } from './catchup-runner.js';
+import type {
+  ContextGraphConvergencePlane,
+  ContextGraphConvergenceSnapshot,
+} from './context-graph-readiness-wire.js';
 
 export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
+export type {
+  ContextGraphConvergencePlane,
+  ContextGraphConvergenceSnapshot,
+} from './context-graph-readiness-wire.js';
 
 export const CONTEXT_GRAPH_READINESS_VERSION = 1;
 
@@ -42,28 +50,52 @@ export interface ContextGraphReadinessPatch {
   sharedMemoryVerified: boolean;
 }
 
-export type ContextGraphConvergencePlane = 'metadata' | 'durable' | 'sharedMemory';
+export type ContextGraphReadinessPlanes = Omit<
+  ContextGraphConvergenceSnapshot,
+  'observedAt'
+>;
 
-export interface ContextGraphConvergenceSnapshot {
-  state: 'pending' | 'partial' | 'complete';
-  required: {
-    metadata: true;
-    durable: true;
-    sharedMemory: boolean;
-  };
-  verified: {
-    metadata: boolean;
-    durable: boolean;
-    sharedMemory: boolean;
-  };
-  missing: ContextGraphConvergencePlane[];
-  readinessUpdatedAt?: number;
-  observedAt: number;
+function hasCurrentReadinessProvenance(
+  readiness: ContextGraphReadinessProvenance,
+): boolean {
+  return readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
 }
 
-export interface ContextGraphReadinessPlanes
-  extends Omit<ContextGraphConvergenceSnapshot, 'observedAt'> {
-  currentReadinessProvenance: boolean;
+function describeResolvedReadinessPlanes(input: {
+  hasConfirmedMeta: boolean;
+  includeSharedMemory: boolean;
+  durableEvidence: boolean;
+  sharedMemoryEvidence: boolean;
+  readinessUpdatedAt?: number;
+}): ContextGraphReadinessPlanes {
+  const metadataVerified = input.hasConfirmedMeta;
+  const durableVerified = metadataVerified && input.durableEvidence;
+  const sharedMemoryVerified = metadataVerified && input.sharedMemoryEvidence;
+  const missing: ContextGraphConvergencePlane[] = [];
+  if (!metadataVerified) missing.push('metadata');
+  if (!durableVerified) missing.push('durable');
+  if (input.includeSharedMemory && !sharedMemoryVerified) missing.push('sharedMemory');
+
+  const anyVerified = metadataVerified || durableVerified ||
+    (input.includeSharedMemory && sharedMemoryVerified);
+
+  return {
+    state: missing.length === 0 ? 'complete' : anyVerified ? 'partial' : 'pending',
+    required: {
+      metadata: true,
+      durable: true,
+      sharedMemory: input.includeSharedMemory,
+    },
+    verified: {
+      metadata: metadataVerified,
+      durable: durableVerified,
+      sharedMemory: sharedMemoryVerified,
+    },
+    missing,
+    ...(input.readinessUpdatedAt !== undefined
+      ? { readinessUpdatedAt: input.readinessUpdatedAt }
+      : {}),
+  };
 }
 
 /**
@@ -77,41 +109,49 @@ export function describeReadinessPlanes(input: {
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
 }): ContextGraphReadinessPlanes {
-  const currentReadinessProvenance =
-    input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
-  const metadataVerified = input.hasConfirmedMeta;
-  const durableVerified = metadataVerified &&
-    currentReadinessProvenance &&
-    input.readiness.durableVerified;
-  const sharedMemoryVerified = metadataVerified &&
-    currentReadinessProvenance &&
-    input.readiness.sharedMemoryVerified;
-  const missing: ContextGraphConvergencePlane[] = [];
-  if (!metadataVerified) missing.push('metadata');
-  if (!durableVerified) missing.push('durable');
-  if (input.includeSharedMemory && !sharedMemoryVerified) missing.push('sharedMemory');
-
-  const anyVerified = metadataVerified || durableVerified ||
-    (input.includeSharedMemory && sharedMemoryVerified);
-
-  return {
-    currentReadinessProvenance,
-    state: missing.length === 0 ? 'complete' : anyVerified ? 'partial' : 'pending',
-    required: {
-      metadata: true,
-      durable: true,
-      sharedMemory: input.includeSharedMemory,
-    },
-    verified: {
-      metadata: metadataVerified,
-      durable: durableVerified,
-      sharedMemory: sharedMemoryVerified,
-    },
-    missing,
+  const currentReadinessProvenance = hasCurrentReadinessProvenance(input.readiness);
+  return describeResolvedReadinessPlanes({
+    hasConfirmedMeta: input.hasConfirmedMeta,
+    includeSharedMemory: input.includeSharedMemory,
+    durableEvidence:
+      currentReadinessProvenance && input.readiness.durableVerified,
+    sharedMemoryEvidence:
+      currentReadinessProvenance && input.readiness.sharedMemoryVerified,
     ...(currentReadinessProvenance
       ? { readinessUpdatedAt: input.readiness.updatedAt }
       : {}),
-  };
+  });
+}
+
+/**
+ * Merge current-run completion evidence with persisted provenance without
+ * pretending the merged value was itself read from storage.
+ */
+export function combineCatchupPlaneEvidence(input: {
+  readinessBeforeCatchup: ContextGraphReadinessProvenance;
+  durableReadyThisRun: boolean;
+  sharedMemoryReadyThisRun: boolean;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+}): ContextGraphReadinessPlanes {
+  const currentReadinessProvenance = hasCurrentReadinessProvenance(
+    input.readinessBeforeCatchup,
+  );
+  return describeResolvedReadinessPlanes({
+    hasConfirmedMeta: input.hasConfirmedMeta,
+    includeSharedMemory: input.includeSharedMemory,
+    durableEvidence:
+      (currentReadinessProvenance &&
+        input.readinessBeforeCatchup.durableVerified) ||
+      input.durableReadyThisRun,
+    sharedMemoryEvidence:
+      (currentReadinessProvenance &&
+        input.readinessBeforeCatchup.sharedMemoryVerified) ||
+      input.sharedMemoryReadyThisRun,
+    ...(currentReadinessProvenance
+      ? { readinessUpdatedAt: input.readinessBeforeCatchup.updatedAt }
+      : {}),
+  });
 }
 
 /**
@@ -125,13 +165,8 @@ export function describeContextGraphConvergence(input: {
   hasConfirmedMeta: boolean;
   observedAt?: number;
 }): ContextGraphConvergenceSnapshot {
-  const {
-    currentReadinessProvenance: _currentReadinessProvenance,
-    ...planes
-  } = describeReadinessPlanes(input);
-
   return {
-    ...planes,
+    ...describeReadinessPlanes(input),
     observedAt: input.observedAt ?? Date.now(),
   };
 }
@@ -167,6 +202,9 @@ export function classifyExistingContextGraphReadiness(input: {
   statePatch?: ContextGraphSubscriptionStatePatch;
   readinessPatch?: ContextGraphReadinessPatch;
 } {
+  const currentReadinessProvenance = hasCurrentReadinessProvenance(
+    input.readiness,
+  );
   const planes = describeReadinessPlanes(input);
   const alreadyReady =
     planes.state === 'complete' &&
@@ -211,7 +249,7 @@ export function classifyExistingContextGraphReadiness(input: {
   return {
     alreadyReady: false,
     statePatch,
-    readinessPatch: planes.currentReadinessProvenance
+    readinessPatch: currentReadinessProvenance
       ? undefined
       : {
           durableVerified: false,
@@ -426,14 +464,10 @@ export function classifyContextGraphCatchupReadiness(input: {
       currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
     const sharedMemoryVerifiedBefore =
       currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
-    const planes = describeReadinessPlanes({
-      readiness: {
-        version: CONTEXT_GRAPH_READINESS_VERSION,
-        durableVerified: durableVerifiedBefore || durableReadyThisRun,
-        sharedMemoryVerified:
-          sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun,
-        updatedAt: input.readinessBeforeCatchup.updatedAt,
-      },
+    const planes = combineCatchupPlaneEvidence({
+      readinessBeforeCatchup: input.readinessBeforeCatchup,
+      durableReadyThisRun,
+      sharedMemoryReadyThisRun,
       includeSharedMemory: input.includeSharedMemory,
       hasConfirmedMeta: input.hasConfirmedMeta,
     });
@@ -589,6 +623,24 @@ async function withContextGraphReadinessMutationLock<T>(
 }
 
 /**
+ * Require authoritative metadata for a readiness decision. Only a locally
+ * curated graph may trust its own pre-registration definition; remote graphs
+ * must reject the legacy unregistered placeholder shape.
+ */
+export async function hasAuthoritativeContextGraphMetadata(input: {
+  agent: DKGAgent;
+  contextGraphId: string;
+}): Promise<boolean> {
+  const locallyCurated = typeof input.agent.isCuratorOf === 'function'
+    ? await input.agent.isCuratorOf(input.contextGraphId).catch(() => false)
+    : false;
+  return input.agent.hasConfirmedMetaState(
+    input.contextGraphId,
+    { rejectUnregisteredPlaceholder: !locallyCurated },
+  ).catch(() => false);
+}
+
+/**
  * Revalidate live metadata and invalidate subscription/provenance together.
  * Returns false when authoritative metadata arrived before this reset acquired
  * the readiness lock, in which case newer PROJECT_SYNCED proof is preserved.
@@ -602,13 +654,10 @@ export async function resetContextGraphReadinessForMissingMetadata(input: {
   if (!contextGraphId) return false;
 
   return withContextGraphReadinessMutationLock(input.agent, contextGraphId, async () => {
-    const locallyCurated = typeof input.agent.isCuratorOf === 'function'
-      ? await input.agent.isCuratorOf(contextGraphId).catch(() => false)
-      : false;
-    const hasConfirmedMeta = await input.agent.hasConfirmedMetaState(
+    const hasConfirmedMeta = await hasAuthoritativeContextGraphMetadata({
+      agent: input.agent,
       contextGraphId,
-      { rejectUnregisteredPlaceholder: !locallyCurated },
-    ).catch(() => false);
+    });
     if (hasConfirmedMeta) return false;
 
     const patches = missingMetadataReadinessPatches();

@@ -154,7 +154,6 @@ import {
   type CatchupJobState,
   type CatchupJob,
   type CatchupTracker,
-  toCatchupStatusResponse,
 } from '../types.js';
 import {
   type MarkItDownTarget,

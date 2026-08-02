@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   toCatchupStatusResponse,
   type CatchupConvergenceStatus,
-  type CatchupJob,
-} from '../src/daemon/types.js';
+} from '../src/daemon/catchup-status-response.js';
+import type { CatchupJob } from '../src/daemon/types.js';
 
 const completeConvergence: CatchupConvergenceStatus = {
   state: 'complete',
@@ -41,20 +41,51 @@ describe('catch-up status response', () => {
   it('reports live completion while preserving a failed attempt as diagnostics', () => {
     expect(toCatchupStatusResponse(job('failed'), completeConvergence)).toMatchObject({
       status: 'done',
-      attemptStatus: 'failed',
-      attemptError: 'failed attempt',
-      error: undefined,
+      attempt: {
+        status: 'failed',
+        error: 'failed attempt',
+      },
       completedAfterAttempt: true,
       convergence: completeConvergence,
     });
+    expect(toCatchupStatusResponse(job('failed'), completeConvergence))
+      .not.toHaveProperty('error');
+  });
+
+  it('does not hide a failed attempt behind readiness that predates it', () => {
+    const staleConvergence = { ...completeConvergence, readinessUpdatedAt: 3 };
+
+    expect(toCatchupStatusResponse(job('failed'), staleConvergence)).toMatchObject({
+      status: 'failed',
+      error: 'failed attempt',
+      convergence: staleConvergence,
+    });
+    expect(toCatchupStatusResponse(job('failed'), staleConvergence))
+      .not.toHaveProperty('completedAfterAttempt');
+    expect(toCatchupStatusResponse(job('failed'), staleConvergence))
+      .not.toHaveProperty('attempt');
   });
 
   it('never lets historical readiness override a current authorization denial', () => {
     expect(toCatchupStatusResponse(job('denied'), completeConvergence)).toMatchObject({
       status: 'denied',
-      attemptStatus: 'denied',
       error: 'denied attempt',
       convergence: completeConvergence,
+    });
+  });
+
+  it('downgrades the actionable status when a completed attempt loses convergence', () => {
+    const invalidatedConvergence = {
+      ...completeConvergence,
+      state: 'pending' as const,
+      verified: { metadata: false, durable: false, sharedMemory: false },
+      missing: ['metadata', 'durable', 'sharedMemory'] as const,
+    };
+
+    expect(toCatchupStatusResponse(job('done'), invalidatedConvergence)).toMatchObject({
+      status: 'unreachable',
+      attempt: { status: 'done' },
+      convergence: invalidatedConvergence,
     });
   });
 });
