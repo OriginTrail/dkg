@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   SyncCoverageEvidenceJournal,
   boundedSyncCoverageContextGraphIds,
+  type EdgeReconcilerJobHandle,
 } from '../src/sync/coverage-evidence-journal.js';
 
 describe('SyncCoverageEvidenceJournal', () => {
@@ -104,6 +105,14 @@ describe('SyncCoverageEvidenceJournal', () => {
       verifiedByContextGraph: new Map(),
       finishedAt: 102,
     })).toThrow(/not issued by this module/);
+    expect(() => journal.finishEdgeReconcilerJob(
+      handle as unknown as EdgeReconcilerJobHandle,
+      {
+        operationCompleted: true,
+        verifiedByContextGraph: new Map(),
+        finishedAt: 102,
+      },
+    )).toThrow(/kind does not match Edge job/);
 
     const terminal = journal.finishCoreAutomaticRound(handle, {
       operationCompleted: true,

@@ -224,6 +224,9 @@ export class SyncCoverageEvidenceJournal {
     handle: CoreAutomaticRoundHandle,
     input: FinishSyncCoverageEvidenceInput,
   ): CoreAutomaticSyncCoverageEvidence {
+    if (handle.kind !== 'core-automatic-round') {
+      throw new TypeError('sync coverage evidence handle kind does not match Core round');
+    }
     const running = this.takeRunning(handle);
     if (running.kind !== 'core-automatic-round') {
       throw new TypeError('sync coverage evidence handle kind does not match Core round');
@@ -300,6 +303,9 @@ export class SyncCoverageEvidenceJournal {
     handle: EdgeReconcilerJobHandle,
     input: FinishSyncCoverageEvidenceInput,
   ): EdgeReconcilerSyncCoverageEvidence {
+    if (handle.kind !== 'edge-reconciler-job') {
+      throw new TypeError('sync coverage evidence handle kind does not match Edge job');
+    }
     const running = this.takeRunning(handle);
     if (running.kind !== 'edge-reconciler-job') {
       throw new TypeError('sync coverage evidence handle kind does not match Edge job');
