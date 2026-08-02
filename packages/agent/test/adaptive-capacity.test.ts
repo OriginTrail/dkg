@@ -252,6 +252,81 @@ describe('adaptive sync capacity controller', () => {
     });
   });
 
+  it('keeps decision endpoints aligned with each applied capacity window', () => {
+    const capacity = controller({
+      initialInflight: 4,
+      maxInflight: 8,
+      configuredCoverageBatch: 4,
+    });
+    const strained = healthySample({ cpuUtilization: 0.85 });
+
+    expect(capacity.observe(strained, 5_000)).toMatchObject({
+      state: 'cooldown',
+      currentInflight: 4,
+      effectiveCoverageBatch: 4,
+      consecutiveStrainedSamples: 1,
+      consecutiveHealthyDemandSamples: 0,
+      lastDecision: {
+        action: 'hold',
+        reason: 'strained_hysteresis',
+        previousInflight: 4,
+        currentInflight: 4,
+        previousCoverageBatch: 4,
+        currentCoverageBatch: 4,
+      },
+    });
+    expect(capacity.observe(strained, 10_000)).toMatchObject({
+      state: 'constrained',
+      currentInflight: 3,
+      effectiveCoverageBatch: 3,
+      consecutiveStrainedSamples: 0,
+      consecutiveHealthyDemandSamples: 0,
+      cooldownUntilMs: 40_000,
+      lastDecision: {
+        action: 'decrease',
+        reason: 'strained_cpu',
+        previousInflight: 4,
+        currentInflight: 3,
+        previousCoverageBatch: 4,
+        currentCoverageBatch: 3,
+      },
+    });
+    expect(capacity.observe(healthySample({ heapRatio: 0.82 }), 15_000)).toMatchObject({
+      state: 'constrained',
+      currentInflight: 1,
+      effectiveCoverageBatch: 1,
+      cooldownUntilMs: 45_000,
+      lastDecision: {
+        action: 'halve',
+        reason: 'critical_heap',
+        previousInflight: 3,
+        currentInflight: 1,
+        previousCoverageBatch: 3,
+        currentCoverageBatch: 1,
+      },
+    });
+
+    for (let sample = 1; sample <= 5; sample += 1) {
+      capacity.observe(healthySample(), 15_000 + sample * 5_000);
+    }
+    expect(capacity.observe(healthySample(), 45_000)).toMatchObject({
+      state: 'cooldown',
+      currentInflight: 2,
+      effectiveCoverageBatch: 2,
+      consecutiveStrainedSamples: 0,
+      consecutiveHealthyDemandSamples: 0,
+      cooldownUntilMs: 75_000,
+      lastDecision: {
+        action: 'increase',
+        reason: 'healthy_hysteresis',
+        previousInflight: 1,
+        currentInflight: 2,
+        previousCoverageBatch: 1,
+        currentCoverageBatch: 2,
+      },
+    });
+  });
+
   it('allows host-healthy growth to two without store telemetry but never above it', () => {
     const capacity = controller({
       initialInflight: 1,

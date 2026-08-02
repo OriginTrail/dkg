@@ -198,6 +198,41 @@ interface ClassifiedSample {
   reason: AdaptiveCapacityReason;
 }
 
+interface CapacityWindow {
+  readonly inflight: number;
+  readonly coverageBatch: number;
+}
+
+interface CapacityCounters {
+  readonly strainedSamples: number;
+  readonly healthyDemandSamples: number;
+}
+
+interface CapacityControllerState {
+  readonly window: Readonly<CapacityWindow>;
+  readonly counters: Readonly<CapacityCounters>;
+  readonly state: AdaptiveCapacityState;
+  readonly cooldownUntilMs: number;
+  readonly storePressureTelemetryAvailable: boolean;
+}
+
+interface CapacityTransitionContext {
+  readonly current: Readonly<CapacityControllerState>;
+  readonly classified: Readonly<ClassifiedSample>;
+  readonly sample: Readonly<AdaptiveCapacitySample>;
+  readonly bounds: Extract<AdaptiveCapacityBounds, { mode: 'bounded' }>;
+  readonly atMs: number;
+  readonly cooldownMs: number;
+  readonly healthySamplesToGrow: number;
+  readonly strainedSamplesToShrink: number;
+}
+
+interface CapacityTransition {
+  readonly action: AdaptiveCapacityAction;
+  readonly reason: AdaptiveCapacityReason;
+  readonly next: Readonly<CapacityControllerState>;
+}
+
 function validateRatio(name: string, value: number | undefined): void {
   if (value === undefined) return;
   if (!Number.isFinite(value) || value < 0 || value > 1) {
@@ -282,6 +317,178 @@ function classifySample(sample: AdaptiveCapacitySample): ClassifiedSample {
   return { kind: 'ambiguous', reason: 'ambiguous_signals' };
 }
 
+function buildTransition(
+  context: CapacityTransitionContext,
+  action: AdaptiveCapacityAction,
+  reason: AdaptiveCapacityReason,
+  next: {
+    window?: Readonly<CapacityWindow>;
+    counters?: Readonly<CapacityCounters>;
+    state: AdaptiveCapacityState;
+    cooldownUntilMs?: number;
+  },
+): CapacityTransition {
+  return {
+    action,
+    reason,
+    next: {
+      window: next.window ?? context.current.window,
+      counters: next.counters ?? context.current.counters,
+      state: next.state,
+      cooldownUntilMs: next.cooldownUntilMs ?? context.current.cooldownUntilMs,
+      storePressureTelemetryAvailable: context.sample.store.telemetryAvailable,
+    },
+  };
+}
+
+function holdCapacity(
+  context: CapacityTransitionContext,
+  reason: AdaptiveCapacityReason,
+  state: AdaptiveCapacityState,
+  counters: Readonly<CapacityCounters> = context.current.counters,
+): CapacityTransition {
+  return buildTransition(context, 'hold', reason, { state, counters });
+}
+
+function halveCapacity(
+  context: CapacityTransitionContext,
+): CapacityTransition {
+  const { current, bounds, classified, atMs, cooldownMs } = context;
+  return buildTransition(context, 'halve', classified.reason, {
+    window: {
+      inflight: Math.max(bounds.minInflight, Math.floor(current.window.inflight / 2)),
+      coverageBatch: current.window.coverageBatch > 0
+        ? Math.max(1, Math.floor(current.window.coverageBatch / 2))
+        : 0,
+    },
+    counters: { strainedSamples: 0, healthyDemandSamples: 0 },
+    state: 'constrained',
+    cooldownUntilMs: atMs + cooldownMs,
+  });
+}
+
+function decreaseCapacity(
+  context: CapacityTransitionContext,
+): CapacityTransition {
+  const { current, bounds, classified, atMs, cooldownMs } = context;
+  return buildTransition(context, 'decrease', classified.reason, {
+    window: {
+      inflight: Math.max(bounds.minInflight, current.window.inflight - 1),
+      coverageBatch: current.window.coverageBatch > 0
+        ? Math.max(1, current.window.coverageBatch - 1)
+        : 0,
+    },
+    counters: { strainedSamples: 0, healthyDemandSamples: 0 },
+    state: 'constrained',
+    cooldownUntilMs: atMs + cooldownMs,
+  });
+}
+
+function increaseCapacity(
+  context: CapacityTransitionContext,
+  inflightCanGrow: boolean,
+  coverageCanGrow: boolean,
+): CapacityTransition {
+  const { current, atMs, cooldownMs } = context;
+  return buildTransition(context, 'increase', 'healthy_hysteresis', {
+    window: {
+      inflight: current.window.inflight + (inflightCanGrow ? 1 : 0),
+      coverageBatch: current.window.coverageBatch + (coverageCanGrow ? 1 : 0),
+    },
+    counters: { strainedSamples: 0, healthyDemandSamples: 0 },
+    state: 'cooldown',
+    cooldownUntilMs: atMs + cooldownMs,
+  });
+}
+
+function calculateCapacityTransition(
+  context: CapacityTransitionContext,
+): CapacityTransition {
+  const {
+    current,
+    classified,
+    sample,
+    atMs,
+    healthySamplesToGrow,
+    strainedSamplesToShrink,
+    bounds,
+  } = context;
+  const waitingForCooldown = atMs < current.cooldownUntilMs;
+
+  if (classified.kind === 'critical') return halveCapacity(context);
+
+  if (classified.kind === 'strained') {
+    const strainedSamples = current.counters.strainedSamples + 1;
+    if (strainedSamples < strainedSamplesToShrink) {
+      return holdCapacity(
+        context,
+        'strained_hysteresis',
+        waitingForCooldown ? 'cooldown' : 'warming',
+        { strainedSamples, healthyDemandSamples: 0 },
+      );
+    }
+    return decreaseCapacity(context);
+  }
+
+  const resetStrainedCounters = {
+    strainedSamples: 0,
+    healthyDemandSamples: current.counters.healthyDemandSamples,
+  };
+  if (classified.kind === 'ambiguous') {
+    return holdCapacity(
+      context,
+      classified.reason,
+      waitingForCooldown ? 'cooldown' : 'warming',
+      { strainedSamples: 0, healthyDemandSamples: 0 },
+    );
+  }
+
+  if (!sample.demand) {
+    return holdCapacity(
+      context,
+      'no_demand',
+      waitingForCooldown ? 'cooldown' : 'healthy',
+      { strainedSamples: 0, healthyDemandSamples: 0 },
+    );
+  }
+
+  const healthyDemandSamples = Math.min(
+    healthySamplesToGrow,
+    resetStrainedCounters.healthyDemandSamples + 1,
+  );
+  const healthyCounters = { strainedSamples: 0, healthyDemandSamples };
+  if (healthyDemandSamples < healthySamplesToGrow) {
+    return holdCapacity(
+      context,
+      'healthy_hysteresis',
+      waitingForCooldown ? 'cooldown' : 'warming',
+      healthyCounters,
+    );
+  }
+  if (waitingForCooldown) {
+    return holdCapacity(context, 'cooldown', 'cooldown', healthyCounters);
+  }
+
+  const growthInflightCeiling = sample.store.telemetryAvailable
+    ? bounds.maxInflight
+    : Math.min(bounds.maxInflight, DEFAULT_SYNC_ADAPTIVE_INITIAL_INFLIGHT);
+  const inflightCanGrow = current.window.inflight < growthInflightCeiling;
+  const coverageCanGrow = current.window.coverageBatch > 0
+    && current.window.coverageBatch < bounds.configuredCoverageBatch;
+  if (!inflightCanGrow && !coverageCanGrow) {
+    return holdCapacity(
+      context,
+      !sample.store.telemetryAvailable && current.window.inflight < bounds.maxInflight
+        ? 'store_telemetry_growth_cap'
+        : 'at_maximum',
+      sample.store.telemetryAvailable ? 'healthy' : 'constrained',
+      healthyCounters,
+    );
+  }
+
+  return increaseCapacity(context, inflightCanGrow, coverageCanGrow);
+}
+
 /**
  * Pure fast-down/slow-up AIMD controller. Sampling and application of the
  * returned limits are deliberately owned by the DKGAgent integration layer.
@@ -291,13 +498,7 @@ export class AdaptiveCapacityController {
   private readonly cooldownMs: number;
   private readonly healthySamplesToGrow: number;
   private readonly strainedSamplesToShrink: number;
-  private currentInflight: number;
-  private currentCoverageBatch: number;
-  private state: AdaptiveCapacityState = 'warming';
-  private storePressureTelemetryAvailable = false;
-  private consecutiveStrainedSamples = 0;
-  private consecutiveHealthyDemandSamples = 0;
-  private cooldownUntilMs: number;
+  private controllerState: Readonly<CapacityControllerState>;
   private lastDecision: Readonly<AdaptiveCapacityDecision>;
 
   constructor(
@@ -320,149 +521,66 @@ export class AdaptiveCapacityController {
       options.strainedSamplesToShrink ?? DEFAULT_SYNC_ADAPTIVE_STRAINED_SAMPLES,
       1,
     );
-    this.currentInflight = bounds.initialInflight;
-    this.currentCoverageBatch = bounds.configuredCoverageBatch;
     const createdAt = this.now();
     if (!Number.isFinite(createdAt)) throw new RangeError('now must return a finite timestamp');
-    this.cooldownUntilMs = createdAt + this.cooldownMs;
+    this.controllerState = {
+      window: {
+        inflight: bounds.initialInflight,
+        coverageBatch: bounds.configuredCoverageBatch,
+      },
+      counters: { strainedSamples: 0, healthyDemandSamples: 0 },
+      state: 'warming',
+      cooldownUntilMs: createdAt + this.cooldownMs,
+      storePressureTelemetryAvailable: false,
+    };
     this.lastDecision = Object.freeze({
       action: 'hold',
       reason: 'warming',
       atMs: createdAt,
-      previousInflight: this.currentInflight,
-      currentInflight: this.currentInflight,
-      previousCoverageBatch: this.currentCoverageBatch,
-      currentCoverageBatch: this.currentCoverageBatch,
+      previousInflight: bounds.initialInflight,
+      currentInflight: bounds.initialInflight,
+      previousCoverageBatch: bounds.configuredCoverageBatch,
+      currentCoverageBatch: bounds.configuredCoverageBatch,
     });
   }
 
   observe(sample: AdaptiveCapacitySample, atMs = this.now()): AdaptiveCapacityStatus {
     this.validateSample(sample, atMs);
-    this.storePressureTelemetryAvailable = sample.store.telemetryAvailable;
-    const classified = classifySample(sample);
-
-    if (classified.kind === 'critical') {
-      this.consecutiveStrainedSamples = 0;
-      this.consecutiveHealthyDemandSamples = 0;
-      this.applyDecision('halve', classified.reason, atMs, () => {
-        this.currentInflight = Math.max(
-          this.bounds.minInflight,
-          Math.floor(this.currentInflight / 2),
-        );
-        if (this.currentCoverageBatch > 0) {
-          this.currentCoverageBatch = Math.max(
-            1,
-            Math.floor(this.currentCoverageBatch / 2),
-          );
-        }
-      });
-      this.state = 'constrained';
-      this.cooldownUntilMs = atMs + this.cooldownMs;
-      return this.getStatus();
-    }
-
-    if (classified.kind === 'strained') {
-      this.consecutiveHealthyDemandSamples = 0;
-      this.consecutiveStrainedSamples += 1;
-      if (this.consecutiveStrainedSamples < this.strainedSamplesToShrink) {
-        this.state = atMs < this.cooldownUntilMs ? 'cooldown' : 'warming';
-        this.applyDecision('hold', 'strained_hysteresis', atMs);
-        return this.getStatus();
-      }
-
-      this.consecutiveStrainedSamples = 0;
-      this.applyDecision('decrease', classified.reason, atMs, () => {
-        this.currentInflight = Math.max(
-          this.bounds.minInflight,
-          this.currentInflight - 1,
-        );
-        if (this.currentCoverageBatch > 0) {
-          this.currentCoverageBatch = Math.max(1, this.currentCoverageBatch - 1);
-        }
-      });
-      this.state = 'constrained';
-      this.cooldownUntilMs = atMs + this.cooldownMs;
-      return this.getStatus();
-    }
-
-    this.consecutiveStrainedSamples = 0;
-    if (classified.kind === 'ambiguous') {
-      this.consecutiveHealthyDemandSamples = 0;
-      this.state = atMs < this.cooldownUntilMs ? 'cooldown' : 'warming';
-      this.applyDecision('hold', classified.reason, atMs);
-      return this.getStatus();
-    }
-
-    if (!sample.demand) {
-      this.consecutiveHealthyDemandSamples = 0;
-      this.state = atMs < this.cooldownUntilMs ? 'cooldown' : 'healthy';
-      this.applyDecision('hold', 'no_demand', atMs);
-      return this.getStatus();
-    }
-
-    this.consecutiveHealthyDemandSamples = Math.min(
-      this.healthySamplesToGrow,
-      this.consecutiveHealthyDemandSamples + 1,
-    );
-    if (this.consecutiveHealthyDemandSamples < this.healthySamplesToGrow) {
-      this.state = atMs < this.cooldownUntilMs ? 'cooldown' : 'warming';
-      this.applyDecision('hold', 'healthy_hysteresis', atMs);
-      return this.getStatus();
-    }
-    if (atMs < this.cooldownUntilMs) {
-      this.state = 'cooldown';
-      this.applyDecision('hold', 'cooldown', atMs);
-      return this.getStatus();
-    }
-
-    const growthInflightCeiling = sample.store.telemetryAvailable
-      ? this.bounds.maxInflight
-      : Math.min(this.bounds.maxInflight, DEFAULT_SYNC_ADAPTIVE_INITIAL_INFLIGHT);
-    const inflightCanGrow = this.currentInflight < growthInflightCeiling;
-    const coverageCanGrow = this.currentCoverageBatch > 0
-      && this.currentCoverageBatch < this.bounds.configuredCoverageBatch;
-    if (!inflightCanGrow && !coverageCanGrow) {
-      this.state = sample.store.telemetryAvailable ? 'healthy' : 'constrained';
-      this.applyDecision(
-        'hold',
-        !sample.store.telemetryAvailable && this.currentInflight < this.bounds.maxInflight
-          ? 'store_telemetry_growth_cap'
-          : 'at_maximum',
-        atMs,
-      );
-      return this.getStatus();
-    }
-
-    this.applyDecision('increase', 'healthy_hysteresis', atMs, () => {
-      if (inflightCanGrow) this.currentInflight += 1;
-      if (coverageCanGrow) this.currentCoverageBatch += 1;
+    const transition = calculateCapacityTransition({
+      current: this.controllerState,
+      classified: classifySample(sample),
+      sample,
+      bounds: this.bounds,
+      atMs,
+      cooldownMs: this.cooldownMs,
+      healthySamplesToGrow: this.healthySamplesToGrow,
+      strainedSamplesToShrink: this.strainedSamplesToShrink,
     });
-    this.consecutiveHealthyDemandSamples = 0;
-    this.cooldownUntilMs = atMs + this.cooldownMs;
-    this.state = 'cooldown';
+    this.applyTransition(transition, atMs);
     return this.getStatus();
   }
 
   getCurrentInflight(): number {
-    return this.currentInflight;
+    return this.controllerState.window.inflight;
   }
 
   getEffectiveCoverageBatch(): number {
-    return this.currentCoverageBatch;
+    return this.controllerState.window.coverageBatch;
   }
 
   getStatus(): AdaptiveCapacityStatus {
+    const { window, counters } = this.controllerState;
     return Object.freeze({
-      state: this.state,
-      currentInflight: this.currentInflight,
+      state: this.controllerState.state,
+      currentInflight: window.inflight,
       minInflight: this.bounds.minInflight,
       maxInflight: this.bounds.maxInflight,
-      effectiveCoverageBatch: this.currentCoverageBatch,
+      effectiveCoverageBatch: window.coverageBatch,
       configuredCoverageBatch: this.bounds.configuredCoverageBatch,
-      storePressureTelemetryAvailable: this.storePressureTelemetryAvailable,
-      consecutiveStrainedSamples: this.consecutiveStrainedSamples,
-      consecutiveHealthyDemandSamples: this.consecutiveHealthyDemandSamples,
-      cooldownUntilMs: this.cooldownUntilMs,
+      storePressureTelemetryAvailable: this.controllerState.storePressureTelemetryAvailable,
+      consecutiveStrainedSamples: counters.strainedSamples,
+      consecutiveHealthyDemandSamples: counters.healthyDemandSamples,
+      cooldownUntilMs: this.controllerState.cooldownUntilMs,
       lastDecision: this.lastDecision,
     });
   }
@@ -480,23 +598,20 @@ export class AdaptiveCapacityController {
     }
   }
 
-  private applyDecision(
-    action: AdaptiveCapacityAction,
-    reason: AdaptiveCapacityReason,
+  private applyTransition(
+    transition: Readonly<CapacityTransition>,
     atMs: number,
-    mutate?: () => void,
   ): void {
-    const previousInflight = this.currentInflight;
-    const previousCoverageBatch = this.currentCoverageBatch;
-    mutate?.();
+    const previous = this.controllerState.window;
+    this.controllerState = transition.next;
     this.lastDecision = Object.freeze({
-      action,
-      reason,
+      action: transition.action,
+      reason: transition.reason,
       atMs,
-      previousInflight,
-      currentInflight: this.currentInflight,
-      previousCoverageBatch,
-      currentCoverageBatch: this.currentCoverageBatch,
+      previousInflight: previous.inflight,
+      currentInflight: transition.next.window.inflight,
+      previousCoverageBatch: previous.coverageBatch,
+      currentCoverageBatch: transition.next.window.coverageBatch,
     });
   }
 }
