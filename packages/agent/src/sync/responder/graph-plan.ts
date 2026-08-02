@@ -30,7 +30,13 @@ import {
   type SyncResponderSnapshotBudget,
 } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
-import { SYNC_BYTE_BUDGET_RESPONSE_BYTES } from '../../dkg-agent-constants.js';
+import {
+  FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+} from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -53,10 +59,17 @@ const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
 const DKG_KA_UAL = `${DKG}kaUal`;
 const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
 const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
-const DKG_FINALIZED_SWM_CLEANUP_ROOT = `${DKG}finalizedSwmCleanupRoot`;
-const DKG_FINALIZED_SWM_CLEANUP_MARKED_AT = `${DKG}finalizedSwmCleanupMarkedAt`;
-const DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT = `${DKG}finalizedSwmCleanupHeadFingerprint`;
-const DKG_FINALIZED_SWM_CLEANUP_TASK = `${DKG}FinalizedSwmCleanupTask`;
+// DERIVED from the canonical constants the marker WRITER uses, never retyped.
+// These four decide what stays local: three predicates the row filter strips,
+// and the task type the subject-level FILTER NOT EXISTS matches. A local
+// literal that drifted from the writer would keep filtering the old IRI and
+// silently advertise local GC bookkeeping to peers — and per the mutation
+// matrix on this filter, in-process-only drift survives testing, so nothing
+// would catch it. Short aliases only, so the SPARQL templates stay readable.
+const DKG_FINALIZED_SWM_CLEANUP_ROOT = FINALIZED_SWM_CLEANUP_ROOT_PREDICATE;
+const DKG_FINALIZED_SWM_CLEANUP_MARKED_AT = FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE;
+const DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT = FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE;
+const DKG_FINALIZED_SWM_CLEANUP_TASK = FINALIZED_SWM_CLEANUP_TASK_TYPE;
 /** In-process mirror of the store-side predicate filter below. */
 const LOCAL_FINALIZED_SWM_CLEANUP_PREDICATES = new Set([
   DKG_FINALIZED_SWM_CLEANUP_ROOT,
