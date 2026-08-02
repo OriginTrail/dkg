@@ -30,7 +30,7 @@ export interface SelectiveCoverageRuntimeReadyV1 {
   readonly networkId: string;
   readonly testedHeadCommit: string;
   readonly runtimeManifestDigest: string;
-  /** Adapter-observed process start instant, also present in the node journal. */
+  /** Node process-start epoch milliseconds, sourced from performance.timeOrigin. */
   readonly processStartedAt: number;
   /** Per-process unguessable instance identity, not the stable DKG peer ID. */
   readonly processInstanceId: string;

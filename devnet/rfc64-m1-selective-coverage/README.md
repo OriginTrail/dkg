@@ -95,7 +95,7 @@ Commands are:
 
 | Command | Required runtime action/evidence |
 | --- | --- |
-| `start` | Start the named role; independently return PID, process instance/start/wave IDs, durable-directory identity, peer ID, network, commit, and loaded-runtime digest. The command contains only the role, never the trust anchor. |
+| `start` | Start the named role; independently return PID, process instance/wave IDs, `processStartedAt` as integer epoch milliseconds sourced from `Math.floor(performance.timeOrigin)`, durable-directory identity, peer ID, network, commit, and loaded-runtime digest. The command contains only the role, never the trust anchor. |
 | `publish-wave` | Publish the named anchored wave; return exact Publisher VM/SWM observations for every graph. |
 | `observe-edge` | Return exact Edge VM/SWM observations, effective runtime mode, and the actual producing job ID. |
 | `synchronize-edge` | Issue only the named explicit user selection; return its real job ID and terminal exact snapshot. |

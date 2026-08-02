@@ -534,6 +534,22 @@ test('requires the exact runtime journal capacity from the node-admin contract',
   );
 });
 
+test('accepts the truthful Node process-start epoch used by the runtime journal', async () => {
+  const runtime = new ScriptedRuntime();
+  const processStartedAt = 1_753_000_000_123;
+  runtime.readyMutation = (ready) => ready.role === 'core'
+    ? { ...ready, processStartedAt }
+    : ready;
+  runtime.coreJournalMutation = (journal) => {
+    const copy = structuredClone(journal) as any;
+    copy.snapshot.processStartedAt = processStartedAt;
+    return copy;
+  };
+  await assert.doesNotReject(
+    collectSelectiveCoverageEvidenceV1({ corpus, expectedProvenance: expected, runtime }),
+  );
+});
+
 test('requires restart to cross an OS process boundary', async () => {
   const runtime = new ScriptedRuntime();
   runtime.readyMutation = (ready) => ready.role === 'edge' && ready.pid === 103
