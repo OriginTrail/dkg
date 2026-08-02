@@ -574,6 +574,12 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
   assertionVersion: string | number | bigint;
   subGraphName?: string;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * Scheduler attribution for the reads below. Optional for callers that run
+   * off a request they already account for; supply it from lanes where this
+   * resolution is itself the cost being measured (finalization receipts).
+   */
+  queryOptions?: QueryOptions;
 }): Promise<KnowledgeAssetOperationPublicSnapshot> {
   const expectedScope = createGraphKnowledgeAssetScope(
     params.kaUal,
@@ -598,6 +604,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
         OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publisherPeerId> ?publisherPeerId }
       }
     } LIMIT 1`,
+    params.queryOptions,
   );
   if (result.type !== 'bindings') {
     throw new Error(
@@ -609,6 +616,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     const existence = await params.store.query(
       `ASK { GRAPH <${assertSafeIri(workspaceMetaGraph)}> { ` +
       `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+      params.queryOptions,
     );
     if (existence.type !== 'boolean') {
       throw new Error(
@@ -663,7 +671,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
         `share operation ${params.shareOperationId}: unsafe snapshot graph`,
       );
     }
-    quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph);
+    quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph, params.queryOptions);
   }
   if (!quads) {
     throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
@@ -1208,9 +1216,14 @@ function workspaceKnowledgeAssetOperationSnapshotGraph(
   return graph;
 }
 
-async function resolveSnapshotGraphQuads(store: TripleStore, snapshotGraph: string): Promise<Quad[]> {
+async function resolveSnapshotGraphQuads(
+  store: TripleStore,
+  snapshotGraph: string,
+  queryOptions?: QueryOptions,
+): Promise<Quad[]> {
   const result = await store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(snapshotGraph)}> { ?s ?p ?o } }`,
+    queryOptions,
   );
   return result.type === 'quads'
     ? result.quads.map((quad) => ({ ...quad, graph: '' }))

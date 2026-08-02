@@ -317,11 +317,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // re-checks below stop the other failure the lock alone cannot:
                 // replacing newer content with an older verified snapshot.
                 //
-                // Re-arm only constant-size durable maintenance metadata when
-                // an earlier finalized cleanup left an operation tombstone.
-                // The independent GC owns all discovery, graph verification
+                // Every path below must leave a constant-size GC task armed
+                // when an earlier finalized cleanup left an operation
+                // tombstone, or a resurrected SWM copy would never be
+                // collected. `replaceHeadMetadata` does that from the tombstone
+                // read it already performs, so only the paths that never reach
+                // it call `ensureFinalizedCleanupTask` explicitly. The
+                // independent GC still owns all discovery, graph verification
                 // and deletion; sync neither performs nor awaits that work.
-                await snapshotMaterializer.ensureFinalizedCleanupTask(pid, descriptor);
                 //
                 // (a) Version ordering. A stored head newer than the descriptor
                 // means gossip advanced this KA past our snapshot; replacing
@@ -336,6 +339,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
                 ) {
+                  // Sync writes nothing here, but a previous round may have
+                  // resurrected this KA and the GC may since have retired its
+                  // task, so the tombstone still has to re-arm one.
+                  await snapshotMaterializer.ensureFinalizedCleanupTask(pid, descriptor);
                   for (const quad of descriptor.metadataQuads) {
                     replacedGraphScopedMetaKeys.add(quadKey(quad));
                   }
@@ -356,7 +363,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     // version/operation rows) — e.g. a prior round replaced the
                     // graph and then failed before finishing the metadata swap.
                     // Install the verified head while the writer lock is held.
+                    // This also re-arms any finalized-cleanup task.
                     await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                  } else {
+                    // Clean head, content already present: nothing is written,
+                    // so re-arm the GC task on its own.
+                    await snapshotMaterializer.ensureFinalizedCleanupTask(pid, descriptor);
                   }
                   // Never append graph-scoped metadata again after releasing
                   // this lock. For a clean head it is redundant; for a newer
@@ -382,6 +394,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // rows from the append-style metadata insert below. Otherwise
                 // a live write could land between the swap and the append and
                 // leave an arbitrary multi-version head.
+                //
+                // The finalized-cleanup task is armed BY this swap, i.e. after
+                // the payload and head are both in place, never before the
+                // payload. Arming first was safe only because arm-and-write
+                // shared one hold of this writer lock, so the GC would block
+                // and then bail on a changed write generation
+                // (`retireStaleTask`). That ratchet is optional — it refuses to
+                // retire when the write-gen capability is absent — so ordering
+                // the arm after the write removes the dependency on it instead
+                // of relying on it, and leaves the task armed only once the
+                // head matches on every field `clearIfStillExact` checks.
                 await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
                 for (const quad of descriptor.metadataQuads) {
                   replacedGraphScopedMetaKeys.add(quadKey(quad));
