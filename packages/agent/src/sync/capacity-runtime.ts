@@ -143,7 +143,11 @@ export class SyncCapacityRuntime {
     }
 
     const adaptivePolicy = resolveSyncGlobalBackpressure({
-      syncGlobalMaxInflight: explicitGlobalLimit ?? hardMax,
+      // The controller can never exceed hardMax, so use that same ceiling for
+      // queue sizing and admission observability. Basing the queue on a larger
+      // explicit operator limit would allow a backlog that the adaptive Core
+      // can never drain at the advertised policy capacity.
+      syncGlobalMaxInflight: hardMax,
       syncGlobalQueueLimit: config.syncGlobalQueueLimit,
     });
     return new SyncCapacityRuntime(

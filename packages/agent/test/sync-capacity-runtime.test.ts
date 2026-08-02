@@ -69,8 +69,23 @@ describe('sync capacity runtime resolution', () => {
     expect(staticRuntime.isAdaptive()).toBe(false);
     expect(staticRuntime.policy.limit).toBe(6);
     expect(adaptiveRuntime.isAdaptive()).toBe(true);
-    expect(adaptiveRuntime.policy.limit).toBe(6);
+    expect(adaptiveRuntime.policy).toMatchObject({ limit: 3, queueLimit: 6 });
     expect(adaptiveRuntime.getStatus().maxInflight).toBe(3);
+  });
+
+  it('sizes the default adaptive queue from the effective hard maximum', () => {
+    const runtime = SyncCapacityRuntime.create({
+      nodeRole: 'core',
+      syncGlobalMaxInflight: 100,
+      syncAdaptiveCapacity: { enabled: true },
+    }, fakeStore(STORE_PRESSURE), { parallelism: 64 });
+
+    expect(runtime.policy).toMatchObject({ limit: 3, queueLimit: 6 });
+    expect(runtime.getStatus()).toMatchObject({
+      mode: 'adaptive',
+      currentInflight: 2,
+      maxInflight: 3,
+    });
   });
 
   it('uses the legacy environment limit ahead of newer config for adaptive policy and status', () => {
