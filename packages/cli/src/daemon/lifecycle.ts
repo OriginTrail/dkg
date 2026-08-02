@@ -203,10 +203,12 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
+  DEBUG_SYNC_TRACE,
   resolveStandaloneInstall,
   resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
+import { createContextGraphCatchupRouteAdapter } from './context-graph-catchup-route-adapter.js';
 import {
   type CatchupJobState,
   type CatchupJob,
@@ -3351,7 +3353,6 @@ export async function runDaemonInner(
   const catchupTracker: CatchupTracker = {
     jobs: new Map(),
     latestByContextGraph: new Map(),
-    inFlightByContextGraph: new Map(),
   };
 
   // --- Extraction Pipelines ---
@@ -3460,6 +3461,15 @@ export async function runDaemonInner(
 
   let corsAllowed: CorsAllowlist = "*";
   daemonState.catchupRunner = createCatchupRunner(agent);
+  const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+    tracker: catchupTracker,
+    runner: daemonState.catchupRunner,
+    readinessStore: dashDb,
+    agent,
+    ...(DEBUG_SYNC_TRACE
+      ? { trace: (message: string) => console.log(message) }
+      : {}),
+  });
 
   const server = createServer(async (req, res) => {
     try {
@@ -3655,6 +3665,7 @@ export async function runDaemonInner(
         nodeVersion,
         nodeCommit,
         catchupTracker,
+        catchupCoordinator,
         extractionRegistry,
         fileStore,
         extractionStatus,

@@ -7,6 +7,7 @@ import type {
 import { handleContextGraphRoutes } from '../../src/daemon/routes/context-graph.js';
 import { handleQueryRoutes } from '../../src/daemon/routes/query.js';
 import { daemonState } from '../../src/daemon/state.js';
+import { createContextGraphCatchupRouteAdapter } from '../../src/daemon/context-graph-catchup-route-adapter.js';
 import type { CatchupJob } from '../../src/daemon/types.js';
 import { cleanEmptyResult } from './context-graph-catchup-fixtures.js';
 
@@ -54,7 +55,6 @@ export class ContextGraphSubscribeRouteHarness {
   private readonly catchupTracker = {
     jobs: new Map<string, CatchupJob>(),
     latestByContextGraph: new Map<string, string>(),
-    inFlightByContextGraph: new Map(),
   };
   private server: Server | undefined;
   private addressPort = 0;
@@ -232,6 +232,26 @@ export class ContextGraphSubscribeRouteHarness {
         this.options.callerAddress ?? '0x0000000000000000000000000000000000000001',
     };
 
+    const readinessStore = {
+      getContextGraphReadinessProvenance: () => this.readinessValue ?? null,
+      setContextGraphReadinessProvenance: (
+        _id: string,
+        next: {
+          version: number;
+          durableVerified: boolean;
+          sharedMemoryVerified: boolean;
+        },
+      ) => {
+        this.readinessValue = { ...next, updatedAt: Date.now() };
+      },
+    };
+    const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+      tracker: this.catchupTracker,
+      runner: daemonState.catchupRunner,
+      readinessStore: readinessStore as any,
+      agent: agent as any,
+    });
+
     this.server = createServer(async (request, response) => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
       const routeContext = {
@@ -242,19 +262,7 @@ export class ContextGraphSubscribeRouteHarness {
         publisherRuntime: null,
         config: { auth: { enabled: false } },
         startedAt: Date.now(),
-        dashDb: {
-          getContextGraphReadinessProvenance: () => this.readinessValue ?? null,
-          setContextGraphReadinessProvenance: (
-            _id: string,
-            next: {
-              version: number;
-              durableVerified: boolean;
-              sharedMemoryVerified: boolean;
-            },
-          ) => {
-            this.readinessValue = { ...next, updatedAt: Date.now() };
-          },
-        },
+        dashDb: readinessStore,
         opWallets: {},
         network: {},
         tracker: {},
@@ -263,6 +271,7 @@ export class ContextGraphSubscribeRouteHarness {
         nodeVersion: 'test',
         nodeCommit: 'test',
         catchupTracker: this.catchupTracker,
+        catchupCoordinator,
         extractionRegistry: {},
         fileStore: {},
         extractionStatus: new Map(),

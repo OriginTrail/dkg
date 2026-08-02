@@ -197,6 +197,30 @@ export function publicDurableAndSharedMemoryResult(): CatchupJobResult {
   });
 }
 
+/** Durable VM completed, but the shared-memory scheduler deferred its plane. */
+export function publicDurableWithSharedMemoryBackpressureResult(): CatchupJobResult {
+  return makeCatchupJobResult({
+    deferredBackpressure: 1,
+    dataSynced: 3,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 1, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+    },
+    diagnostics: {
+      durable: {
+        emptyResponses: 0,
+        fetchedDataTriples: 3,
+        insertedDataTriples: 3,
+      },
+      sharedMemory: {
+        emptyResponses: 0,
+        completedPhases: 0,
+        deferredBackpressure: 1,
+      },
+    },
+  });
+}
+
 /** One public host proves empty while another selected peer transport-fails. */
 export function lossyPublicEmptyResult(): CatchupJobResult {
   return makeCatchupJobResult({

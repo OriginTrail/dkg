@@ -6,6 +6,10 @@ import {
   combineCatchupPlaneEvidence,
   describeContextGraphConvergence,
 } from '../src/context-graph-readiness.js';
+import {
+  publicDurableAndSharedMemoryResult,
+  publicDurableWithSharedMemoryBackpressureResult,
+} from './helpers/context-graph-catchup-fixtures.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   return {
@@ -71,6 +75,44 @@ describe('context graph catch-up readiness classification', () => {
     sharedMemoryVerified: false,
     updatedAt: 0,
   };
+
+  it('scopes shared-memory backpressure out of a durable-only view', () => {
+    const result = publicDurableWithSharedMemoryBackpressureResult();
+    const classify = (includeSharedMemory: boolean) =>
+      classifyContextGraphCatchupReadiness({
+        result,
+        includeSharedMemory,
+        hasConfirmedMeta: true,
+        isPrivate: false,
+        readinessBeforeCatchup,
+      });
+
+    expect(classify(false)).toMatchObject({ jobStatus: 'done' });
+    expect(classify(true)).toMatchObject({
+      jobStatus: 'deferred',
+      error: expect.stringContaining('local scheduler backpressure'),
+    });
+  });
+
+  it('keeps durable-plane backpressure deferred for narrow and broad views', () => {
+    const result = publicDurableAndSharedMemoryResult();
+    result.deferredBackpressure = 1;
+    if (!result.diagnostics) throw new Error('diagnostics missing');
+    result.diagnostics.durable.deferredBackpressure = 1;
+
+    for (const includeSharedMemory of [false, true]) {
+      expect(classifyContextGraphCatchupReadiness({
+        result,
+        includeSharedMemory,
+        hasConfirmedMeta: true,
+        isPrivate: false,
+        readinessBeforeCatchup,
+      })).toMatchObject({
+        jobStatus: 'deferred',
+        error: expect.stringContaining('local scheduler backpressure'),
+      });
+    }
+  });
 
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
     const classification = classifyContextGraphCatchupReadiness({

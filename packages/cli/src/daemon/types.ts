@@ -21,44 +21,20 @@ export interface CatchupJob {
 
 export type CatchupScope = 'durable' | 'durable-and-shared-memory';
 
-export interface CatchupExecution {
-  jobId: string;
-  scope: CatchupScope;
-}
-
-export type CatchupJobView =
-  | {
-      jobId: string;
-      scope: CatchupScope;
-      kind: 'execution';
-    }
-  | {
-      jobId: string;
-      scope: CatchupScope;
-      sourceExecutionJobId: string;
-      kind: 'projection';
-    };
-
 /**
- * Mutable orchestration state for one serialized per-CG catch-up. Executions
- * describe actual runner work; views describe the immutable public job for
- * each requested scope. A narrow view can project a broad execution without
- * pretending to be another execution, while a wider request queues one real
- * serialized execution.
+ * One serialized per-CG catch-up has exactly the two scopes the product
+ * exposes. When durable starts first, a later full request occupies the full
+ * slot and runs second. When full starts first, a later durable request
+ * occupies the durable slot and is settled from that full result.
  */
 export interface CatchupCoordinator {
   contextGraphId: string;
-  executions: CatchupExecution[];
-  viewsByScope: Map<CatchupScope, CatchupJobView>;
+  initialScope: CatchupScope;
+  durableJobId?: string;
+  fullJobId?: string;
 }
 
 export interface CatchupTracker {
   jobs: Map<string, CatchupJob>;
   latestByContextGraph: Map<string, string>;
-  /**
-   * Coordinator-only index added after the original two-map tracker contract.
-   * Optional at the public boundary so embedded callers can supply that legacy
-   * shape; the coordinator normalizes it through one canonical helper.
-   */
-  inFlightByContextGraph?: Map<string, CatchupCoordinator>;
 }

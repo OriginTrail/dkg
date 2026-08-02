@@ -7,6 +7,7 @@ import {
   cleanEmptyResult,
   privateDataOnlyResult,
   publicDurableAndSharedMemoryResult,
+  publicDurableWithSharedMemoryBackpressureResult,
 } from './helpers/context-graph-catchup-fixtures.js';
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -48,7 +49,6 @@ function coordinatorFixture(options: {
   const tracker: CatchupTracker = {
     jobs: new Map(),
     latestByContextGraph: new Map(),
-    inFlightByContextGraph: new Map(),
   };
   let readiness: ContextGraphReadinessProvenance = {
     version: 1,
@@ -62,7 +62,6 @@ function coordinatorFixture(options: {
   let runNumber = 0;
   const run = vi.fn(async (request: { includeSharedMemory: boolean }) => {
     runNumber += 1;
-    if (options.result) return options.result;
     if (runNumber === 1 && (!request.includeSharedMemory || options.blockBroadBase)) {
       firstRunStarted.resolve();
       await releaseFirstRun.promise;
@@ -70,8 +69,10 @@ function coordinatorFixture(options: {
         throw new Error('base attempt failed');
       }
       if (options.baseOutcome === 'denied') return deniedResult();
+      if (options.result) return options.result;
       return privateDataOnlyResult();
     }
+    if (options.result) return options.result;
     return options.failUpgrade
       ? privateDataOnlyResult()
       : publicDurableAndSharedMemoryResult();
@@ -105,6 +106,48 @@ function coordinatorFixture(options: {
 }
 
 describe('ContextGraphCatchupCoordinatorService', () => {
+  it('settles a durable slot from broad work without inheriting SWM backpressure', async () => {
+    const fixture = coordinatorFixture({
+      blockBroadBase: true,
+      result: publicDurableWithSharedMemoryBackpressureResult(),
+    });
+    const full = fixture.service.start({
+      contextGraphId: 'cg:scope-backpressure',
+      includeSharedMemory: true,
+      readinessBeforeCatchup: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: false,
+        updatedAt: 1,
+      },
+    });
+    await fixture.firstRunStarted.promise;
+    const durable = fixture.service.coalesceActive({
+      contextGraphId: 'cg:scope-backpressure',
+      includeSharedMemory: false,
+    });
+
+    fixture.releaseFirstRun.resolve();
+    await waitForJob(full);
+    if (!durable) throw new Error('durable slot missing');
+    await waitForJob(durable);
+
+    expect(fixture.run).toHaveBeenCalledTimes(1);
+    expect(full).toMatchObject({
+      includeWorkspace: true,
+      status: 'deferred',
+    });
+    expect(durable).toMatchObject({
+      includeWorkspace: false,
+      status: 'done',
+    });
+    expect(fixture.writeReadiness).toHaveBeenCalledTimes(1);
+    expect(fixture.writeReadiness).toHaveBeenCalledWith(
+      'cg:scope-backpressure',
+      { durableVerified: true, sharedMemoryVerified: false },
+    );
+  });
+
   it('keeps denied mixed progress deferred when local backpressure left the round incomplete', async () => {
     const result = publicDurableAndSharedMemoryResult();
     result.denied = true;
@@ -132,9 +175,7 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     expect(fixture.markSubscriptionState).not.toHaveBeenCalled();
   });
 
-  it('provisions orchestration state for the historical two-map tracker shape', () => {
-    // Compile-time regression: the public tracker boundary explicitly accepts
-    // the historical two-map shape without a cast.
+  it('keeps orchestration state out of the historical two-map tracker', () => {
     const tracker: CatchupTracker = {
       jobs: new Map(),
       latestByContextGraph: new Map(),
@@ -153,7 +194,7 @@ describe('ContextGraphCatchupCoordinatorService', () => {
       contextGraphId: 'cg:legacy-tracker',
       includeSharedMemory: true,
     })).toBeUndefined();
-    expect(tracker.inFlightByContextGraph).toBeInstanceOf(Map);
+    expect(Object.keys(tracker).sort()).toEqual(['jobs', 'latestByContextGraph']);
   });
 
   it('refreshes latest status when broad, narrow, then broad reuses existing views', async () => {
@@ -265,7 +306,10 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     ]);
     expect(base).toMatchObject({ includeWorkspace: false, status: 'done' });
     expect(upgrade).toMatchObject({ includeWorkspace: true, status: 'done' });
-    expect(fixture.tracker.inFlightByContextGraph?.has('cg:one')).toBe(false);
+    expect(fixture.service.coalesceActive({
+      contextGraphId: 'cg:one',
+      includeSharedMemory: true,
+    })).toBeUndefined();
   });
 
   it('does not retroactively fail VM-only success when the wider upgrade is incomplete', async () => {

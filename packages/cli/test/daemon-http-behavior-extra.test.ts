@@ -57,6 +57,7 @@ import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-contex
 import { ApiClient } from '../src/api-client.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { daemonState } from '../src/daemon/state.js';
+import { createContextGraphCatchupRouteAdapter } from '../src/daemon/context-graph-catchup-route-adapter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
@@ -997,7 +998,6 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
-      inFlightByContextGraph: new Map(),
     };
     const previousCatchupRunner = daemonState.catchupRunner;
     daemonState.catchupRunner = {
@@ -1067,6 +1067,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
+        const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+          tracker: catchupTracker,
+          runner: daemonState.catchupRunner!,
+          readinessStore: {} as any,
+          agent: agent as any,
+        });
         await handleContextGraphRoutes({
           req,
           res,
@@ -1084,6 +1090,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           nodeVersion: 'test',
           nodeCommit: 'test',
           catchupTracker,
+          catchupCoordinator,
           extractionRegistry: {},
           fileStore: {},
           extractionStatus: new Map(),
@@ -1151,7 +1158,6 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
-      inFlightByContextGraph: new Map(),
     };
     const previousCatchupRunner = daemonState.catchupRunner;
     daemonState.catchupRunner = {
@@ -1188,6 +1194,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
+        const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+          tracker: catchupTracker,
+          runner: daemonState.catchupRunner!,
+          readinessStore: {} as any,
+          agent: agent as any,
+        });
         await handleContextGraphRoutes({
           req,
           res,
@@ -1205,6 +1217,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           nodeVersion: 'test',
           nodeCommit: 'test',
           catchupTracker,
+          catchupCoordinator,
           extractionRegistry: {},
           fileStore: {},
           extractionStatus: new Map(),
@@ -1304,6 +1317,12 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
+        const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+          tracker: catchupTracker,
+          runner: daemonState.catchupRunner!,
+          readinessStore: {} as any,
+          agent: agent as any,
+        });
 
         await handleContextGraphRoutes({
           req,
@@ -1322,6 +1341,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
           nodeVersion: 'test',
           nodeCommit: 'test',
           catchupTracker,
+          catchupCoordinator,
           extractionRegistry: {},
           fileStore: {},
           extractionStatus: new Map(),
@@ -2411,7 +2431,6 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
-      inFlightByContextGraph: new Map(),
     };
     const previousCatchupRunner = daemonState.catchupRunner;
     // Benign runner: the queued job runs fire-and-forget after the response and
@@ -2457,6 +2476,12 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           markContextGraphSubscriptionState: () => {},
           resolveAgentByToken: () => undefined,
         };
+        const catchupCoordinator = createContextGraphCatchupRouteAdapter({
+          tracker: catchupTracker,
+          runner: daemonState.catchupRunner!,
+          readinessStore: {} as any,
+          agent: agent as any,
+        });
         await handleContextGraphRoutes({
           req,
           res,
@@ -2474,6 +2499,7 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           nodeVersion: 'test',
           nodeCommit: 'test',
           catchupTracker,
+          catchupCoordinator,
           extractionRegistry: {},
           fileStore: {},
           extractionStatus: new Map(),

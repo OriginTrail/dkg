@@ -158,8 +158,6 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // them all without explicit imports. Unused ones are tolerated by
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
-  daemonState,
-  DEBUG_SYNC_TRACE,
   resolveAutoUpdateEnabled,
   type CorsAllowlist,
 } from '../state.js';
@@ -168,7 +166,6 @@ import {
   type CatchupJob,
   type CatchupTracker,
 } from '../types.js';
-import { createContextGraphCatchupRouteAdapter } from '../context-graph-catchup-route-adapter.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -481,6 +478,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     nodeVersion,
     nodeCommit,
     catchupTracker,
+    catchupCoordinator,
     extractionRegistry,
     fileStore,
     extractionStatus,
@@ -1740,15 +1738,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: requestedSyncMode,
     });
     const effectiveSyncMode = appliedSubscription.syncMode;
-    const catchupCoordinator = createContextGraphCatchupRouteAdapter({
-      tracker: catchupTracker,
-      runner: daemonState.catchupRunner!,
-      readinessStore: dashDb,
-      agent,
-      ...(DEBUG_SYNC_TRACE
-        ? { trace: (message: string) => console.log(message) }
-        : {}),
-    });
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);

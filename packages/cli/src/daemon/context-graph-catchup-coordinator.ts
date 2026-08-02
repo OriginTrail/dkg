@@ -2,13 +2,12 @@ import type { ContextGraphReadinessProvenance } from '@origintrail-official/dkg-
 import type { CatchupRunner } from '../catchup-runner.js';
 import type { CatchupJobResult } from '../catchup-result-wire.js';
 import {
-  catchupResultHasCleanResponse,
+  catchupClassificationNeedsMetadata,
   classifyContextGraphCatchupReadiness,
   type ContextGraphCatchupReadinessClassification,
 } from '../context-graph-readiness.js';
 import type {
   CatchupCoordinator,
-  CatchupExecution,
   CatchupJob,
   CatchupScope,
   CatchupTracker,
@@ -45,31 +44,12 @@ export interface ContextGraphCatchupCoordinatorEffects {
   trace?: (message: string) => void;
 }
 
-type CatchupResultClassification =
-  | ContextGraphCatchupReadinessClassification
-  | {
-      jobStatus: 'deferred';
-      error: string;
-      readinessPatch?: undefined;
-      statePatch?: undefined;
-      eventPayload?: undefined;
-    };
-
-/** Normalize the explicitly optional legacy tracker boundary exactly once. */
-export function getOrCreateCatchupCoordinatorIndex(
-  tracker: CatchupTracker,
-): Map<string, CatchupCoordinator> {
-  const existing = tracker.inFlightByContextGraph;
-  if (existing) return existing;
-  const created = new Map<string, CatchupCoordinator>();
-  tracker.inFlightByContextGraph = created;
-  return created;
-}
+type CatchupResultClassification = ContextGraphCatchupReadinessClassification;
 
 export class ContextGraphCatchupCoordinatorService {
   private readonly now: () => number;
   private readonly createJobId: () => string;
-  private readonly inFlightByContextGraph: Map<string, CatchupCoordinator>;
+  private readonly inFlightByContextGraph = new Map<string, CatchupCoordinator>();
 
   constructor(
     private readonly tracker: CatchupTracker,
@@ -78,7 +58,6 @@ export class ContextGraphCatchupCoordinatorService {
     this.now = effects.now ?? Date.now;
     this.createJobId = effects.createJobId ?? (() =>
       `${this.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
-    this.inFlightByContextGraph = getOrCreateCatchupCoordinatorIndex(tracker);
   }
 
   /** Reuse active work while preserving each caller's immutable plane scope. */
@@ -88,47 +67,26 @@ export class ContextGraphCatchupCoordinatorService {
   }): CatchupJob | undefined {
     const coordinator = this.inFlightByContextGraph.get(input.contextGraphId);
     if (!coordinator) return undefined;
-    const hasActiveExecution = coordinator.executions.some((execution) => {
-      const job = this.tracker.jobs.get(execution.jobId);
-      return job?.status === 'queued' || job?.status === 'running';
-    });
-    if (!hasActiveExecution) return undefined;
+    if (!this.hasActiveJob(coordinator)) return undefined;
 
     const requestedScope = this.toScope(input.includeSharedMemory);
-    const existingView = coordinator.viewsByScope.get(requestedScope);
-    if (existingView) {
-      const existingJob = this.tracker.jobs.get(existingView.jobId);
+    const existingJobId = this.jobIdForScope(coordinator, requestedScope);
+    if (existingJobId) {
+      const existingJob = this.tracker.jobs.get(existingJobId);
       if (existingJob) return this.markLatest(existingJob);
     }
 
     if (requestedScope === 'durable') {
-      const broadExecution = coordinator.executions.find((execution) =>
-        execution.scope === 'durable-and-shared-memory' &&
-        this.isExecutionActive(execution));
-      if (!broadExecution) return undefined;
-
-      const projection = this.createJob(input.contextGraphId, requestedScope);
-      coordinator.viewsByScope.set(requestedScope, {
-        jobId: projection.jobId,
-        scope: requestedScope,
-        sourceExecutionJobId: broadExecution.jobId,
-        kind: 'projection',
-      });
-      return this.markLatest(projection);
+      if (coordinator.initialScope !== 'durable-and-shared-memory') return undefined;
+      const durable = this.createJob(input.contextGraphId, requestedScope);
+      coordinator.durableJobId = durable.jobId;
+      return this.markLatest(durable);
     }
 
-    const upgrade = this.createJob(input.contextGraphId, requestedScope);
-    const execution: CatchupExecution = {
-      jobId: upgrade.jobId,
-      scope: requestedScope,
-    };
-    coordinator.executions.push(execution);
-    coordinator.viewsByScope.set(requestedScope, {
-      jobId: upgrade.jobId,
-      scope: requestedScope,
-      kind: 'execution',
-    });
-    return this.markLatest(upgrade);
+    if (coordinator.initialScope !== 'durable') return undefined;
+    const full = this.createJob(input.contextGraphId, requestedScope);
+    coordinator.fullJobId = full.jobId;
+    return this.markLatest(full);
   }
 
   /** Start one detached serialized worker for a fresh per-CG catch-up. */
@@ -139,17 +97,12 @@ export class ContextGraphCatchupCoordinatorService {
   }): CatchupJob {
     const scope = this.toScope(input.includeSharedMemory);
     const job = this.createJob(input.contextGraphId, scope);
-    const execution: CatchupExecution = { jobId: job.jobId, scope };
     const coordinator: CatchupCoordinator = {
       contextGraphId: input.contextGraphId,
-      executions: [execution],
-      viewsByScope: new Map([
-        [scope, {
-          jobId: job.jobId,
-          scope,
-          kind: 'execution',
-        }],
-      ]),
+      initialScope: scope,
+      ...(scope === 'durable'
+        ? { durableJobId: job.jobId }
+        : { fullJobId: job.jobId }),
     };
     this.inFlightByContextGraph.set(input.contextGraphId, coordinator);
     this.pruneCompletedJobs();
@@ -178,17 +131,28 @@ export class ContextGraphCatchupCoordinatorService {
     return job;
   }
 
-  private isExecutionActive(execution: CatchupExecution): boolean {
-    const job = this.tracker.jobs.get(execution.jobId);
-    return job?.status === 'queued' || job?.status === 'running';
+  private jobIdForScope(
+    coordinator: CatchupCoordinator,
+    scope: CatchupScope,
+  ): string | undefined {
+    return scope === 'durable'
+      ? coordinator.durableJobId
+      : coordinator.fullJobId;
+  }
+
+  private hasActiveJob(coordinator: CatchupCoordinator): boolean {
+    return [coordinator.durableJobId, coordinator.fullJobId].some((jobId) => {
+      if (!jobId) return false;
+      const job = this.tracker.jobs.get(jobId);
+      return job?.status === 'queued' || job?.status === 'running';
+    });
   }
 
   private pruneCompletedJobs(): void {
     const activeJobIds = new Set<string>();
     for (const coordinator of this.inFlightByContextGraph.values()) {
-      for (const view of coordinator.viewsByScope.values()) {
-        activeJobIds.add(view.jobId);
-      }
+      if (coordinator.durableJobId) activeJobIds.add(coordinator.durableJobId);
+      if (coordinator.fullJobId) activeJobIds.add(coordinator.fullJobId);
     }
     while (this.tracker.jobs.size > 100) {
       let oldest: CatchupJob | undefined;
@@ -211,37 +175,10 @@ export class ContextGraphCatchupCoordinatorService {
     readinessBeforeCatchup: ContextGraphReadinessProvenance,
   ): Promise<void> {
     try {
-      for (let index = 0; index < coordinator.executions.length; index += 1) {
-        const execution = coordinator.executions[index];
-        const job = this.tracker.jobs.get(execution.jobId);
-        if (!job || job.status !== 'queued') continue;
-        const readinessBeforeAttempt = index === 0
-          ? readinessBeforeCatchup
-          : this.effects.readReadiness(coordinator.contextGraphId);
-
-        try {
-          const attempt = await this.runAttempt(job, readinessBeforeAttempt);
-          await this.settleProjectionViews(
-            coordinator,
-            execution,
-            attempt.result,
-            readinessBeforeAttempt,
-          );
-          if (attempt.status === 'denied') {
-            this.settleRemainingExecutionsFrom(coordinator, index + 1, job);
-            break;
-          }
-        } catch (error) {
-          job.error = error instanceof Error ? error.message : String(error);
-          job.status = 'failed';
-          job.finishedAt = this.now();
-          this.settleProjectionViewsFrom(coordinator, execution, job);
-          this.settleRemainingExecutionsFrom(coordinator, index + 1, job);
-          this.effects.trace?.(
-            `[catchup] job=${job.jobId} contextGraph=${coordinator.contextGraphId} threw: ${job.error}`,
-          );
-          break;
-        }
+      if (coordinator.initialScope === 'durable') {
+        await this.runDurableFirst(coordinator, readinessBeforeCatchup);
+      } else {
+        await this.runFullFirst(coordinator, readinessBeforeCatchup);
       }
     } finally {
       if (this.inFlightByContextGraph.get(coordinator.contextGraphId) === coordinator) {
@@ -250,10 +187,77 @@ export class ContextGraphCatchupCoordinatorService {
     }
   }
 
+  private async runDurableFirst(
+    coordinator: CatchupCoordinator,
+    readinessBeforeCatchup: ContextGraphReadinessProvenance,
+  ): Promise<void> {
+    const durable = coordinator.durableJobId
+      ? this.tracker.jobs.get(coordinator.durableJobId)
+      : undefined;
+    if (!durable || durable.status !== 'queued') return;
+    try {
+      const attempt = await this.runAttempt(durable, readinessBeforeCatchup);
+      if (attempt.status === 'denied') {
+        this.settleFullSlotFrom(coordinator, durable);
+        return;
+      }
+    } catch (error) {
+      this.settleThrownJob(durable, error);
+      this.settleFullSlotFrom(coordinator, durable);
+      return;
+    }
+
+    const full = coordinator.fullJobId
+      ? this.tracker.jobs.get(coordinator.fullJobId)
+      : undefined;
+    if (!full || full.status !== 'queued') return;
+    try {
+      await this.runAttempt(full, this.effects.readReadiness(coordinator.contextGraphId));
+    } catch (error) {
+      this.settleThrownJob(full, error);
+    }
+  }
+
+  private async runFullFirst(
+    coordinator: CatchupCoordinator,
+    readinessBeforeCatchup: ContextGraphReadinessProvenance,
+  ): Promise<void> {
+    const full = coordinator.fullJobId
+      ? this.tracker.jobs.get(coordinator.fullJobId)
+      : undefined;
+    if (!full || full.status !== 'queued') return;
+    try {
+      const attempt = await this.runAttempt(full, readinessBeforeCatchup);
+      await this.settleDurableSlot(
+        coordinator,
+        full,
+        attempt.result,
+        readinessBeforeCatchup,
+        this.classificationHasEffects(attempt.classification),
+      );
+    } catch (error) {
+      this.settleThrownJob(full, error);
+      this.settleDurableSlotFrom(coordinator, full);
+    }
+  }
+
+  private settleThrownJob(job: CatchupJob, error: unknown): void {
+    job.error = error instanceof Error ? error.message : String(error);
+    job.status = 'failed';
+    job.finishedAt = this.now();
+    this.effects.trace?.(
+      `[catchup] job=${job.jobId} contextGraph=${job.contextGraphId} threw: ${job.error}`,
+    );
+  }
+
   private async runAttempt(
     job: CatchupJob,
     readinessBeforeCatchup: ContextGraphReadinessProvenance,
-  ): Promise<{ result: CatchupJobResult; status: CatchupJob['status'] }> {
+  ): Promise<{
+    result: CatchupJobResult;
+    status: CatchupJob['status'];
+    classification: CatchupResultClassification;
+  }> {
     job.status = 'running';
     job.startedAt ??= this.now();
     this.effects.trace?.(
@@ -270,7 +274,15 @@ export class ContextGraphCatchupCoordinatorService {
     );
     this.applyExecutionEffects(job.contextGraphId, classification);
     this.settleClassifiedJob(job, result, classification);
-    return { result, status: job.status };
+    return { result, status: job.status, classification };
+  }
+
+  private classificationHasEffects(
+    classification: CatchupResultClassification,
+  ): boolean {
+    return classification.readinessPatch !== undefined ||
+      classification.statePatch !== undefined ||
+      classification.eventPayload !== undefined;
   }
 
   private async classifyResult(
@@ -278,43 +290,23 @@ export class ContextGraphCatchupCoordinatorService {
     result: CatchupJobResult,
     readinessBeforeCatchup: ContextGraphReadinessProvenance,
   ): Promise<CatchupResultClassification> {
-    if (result.deferredBackpressure > 0 && !result.denied) {
-      return {
-        jobStatus: 'deferred' as const,
-        error: 'Sync deferred by local scheduler backpressure; retry when capacity is available.',
-        readinessPatch: undefined,
-        statePatch: undefined,
-        eventPayload: undefined,
-      };
-    }
-
-    const inspectReadiness = catchupResultHasCleanResponse(result);
+    const inspectReadiness = catchupClassificationNeedsMetadata({
+      result,
+      includeSharedMemory: job.includeWorkspace,
+    });
     const hasConfirmedMeta = inspectReadiness
       ? await this.effects.hasConfirmedMeta(job.contextGraphId)
       : false;
     const isPrivate = hasConfirmedMeta
       ? await this.effects.isPrivate(job.contextGraphId)
       : false;
-    const classification = classifyContextGraphCatchupReadiness({
+    return classifyContextGraphCatchupReadiness({
       result,
       includeSharedMemory: job.includeWorkspace,
       hasConfirmedMeta,
       isPrivate,
       readinessBeforeCatchup,
     });
-    // Denial can coexist with usable data from another peer. If local
-    // admission also deferred part of that mixed round, the clean data must
-    // not turn the attempt into success: finalizeCatchup deliberately leaves
-    // any backpressured round incomplete. Preserve a pure ACL denial, but
-    // downgrade an otherwise-successful mixed result before effects are
-    // applied so no readiness bit is frozen from partial work.
-    if (result.deferredBackpressure > 0 && classification.jobStatus === 'done') {
-      return {
-        jobStatus: 'deferred',
-        error: 'Sync deferred by local scheduler backpressure; retry when capacity is available.',
-      };
-    }
-    return classification;
   }
 
   private applyExecutionEffects(
@@ -359,61 +351,52 @@ export class ContextGraphCatchupCoordinatorService {
     target.finishedAt = this.now();
   }
 
-  private async settleProjectionViews(
+  private async settleDurableSlot(
     coordinator: CatchupCoordinator,
-    execution: CatchupExecution,
+    full: CatchupJob,
     result: CatchupJobResult,
     readinessBeforeCatchup: ContextGraphReadinessProvenance,
+    sourceAppliedEffects: boolean,
   ): Promise<void> {
-    const source = this.tracker.jobs.get(execution.jobId);
-    if (!source) return;
-    for (const view of coordinator.viewsByScope.values()) {
-      if (
-        view.kind !== 'projection' ||
-        view.sourceExecutionJobId !== execution.jobId
-      ) continue;
-      const projection = this.tracker.jobs.get(view.jobId);
-      if (!projection || projection.status !== 'queued') continue;
-      projection.status = 'running';
-      projection.startedAt = source.startedAt;
-      try {
-        const classification = await this.classifyResult(
-          projection,
-          result,
-          readinessBeforeCatchup,
-        );
-        this.settleClassifiedJob(projection, result, classification);
-      } catch (error) {
-        projection.status = 'failed';
-        projection.error = error instanceof Error ? error.message : String(error);
-        projection.finishedAt = this.now();
+    const durable = coordinator.durableJobId
+      ? this.tracker.jobs.get(coordinator.durableJobId)
+      : undefined;
+    if (!durable || durable.status !== 'queued') return;
+    durable.status = 'running';
+    durable.startedAt = full.startedAt;
+    try {
+      const classification = await this.classifyResult(
+        durable,
+        result,
+        readinessBeforeCatchup,
+      );
+      // Full success already persisted every plane. When the full attempt had
+      // no effects (for example SWM-only local deferral), the independently
+      // successful durable slot owns its scoped readiness and event instead.
+      if (!sourceAppliedEffects) {
+        this.applyExecutionEffects(durable.contextGraphId, classification);
       }
+      this.settleClassifiedJob(durable, result, classification);
+    } catch (error) {
+      this.settleThrownJob(durable, error);
     }
   }
 
-  private settleProjectionViewsFrom(
+  private settleDurableSlotFrom(
     coordinator: CatchupCoordinator,
-    execution: CatchupExecution,
     source: CatchupJob,
   ): void {
-    for (const view of coordinator.viewsByScope.values()) {
-      if (
-        view.kind === 'projection' &&
-        view.sourceExecutionJobId === execution.jobId
-      ) {
-        this.settleQueuedJobFrom(view.jobId, source);
-      }
+    if (coordinator.durableJobId) {
+      this.settleQueuedJobFrom(coordinator.durableJobId, source);
     }
   }
 
-  private settleRemainingExecutionsFrom(
+  private settleFullSlotFrom(
     coordinator: CatchupCoordinator,
-    startIndex: number,
     source: CatchupJob,
   ): void {
-    for (const execution of coordinator.executions.slice(startIndex)) {
-      this.settleQueuedJobFrom(execution.jobId, source);
-      this.settleProjectionViewsFrom(coordinator, execution, source);
+    if (coordinator.fullJobId) {
+      this.settleQueuedJobFrom(coordinator.fullJobId, source);
     }
   }
 }

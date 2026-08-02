@@ -24,6 +24,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { ContextGraphCatchupCoordinatorService } from '../context-graph-catchup-coordinator.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -73,6 +74,8 @@ export interface RequestContext {
   nodeVersion: string;
   nodeCommit: string;
   catchupTracker: CatchupTracker;
+  /** Lifecycle-owned coordinator; active coalescing state never leaks into status storage. */
+  catchupCoordinator: ContextGraphCatchupCoordinatorService;
   extractionRegistry: ExtractionPipelineRegistry;
   fileStore: FileStore;
   extractionStatus: Map<string, ExtractionStatusRecord>;

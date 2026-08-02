@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   privateDataOnlyResult,
   publicDurableAndSharedMemoryResult,
+  publicDurableWithSharedMemoryBackpressureResult,
 } from './helpers/context-graph-catchup-fixtures.js';
 import { ContextGraphSubscribeRouteHarness } from './helpers/context-graph-subscribe-route-harness.js';
 
@@ -233,6 +234,50 @@ describe('context graph catch-up route coalescing', () => {
           state: 'partial',
           required: { sharedMemory: true },
           missing: ['sharedMemory'],
+        },
+      });
+    } finally {
+      releaseFirstRun.resolve();
+      await harness.close();
+    }
+  });
+
+  it('keeps a VM projection done when only the broad SWM plane is backpressured', async () => {
+    const firstRunStarted = deferred();
+    const releaseFirstRun = deferred();
+    const harness = await ContextGraphSubscribeRouteHarness.create({
+      hasConfirmedMeta: true,
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+      runner: async () => {
+        firstRunStarted.resolve();
+        await releaseFirstRun.promise;
+        return publicDurableWithSharedMemoryBackpressureResult();
+      },
+    });
+
+    try {
+      const broad = await harness.postSubscribe({ includeSharedMemory: true });
+      await firstRunStarted.promise;
+      const narrow = await harness.postSubscribe({ includeSharedMemory: false });
+
+      releaseFirstRun.resolve();
+      const broadJob = await harness.waitForJob(broad.body.catchup.jobId);
+      const narrowJob = await harness.waitForJob(narrow.body.catchup.jobId);
+
+      expect(harness.runCalls).toBe(1);
+      expect(broadJob).toMatchObject({ status: 'deferred' });
+      expect(narrowJob).toMatchObject({ status: 'done' });
+      await expect(harness.getStatus(narrow.body.catchup.jobId)).resolves.toMatchObject({
+        status: 'done',
+        convergence: {
+          state: 'complete',
+          required: { sharedMemory: false },
+          missing: [],
         },
       });
     } finally {

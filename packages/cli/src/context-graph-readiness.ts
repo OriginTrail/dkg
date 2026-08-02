@@ -64,6 +64,17 @@ export type ContextGraphReadinessPlanes = Omit<
   'observedAt'
 >;
 
+interface ResolvedReadinessPlanes {
+  state: ContextGraphReadinessPlanes['state'];
+  metadataVerified: boolean;
+  durableVerified: boolean;
+  sharedMemoryVerified: boolean;
+  missingMetadata: boolean;
+  missingDurable: boolean;
+  missingRequestedSharedMemory: boolean;
+  readinessUpdatedAt?: number;
+}
+
 function hasCurrentReadinessProvenance(
   readiness: ContextGraphReadinessProvenance,
 ): boolean {
@@ -76,48 +87,66 @@ function describeResolvedReadinessPlanes(input: {
   durableEvidence: boolean;
   sharedMemoryEvidence: boolean;
   readinessUpdatedAt?: number;
-}): ContextGraphReadinessPlanes {
+}): ResolvedReadinessPlanes {
   const metadataVerified = input.hasConfirmedMeta;
   const durableVerified = metadataVerified && input.durableEvidence;
   const sharedMemoryVerified = metadataVerified && input.sharedMemoryEvidence;
-  const missing: ContextGraphConvergencePlane[] = [];
-  if (!metadataVerified) missing.push('metadata');
-  if (!durableVerified) missing.push('durable');
-  if (input.includeSharedMemory && !sharedMemoryVerified) missing.push('sharedMemory');
+  const missingMetadata = !metadataVerified;
+  const missingDurable = !durableVerified;
+  const missingRequestedSharedMemory =
+    input.includeSharedMemory && !sharedMemoryVerified;
 
   const anyVerified = metadataVerified || durableVerified ||
     (input.includeSharedMemory && sharedMemoryVerified);
+  const complete = !missingMetadata && !missingDurable &&
+    !missingRequestedSharedMemory;
 
   return {
-    state: missing.length === 0 ? 'complete' : anyVerified ? 'partial' : 'pending',
-    required: {
-      metadata: true,
-      durable: true,
-      sharedMemory: input.includeSharedMemory,
-    },
-    verified: {
-      metadata: metadataVerified,
-      durable: durableVerified,
-      sharedMemory: sharedMemoryVerified,
-    },
-    missing,
+    state: complete ? 'complete' : anyVerified ? 'partial' : 'pending',
+    metadataVerified,
+    durableVerified,
+    sharedMemoryVerified,
+    missingMetadata,
+    missingDurable,
+    missingRequestedSharedMemory,
     ...(input.readinessUpdatedAt !== undefined
       ? { readinessUpdatedAt: input.readinessUpdatedAt }
       : {}),
   };
 }
 
-/**
- * Canonical interpretation of persisted readiness as independently verified
- * metadata, durable VM, and optional SWM planes. Every caller that needs to
- * decide whether a selected graph is ready must go through this helper so
- * metadata loss and readiness-version changes cannot drift between paths.
- */
-export function describeReadinessPlanes(input: {
+function renderReadinessPlanes(
+  planes: ResolvedReadinessPlanes,
+  includeSharedMemory: boolean,
+): ContextGraphReadinessPlanes {
+  const missing: ContextGraphConvergencePlane[] = [];
+  if (planes.missingMetadata) missing.push('metadata');
+  if (planes.missingDurable) missing.push('durable');
+  if (planes.missingRequestedSharedMemory) missing.push('sharedMemory');
+  return {
+    state: planes.state,
+    required: {
+      metadata: true,
+      durable: true,
+      sharedMemory: includeSharedMemory,
+    },
+    verified: {
+      metadata: planes.metadataVerified,
+      durable: planes.durableVerified,
+      sharedMemory: planes.sharedMemoryVerified,
+    },
+    missing,
+    ...(planes.readinessUpdatedAt !== undefined
+      ? { readinessUpdatedAt: planes.readinessUpdatedAt }
+      : {}),
+  };
+}
+
+function resolvePersistedReadinessPlanes(input: {
   readiness: ContextGraphReadinessProvenance;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
-}): ContextGraphReadinessPlanes {
+}): ResolvedReadinessPlanes {
   const currentReadinessProvenance = hasCurrentReadinessProvenance(input.readiness);
   return describeResolvedReadinessPlanes({
     hasConfirmedMeta: input.hasConfirmedMeta,
@@ -133,16 +162,29 @@ export function describeReadinessPlanes(input: {
 }
 
 /**
- * Merge current-run completion evidence with persisted provenance without
- * pretending the merged value was itself read from storage.
+ * Canonical interpretation of persisted readiness as independently verified
+ * metadata, durable VM, and optional SWM planes. Every caller that needs to
+ * decide whether a selected graph is ready must go through this helper so
+ * metadata loss and readiness-version changes cannot drift between paths.
  */
-export function combineCatchupPlaneEvidence(input: {
+export function describeReadinessPlanes(input: {
+  readiness: ContextGraphReadinessProvenance;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+}): ContextGraphReadinessPlanes {
+  return renderReadinessPlanes(
+    resolvePersistedReadinessPlanes(input),
+    input.includeSharedMemory,
+  );
+}
+
+function resolveCatchupPlaneEvidence(input: {
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
   durableReadyThisRun: boolean;
   sharedMemoryReadyThisRun: boolean;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
-}): ContextGraphReadinessPlanes {
+}): ResolvedReadinessPlanes {
   const currentReadinessProvenance = hasCurrentReadinessProvenance(
     input.readinessBeforeCatchup,
   );
@@ -161,6 +203,23 @@ export function combineCatchupPlaneEvidence(input: {
       ? { readinessUpdatedAt: input.readinessBeforeCatchup.updatedAt }
       : {}),
   });
+}
+
+/**
+ * Merge current-run completion evidence with persisted provenance without
+ * pretending the merged value was itself read from storage.
+ */
+export function combineCatchupPlaneEvidence(input: {
+  readinessBeforeCatchup: ContextGraphReadinessProvenance;
+  durableReadyThisRun: boolean;
+  sharedMemoryReadyThisRun: boolean;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+}): ContextGraphReadinessPlanes {
+  return renderReadinessPlanes(
+    resolveCatchupPlaneEvidence(input),
+    input.includeSharedMemory,
+  );
 }
 
 /**
@@ -214,7 +273,7 @@ export function classifyExistingContextGraphReadiness(input: {
   const currentReadinessProvenance = hasCurrentReadinessProvenance(
     input.readiness,
   );
-  const planes = describeReadinessPlanes(input);
+  const planes = resolvePersistedReadinessPlanes(input);
   const alreadyReady =
     planes.state === 'complete' &&
     input.subscription.synced === true &&
@@ -242,8 +301,8 @@ export function classifyExistingContextGraphReadiness(input: {
     };
   }
 
-  const durableVerified = planes.verified.durable;
-  const sharedMemoryVerified = planes.verified.sharedMemory;
+  const durableVerified = planes.durableVerified;
+  const sharedMemoryVerified = planes.sharedMemoryVerified;
   const statePatch =
     input.subscription.synced !== durableVerified ||
     input.subscription.sharedMemorySynced !== sharedMemoryVerified
@@ -400,7 +459,7 @@ function catchupPlaneReadinessThisRun(input: {
 }
 
 export interface ContextGraphCatchupReadinessClassification {
-  jobStatus: 'done' | 'failed' | 'denied' | 'unreachable';
+  jobStatus: 'done' | 'failed' | 'denied' | 'unreachable' | 'deferred';
   error?: string;
   statePatch?: ContextGraphSubscriptionStatePatch;
   readinessPatch?: ContextGraphReadinessPatch;
@@ -411,12 +470,74 @@ export interface ContextGraphCatchupReadinessClassification {
   };
 }
 
+function deferredCatchupClassification(): ContextGraphCatchupReadinessClassification {
+  return {
+    jobStatus: 'deferred',
+    error: 'Sync deferred by local scheduler backpressure; retry when capacity is available.',
+  };
+}
+
+/**
+ * Backpressure is scoped to the planes requested by this view. A durable-only
+ * projection of a broad execution must not inherit shared-memory deferral.
+ * Legacy results without plane diagnostics fall back to the aggregate counter
+ * so rolling-upgrade callers remain fail-closed.
+ */
+function requestedCatchupBackpressure(
+  result: CatchupJobResult,
+  includeSharedMemory: boolean,
+): number {
+  if (includeSharedMemory) return result.deferredBackpressure;
+  return result.diagnostics?.durable.deferredBackpressure
+    ?? result.deferredBackpressure;
+}
+
+/** Whether the canonical classifier needs chain-backed CG metadata this round. */
+export function catchupClassificationNeedsMetadata(input: {
+  result: CatchupJobResult;
+  includeSharedMemory: boolean;
+}): boolean {
+  const deferredBackpressure = requestedCatchupBackpressure(
+    input.result,
+    input.includeSharedMemory,
+  );
+  // A pure local deferral settles before any metadata/readiness branch. Mixed
+  // denial still needs the full classifier to distinguish denial from usable
+  // progress, so it must inspect clean evidence normally.
+  if (deferredBackpressure > 0 && !input.result.denied) return false;
+  return catchupResultHasCleanResponse(input.result);
+}
+
 /**
  * Canonical policy for converting one catch-up result into externally visible
  * subscription readiness. The HTTP route gathers live metadata and applies
  * the returned patches; all readiness decisions remain in this pure function.
  */
 export function classifyContextGraphCatchupReadiness(input: {
+  result: CatchupJobResult;
+  includeSharedMemory: boolean;
+  hasConfirmedMeta: boolean;
+  isPrivate: boolean;
+  readinessBeforeCatchup: ContextGraphReadinessProvenance;
+}): ContextGraphCatchupReadinessClassification {
+  const deferredBackpressure = requestedCatchupBackpressure(
+    input.result,
+    input.includeSharedMemory,
+  );
+  if (deferredBackpressure > 0 && !input.result.denied) {
+    return deferredCatchupClassification();
+  }
+
+  const classification = classifyContextGraphCatchupReadinessWithoutBackpressure(input);
+  // Pure ACL denial keeps its specific status. When denial coexists with clean
+  // requested-plane progress, local deferral still prevents that partial round
+  // from becoming successful or freezing readiness.
+  return deferredBackpressure > 0 && classification.jobStatus === 'done'
+    ? deferredCatchupClassification()
+    : classification;
+}
+
+function classifyContextGraphCatchupReadinessWithoutBackpressure(input: {
   result: CatchupJobResult;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
@@ -473,23 +594,23 @@ export function classifyContextGraphCatchupReadiness(input: {
       currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
     const sharedMemoryVerifiedBefore =
       currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
-    const planes = combineCatchupPlaneEvidence({
+    const planes = resolveCatchupPlaneEvidence({
       readinessBeforeCatchup: input.readinessBeforeCatchup,
       durableReadyThisRun,
       sharedMemoryReadyThisRun,
       includeSharedMemory: input.includeSharedMemory,
       hasConfirmedMeta: input.hasConfirmedMeta,
     });
-    const durableVerified = planes.verified.durable;
-    const sharedMemoryVerified = planes.verified.sharedMemory;
+    const durableVerified = planes.durableVerified;
+    const sharedMemoryVerified = planes.sharedMemoryVerified;
     // What this run is allowed to FREEZE, as opposed to what it reports. These
     // diverge only for a unanimous-empty verdict, which stays re-derived per run
     // so that a wrong empty verdict cannot become permanent.
     const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
     const sharedMemoryVerifiedPersisted =
       sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
-    const missingDurable = planes.missing.includes('durable');
-    const missingRequestedSharedMemory = planes.missing.includes('sharedMemory');
+    const missingDurable = planes.missingDurable;
+    const missingRequestedSharedMemory = planes.missingRequestedSharedMemory;
     const madeIncompleteProgress =
       (durableDataProgress && !durableReadyThisRun) ||
       (sharedMemoryProgress && !sharedMemoryReadyThisRun);
