@@ -118,6 +118,31 @@ describe('sync-on-connect churn gates', () => {
     expect(calls).toEqual([PEER_A]);
   });
 
+  it('does not suppress connection-open catch-up with an older Core coverage epoch', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SyncReconnectCoreCoverageEpoch',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
+    });
+    const calls: string[] = [];
+    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now());
+    (agent as any).lastSyncCoverageEpoch.set(
+      PEER_A,
+      (agent as any).getCorePublicSyncCoverageEpoch(),
+    );
+
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
+    expect((agent as any).registerCorePublicSyncContextGraph('new-public-cg')).toBe(true);
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(true);
+
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+  });
+
   it('labels the connect-driven admission on-connect, not unspecified', async () => {
     // The complement of the reconciler assertion below, and the source with the
     // highest production volume: every reconnect sync flows through this

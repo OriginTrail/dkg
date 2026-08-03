@@ -83,6 +83,14 @@ export function resolveCorePublicSyncBatchSize(
 export class CorePublicSyncCoverageScheduler {
   private readonly tracked = new Set<string>();
   /**
+   * Monotonic generation of the automatic public-coverage catalogue.
+   * Peer rounds snapshot this value when they plan their frozen automatic
+   * tail; a round may refresh peer freshness only while the generation is
+   * unchanged. This closes the cross-peer race where an old-scope round
+   * finishes after another peer expands the catalogue.
+   */
+  private coverageEpoch = 0;
+  /**
    * Bounded LRU lane anchors keep active-peer fairness without a lifecycle cleanup contract.
    * Each value names the graph that most recently occupied the lane's first slot, so the
    * state remains meaningful when priorities or tracked membership rebuild the ordered list.
@@ -107,11 +115,14 @@ export class CorePublicSyncCoverageScheduler {
     if (!normalized) return false;
     const sizeBefore = this.tracked.size;
     this.tracked.add(normalized);
-    return this.tracked.size !== sizeBefore;
+    const changed = this.tracked.size !== sizeBefore;
+    if (changed) this.coverageEpoch += 1;
+    return changed;
   }
 
   unregister(contextGraphId: string): boolean {
     const removed = this.tracked.delete(contextGraphId);
+    if (removed) this.coverageEpoch += 1;
     if (this.tracked.size === 0) {
       this.laneAnchors.clear();
     } else if (removed) {
@@ -122,6 +133,10 @@ export class CorePublicSyncCoverageScheduler {
       }
     }
     return removed;
+  }
+
+  getCoverageEpoch(): number {
+    return this.coverageEpoch;
   }
 
   planAutomaticCoverage(

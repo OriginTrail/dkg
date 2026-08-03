@@ -934,6 +934,7 @@ type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'defe
 
 interface LifecycleSyncScopePlan {
   readonly effectiveBatchSize: number;
+  readonly automaticCoverageEpoch?: number;
   readonly automaticContextGraphIds: readonly string[];
   readonly initialBootstrapContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
@@ -3804,6 +3805,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
+    this.lastSyncCoverageEpoch.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -3824,7 +3826,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
+    const currentCorePublicCoverageEpoch = (this.config.nodeRole ?? 'edge') === 'core'
+      ? this.getCorePublicSyncCoverageEpoch()
+      : undefined;
+    const coverageEpochCurrent = currentCorePublicCoverageEpoch === undefined
+      || this.lastSyncCoverageEpoch.get(remotePeer) === currentCorePublicCoverageEpoch;
     if (
+      coverageEpochCurrent &&
       lastSuccessfulSync != null &&
       lastSuccessfulSync > disconnectBoundary &&
       now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
@@ -4002,12 +4010,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       planningLane: remotePeer,
       configuredBatchSize: coverageStatus.batchSize,
     });
+    let plannedCorePublicCoverageEpoch: number | undefined;
     const createScopePlan = () => {
       const configuredContextGraphIds = [...new Set(this.config.syncContextGraphs ?? [])];
       const durableAlwaysOnEdgeContextGraphIds =
         getLiveDurableAlwaysOnEdgeContextGraphIds();
       const defaultScopePlan = this.planCorePublicSyncPeerRound(remotePeer);
       const scopePlan = invocationPolicy.buildScopePlan(defaultScopePlan);
+      plannedCorePublicCoverageEpoch = scopePlan.automaticCoverageEpoch;
       evidence.beginRound({
         effectiveBatchSize: scopePlan.effectiveBatchSize,
         selectedContextGraphIds: configuredContextGraphIds,
@@ -4037,7 +4047,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return invocationPolicy.filterSharedMemoryPlan(resolved);
     };
     let terminalOutcome: SyncOnConnectOutcome | undefined;
-    let coreCoverageExpandedDuringRound = false;
     try {
       terminalOutcome = await runSyncOnConnectWithScopePlan({
       remotePeer,
@@ -4068,22 +4077,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const confirmed = await this.refreshMetaSyncedFlags(contextGraphIds);
           evidence.markMetadata(confirmed);
         },
-        discoverContextGraphsFromStore: async () => {
-          const trackedBefore = this.getCorePublicSyncCoverageStatus().trackedContextGraphs;
-          const discovered = await this.discoverContextGraphsFromStore();
-          const trackedAfter = this.getCorePublicSyncCoverageStatus().trackedContextGraphs;
-          if (trackedAfter > trackedBefore) {
-            // The peer-round plan is intentionally frozen before durable sync.
-            // Definitions learned from that sync therefore cannot be covered by
-            // the same round. Do not let its accounting make this peer look
-            // fresh for a scope it never attempted; the reconciler must plan a
-            // bounded follow-up round from the expanded scheduler catalogue.
-            coreCoverageExpandedDuringRound = true;
-            this.lastSuccessfulSyncAt.delete(remotePeer);
-            this.lastSyncProgressAt.delete(remotePeer);
-          }
-          return discovered;
-        },
+        discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
         syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
           const plan = await getSharedMemorySyncPlan(peerId, contextGraphIds);
           const requestedContextGraphIds =
@@ -4110,15 +4104,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
         onPeerSynced: (peerId, outcome) => {
           const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-          if (coreCoverageExpandedDuringRound) {
+          const coreCoverageEpoch = (this.config.nodeRole ?? 'edge') === 'core'
+            ? this.getCorePublicSyncCoverageEpoch()
+            : undefined;
+          const plannedCoverageIsCurrent = coreCoverageEpoch === undefined
+            || plannedCorePublicCoverageEpoch === coreCoverageEpoch;
+          if (!plannedCoverageIsCurrent) {
+            // Another peer (or a concurrent local discovery path) changed the
+            // automatic catalogue after this round froze its scope. Its result
+            // is useful, but it cannot prove freshness for the newer epoch.
             this.lastSyncProgressAt.delete(peerId);
             this.lastSuccessfulSyncAt.delete(peerId);
+            this.lastSyncCoverageEpoch.delete(peerId);
           } else {
+            if (
+              coreCoverageEpoch !== undefined
+              && this.lastSyncCoverageEpoch.get(peerId) !== coreCoverageEpoch
+            ) {
+              // Existing timestamps describe an older automatic scope. Keep
+              // only accounting produced by this current-generation round.
+              this.lastSyncProgressAt.delete(peerId);
+              this.lastSuccessfulSyncAt.delete(peerId);
+            }
             if (outcome?.progress) {
               this.lastSyncProgressAt.set(peerId, progressAt);
             }
             if (outcome?.fresh ?? true) {
               this.lastSuccessfulSyncAt.set(peerId, progressAt);
+            }
+            if (coreCoverageEpoch !== undefined) {
+              this.lastSyncCoverageEpoch.set(peerId, coreCoverageEpoch);
             }
           }
           this.skippedNoSyncPeers.delete(peerId);
@@ -4369,6 +4384,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const now = Date.now();
     const ctx = createOperationContext('sync');
+    const corePublicCoverageEpoch = (this.config.nodeRole ?? 'edge') === 'core'
+      ? this.getCorePublicSyncCoverageEpoch()
+      : undefined;
 
     this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
@@ -4379,7 +4397,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
       const lastProgress = this.lastSyncProgressAt.get(peerId);
       const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
-      const stale = lastSyncCooldown === 0
+      const coverageEpochStale = corePublicCoverageEpoch !== undefined
+        && this.lastSyncCoverageEpoch.get(peerId) !== corePublicCoverageEpoch;
+      const stale = coverageEpochStale
+        || lastSyncCooldown === 0
         || lastSyncCooldown <= lastDisconnected
         || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS;
       if (!stale) continue;
@@ -4441,6 +4462,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const [peerId, ts] of this.lastSyncProgressAt) {
       if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
         this.lastSyncProgressAt.delete(peerId);
+      }
+    }
+    for (const peerId of this.lastSyncCoverageEpoch.keys()) {
+      if (
+        !connected.has(peerId)
+        && !this.lastSuccessfulSyncAt.has(peerId)
+        && !this.lastSyncProgressAt.has(peerId)
+      ) {
+        this.lastSyncCoverageEpoch.delete(peerId);
       }
     }
     for (const [peerId, backoff] of this.syncReconcilerBackoff) {

@@ -1161,6 +1161,65 @@ describe('runSyncOnConnect callbacks', () => {
 });
 
 describe('DKGAgent peer-round scope wiring', () => {
+  it('does not let concurrent old-scope Core rounds refresh a newer coverage epoch', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ConcurrentCoreCoverageExpansion',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
+      syncCorePublicBatchSize: 1,
+    });
+    try {
+      await agent.start();
+      allowAllNetworkAdmission(agent);
+      const peerA = freshPeerIdString();
+      const peerB = freshPeerIdString();
+      (agent as any).registerCorePublicSyncContextGraph('public-before-plan');
+      const plannedEpoch = (agent as any).getCorePublicSyncCoverageEpoch();
+      const peerAStarted = deferred<void>();
+      const releasePeerA = deferred<void>();
+      let expanded = false;
+
+      (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+      (agent as any).refreshMetaSyncedFlags = async () => {};
+      (agent as any).syncFromPeerDetailed = async (peerId: string) => {
+        if (peerId === peerA) {
+          peerAStarted.resolve();
+          await releasePeerA.promise;
+        }
+        return 1;
+      };
+      (agent as any).discoverContextGraphsFromStore = async () => {
+        if (!expanded) {
+          expanded = true;
+          (agent as any).registerCorePublicSyncContextGraph('public-after-plan');
+        }
+        return expanded ? 1 : 0;
+      };
+      (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+        publicContextGraphIds: [],
+        privateRecoverFromCurator: [],
+        eligibleContextGraphIds: [],
+      });
+
+      const peerARound = (agent as any).trySyncFromPeer(peerA);
+      await peerAStarted.promise;
+      expect((agent as any).getCorePublicSyncCoverageEpoch()).toBe(plannedEpoch);
+
+      expect(await (agent as any).trySyncFromPeer(peerB)).toBe('synced');
+      expect((agent as any).getCorePublicSyncCoverageEpoch()).toBe(plannedEpoch + 1);
+      expect((agent as any).lastSuccessfulSyncAt.has(peerB)).toBe(false);
+      expect((agent as any).lastSyncCoverageEpoch.has(peerB)).toBe(false);
+
+      releasePeerA.resolve();
+      expect(await peerARound).toBe('synced');
+      expect((agent as any).lastSuccessfulSyncAt.has(peerA)).toBe(false);
+      expect((agent as any).lastSyncCoverageEpoch.has(peerA)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('keeps a peer immediately eligible when its frozen round discovers new automatic coverage', async () => {
     const agent = await DKGAgent.create({
       name: 'FrozenCoreCoverageExpansion',
@@ -1422,9 +1481,17 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const freshAt = Date.now() - 30_000;
       (agent as any).lastSuccessfulSyncAt.set(peerA, freshAt);
       (agent as any).lastSyncProgressAt.set(peerA, freshAt);
+      (agent as any).lastSyncCoverageEpoch.set(
+        peerA,
+        (agent as any).getCorePublicSyncCoverageEpoch(),
+      );
 
       const trySyncFromPeer = recorder(async (peerId: string) => {
         (agent as any).lastSuccessfulSyncAt.set(peerId, Date.now());
+        (agent as any).lastSyncCoverageEpoch.set(
+          peerId,
+          (agent as any).getCorePublicSyncCoverageEpoch(),
+        );
         return 'synced';
       });
       (agent as any).trySyncFromPeer = trySyncFromPeer;

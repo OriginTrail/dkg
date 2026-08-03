@@ -7,6 +7,21 @@ import {
 } from '../src/sync/core-public-coverage-scheduler.js';
 
 describe('Core public Context Graph coverage scheduler', () => {
+  it('advances its coverage epoch only for real catalogue mutations', () => {
+    const scheduler = new CorePublicSyncCoverageScheduler(1);
+
+    expect(scheduler.getCoverageEpoch()).toBe(0);
+    expect(scheduler.register('public-a')).toBe(true);
+    expect(scheduler.getCoverageEpoch()).toBe(1);
+    expect(scheduler.register('public-a')).toBe(false);
+    expect(scheduler.register('   ')).toBe(false);
+    expect(scheduler.getCoverageEpoch()).toBe(1);
+    expect(scheduler.unregister('missing')).toBe(false);
+    expect(scheduler.getCoverageEpoch()).toBe(1);
+    expect(scheduler.unregister('public-a')).toBe(true);
+    expect(scheduler.getCoverageEpoch()).toBe(2);
+  });
+
   it('always admits explicit selections outside the automatic coverage cap', () => {
     const scheduler = new CorePublicSyncCoverageScheduler(1, () => 123);
     scheduler.register('public-a');

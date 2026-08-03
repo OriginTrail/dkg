@@ -436,6 +436,8 @@ type ContextGraphDiscoveryDisposition =
 /** Internal peer-round policy: initial durable scope is frozen; later explicit intent is live. */
 interface PeerSyncScope {
   readonly effectiveBatchSize: number;
+  /** Automatic public-coverage generation frozen with this peer plan. */
+  readonly automaticCoverageEpoch?: number;
   readonly automaticContextGraphIds: readonly string[];
   readonly initialBootstrapContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
@@ -1566,6 +1568,12 @@ export class DKGAgentBase {
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
   /**
+   * Core-only automatic public-coverage generation represented by this
+   * peer's freshness/progress timestamps. Kept per peer so one concurrent
+   * old-scope round cannot make another lane appear fresh.
+   */
+  protected readonly lastSyncCoverageEpoch = new Map<string, number>();
+  /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
@@ -1693,15 +1701,7 @@ export class DKGAgentBase {
 
   protected registerCorePublicSyncContextGraph(contextGraphId: string): boolean {
     if ((this.config.nodeRole ?? 'edge') !== 'core') return false;
-    const changed = this.corePublicSyncCoverageScheduler.register(contextGraphId);
-    if (changed) {
-      // A prior peer success only proves the old frozen scope. Make every
-      // connected lane eligible to plan a bounded round for the expanded
-      // public catalogue; transport backoff remains independent and intact.
-      this.lastSuccessfulSyncAt.clear();
-      this.lastSyncProgressAt.clear();
-    }
-    return changed;
+    return this.corePublicSyncCoverageScheduler.register(contextGraphId);
   }
 
   protected unregisterCorePublicSyncContextGraph(contextGraphId: string): boolean {
@@ -1772,6 +1772,9 @@ export class DKGAgentBase {
     ])];
     return {
       effectiveBatchSize,
+      ...((this.config.nodeRole ?? 'edge') === 'core'
+        ? { automaticCoverageEpoch: this.corePublicSyncCoverageScheduler.getCoverageEpoch() }
+        : {}),
       automaticContextGraphIds,
       initialBootstrapContextGraphIds: [
         SYSTEM_CONTEXT_GRAPHS.AGENTS,
@@ -1783,6 +1786,10 @@ export class DKGAgentBase {
         ...automaticContextGraphIds,
       ])],
     };
+  }
+
+  protected getCorePublicSyncCoverageEpoch(): number {
+    return this.corePublicSyncCoverageScheduler.getCoverageEpoch();
   }
 
   getCorePublicSyncCoverageStatus(): CorePublicSyncCoverageStatus {
