@@ -166,6 +166,7 @@ import {
   type CatchupJob,
   type CatchupTracker,
 } from '../types.js';
+import { settleOnDemandContextGraphSubscription } from '../context-graph-catchup-route-adapter.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -1738,6 +1739,21 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       syncMode: requestedSyncMode,
     });
     const effectiveSyncMode = appliedSubscription.syncMode;
+    const settleOnDemandLifetime = () => {
+      if (effectiveSyncMode !== 'on-demand') return;
+      try {
+        settleOnDemandContextGraphSubscription(agent, contextGraphId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[subscribe] contextGraph=${contextGraphId} on-demand lifetime settlement failed: ${message}`);
+      }
+    };
+    const settleOnDemandLifetimeAfterCurrentCatchup = () => {
+      if (effectiveSyncMode !== 'on-demand') return;
+      void catchupCoordinator.whenCurrentRunSettles(contextGraphId).then(
+        settleOnDemandLifetime,
+      );
+    };
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
@@ -1748,6 +1764,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         includeSharedMemory: shouldSyncSharedMemory,
       });
       if (responseJob) {
+        settleOnDemandLifetimeAfterCurrentCatchup();
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
@@ -1791,11 +1808,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           catchupTracker.jobs.set(jobId, syntheticJob);
           catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
         }
-        // No detached coordinator worker will run for this fast path, so end
-        // a point-in-time on-demand subscription here. The coordinator-owned
-        // settlement callback re-reads the live mode and preserves a request
-        // that was promoted to always-on while readiness was evaluated.
-        catchupCoordinator.settleSubscriptionLifetime(contextGraphId);
+        // No detached coordinator worker will run for this fast path. The
+        // route-owned finalizer re-reads live mode so an in-flight always-on
+        // promotion wins over this original point-in-time request.
+        settleOnDemandLifetime();
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
@@ -1837,6 +1853,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       includeSharedMemory: shouldSyncSharedMemory,
       readinessBeforeCatchup,
     });
+    settleOnDemandLifetimeAfterCurrentCatchup();
 
     return jsonResponse(res, 200, {
       subscribed: contextGraphId,

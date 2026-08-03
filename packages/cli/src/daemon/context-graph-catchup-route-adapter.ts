@@ -61,9 +61,6 @@ export function createContextGraphCatchupRouteAdapter(input: {
         ...payload,
       });
     },
-    settleSubscriptionLifetime: (contextGraphId) => {
-      settleOnDemandContextGraphSubscription(input.agent, contextGraphId);
-    },
     ...(input.trace ? { trace: input.trace } : {}),
   });
 }

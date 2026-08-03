@@ -22,6 +22,7 @@ export interface SubscribeRouteHarnessOptions {
   isPrivate?: boolean;
   allowedAgents?: string[];
   callerAddress?: string;
+  unsubscribeError?: Error;
   readiness?: {
     version: number;
     durableVerified: boolean;
@@ -42,6 +43,10 @@ export class ContextGraphSubscribeRouteHarness {
   readonly subscribeCalls: Array<{
     id: string;
     options: { syncMode?: SyncMode } | undefined;
+  }> = [];
+  readonly unsubscribeCalls: Array<{
+    id: string;
+    options: { persist?: boolean } | undefined;
   }> = [];
   readonly metadataCheckOptions: Array<
     { rejectUnregisteredPlaceholder?: boolean } | undefined
@@ -198,6 +203,14 @@ export class ContextGraphSubscribeRouteHarness {
         this.state.set(id, applied);
         return applied;
       },
+      unsubscribeFromContextGraph: (
+        id: string,
+        options?: { persist?: boolean },
+      ) => {
+        this.unsubscribeCalls.push({ id, options });
+        if (this.options.unsubscribeError) throw this.options.unsubscribeError;
+        this.state.set(id, { ...this.state.get(id), subscribed: false });
+      },
       markContextGraphSubscriptionState: (
         id: string,
         patch: Record<string, unknown>,
@@ -320,6 +333,7 @@ export async function runSubscribeScenario(
   runCalls: number;
   runRequests: CatchupRunRequest[];
   subscribeCalls: ContextGraphSubscribeRouteHarness['subscribeCalls'];
+  unsubscribeCalls: ContextGraphSubscribeRouteHarness['unsubscribeCalls'];
   state: Record<string, any>;
   patches: Array<Record<string, unknown>>;
   readiness: Record<string, unknown> | undefined;
@@ -345,6 +359,7 @@ export async function runSubscribeScenario(
       runCalls: harness.runCalls,
       runRequests: [...harness.runRequests],
       subscribeCalls: [...harness.subscribeCalls],
+      unsubscribeCalls: [...harness.unsubscribeCalls],
       state: harness.state.get(harness.contextGraphId) ?? {},
       patches: [...harness.patches],
       readiness: harness.readiness,

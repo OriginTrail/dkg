@@ -38,12 +38,6 @@ export interface ContextGraphCatchupCoordinatorEffects {
       verifiedPrivateOnlyResponses: number;
     },
   ) => void;
-  /**
-   * Close any process-local subscription whose requested lifetime ended with
-   * this serialized catch-up. Implementations must re-read live state so an
-   * in-flight promotion to always-on wins over the original on-demand request.
-   */
-  settleSubscriptionLifetime?: (contextGraphId: string) => void;
   now?: () => number;
   createJobId?: () => string;
   trace?: (message: string) => void;
@@ -55,6 +49,10 @@ export class ContextGraphCatchupCoordinatorService {
   private readonly now: () => number;
   private readonly createJobId: () => string;
   private readonly inFlightByContextGraph = new Map<string, CatchupCoordinator>();
+  private readonly runSettlementByContextGraph = new Map<string, {
+    promise: Promise<void>;
+    resolve: () => void;
+  }>();
 
   constructor(
     private readonly tracker: CatchupTracker,
@@ -109,15 +107,23 @@ export class ContextGraphCatchupCoordinatorService {
         ? { durableJobId: job.jobId }
         : { fullJobId: job.jobId }),
     };
+    let resolveSettlement!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      resolveSettlement = resolve;
+    });
+    this.runSettlementByContextGraph.set(input.contextGraphId, {
+      promise: settlement,
+      resolve: resolveSettlement,
+    });
     this.inFlightByContextGraph.set(input.contextGraphId, coordinator);
     this.pruneCompletedJobs();
     void this.run(coordinator, input.readinessBeforeCatchup);
     return this.markLatest(job);
   }
 
-  /** Settle an already-ready request that did not need a detached worker. */
-  settleSubscriptionLifetime(contextGraphId: string): void {
-    this.effects.settleSubscriptionLifetime?.(contextGraphId);
+  /** Observe completion of the currently serialized catch-up, if any. */
+  whenCurrentRunSettles(contextGraphId: string): Promise<void> {
+    return this.runSettlementByContextGraph.get(contextGraphId)?.promise ?? Promise.resolve();
   }
 
   private toScope(includeSharedMemory: boolean): CatchupScope {
@@ -191,33 +197,15 @@ export class ContextGraphCatchupCoordinatorService {
         await this.runFullFirst(coordinator, readinessBeforeCatchup);
       }
     } finally {
-      try {
-        this.settleSubscriptionLifetime(coordinator.contextGraphId);
-      } catch (error) {
-        this.failSubscriptionLifetimeSettlement(coordinator, error);
-      }
       if (this.inFlightByContextGraph.get(coordinator.contextGraphId) === coordinator) {
         this.inFlightByContextGraph.delete(coordinator.contextGraphId);
       }
+      const settlement = this.runSettlementByContextGraph.get(coordinator.contextGraphId);
+      if (settlement) {
+        this.runSettlementByContextGraph.delete(coordinator.contextGraphId);
+        settlement.resolve();
+      }
     }
-  }
-
-  private failSubscriptionLifetimeSettlement(
-    coordinator: CatchupCoordinator,
-    error: unknown,
-  ): void {
-    const message = error instanceof Error ? error.message : String(error);
-    for (const jobId of [coordinator.durableJobId, coordinator.fullJobId]) {
-      if (!jobId) continue;
-      const job = this.tracker.jobs.get(jobId);
-      if (!job) continue;
-      job.status = 'failed';
-      job.error = `Catch-up finished but subscription lifetime settlement failed: ${message}`;
-      job.finishedAt = this.now();
-    }
-    this.effects.trace?.(
-      `[catchup] contextGraph=${coordinator.contextGraphId} lifetime settlement failed: ${message}`,
-    );
   }
 
   private async runDurableFirst(

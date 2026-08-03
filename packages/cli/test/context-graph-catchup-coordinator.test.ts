@@ -87,7 +87,6 @@ function coordinatorFixture(options: {
   const markSubscriptionState = vi.fn();
   const hasConfirmedMeta = vi.fn(async () => true);
   const isPrivate = vi.fn(async () => false);
-  const settleSubscriptionLifetime = vi.fn();
   const service = new ContextGraphCatchupCoordinatorService(tracker, {
     runner: { run },
     readReadiness: () => readiness,
@@ -96,7 +95,6 @@ function coordinatorFixture(options: {
     writeReadiness,
     markSubscriptionState,
     emitProjectSynced: vi.fn(),
-    settleSubscriptionLifetime,
     createJobId: () => `job-${++sequence}`,
   });
   return {
@@ -109,7 +107,6 @@ function coordinatorFixture(options: {
     markSubscriptionState,
     hasConfirmedMeta,
     isPrivate,
-    settleSubscriptionLifetime,
   };
 }
 
@@ -338,9 +335,6 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     ]);
     expect(base).toMatchObject({ includeSharedMemory: false, status: 'done' });
     expect(upgrade).toMatchObject({ includeSharedMemory: true, status: 'done' });
-    await vi.waitFor(() => {
-      expect(fixture.settleSubscriptionLifetime).toHaveBeenCalledExactlyOnceWith('cg:one');
-    });
     expect(fixture.service.coalesceActive({
       contextGraphId: 'cg:one',
       includeSharedMemory: true,
@@ -443,13 +437,10 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     expect(fixture.isPrivate).not.toHaveBeenCalled();
   });
 
-  it('fails every coalesced view when subscription lifetime settlement fails', async () => {
+  it('exposes run settlement without rewriting coalesced catch-up outcomes', async () => {
     const fixture = coordinatorFixture();
-    fixture.settleSubscriptionLifetime.mockImplementation(() => {
-      throw new Error('detach failed');
-    });
     const narrow = fixture.service.start({
-      contextGraphId: 'cg:lifetime-failure',
+      contextGraphId: 'cg:run-settlement',
       includeSharedMemory: false,
       readinessBeforeCatchup: {
         version: 1,
@@ -460,18 +451,17 @@ describe('ContextGraphCatchupCoordinatorService', () => {
     });
     await fixture.firstRunStarted.promise;
     const broad = fixture.service.coalesceActive({
-      contextGraphId: 'cg:lifetime-failure',
+      contextGraphId: 'cg:run-settlement',
       includeSharedMemory: true,
     });
+    const settled = fixture.service.whenCurrentRunSettles('cg:run-settlement');
 
     fixture.releaseFirstRun.resolve();
     if (!broad) throw new Error('broad view missing');
-    await vi.waitFor(() => {
-      expect(narrow.status).toBe('failed');
-      expect(broad.status).toBe('failed');
-    });
-    expect(narrow.error).toContain('subscription lifetime settlement failed: detach failed');
-    expect(broad.error).toContain('subscription lifetime settlement failed: detach failed');
+    await settled;
+    expect(narrow).toMatchObject({ status: 'done', error: undefined });
+    expect(broad).toMatchObject({ status: 'done', error: undefined });
+    await expect(fixture.service.whenCurrentRunSettles('cg:run-settlement')).resolves.toBeUndefined();
   });
 });
 

@@ -35,6 +35,87 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.state.syncMode).toBe('on-demand');
   });
 
+  it('settles an already-ready on-demand fast path without starting catch-up', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      syncMode: 'on-demand',
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncMode: 'on-demand',
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('done');
+    expect(result.runCalls).toBe(0);
+    expect(result.unsubscribeCalls).toEqual([{
+      id: expect.any(String),
+      options: { persist: false },
+    }]);
+    expect(result.state).toMatchObject({
+      subscribed: false,
+      synced: true,
+      sharedMemorySynced: true,
+      syncMode: 'on-demand',
+    });
+  });
+
+  it('keeps an already-ready catch-up result done when on-demand cleanup fails', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      syncMode: 'on-demand',
+      unsubscribeError: new Error('detach failed'),
+      readiness: {
+        version: 1,
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncMode: 'on-demand',
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('done');
+    expect(result.job?.status).toBe('done');
+    expect(result.job?.error).toBeUndefined();
+    expect(result.runCalls).toBe(0);
+    expect(result.unsubscribeCalls).toHaveLength(1);
+    expect(result.state.subscribed).toBe(true);
+  });
+
+  it('keeps a worker catch-up result done when on-demand cleanup fails', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      syncMode: 'on-demand',
+      unsubscribeError: new Error('detach failed'),
+      result: publicDurableAndSharedMemoryResult(),
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        syncMode: 'on-demand',
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.job).toMatchObject({ status: 'done', error: undefined });
+    expect(result.runCalls).toBe(1);
+    expect(result.unsubscribeCalls).toHaveLength(1);
+    expect(result.state.subscribed).toBe(true);
+  });
+
   it('reports the agent-applied mode when an on-demand open cannot downgrade always-on', async () => {
     const result = await subscribe({
       hasConfirmedMeta: false,
@@ -51,6 +132,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     ]);
     expect(result.response.syncMode).toBe('always-on');
     expect(result.state.syncMode).toBe('always-on');
+    expect(result.state.subscribed).toBe(true);
+    expect(result.unsubscribeCalls).toEqual([]);
   });
 
   it('rejects unknown sync modes before changing subscription state', async () => {
