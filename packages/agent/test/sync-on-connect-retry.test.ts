@@ -1161,6 +1161,50 @@ describe('runSyncOnConnect callbacks', () => {
 });
 
 describe('DKGAgent peer-round scope wiring', () => {
+  it('keeps a peer immediately eligible when its frozen round discovers new automatic coverage', async () => {
+    const agent = await DKGAgent.create({
+      name: 'FrozenCoreCoverageExpansion',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      nodeRole: 'core',
+      syncCorePublicBatchSize: 1,
+    });
+    try {
+      await agent.start();
+      allowAllNetworkAdmission(agent);
+      const remotePeer = freshPeerIdString();
+      (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+      (agent as any).refreshMetaSyncedFlags = async () => {};
+      (agent as any).discoverContextGraphsFromStore = async () => {
+        (agent as any).registerCorePublicSyncContextGraph('public-after-plan');
+        return 1;
+      };
+      const durable = recorder(async (..._args: unknown[]) => 1);
+      (agent as any).syncFromPeerDetailed = durable;
+      (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+        publicContextGraphIds: [],
+        privateRecoverFromCurator: [],
+        eligibleContextGraphIds: [],
+      });
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => 0;
+
+      const priorFreshness = Date.now() - 30_000;
+      (agent as any).lastSuccessfulSyncAt.set(remotePeer, priorFreshness);
+      (agent as any).lastSyncProgressAt.set(remotePeer, priorFreshness);
+
+      expect(await (agent as any).trySyncFromPeer(remotePeer)).toBe('synced');
+      expect(durable.calls[0]?.[1]).toEqual([
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      ]);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(1);
+      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
+      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('keeps newly restored explicit CGs live while freezing only the automatic tail', async () => {
     const agent = await DKGAgent.create({
       name: 'DynamicExplicitScope',
@@ -1358,6 +1402,56 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
 });
 
 describe('DKGAgent sync retry — periodic reconciler', () => {
+  it('wakes fresh Core peers when public coverage admission expands', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ReconcilerCoreCoverageDiscoveryWakeup',
+      listenHost: '127.0.0.1',
+      nodeRole: 'core',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      allowAllNetworkAdmission(agent);
+
+      const peerA = freshPeerIdString();
+      const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
+      (agent.node.libp2p as any).getPeers = recorder(
+        () => [...origGetPeers(), peerIdFromString(peerA)],
+      );
+
+      const freshAt = Date.now() - 30_000;
+      (agent as any).lastSuccessfulSyncAt.set(peerA, freshAt);
+      (agent as any).lastSyncProgressAt.set(peerA, freshAt);
+
+      const trySyncFromPeer = recorder(async (peerId: string) => {
+        (agent as any).lastSuccessfulSyncAt.set(peerId, Date.now());
+        return 'synced';
+      });
+      (agent as any).trySyncFromPeer = trySyncFromPeer;
+
+      expect((agent as any).registerCorePublicSyncContextGraph('public-from-ontology')).toBe(true);
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+
+      expect(trySyncFromPeer.calls).toEqual([[
+        peerA,
+        expect.any(Function),
+        'reconcile',
+        expect.any(Object),
+      ]]);
+      expect(agent.getCorePublicSyncCoverageStatus().trackedContextGraphs).toBe(1);
+
+      // The wake-up is edge-triggered. Once the peer has refreshed the new
+      // scope, an unchanged local catalogue does not defeat normal freshness.
+      expect((agent as any).registerCorePublicSyncContextGraph('public-from-ontology')).toBe(false);
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+      expect(trySyncFromPeer.calls).toHaveLength(1);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('retries connected peers with no successful sync on record', async () => {
     const agent = await DKGAgent.create({
       name: 'ReconcilerNeverSynced',

@@ -4037,6 +4037,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return invocationPolicy.filterSharedMemoryPlan(resolved);
     };
     let terminalOutcome: SyncOnConnectOutcome | undefined;
+    let coreCoverageExpandedDuringRound = false;
     try {
       terminalOutcome = await runSyncOnConnectWithScopePlan({
       remotePeer,
@@ -4067,7 +4068,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const confirmed = await this.refreshMetaSyncedFlags(contextGraphIds);
           evidence.markMetadata(confirmed);
         },
-        discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
+        discoverContextGraphsFromStore: async () => {
+          const trackedBefore = this.getCorePublicSyncCoverageStatus().trackedContextGraphs;
+          const discovered = await this.discoverContextGraphsFromStore();
+          const trackedAfter = this.getCorePublicSyncCoverageStatus().trackedContextGraphs;
+          if (trackedAfter > trackedBefore) {
+            // The peer-round plan is intentionally frozen before durable sync.
+            // Definitions learned from that sync therefore cannot be covered by
+            // the same round. Do not let its accounting make this peer look
+            // fresh for a scope it never attempted; the reconciler must plan a
+            // bounded follow-up round from the expanded scheduler catalogue.
+            coreCoverageExpandedDuringRound = true;
+            this.lastSuccessfulSyncAt.delete(remotePeer);
+            this.lastSyncProgressAt.delete(remotePeer);
+          }
+          return discovered;
+        },
         syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
           const plan = await getSharedMemorySyncPlan(peerId, contextGraphIds);
           const requestedContextGraphIds =
@@ -4094,11 +4110,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
         onPeerSynced: (peerId, outcome) => {
           const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-          if (outcome?.progress) {
-            this.lastSyncProgressAt.set(peerId, progressAt);
-          }
-          if (outcome?.fresh ?? true) {
-            this.lastSuccessfulSyncAt.set(peerId, progressAt);
+          if (coreCoverageExpandedDuringRound) {
+            this.lastSyncProgressAt.delete(peerId);
+            this.lastSuccessfulSyncAt.delete(peerId);
+          } else {
+            if (outcome?.progress) {
+              this.lastSyncProgressAt.set(peerId, progressAt);
+            }
+            if (outcome?.fresh ?? true) {
+              this.lastSuccessfulSyncAt.set(peerId, progressAt);
+            }
           }
           this.skippedNoSyncPeers.delete(peerId);
           this.syncReconcilerBackoff.delete(peerId);
@@ -4348,6 +4369,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const now = Date.now();
     const ctx = createOperationContext('sync');
+
     this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
       const peerId = pid.toString();

@@ -1693,7 +1693,15 @@ export class DKGAgentBase {
 
   protected registerCorePublicSyncContextGraph(contextGraphId: string): boolean {
     if ((this.config.nodeRole ?? 'edge') !== 'core') return false;
-    return this.corePublicSyncCoverageScheduler.register(contextGraphId);
+    const changed = this.corePublicSyncCoverageScheduler.register(contextGraphId);
+    if (changed) {
+      // A prior peer success only proves the old frozen scope. Make every
+      // connected lane eligible to plan a bounded round for the expanded
+      // public catalogue; transport backoff remains independent and intact.
+      this.lastSuccessfulSyncAt.clear();
+      this.lastSyncProgressAt.clear();
+    }
+    return changed;
   }
 
   protected unregisterCorePublicSyncContextGraph(contextGraphId: string): boolean {
