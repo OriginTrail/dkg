@@ -170,6 +170,43 @@ describe('ProtocolRouter', () => {
       expect(stream.aborted?.message).toMatch(/handler error/);
     });
 
+    it('does ZERO admission work for an outbound send whose signal is already aborted', async () => {
+      // The premise W1's changelog pre-send boundary rests on. That boundary
+      // skips recording an attempt and its request bytes for an already-aborted
+      // send, on the grounds that the router rejects it before anything
+      // physical happens. Asserted here against the REAL router rather than
+      // reasoned about, because every agent telemetry test replaces
+      // `agent.messenger` wholesale and so never exercises this preflight —
+      // which would leave "no work happened" a code-reading claim.
+      const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
+      const node = {
+        libp2p: { handle: () => undefined, unhandle: () => undefined },
+        stopSignal: AbortSignal.abort(new Error('node stopping')),
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: (peerId, protocolId, direction) => {
+          admittedCalls.push([peerId, protocolId, direction]);
+          return true;
+        },
+      });
+
+      // Capture rather than `rejects.toMatchObject`, so the admission assertion
+      // below is REACHED even when the shape assertion would fail. Ordered
+      // deliberately: with the preflight removed, admission runs (it is the very
+      // next statement) and only later does the fixture's peer id fail to parse
+      // — so `admittedCalls` is what discriminates, and asserting it second
+      // would leave it unreached behind an earlier failure.
+      const err = await router
+        .send(REMOTE_PEER, PROTOCOL, new Uint8Array([0x01]))
+        .then(() => null, (e: unknown) => e);
+
+      // Admission is the FIRST thing after the abort preflight, so zero calls
+      // proves the rejection happened upstream of it — and therefore upstream
+      // of every dial, stream and byte.
+      expect(admittedCalls).toEqual([]);
+      expect(err).toMatchObject({ name: 'AbortError' });
+    });
+
     it('quietly rejects inbound requests when the admission boundary returns a quiet retryable error', async () => {
       const originalError = console.error;
       const errorSpy = recorder((..._args: unknown[]) => undefined);

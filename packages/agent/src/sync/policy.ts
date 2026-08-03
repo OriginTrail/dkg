@@ -34,6 +34,14 @@ export type SyncSchedulerLane =
  *
  * The set is deliberately closed and small: these values become metric and log
  * dimensions, so cardinality is a contract, not an implementation detail.
+ *
+ * The rule is TRIGGER attribution, with a base case: a sync operation is
+ * attributed to whatever triggered it, and work with no triggering sync
+ * operation is triggered by the control plane. `control-plane` is that base
+ * case — node-internal metadata work (curator meta refresh, on both the
+ * requester and responder sides) that no sync trigger is responsible for.
+ * It exists so `unspecified` can keep meaning "we do not know", which is what
+ * makes an unclassified sample able to invalidate an observation window.
  */
 export const SYNC_ADMISSION_SOURCES = [
   'catchup-foreground',
@@ -42,6 +50,7 @@ export const SYNC_ADMISSION_SOURCES = [
   'reconcile',
   'vm-recovery',
   'swm-recovery',
+  'control-plane',
   'unspecified',
 ] as const;
 

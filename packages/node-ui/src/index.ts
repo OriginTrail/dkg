@@ -79,6 +79,9 @@ export { resolveCapabilities } from './llm/capability-resolver.js';
 export type { LlmConfig, LlmChatRequest, LlmChatMessage, LlmStreamEvent, LlmCompletionResult, LlmCapabilities } from './llm/types.js';
 export {
   initTelemetry, shutdownTelemetry, isTelemetryConfigured,
+  // Flush-only hook for the daemon's terminal shutdown point: exports what has
+  // been recorded while leaving the provider live (shutdownTelemetry does not).
+  flushTelemetry, TERMINAL_FLUSH_BUDGET_MS,
   // Back-compat shims for the pre-#1317 telemetry API (no-ops / legacy config).
   recordGauge, setOperationSpan,
 } from './telemetry.js';

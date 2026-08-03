@@ -68,6 +68,10 @@ export default defineConfig({
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
           'test/catchup-runner-worker-lifecycle.test.ts',
+          // W1 §6.6/§6.7 — catch-up request/job accounting (I7–I9) and the
+          // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
+          // a fake worker thread; no hardhat.
+          'test/daemon-catchup-telemetry-shutdown.test.ts',
           'test/catchup-runner-worker-killswitch.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
