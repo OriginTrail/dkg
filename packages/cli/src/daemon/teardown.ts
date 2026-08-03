@@ -165,7 +165,14 @@ export interface TeardownOutcome {
  * would strand its own tail before this catch ever sees the failure. Keep new
  * steps atomic; do not fold two actions into one entry.
  *
- * See follow-up issue #2029.
+ * Resolves #2029, which asked for a deliberate choice between guarding each
+ * step and enforcing "no step may reject" at the builder boundary. This is the
+ * first option. That issue predicted the guard would MASK M17 — the mutant
+ * removing the `.catch` around the bounded meter flush — because M17 was
+ * thought to be killed by the rejection propagating through this sequencer.
+ * It is not: M17 stays killed by three direct-call assertions in
+ * `node-ui/test/telemetry.test.ts` that never reach this function, verified by
+ * re-running the mutation against this version. The invariant is still pinned.
  */
 export async function runProducerQuiescentTeardown(
   steps: ProducerQuiescentTeardownSteps,
