@@ -38,8 +38,10 @@ async function countTriples(base, token, cg, view) {
         method: 'POST', token,
         body: { sparql: 'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }', contextGraphId: cg, view },
     });
-    const b = q?.results?.bindings?.[0];
-    const v = b ? Number(Object.values(b)[0]?.value ?? Object.values(b)[0]) : NaN;
+    const row = q?.result?.bindings?.[0] ?? q?.results?.bindings?.[0] ?? (Array.isArray(q?.results) ? q.results[0] : null) ?? (Array.isArray(q?.data?.results) ? q.data.results[0] : null);
+    if (!row) return null;
+    const first = Object.values(row)[0];
+    const v = Number(first && typeof first === 'object' ? first.value : first);
     return Number.isFinite(v) ? v : null;
 }
 

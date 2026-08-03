@@ -126,6 +126,16 @@ async function timed(fn) {
     return { value, ms: Date.now() - t0 };
 }
 
+// Same response-shape handling as the burst suite's queryHasData().
+export function queryHasData(result) {
+    if (!result) return false;
+    if (Array.isArray(result.results)) return result.results.length > 0;
+    if (result.data && Array.isArray(result.data.results)) return result.data.results.length > 0;
+    if (result.result && Array.isArray(result.result.bindings)) return result.result.bindings.length > 0;
+    if (result.results && Array.isArray(result.results.bindings)) return result.results.bindings.length > 0;
+    return false;
+}
+
 async function retry(fn, tries, delayMs) {
     let last;
     for (let i = 0; i < tries; i++) {
@@ -146,7 +156,7 @@ async function runIteration(pub, recv, receiverPeerId, cgId, cgKind, sizeKb, run
             await pub.create(cgId, kaName, quads);
             await pub.finalize(kaName, cgId);
             const q = await pub.query(`SELECT ?p WHERE { <${rootId}> ?p ?o } LIMIT 1`, cgId, 'working-memory');
-            if (!(q?.results?.bindings?.length || q?.rows?.length || q?.count)) throw new Error('WM read-back found nothing for the root entity');
+            if (!queryHasData(q)) throw new Error('WM read-back found nothing for the root entity');
         });
         record(runId, 'TestNode1', 'wm', cgKind, sizeKb, true, ms, null, version);
     } catch (e) {
@@ -166,7 +176,7 @@ async function runIteration(pub, recv, receiverPeerId, cgId, cgKind, sizeKb, run
     try {
         const { ms } = await timed(() => retry(async () => {
             const q = await recv.query(`SELECT ?p WHERE { <${rootId}> ?p ?o } LIMIT 1`, cgId, 'shared-working-memory');
-            if (!(q?.results?.bindings?.length || q?.rows?.length || q?.count)) throw new Error('receiver has no SWM copy of the root entity yet');
+            if (!queryHasData(q)) throw new Error('receiver has no SWM copy of the root entity yet');
         }, 20, 3000));
         record(runId, 'TestNode2', 'swm_receiver', cgKind, sizeKb, true, ms, null, version);
     } catch (e) {
@@ -188,7 +198,7 @@ async function runIteration(pub, recv, receiverPeerId, cgId, cgKind, sizeKb, run
     try {
         const { ms } = await timed(() => retry(async () => {
             const q = await pub.query(`SELECT ?p WHERE { <${rootId}> ?p ?o } LIMIT 1`, cgId, 'verifiable-memory');
-            if (!(q?.results?.bindings?.length || q?.rows?.length || q?.count)) throw new Error('VM read-back found nothing');
+            if (!queryHasData(q)) throw new Error('VM read-back found nothing');
         }, 8, 3000));
         record(runId, 'TestNode1', 'vm_get', cgKind, sizeKb, true, ms, null, version);
     } catch (e) {
@@ -250,7 +260,10 @@ async function main() {
     console.log(`✅ layered run recorded: ${ok}/${rows.length} ops succeeded`);
 }
 
-main().catch((err) => {
-    console.error(`❌ layered suite fatal: ${err.message}`);
-    process.exit(1);
-});
+import { pathToFileURL } from 'url';
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    main().catch((err) => {
+        console.error(`❌ layered suite fatal: ${err.message}`);
+        process.exit(1);
+    });
+}
