@@ -1002,6 +1002,8 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
+  protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */

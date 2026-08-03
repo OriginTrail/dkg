@@ -248,7 +248,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
-import { requireExactAssetUals } from './sync/exact-assets.js';
+import { exactAssetFilterKey, requireExactAssetUals } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
@@ -263,9 +263,12 @@ import {
   runDurableSyncDetailed,
   type DetailedDurableSyncResult,
   type DurableSyncContext,
-  type ExactDurableFetchDisposition,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
+import {
+  mergeExactDurableFetchDisposition,
+  type ExactDurableFetchDisposition,
+} from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
@@ -689,7 +692,7 @@ function syncPageFetchCoalescingKey(params: {
     params.sinceBatchId ?? null,
     params.recovery === true,
     params.forceFreshSession === true,
-    params.assetUals ?? null,
+    params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
   ]);
 }
 
@@ -1054,16 +1057,6 @@ type PhysicalDurableSyncResult = {
   readonly result: DurableSyncResult;
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
 };
-
-function mergeExactDurableFetchDisposition(
-  current: ExactDurableFetchDisposition | undefined,
-  next: ExactDurableFetchDisposition,
-): ExactDurableFetchDisposition {
-  if (current === undefined) return next;
-  if (current === 'incomplete' || next === 'incomplete') return 'incomplete';
-  if (current === 'found' || next === 'found') return 'found';
-  return 'clean-absent';
-}
 
 type LegacyDurableContextGraphOptions = {
   onPhase?: PhaseCallback;
@@ -4681,12 +4674,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<PhysicalDurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const exactAssetUals = options?.exactAssetUals === undefined
+      ? undefined
+      : requireExactAssetUals(options.exactAssetUals);
     const operationBoundary = createDurableSyncOperationBoundary({
       totalTimeoutMs: options?.totalTimeoutMs,
       signal: options?.signal,
     });
     const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
-    const fetchTimeoutMs = options?.exactAssetUals && options.totalTimeoutMs === undefined
+    const fetchTimeoutMs = exactAssetUals && options?.totalTimeoutMs === undefined
       ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
       : authenticationTimeoutMs;
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
@@ -4695,7 +4691,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     let exactFetchDisposition: ExactDurableFetchDisposition | undefined;
     const markExactFetchIncomplete = () => {
-      if (options?.exactAssetUals === undefined) return;
+      if (exactAssetUals === undefined) return;
       exactFetchDisposition = mergeExactDurableFetchDisposition(
         exactFetchDisposition,
         'incomplete',
@@ -4721,7 +4717,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 sinceBatchIdFor,
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
-                exactAssetUals: options?.exactAssetUals,
+                exactAssetUals,
                 authenticationTimeoutMs,
                 operationDeadline: operationBoundary.deadline,
                 signal: operationBoundary.signal,
@@ -4805,7 +4801,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
       hasSignal: Boolean(operationBoundary.signal),
-      exactAssetUals: options?.exactAssetUals,
+      exactAssetUals,
       priority: options?.priority,
     });
     const runWithinBoundary = async () => {
@@ -4834,22 +4830,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     requestedAssetUals: string[],
   ): Promise<DurableSyncResult> {
-    const assetUals = requireExactAssetUals(requestedAssetUals);
-    const ctx = createOperationContext('sync');
-    return this.runLegacyDurableSync(
-      ctx,
+    return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
-      [contextGraphId],
-      undefined,
-      undefined,
-      undefined,
-      {
-        exactAssetUals: assetUals,
-        stopOnBackoffWorthyFailure: true,
-        priority: 1_000,
-        source: 'vm-recovery',
-      },
-    );
+      contextGraphId,
+      requestedAssetUals,
+    )).result;
   }
 
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -4859,8 +4844,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const assetUals = requireExactAssetUals(requestedAssetUals);
     const ctx = createOperationContext('sync');
-    const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
-      this,
+    const detailed = await this.runLegacyDurableSyncDetailed(
       ctx,
       remotePeerId,
       [contextGraphId],

@@ -763,6 +763,65 @@ describe('sync global backpressure', () => {
     releaseLow();
   });
 
+  it('rolls back direct-start capacity when onStart throws after claiming it', async () => {
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        if (entry.payload === 'failing') throw new Error('start failed after claim');
+        starts.push(entry.payload);
+        return () => { running -= 1; };
+      },
+      onStartFailureRollback: () => { running -= 1; },
+    });
+
+    expect(() => queue.acquire(queueOptions('failing', 0))).toThrow(
+      'start failed after claim',
+    );
+    expect(running).toBe(0);
+
+    const subsequent = queue.acquire(queueOptions('subsequent', 0));
+    const releaseSubsequent = await subsequent.release;
+    expect(subsequent.status).toBe('running');
+    expect(starts).toEqual(['subsequent']);
+    expect(running).toBe(1);
+    releaseSubsequent();
+    expect(running).toBe(0);
+  });
+
+  it('rolls back queued-start capacity and starts the next waiter in the same pump', async () => {
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        if (entry.payload === 'failing') throw new Error('queued start failed after claim');
+        starts.push(entry.payload);
+        return () => { running -= 1; };
+      },
+      onStartFailureRollback: () => { running -= 1; },
+    });
+
+    const blocker = queue.acquire(queueOptions('blocker', 0));
+    const releaseBlocker = await blocker.release;
+    const failing = queue.acquire(queueOptions('failing', 10));
+    const failingResult = failing.release.catch((error: unknown) => error);
+    const subsequent = queue.acquire(queueOptions('subsequent', 0));
+
+    releaseBlocker();
+
+    expect(await failingResult).toMatchObject({ message: 'queued start failed after claim' });
+    const releaseSubsequent = await subsequent.release;
+    expect(starts).toEqual(['blocker', 'subsequent']);
+    expect(running).toBe(1);
+    expect(queue.length).toBe(0);
+    releaseSubsequent();
+    expect(running).toBe(0);
+  });
+
   it('displaces only strictly lower-priority queued work when the queue is full', async () => {
     const ctx = createOperationContext('sync');
     const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 });

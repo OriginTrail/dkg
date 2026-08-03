@@ -328,19 +328,23 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
-    const runLegacyDurableSync = vi.fn(async () => ({}));
-    const agentLike = { runLegacyDurableSync };
+    const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;
+    const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+      result: physicalResult,
+      exactFetchDisposition: 'clean-absent' as const,
+    }));
+    const agentLike = { runLegacyDurableSyncDetailed };
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
 
-    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+    const detailed = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
       agentLike as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/blackbox',
       [exactUal],
     );
 
-    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
+    expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
       exactAssetUals: [exactUal],
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
@@ -350,7 +354,31 @@ describe('durable sync lifecycle chain binding', () => {
       // call site keeps every test green and only the Grafana attribution rots.
       source: 'vm-recovery',
     });
-    expect(runLegacyDurableSync.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
+    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
+    expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
+  });
+
+  it('projects the public exact-sync result from the detailed implementation', async () => {
+    const result = {} as Awaited<ReturnType<typeof runDurableSync>>;
+    const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async () => ({
+      result,
+      disposition: 'found' as const,
+    }));
+    const requestedAssetUals = [ual];
+
+    const projected = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
+      { syncExactKnowledgeAssetsFromPeerDetailed } as any,
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      requestedAssetUals,
+    );
+
+    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledWith(
+      '12D3KooWExactProjectionPeer',
+      contextGraphId,
+      requestedAssetUals,
+    );
+    expect(projected).toBe(result);
   });
 
   it.each([
@@ -495,7 +523,9 @@ describe('durable sync lifecycle chain binding', () => {
     ).toBe(1_800_000_030_000);
 
     mockedRunDurableSyncDetailed.mockClear();
-    agentLike.runLegacyDurableSync = LifecycleSyncMethods.prototype.runLegacyDurableSync;
+    agentLike.runLegacyDurableSyncDetailed = LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed;
+    agentLike.syncExactKnowledgeAssetsFromPeerDetailed =
+      LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed;
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
       agentLike,
       'peer-internal-exact-recovery',

@@ -49,6 +49,11 @@ export interface PriorityAdmission<Payload> {
 export interface PriorityAdmissionQueueHooks<Payload> {
   canRun: (entry: PriorityAdmissionEntry<Payload>) => boolean;
   onStart: (entry: PriorityAdmissionEntry<Payload>) => PriorityAdmissionRelease;
+  /** Undo capacity claimed by onStart when it throws before returning its release. */
+  onStartFailureRollback?: (
+    entry: PriorityAdmissionEntry<Payload>,
+    error: unknown,
+  ) => void;
   onDepthChange?: (depth: number) => void;
   /** Queue-wide elapsed-time source; production defaults to a monotonic clock. */
   now?: () => number;
@@ -400,8 +405,9 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     entry: PriorityAdmissionEntry<Payload>,
     options: Pick<PriorityAdmissionAcquireOptions<Payload>, 'reserveForHandoff' | 'queueLimit' | 'ownerQueueLimit'>,
   ): PriorityAdmissionRelease {
-    const release = this.hooks.onStart(entry);
+    let release: PriorityAdmissionRelease | undefined;
     try {
+      release = this.hooks.onStart(entry);
       if (options.reserveForHandoff) {
         this.handoffReservations.set(entry.sequence, {
           sequence: entry.sequence,
@@ -414,7 +420,8 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     } catch (error) {
       this.handoffReservations.delete(entry.sequence);
       try {
-        release();
+        if (release) release();
+        else this.hooks.onStartFailureRollback?.(entry, error);
       } catch {
         // Preserve the admission failure; release is best-effort rollback here.
       }

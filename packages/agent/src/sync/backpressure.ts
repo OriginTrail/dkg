@@ -85,6 +85,10 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
       getMetrics().syncGlobalInflight.record(inflight);
     };
   },
+  onStartFailureRollback: () => {
+    inflight = Math.max(0, inflight - 1);
+    getMetrics().syncGlobalInflight.record(inflight);
+  },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
   observability: {
     scheduler: 'sync-global',

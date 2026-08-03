@@ -524,6 +524,22 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(first.result).toBe(second.result);
       expect(first.disposition).toBe('clean-absent');
       expect(second.disposition).toBe('clean-absent');
+
+      fetchCalls = 0;
+      const forwardOrder = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        [EXACT_UAL_7, EXACT_UAL_8],
+      );
+      const reverseOrder = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'coalesced-cg',
+        [EXACT_UAL_8, EXACT_UAL_7],
+      );
+      const [forward, reverse] = await Promise.all([forwardOrder, reverseOrder]);
+      expect(fetchCalls).toBe(2);
+      expect(forward).toBe(reverse.result);
+      expect(reverse.disposition).toBe('clean-absent');
     } finally {
       await agent.stop().catch(() => {});
     }

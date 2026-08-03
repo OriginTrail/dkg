@@ -3,6 +3,10 @@ import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-c
 /** One VM reconciliation slice deliberately fetches at most this many KAs. */
 export const MAX_EXACT_SYNC_ASSETS = 10;
 
+function canonicalExactAssetSetOrder(assetUals: readonly string[]): string[] {
+  return [...new Set(assetUals)].sort();
+}
+
 /**
  * Normalize the additive exact-asset sync filter.
  *
@@ -30,7 +34,7 @@ export function normalizeExactAssetUals(value: unknown): string[] | undefined {
       return [];
     }
   }
-  return normalized;
+  return canonicalExactAssetSetOrder(normalized);
 }
 
 export function requireExactAssetUals(value: unknown): string[] {
@@ -43,11 +47,13 @@ export function requireExactAssetUals(value: unknown): string[] {
 
 /** Stable identity for checkpoints, single-flight keys, and responder plans. */
 export function exactAssetFilterKey(assetUals: readonly string[] | undefined): string {
-  return assetUals === undefined ? 'full' : `exact:${assetUals.join('\u001f')}`;
+  return assetUals === undefined
+    ? 'full'
+    : `exact:${canonicalExactAssetSetOrder(assetUals).join('\u001f')}`;
 }
 
 export function encodeExactAssetUals(assetUals: readonly string[]): string {
-  return encodeURIComponent(JSON.stringify(assetUals));
+  return encodeURIComponent(JSON.stringify(canonicalExactAssetSetOrder(assetUals)));
 }
 
 export function decodeExactAssetUals(encoded: string): string[] {

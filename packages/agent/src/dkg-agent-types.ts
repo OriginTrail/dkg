@@ -761,6 +761,8 @@ export interface VmReconcileRotationRecord {
   fingerprint: string;
   phase: 'collecting' | 'backoff';
   candidatePeerIds: Set<string>;
+  /** Peers physically attempted during the current bounded retry cycle. */
+  attemptedPeerIds: Set<string>;
   cleanAbsentPeerIds: Set<string>;
   /** Monotonic bound after which an incomplete collection retries every peer. */
   collectionDeadlineAt: number;
