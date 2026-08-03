@@ -27,8 +27,13 @@ interface AgentInternals {
     localCgId: string,
     sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
     targetOnChainId?: bigint,
+    signal?: AbortSignal,
   ): Promise<string | null>;
-  handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
+  handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown, signal?: AbortSignal): Promise<string | null>;
+  getContextGraphOnChainId(
+    localCgId: string,
+    options?: { signal?: AbortSignal; source?: string },
+  ): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: {
     dispatch: (cg: string, reason: 'live' | 'periodic') => Promise<boolean>;
@@ -209,5 +214,51 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     );
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
+  });
+
+  it('live KACG nudge handler aborts an in-flight CG resolver without binding or reconciling', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'KacgNudgeAbort', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCg = 'gh1098-nudge-abort';
+    internals.subscribedContextGraphs.set(localCg, { subscribed: true });
+
+    let resolverStarted!: () => void;
+    const started = new Promise<void>((resolve) => { resolverStarted = resolve; });
+    internals.getContextGraphOnChainId = async (_id, options = {}) => {
+      resolverStarted();
+      await new Promise<void>((_resolve, reject) => {
+        const rejectAbort = () => {
+          const error = new Error('resolver aborted');
+          error.name = 'AbortError';
+          reject(error);
+        };
+        if (options.signal?.aborted) rejectAbort();
+        else options.signal?.addEventListener('abort', rejectAbort, { once: true });
+      });
+      return '9090';
+    };
+    const triggered: string[] = [];
+    internals.vmReconcileDispatcher = {
+      dispatch: async () => true,
+      triggerLive: (cg: string) => { triggered.push(cg); },
+      triggerPeriodic: () => undefined,
+      tryTriggerPeriodic: () => true,
+    };
+
+    const controller = new AbortController();
+    const pending = internals.handleKARegisteredNudge(
+      '9090',
+      1n,
+      createOperationContext('system'),
+      controller.signal,
+    );
+    await started;
+    controller.abort();
+
+    await expect(pending).resolves.toBeNull();
+    expect(internals.subscribedContextGraphs.get(localCg)?.onChainId).toBeUndefined();
+    expect(triggered).toEqual([]);
   });
 });

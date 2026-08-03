@@ -705,6 +705,22 @@ export class DKGNode {
     return this.stopAbortController?.signal;
   }
 
+  /**
+   * Close network admission before a higher-level owner starts awaiting its
+   * own teardown dependencies.
+   *
+   * DKGAgent has cleanup work (notably the chain-event poller) that must run
+   * before libp2p itself is stopped. Some of those callbacks can already be
+   * waiting on ProtocolRouter reads. If the stop signal only fires inside
+   * {@link stop}, those reads keep the earlier cleanup step alive and the
+   * daemon eventually reaches its forced-shutdown watchdog. Aborting here is
+   * idempotent and leaves the node available for the remaining close calls;
+   * {@link stop} still owns the actual libp2p teardown.
+   */
+  beginStop(): void {
+    this.stopAbortController?.abort();
+  }
+
   constructor(config: DKGNodeConfig = {}) {
     this.config = config;
   }
@@ -1867,7 +1883,7 @@ export class DKGNode {
     // closing — doesn't deadlock waiting for those reads to finish.
     // Aborting + then awaiting libp2p.stop() is the graceful
     // counterpart to PR-1's hard-timeout safety net (#655).
-    this.stopAbortController?.abort();
+    this.beginStop();
     if (this.relayWatchdogTimer) {
       clearTimeout(this.relayWatchdogTimer);
       this.relayWatchdogTimer = null;

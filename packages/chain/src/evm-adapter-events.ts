@@ -11,7 +11,13 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
-import type { EventFilter, ChainEvent } from './chain-adapter.js';
+import type { EventFilter, ChainEvent, ChainEventListenOptions } from './chain-adapter.js';
+
+const eventScanAborted = (): Error => {
+  const error = new Error('Chain event scan aborted');
+  error.name = 'AbortError';
+  return error;
+};
 
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -40,19 +46,47 @@ export class EventsMethods extends EVMChainAdapterBase {
     eventFilter: ethers.ContractEventName,
     fromBlock: ethers.BlockTag,
     toBlock?: ethers.BlockTag,
+    signal?: AbortSignal,
   ): Promise<(ethers.Log | ethers.EventLog)[]> {
-    return this.readContractWith(
+    if (signal?.aborted) return Promise.reject(eventScanAborted());
+
+    const pending = this.readContractWith(
       contract,
       label,
       (c) => c.queryFilter(eventFilter, fromBlock, toBlock),
       { policy: 'wideLogScan', skipPreferred: true },
     );
+    if (!signal) return pending;
+
+    // ethers does not expose AbortSignal on Contract.queryFilter. Reject the
+    // caller-facing wait immediately while retaining handlers on the provider
+    // promise, so a later socket close cannot become an unhandled rejection.
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort);
+        reject(eventScanAborted());
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      pending.then(
+        (logs) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(logs);
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
   }
 
-  async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
+  async *listenForEvents(filter: EventFilter, options?: ChainEventListenOptions): AsyncIterable<ChainEvent> {
+    if (options?.signal?.aborted) return;
     await this.init();
+    if (options?.signal?.aborted) return;
 
     for (const eventType of filter.eventTypes) {
+      if (options?.signal?.aborted) return;
       if (eventType === 'KnowledgeBatchCreated') {
         // V8-only event — emitted by archived KnowledgeAssetsStorage. When the
         // V8 contract is absent (the V10-only deploy path after this PR), this
@@ -63,7 +97,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         }
         const eventFilter = storage.filters.KnowledgeBatchCreated();
         const logs = await this.queryFilterWithFailover(
-          storage, 'kasV9.queryFilter(KnowledgeBatchCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+          storage, 'kasV9.queryFilter(KnowledgeBatchCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock, options?.signal,
         );
 
         for (const log of logs) {
@@ -92,7 +126,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         if (cgStorage) {
           const eventFilter = cgStorage.filters.ContextGraphExpanded();
           const logs = await this.queryFilterWithFailover(
-            cgStorage, 'cgStorage.queryFilter(ContextGraphExpanded)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+            cgStorage, 'cgStorage.queryFilter(ContextGraphExpanded)', eventFilter, filter.fromBlock ?? 0, filter.toBlock, options?.signal,
           );
 
           for (const log of logs) {
@@ -122,7 +156,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         if (cgStorage) {
           const eventFilter = cgStorage.filters.KnowledgeAssetRegisteredToContextGraph();
           const logs = await this.queryFilterWithFailover(
-            cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+            cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', eventFilter, filter.fromBlock ?? 0, filter.toBlock, options?.signal,
           );
 
           for (const log of logs) {
@@ -171,7 +205,7 @@ export class EventsMethods extends EVMChainAdapterBase {
 
           const kcFilter = kaStorage.filters[createEventName]();
           const kcLogs = await this.queryFilterWithFailover(
-            kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter, fromB, toB,
+            kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter, fromB, toB, options?.signal,
           );
 
           // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
@@ -182,7 +216,7 @@ export class EventsMethods extends EVMChainAdapterBase {
           if (hasEvent('KnowledgeAssetsMinted')) {
             const mintFilter = kaStorage.filters.KnowledgeAssetsMinted();
             const mintLogs = await this.queryFilterWithFailover(
-              kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter, fromB, toB,
+              kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter, fromB, toB, options?.signal,
             );
             for (const ml of mintLogs) {
               const mp = kaStorage.interface.parseLog({ topics: [...ml.topics], data: ml.data });
@@ -206,7 +240,7 @@ export class EventsMethods extends EVMChainAdapterBase {
             try {
               const transferFilter = kaStorage.filters.Transfer(ethers.ZeroAddress);
               const transferLogs = await this.queryFilterWithFailover(
-                kaStorage, 'kas.queryFilter(Transfer)', transferFilter, fromB, toB,
+                kaStorage, 'kas.queryFilter(Transfer)', transferFilter, fromB, toB, options?.signal,
               );
               for (const tl of transferLogs) {
                 const tp = kaStorage.interface.parseLog({ topics: [...tl.topics], data: tl.data });
@@ -267,7 +301,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         if (registry) {
           const eventFilter = registry.filters.NameClaimed();
           const logs = await this.queryFilterWithFailover(
-            registry, 'cgNameRegistry.queryFilter(NameClaimed)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+            registry, 'cgNameRegistry.queryFilter(NameClaimed)', eventFilter, filter.fromBlock ?? 0, filter.toBlock, options?.signal,
           );
           for (const log of logs) {
             const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
@@ -292,7 +326,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         if (cgStorage) {
           const eventFilter = cgStorage.filters.ContextGraphCreated();
           const logs = await this.queryFilterWithFailover(
-            cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+            cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock, options?.signal,
           );
           for (const log of logs) {
             const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
@@ -327,7 +361,7 @@ export class EventsMethods extends EVMChainAdapterBase {
         if (profileStorage) {
           const eventFilter = profileStorage.filters.RelayCapabilityUpdated();
           const logs = await this.queryFilterWithFailover(
-            profileStorage, 'profileStorage.queryFilter(RelayCapabilityUpdated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
+            profileStorage, 'profileStorage.queryFilter(RelayCapabilityUpdated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock, options?.signal,
           );
           for (const log of logs) {
             const parsed = profileStorage.interface.parseLog({ topics: [...log.topics], data: log.data });

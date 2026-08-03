@@ -2636,17 +2636,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     sub: ContextGraphSub,
     targetOnChainId?: bigint,
+    signal?: AbortSignal,
   ): Promise<string | null> {
-    if (!sub.subscribed || sub.onChainId) return null;
+    if (signal?.aborted || !sub.subscribed || sub.onChainId) return null;
     let resolved: string | null = null;
     try {
       resolved = await this.getContextGraphOnChainId(localCgId, {
+        signal,
         source: 'agent.vmReconcile.resolveOnChainId',
       });
     } catch {
       return null;
     }
-    if (!resolved) return null;
+    if (signal?.aborted || !resolved) return null;
     if (targetOnChainId !== undefined) {
       let resolvedNum: bigint | null = null;
       try { resolvedNum = BigInt(resolved); } catch { return null; }
@@ -2680,7 +2682,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<string | null> {
+    if (signal?.aborted) return null;
     let targetOnChain: bigint | null = null;
     try { targetOnChain = BigInt(onChainId); } catch { targetOnChain = null; }
 
@@ -2693,7 +2697,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // path); the sweep remains the safety net for a CG whose quad hasn't arrived.
       if (targetOnChain !== null) {
         for (const [lcg, sub] of this.subscribedContextGraphs) {
-          const bound = await this.selfPrimeSubscriptionOnChainId(lcg, sub, targetOnChain);
+          if (signal?.aborted) return null;
+          const bound = await this.selfPrimeSubscriptionOnChainId(lcg, sub, targetOnChain, signal);
           if (bound) {
             this.log.info(ctx, `Phase B: KACG nudge cg=${onChainId} ka=${kaId} -> bound + reconcile pre-subscribed "${lcg}"`);
             if (this.vmReconcileDispatcher) void this.vmReconcileDispatcher.triggerLive(lcg);

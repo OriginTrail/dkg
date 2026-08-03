@@ -346,6 +346,11 @@ export interface EventFilter {
   toBlock?: number;
 }
 
+export interface ChainEventListenOptions {
+  /** Stop an in-flight event scan without allowing its caller to advance a cursor. */
+  signal?: AbortSignal;
+}
+
 export interface CreateContextGraphParams {
   /**
    * Human-readable context graph name. The on-chain contextGraphId is derived as
@@ -1055,7 +1060,7 @@ export interface ChainAdapter {
   getBlockNumber?(): Promise<number>;
 
   // Events
-  listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
+  listenForEvents(filter: EventFilter, options?: ChainEventListenOptions): AsyncIterable<ChainEvent>;
 
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;

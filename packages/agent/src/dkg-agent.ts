@@ -1720,8 +1720,26 @@ export class DKGAgent extends DKGAgentBase {
     await this.chainPoller?.waitForCurrentPoll();
   }
 
+  /**
+   * Close network admission before an outer runtime awaits any of its own
+   * shutdown dependencies. The daemon owns catch-up and publish workers that
+   * are drained before {@link stop}; those workers can themselves be blocked
+   * on this agent's protocol router, so waiting until stop() would recreate
+   * the same cancellation-order inversion one layer higher.
+   */
+  beginStop(): void {
+    this.node.beginStop();
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
+    // Abort network-backed work before awaiting the chain poller. The poller
+    // dispatches VM-reconcile callbacks that may themselves be blocked in a
+    // sync read; waiting for the poll before DKGNode.stop() used to invert the
+    // cancellation order and force the daemon's shutdown watchdog to exit 100.
+    // beginStop() only closes admission/aborts reads; the actual libp2p stop
+    // remains at the existing dependency-safe point below.
+    this.beginStop();
     this.syncCapacityRuntime.stopSampling();
     if (this.chainPoller) {
       // Await so any in-flight poll (and its HTTP keep-alive socket) settles

@@ -97,6 +97,53 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(filters).toEqual([]);
   });
 
+  it('stops a large event page after the active callback and replays the partial lane', async () => {
+    const events: ChainEvent[] = [1, 2, 3].map((id) => ({
+      type: 'ContextGraphCreated',
+      blockNumber: 9_500 + id,
+      data: {
+        contextGraphId: String(id),
+        creator: '0x' + 'a1'.repeat(20),
+        accessPolicy: 0,
+        publishPolicy: 1,
+        nameHash: '0x' + id.toString(16).padStart(64, '0'),
+      },
+    }));
+    const { adapter } = makeChain(10_000, events);
+    const seen: string[] = [];
+    let stopRequested = false;
+    let resolveStopStarted: () => void = () => {};
+    const stopStarted = new Promise<void>((resolve) => { resolveStopStarted = resolve; });
+    let stopPromise: Promise<void> | undefined;
+    let poller!: ChainEventPoller;
+    poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onContextGraphCreated: async ({ contextGraphId }) => {
+        seen.push(contextGraphId);
+        if (!stopRequested) {
+          stopRequested = true;
+          stopPromise = poller.stop();
+          resolveStopStarted();
+        }
+      },
+    });
+
+    await poller.start();
+    await stopStarted;
+    await stopPromise;
+    expect(seen).toEqual(['1']);
+
+    // The interrupted page never advanced its cursor. A restart therefore
+    // replays the first idempotent event and then processes the rest rather
+    // than skipping events 2 and 3.
+    await poller.start();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await poller.stop();
+    expect(seen).toEqual(['1', '1', '2', '3']);
+  });
+
   it('cold-starts a restored pending publish lane from block 0 without allocator callbacks', async () => {
     const merkleRoot = '0x' + '55'.repeat(32);
     const oldCreate: ChainEvent = {

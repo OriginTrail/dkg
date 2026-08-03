@@ -35,7 +35,7 @@ export interface ChainEventPollerLaneSpec {
   canUseLegacyAggregateCursor?(): boolean;
   liveSeedLookbackBlocks?: number;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
+  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
 
@@ -95,12 +95,14 @@ export class ChainEventLaneRunner {
     await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
   }
 
-  async poll(): Promise<void> {
+  async poll(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
     const ctx = createOperationContext('publish');
     const activeLanes = this.activeLaneSpecs();
     if (activeLanes.length === 0) return;
 
     await this.restoreLaneCursors(activeLanes, ctx);
+    if (signal?.aborted) return;
 
     const now = this.clock();
     const dueLanes = activeLanes.filter((lane) => this.laneDue(lane, now));
@@ -110,10 +112,12 @@ export class ChainEventLaneRunner {
     if (this.chain.getBlockNumber) {
       try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
     }
+    if (signal?.aborted) return;
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
     for (const lane of dueLanes) {
-      scanResults.push(await this.scanLane(lane, head, now, ctx));
+      if (signal?.aborted) break;
+      scanResults.push(await this.scanLane(lane, head, now, ctx, signal));
     }
     await this.persistScanResults(scanResults, activeLanes);
   }
@@ -235,6 +239,7 @@ export class ChainEventLaneRunner {
     head: number | undefined,
     now: number,
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<ChainEventPollerLaneScanResult> {
     const state = lane.state;
 
@@ -269,14 +274,27 @@ export class ChainEventLaneRunner {
     let advanced = false;
 
     try {
-      for await (const event of this.chain.listenForEvents(filter)) {
-        await lane.spec.dispatch(event, ctx);
+      for await (const event of this.chain.listenForEvents(filter, { signal })) {
+        // A stopped partial lane must be replayed from its prior durable
+        // cursor. Event callbacks are idempotent, so replay is safer than
+        // advancing past events that were never dispatched.
+        if (signal?.aborted) {
+          return { lane, blockNumber: state.lastBlock, advanced: false };
+        }
+        await lane.spec.dispatch(event, ctx, signal);
+      }
+
+      if (signal?.aborted) {
+        return { lane, blockNumber: state.lastBlock, advanced: false };
       }
 
       state.lastBlock = upperBound;
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
+      if (signal?.aborted) {
+        return { lane, blockNumber: state.lastBlock, advanced: false };
+      }
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.applyLaneSchedule(lane, { kind: 'failure', now });
     }

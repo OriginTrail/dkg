@@ -129,6 +129,40 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     expect(readContractWith.calls).toHaveLength(1);
     expect(readContractWith.calls[0][3]).toMatchObject({ policy: 'wideLogScan', skipPreferred: true });
   });
+
+  it('lets shutdown abandon an in-flight wide-log wait without an unhandled provider rejection', async () => {
+    const a = makeAdapter();
+    a.contracts = {
+      knowledgeAssetsStorage: {
+        filters: { KnowledgeBatchCreated: () => ({}) },
+        interface: { parseLog: () => null },
+      },
+    };
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    let rejectProvider!: (error: Error) => void;
+    const providerWait = new Promise<never>((_resolve, reject) => { rejectProvider = reject; });
+    a.readContractWith = recorder(() => {
+      resolveStarted();
+      return providerWait;
+    });
+
+    const controller = new AbortController();
+    const iterator = a.listenForEvents(
+      { eventTypes: ['KnowledgeBatchCreated'], fromBlock: 0 },
+      { signal: controller.signal },
+    )[Symbol.asyncIterator]();
+    const next = iterator.next();
+    await started;
+    controller.abort();
+
+    await expect(next).rejects.toMatchObject({ name: 'AbortError' });
+    // The underlying ethers/provider operation may settle after shutdown. Its
+    // rejection remains observed by the abort wrapper rather than escaping as
+    // an unhandled promise.
+    rejectProvider(new Error('socket closed after adapter teardown'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 });
 
 // getBlockTimestamp is a CONCRETE receipt-block read (NOT the tip), so it is NOT a

@@ -518,10 +518,11 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- Events ---
 
-  async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
+  async *listenForEvents(filter: EventFilter, options?: { signal?: AbortSignal }): AsyncIterable<ChainEvent> {
     const from = filter.fromBlock ?? 0;
     const to = filter.toBlock ?? Infinity;
     for (const evt of this.events) {
+      if (options?.signal?.aborted) return;
       if (evt.blockNumber > to) break;
       if (
         evt.blockNumber >= from &&

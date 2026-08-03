@@ -59,6 +59,26 @@ describe('DKGNode DHT network identity wiring', () => {
     await node.stop();
   });
 
+  it('can abort network admission before the actual libp2p stop', async () => {
+    const { DKGNode } = await import('../src/node.js');
+    const node = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+
+    await node.start();
+    expect(node.stopSignal?.aborted).toBe(false);
+
+    node.beginStop();
+    expect(node.stopSignal?.aborted).toBe(true);
+    // Admission close is deliberately idempotent because both DKGAgent.stop
+    // and DKGNode.stop own a defensive call.
+    node.beginStop();
+
+    await node.stop();
+    expect(node.stopSignal).toBeUndefined();
+  });
+
   it('passes the active relay network gater into libp2p during start', async () => {
     const { DKGNode } = await import('../src/node.js');
     const node = new DKGNode({

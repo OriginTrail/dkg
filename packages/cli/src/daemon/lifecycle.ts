@@ -3730,6 +3730,13 @@ export async function runDaemonInner(
     if (shuttingDown) return;
     shuttingDown = true;
     log("Shutting down...");
+    // Close protocol admission before draining daemon-owned publish/catch-up
+    // workers. Those workers may be awaiting agent router reads, while
+    // agent.stop() is intentionally later in the dependency-safe teardown.
+    // Without this early boundary, the outer daemon and inner agent each wait
+    // for the other layer to initiate cancellation and the watchdog must force
+    // exit even though DKGAgent.stop() itself has the correct ordering.
+    agent.beginStop();
     // Tell the supervisor's liveness watcher (PR #664) that this is a graceful
     // shutdown before any slow cleanup runs. The watcher reads `api.port`'s
     // absence as "worker is intentionally going down — don't SIGKILL me
@@ -3762,35 +3769,47 @@ export async function runDaemonInner(
         rateLimiter.destroy();
         metricsCollector?.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.
+        log("[shutdown-stage] telemetry drain starting");
         await stopTelemetry();
+        log("[shutdown-stage] telemetry drain complete");
         natStatusWatcherStop?.();
         resetNatStatus();
+        log("[shutdown-stage] publisher runtime drain starting");
         await publisherState.runtime
           ?.stop()
           .catch((err: any) =>
             log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
           );
+        log("[shutdown-stage] publisher runtime drain complete");
         // Drain the async-promote worker before closing the agent — once
         // `agent.stop()` runs the queue's underlying triple store goes
         // away. We let in-flight promotes complete (or hit
         // `shutdownTimeoutMs`); RFC §6.2 forbids marking `running →
         // queued` here so the next boot's `recoverOnStartup()` decides.
+        log("[shutdown-stage] promote worker drain starting");
         await promoteWorkerLifecycle?.stop(shuttingDown ? 'daemon shutting down' : null);
+        log("[shutdown-stage] promote worker drain complete");
+        log("[shutdown-stage] catch-up runner drain starting");
         await daemonState.catchupRunner
           ?.close()
           .catch((err: any) =>
             log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
           );
+        log("[shutdown-stage] catch-up runner drain complete");
         server.close();
+        log("[shutdown-stage] agent drain starting");
         await agent.stop();
+        log("[shutdown-stage] agent drain complete");
         // Stop the managed Oxigraph child AFTER the agent has stopped
         // issuing store queries, so an in-flight SPARQL request never
         // races the killed server. No-op when not using oxigraph-server.
+        log("[shutdown-stage] managed store drain starting");
         await managedOxigraph
           ?.stop()
           .catch((err: any) =>
             log(`Managed Oxigraph stop error: ${err?.message ?? String(err)}`),
           );
+        log("[shutdown-stage] managed store drain complete");
         dashDb.close();
         log("Stopped.");
       } finally {

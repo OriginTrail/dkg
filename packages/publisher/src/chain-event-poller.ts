@@ -67,7 +67,7 @@ export type OnKARegisteredToContextGraph = (info: {
   txHash: string;
   txIndex?: number;
   blockNumber: number;
-}) => Promise<void>;
+}, signal?: AbortSignal) => Promise<void>;
 
 /**
  * Callback for `KnowledgeAssetCreated` events — OT-RFC-43 Option-1 allocator
@@ -133,6 +133,7 @@ export class ChainEventPoller {
   private readonly log = new Logger('ChainEventPoller');
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private stopController: AbortController | null = null;
   /**
    * The currently-executing `poll()` promise (or `null` when idle).
    *
@@ -172,6 +173,8 @@ export class ChainEventPoller {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    const stopController = new AbortController();
+    this.stopController = stopController;
 
     const ctx = createOperationContext('system');
 
@@ -192,7 +195,7 @@ export class ChainEventPoller {
       // chain is monotonic and the poll catches up via `MAX_RANGE`, so a
       // skipped tick is functionally identical to slightly longer cadence.
       if (this.inFlightPoll) return;
-      this.inFlightPoll = this.poll()
+      this.inFlightPoll = this.poll(this.stopController?.signal)
         .catch((err) => {
           const pollCtx = createOperationContext('system');
           this.log.error(pollCtx, `Poll failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -201,7 +204,7 @@ export class ChainEventPoller {
     }, this.intervalMs);
 
     // Run first poll immediately, and track it so `stop()` can await it.
-    this.inFlightPoll = this.poll()
+    this.inFlightPoll = this.poll(stopController.signal)
       .catch(() => {})
       .finally(() => { this.inFlightPoll = null; });
   }
@@ -232,6 +235,11 @@ export class ChainEventPoller {
       this.timer = null;
     }
     this.running = false;
+    // Stop after the current event callback and do not start another lane or
+    // dispatch another event from a large historical page. The current lane's
+    // cursor deliberately remains unchanged so any partial page is replayed
+    // safely on restart.
+    this.stopController?.abort();
     const pending = this.inFlightPoll;
     if (pending) {
       // The `.catch(() => {})` chain at the call sites already swallows
@@ -241,6 +249,7 @@ export class ChainEventPoller {
       // null out `inFlightPoll` once the await unblocks.
       try { await pending; } catch { /* already logged or swallowed */ }
     }
+    this.stopController = null;
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, 'Chain event poller stopped');
@@ -292,7 +301,7 @@ export class ChainEventPoller {
         eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleKARegistered(event, ctx, signal),
       },
       {
         name: 'collectionUpdates',
@@ -321,8 +330,8 @@ export class ChainEventPoller {
     ];
   }
 
-  private async poll(): Promise<void> {
-    await this.laneRunner.poll();
+  private async poll(signal?: AbortSignal): Promise<void> {
+    await this.laneRunner.poll(signal);
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
@@ -446,7 +455,11 @@ export class ChainEventPoller {
     }
   }
 
-  private async handleKARegistered(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleKARegistered(
+    event: ChainEvent,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (!this.onKARegisteredToContextGraph) return;
     const { data } = event;
     const contextGraphId = String(data['contextGraphId'] ?? '');
@@ -470,7 +483,7 @@ export class ChainEventPoller {
         txHash,
         txIndex,
         blockNumber: event.blockNumber,
-      });
+      }, signal);
     } catch (err) {
       this.log.warn(ctx, `onKARegisteredToContextGraph callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }

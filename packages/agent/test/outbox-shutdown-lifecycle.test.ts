@@ -6,6 +6,47 @@ import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
+  it('aborts network waits before awaiting the chain-event poller drain', async () => {
+    let releasePoller!: () => void;
+    const pollerDrain = new Promise<void>((resolve) => { releasePoller = resolve; });
+    const beginStop = vi.fn();
+    const stopNode = vi.fn(async () => {});
+    const chainPollerStop = vi.fn(async () => {
+      expect(beginStop).toHaveBeenCalledOnce();
+      await pollerDrain;
+    });
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      syncCapacityRuntime: { stopSampling: vi.fn() },
+      chainPoller: { stop: chainPollerStop },
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { beginStop, stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: vi.fn(async () => {}) },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(beginStop).toHaveBeenCalledOnce();
+    expect(chainPollerStop).toHaveBeenCalledOnce();
+    expect(stopNode).not.toHaveBeenCalled();
+
+    releasePoller();
+    await stopping;
+    expect(stopNode).toHaveBeenCalledOnce();
+  });
+
   it('closes reconcile admission and cancels queued jobs before store teardown', async () => {
     let releaseActive!: () => void;
     let queuedStarted = false;
@@ -23,6 +64,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const agent = Object.create(DKGAgent.prototype) as any;
     Object.assign(agent, {
       started: true,
+      syncCapacityRuntime: { stopSampling: vi.fn() },
       chainPoller: null,
       vmReconcileDispatcher: dispatcher,
       coreHostRecordingsClosed: false,
@@ -34,7 +76,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { beginStop: vi.fn(), stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
@@ -75,6 +117,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       const agent = Object.create(DKGAgent.prototype) as any;
       Object.assign(agent, {
         started: true,
+        syncCapacityRuntime: { stopSampling: vi.fn() },
         chainPoller: null,
         vmReconcileDispatcher: dispatcher,
         coreHostRecordingsClosed: false,
@@ -86,7 +129,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         randomSamplingHandle: null,
         inFlightSubstrateFanOutCount: () => 0,
         router: { closePooling: vi.fn(async () => {}) },
-        node: { stop: stopNode },
+        node: { beginStop: vi.fn(), stop: stopNode },
         finalizationRuntime: new FinalizationRuntime(),
         store: { close: closeStore },
         log: { warn },
@@ -116,6 +159,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const agent = Object.create(DKGAgent.prototype) as any;
     Object.assign(agent, {
       started: true,
+      syncCapacityRuntime: { stopSampling: vi.fn() },
       chainPoller: null,
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
@@ -126,7 +170,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { beginStop: vi.fn(), stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: vi.fn(async () => {}) },
       log: { warn: vi.fn() },
@@ -150,6 +194,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const agent = Object.create(DKGAgent.prototype) as any;
     Object.assign(agent, {
       started: true,
+      syncCapacityRuntime: { stopSampling: vi.fn() },
       chainPoller: null,
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
@@ -160,7 +205,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { beginStop: vi.fn(), stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn },
