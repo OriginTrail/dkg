@@ -330,22 +330,9 @@ export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraph
  * graph that owns its durable head.
  */
 export function sharedMemoryMetaUriForAssertionGraph(assertionGraph: string): string | undefined {
-  const safeAssertionGraph = assertSafeIri(assertionGraph);
-  const marker = '/_shared_memory/';
-  const markerIndex = safeAssertionGraph.lastIndexOf(marker);
-  if (markerIndex < 0) return undefined;
-
-  const assertionIdentity = safeAssertionGraph.slice(markerIndex + marker.length);
-  const identityParts = assertionIdentity.split('/');
-  if (
-    identityParts.length !== 2
-    || identityParts.some((part) => part.length === 0)
-    || identityParts[0] === 'staging'
-  ) {
-    return undefined;
-  }
-
-  return `${safeAssertionGraph.slice(0, markerIndex)}/_shared_memory_meta`;
+  const parsed = parseContextGraphLayerUri(assertSafeIri(assertionGraph));
+  if (!parsed || parsed.layer !== MemoryLayer.SharedWorkingMemory) return undefined;
+  return contextGraphSharedMemoryMetaUri(parsed.contextGraphId, parsed.subGraphName);
 }
 
 /**

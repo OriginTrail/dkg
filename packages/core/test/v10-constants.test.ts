@@ -173,15 +173,17 @@ describe('V10 named graph URIs', () => {
   });
 
   it('maps canonical root and sub-graph SWM assertions to their sibling metadata graph', () => {
+    const agentAddress = `0x${'ab'.repeat(20)}`;
     expect(sharedMemoryMetaUriForAssertionGraph(
-      'did:dkg:context-graph:42/_shared_memory/0xabc/7',
+      `did:dkg:context-graph:42/_shared_memory/${agentAddress}/7`,
     )).toBe('did:dkg:context-graph:42/_shared_memory_meta');
     expect(sharedMemoryMetaUriForAssertionGraph(
-      'did:dkg:context-graph:42/code/_shared_memory/0xabc/7',
+      `did:dkg:context-graph:42/code/_shared_memory/${agentAddress}/7`,
     )).toBe('did:dkg:context-graph:42/code/_shared_memory_meta');
   });
 
   it('rejects non-canonical and staging SWM graph shapes', () => {
+    const agentAddress = `0x${'ab'.repeat(20)}`;
     expect(sharedMemoryMetaUriForAssertionGraph(
       'did:dkg:context-graph:42/_shared_memory',
     )).toBeUndefined();
@@ -189,7 +191,10 @@ describe('V10 named graph URIs', () => {
       'did:dkg:context-graph:42/_shared_memory/staging/tmp',
     )).toBeUndefined();
     expect(sharedMemoryMetaUriForAssertionGraph(
-      'did:dkg:context-graph:42/_shared_memory/0xabc/7/extra',
+      `did:dkg:context-graph:42/_shared_memory/${agentAddress}/7/extra`,
+    )).toBeUndefined();
+    expect(sharedMemoryMetaUriForAssertionGraph(
+      `did:dkg:context-graph:42/_verifiable_memory/${agentAddress}/7`,
     )).toBeUndefined();
   });
 
