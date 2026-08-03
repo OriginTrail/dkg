@@ -599,8 +599,11 @@ describe('automatic sync coverage runtime evidence', () => {
       .toEqual([rehydrated]);
 
     // Edge's broad sync-on-connect switch remains off. Only the internal
-    // periodic reconciler may resume persisted always-on intent.
+    // periodic reconciler may resume persisted always-on intent. The broad
+    // SWM-on-connect switch is independently off too: persisted graph-scoped
+    // always-on policy must override it only for this bounded periodic lane.
     (agent as any).config.syncOnConnectEnabled = false;
+    (agent as any).config.syncSharedMemoryOnConnect = false;
     const durableScopes: string[][] = [];
     const sharedMemoryScopes: string[][] = [];
     (agent as any).syncFromPeerDetailed = async (

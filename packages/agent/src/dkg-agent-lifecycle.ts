@@ -4031,8 +4031,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return result;
         },
         syncSharedMemoryOnConnect:
-          (syncOnConnectEnabled(this.config) || scopedEdgePeriodicInvocation)
-            && (this.config.syncSharedMemoryOnConnect ?? true),
+          scopedEdgePeriodicInvocation
+            || (syncOnConnectEnabled(this.config)
+              && (this.config.syncSharedMemoryOnConnect ?? true)),
         includeSystemContextGraphs: !scopedEdgePeriodicInvocation,
         logInfo: (ctx, message) => this.log.info(ctx, message),
         onPeerSkippedNoSync: (peerId) => {
