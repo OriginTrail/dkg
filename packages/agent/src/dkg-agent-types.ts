@@ -753,6 +753,23 @@ export interface VmReconcileNegativeRecord {
   peerTopologyKey: string;
 }
 
+/** Process-local evidence for one chain-ordinal exact-recovery rotation. */
+export interface VmReconcileRotationRecord {
+  localCgId: string;
+  onChainCgId: string;
+  ordinal: number;
+  fingerprint: string;
+  phase: 'collecting' | 'backoff';
+  candidatePeerIds: Set<string>;
+  cleanAbsentPeerIds: Set<string>;
+  /** Monotonic bound after which an incomplete collection retries every peer. */
+  collectionDeadlineAt: number;
+  /** Cursor only; every physical attempt advances it, regardless of outcome. */
+  lastAttemptedPeerId?: string;
+  failures: number;
+  nextRetryAt: number;
+}
+
 export interface ContextGraphSubscriptionRehydrationStatus {
   /** Non-system persisted rows governed by the rehydration cap. */
   persistedTotal: number;

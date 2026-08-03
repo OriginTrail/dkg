@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
+  runDurableSyncDetailed,
   type DurableSyncFetchRequest,
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
@@ -25,6 +26,7 @@ function durableFetchRecorder(
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
 const noop = () => {};
+const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
 
 function pageResult(
   contextGraphId: string,
@@ -35,6 +37,7 @@ function pageResult(
     quads: [],
     bytesReceived: 0,
     resumedFromOffset: 0,
+    responderSessionStartedFresh: true,
     nextOffset: 0,
     checkpointKey: `${contextGraphId}:${phase}`,
     completed: true,
@@ -1201,5 +1204,195 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint.calls).toContainEqual(['large-swm:data', 7]);
     expect(setCheckpoint.calls).not.toContainEqual(['large-swm:meta', expect.any(Number)]);
     expect(deleteCheckpoint.calls).toContainEqual(['large-swm:snapshot:snapshot-ref']);
+  });
+});
+
+describe('exact durable fetch disposition', () => {
+  async function runExact(options: {
+    meta?: Partial<SyncPageResult>;
+    data?: Partial<SyncPageResult>;
+    rawMeta?: Quad[];
+    rawData?: Quad[];
+    rejectedKcs?: number;
+    dataRejectedMissingMeta?: number;
+    fetchError?: Error;
+    abortAfterMeta?: boolean;
+  } = {}) {
+    const controller = new AbortController();
+    return runDurableSyncDetailed({
+      ctx,
+      remotePeerId: 'exact-peer',
+      contextGraphIds: ['exact-cg'],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      exactAssetUalsFor: () => [EXACT_UAL],
+      fetchSyncPages: async ({ phase }) => {
+        if (options.fetchError) throw options.fetchError;
+        const page = pageResult('exact-cg', phase, {
+          quads: phase === 'meta' ? (options.rawMeta ?? []) : (options.rawData ?? []),
+          ...(phase === 'meta' ? options.meta : options.data),
+        });
+        if (phase === 'meta' && options.abortAfterMeta) {
+          controller.abort(new Error('cancelled after exact metadata'));
+        }
+        return page;
+      },
+      signal: controller.signal,
+      processDurableBatchInWorker: async (data, meta) => ({
+        ...durableProcessResult(),
+        verifiedData: data,
+        verifiedMeta: meta,
+        totalFetchedDataQuads: data.length,
+        totalFetchedMetaQuads: meta.length,
+        emptyResponses: data.length === 0 && meta.length === 0 ? 1 : 0,
+        rejectedKcs: options.rejectedKcs ?? 0,
+        dataRejectedMissingMeta: options.dataRejectedMissingMeta ?? 0,
+      }),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+  }
+
+  it('distinguishes fresh clean absence without changing public completion', async () => {
+    const detailed = await runExact();
+    const projected = await runDurableSync({
+      ctx,
+      remotePeerId: 'exact-peer-public',
+      contextGraphIds: ['exact-cg'],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      exactAssetUalsFor: () => [EXACT_UAL],
+      fetchSyncPages: async ({ phase }) => pageResult('exact-cg', phase),
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('clean-absent');
+    expect(detailed.result.complete).toBe(false);
+    expect(projected.complete).toBe(false);
+    expect(projected).not.toHaveProperty('exactFetchDisposition');
+  });
+
+  it('classifies returned exact descriptor and content as found', async () => {
+    const assertionGraph = 'did:dkg:context-graph:exact-cg/_verifiable_memory/asset/7';
+    const detailed = await runExact({
+      rawMeta: [
+        {
+          subject: EXACT_UAL,
+          predicate: 'http://dkg.io/ontology/kaUal',
+          object: EXACT_UAL,
+          graph: 'did:dkg:context-graph:exact-cg/_meta',
+        } as Quad,
+        {
+          subject: EXACT_UAL,
+          predicate: 'http://dkg.io/ontology/assertionGraph',
+          object: assertionGraph,
+          graph: 'did:dkg:context-graph:exact-cg/_meta',
+        } as Quad,
+      ],
+      rawData: [{
+        subject: 'http://example.com/entity',
+        predicate: 'http://example.com/value',
+        object: '"present"',
+        graph: assertionGraph,
+      } as Quad],
+      meta: { nextOffset: 2 },
+      data: { nextOffset: 1 },
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('found');
+  });
+
+  it.each([
+    ['resumed empty suffix', { meta: { resumedFromOffset: 4, nextOffset: 4 } }],
+    ['reused offset-zero responder session', { meta: { responderSessionStartedFresh: false } }],
+    ['partial phase', { data: { completed: false } }],
+    ['timed out phase', { data: { completed: false, timedOut: true } }],
+    ['integrity rejection', { rejectedKcs: 1 }],
+    ['missing metadata rejection', { dataRejectedMissingMeta: 1 }],
+    ['denial', { fetchError: deniedError() }],
+    ['abort', { abortAfterMeta: true }],
+  ])('keeps %s incomplete', async (_label, options) => {
+    const detailed = await runExact(options);
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+  });
+
+  it('keeps an old responder filtered prefix incomplete', async () => {
+    const detailed = await runExact({
+      rawMeta: [quad('did:dkg:other-asset')],
+      rawData: [quad('http://example.com/unrelated')],
+      meta: { nextOffset: 1 },
+      data: { nextOffset: 1 },
+    });
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+  });
+
+  it('does not treat skipped agents metadata as a clean exact response', async () => {
+    const fetchedPhases: string[] = [];
+    const detailed = await runDurableSyncDetailed({
+      ctx,
+      remotePeerId: 'exact-agents-peer',
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
+      syncAgentsMeta: false,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      exactAssetUalsFor: () => [EXACT_UAL],
+      fetchSyncPages: async ({ contextGraphId, phase }) => {
+        fetchedPhases.push(phase);
+        return pageResult(contextGraphId, phase);
+      },
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(fetchedPhases).toEqual(['data']);
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+  });
+
+  it('aggregates exact outcomes across Context Graphs without overwriting an incomplete result', async () => {
+    const detailed = await runDurableSyncDetailed({
+      ctx,
+      remotePeerId: 'exact-multi-cg-peer',
+      contextGraphIds: ['exact-incomplete-cg', 'exact-clean-cg'],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      exactAssetUalsFor: () => [EXACT_UAL],
+      fetchSyncPages: async ({ contextGraphId, phase }) => pageResult(contextGraphId, phase, {
+        ...(contextGraphId === 'exact-incomplete-cg' && phase === 'data'
+          ? { completed: false }
+          : {}),
+      }),
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+  });
+
+  it('keeps normalization failures on the asynchronous requester boundary', async () => {
+    let publicResult: ReturnType<typeof runDurableSync> | undefined;
+    let detailedResult: ReturnType<typeof runDurableSyncDetailed> | undefined;
+
+    expect(() => {
+      publicResult = runDurableSync(null as never);
+      detailedResult = runDurableSyncDetailed(null as never);
+    }).not.toThrow();
+    await expect(publicResult).rejects.toThrow();
+    await expect(detailedResult).rejects.toThrow();
   });
 });

@@ -5,7 +5,11 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 
 vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/sync/requester/durable-sync.js')>();
-  return { ...actual, runDurableSync: vi.fn(async () => ({})) };
+  return {
+    ...actual,
+    runDurableSync: vi.fn(async () => ({})),
+    runDurableSyncDetailed: vi.fn(async () => ({ result: {} })),
+  };
 });
 
 vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOriginal) => {
@@ -24,6 +28,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   runDurableSync,
+  runDurableSyncDetailed,
   type DurableSyncContext,
   type DurableSyncGraphScopedStoreRequest,
 } from '../src/sync/requester/durable-sync.js';
@@ -40,6 +45,7 @@ const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
 const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as OperationContext;
 
 const mockedRunDurableSync = vi.mocked(runDurableSync);
+const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 
 function graphScopedAsset(
@@ -138,6 +144,7 @@ async function captureGraphScopedStore(
 describe('durable sync lifecycle chain binding', () => {
   beforeEach(() => {
     mockedRunDurableSync.mockClear();
+    mockedRunDurableSyncDetailed.mockClear();
     mockedMaterialize.mockClear();
   });
 
@@ -480,14 +487,14 @@ describe('durable sync lifecycle chain binding', () => {
         totalTimeoutMs: 30_000,
       },
     );
-    expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
+    expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(
-      mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget
+      mockedRunDurableSyncDetailed.mock.calls[0]![0].durableSyncBudget
         .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 })
         .fetchDeadline,
     ).toBe(1_800_000_030_000);
 
-    mockedRunDurableSync.mockClear();
+    mockedRunDurableSyncDetailed.mockClear();
     agentLike.runLegacyDurableSync = LifecycleSyncMethods.prototype.runLegacyDurableSync;
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeer.call(
       agentLike,
@@ -495,12 +502,51 @@ describe('durable sync lifecycle chain binding', () => {
       contextGraphId,
       [exactUal],
     );
-    expect(mockedRunDurableSync).toHaveBeenCalledTimes(1);
+    expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(
-      mockedRunDurableSync.mock.calls[0]![0].durableSyncBudget
+      mockedRunDurableSyncDetailed.mock.calls[0]![0].durableSyncBudget
         .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 })
         .fetchDeadline,
     ).toBe(1_800_000_600_000);
+  });
+
+  it('keeps a multi-graph exact lifecycle result incomplete after a later clean absence', async () => {
+    const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
+    const agentLike: any = {
+      config: {},
+      processDurableBatchInWorker: async () => ({}),
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _contextGraphId: string,
+        _lane: string,
+        _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    mockedRunDurableSyncDetailed
+      .mockResolvedValueOnce({
+        result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+        exactFetchDisposition: 'incomplete',
+      })
+      .mockResolvedValueOnce({
+        result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+        exactFetchDisposition: 'clean-absent',
+      });
+
+    const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+      agentLike,
+      ctx,
+      'peer-multi-exact',
+      ['exact-incomplete-cg', 'exact-clean-cg'],
+      undefined,
+      undefined,
+      undefined,
+      { exactAssetUals: [exactUal] },
+    );
+
+    expect(mockedRunDurableSyncDetailed).toHaveBeenCalledTimes(2);
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
   });
 
   it('keeps caller-signalled durable sync off the non-cancellable changelog lane', async () => {

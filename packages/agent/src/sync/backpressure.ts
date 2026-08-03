@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { getMetrics, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   normalizeSyncAdmissionSource,
@@ -73,6 +74,7 @@ let inflight = 0;
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
+  now: () => performance.now(),
   canRun: (entry) => inflight < entry.payload.limit,
   onStart: (entry) => {
     inflight += 1;
@@ -136,7 +138,6 @@ function acquire(
     source: SyncAdmissionSource;
     signal?: AbortSignal;
     agingThresholdMs: number;
-    now: () => number;
   },
 ): PriorityAdmission<GlobalQueuePayload> {
   const { limit } = policy;
@@ -158,7 +159,6 @@ function acquire(
     priorityClass: options.priorityClass,
     signal: options.signal,
     agingThresholdMs: options.agingThresholdMs,
-    now: options.now,
     queueLimit,
     createBusyError: () => new SyncBackpressureBusyError(
       `Sync backpressure rejected ${options.label} `
@@ -246,7 +246,6 @@ export function resolveSyncGlobalBackpressure(
 
 export function getSyncBackpressureSnapshot(
   policy?: SyncGlobalBackpressurePolicy,
-  now = Date.now(),
 ): SyncBackpressureSnapshot {
   const queuedByPriorityClass: Record<SyncPriorityClass, number> = {
     elevated: 0,
@@ -260,7 +259,7 @@ export function getSyncBackpressureSnapshot(
     limit: policy ? policy.limit ?? null : lastLimit,
     queueLimit: policy ? policy.queueLimit ?? null : lastQueueLimit,
     queuedByPriorityClass,
-    oldestQueuedAgeMs: queue.oldestAgeMs(now),
+    oldestQueuedAgeMs: queue.oldestAgeMs(),
   };
 }
 
@@ -282,9 +281,7 @@ export async function withGlobalSyncBackpressure<T>(
      */
     source?: SyncAdmissionSource;
     signal?: AbortSignal;
-    /** Deterministic scheduler injection; not operator configuration. */
     agingThresholdMs?: number;
-    now?: () => number;
     logInfo?: (ctx: OperationContext, message: string) => void;
   },
   work: () => Promise<T>,
@@ -314,7 +311,6 @@ export async function withGlobalSyncBackpressure<T>(
       source: normalizeSyncAdmissionSource(options.source),
       signal: options.signal,
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
-      now: options.now ?? Date.now,
     });
   } catch (error) {
     if (error instanceof SyncBackpressureBusyError) {

@@ -105,6 +105,7 @@ function emptySyncPage(phase: string): SyncPageResult {
     quads: [],
     bytesReceived: 0,
     resumedFromOffset: 0,
+    responderSessionStartedFresh: true,
     nextOffset: 0,
     checkpointKey: `checkpoint:${phase}`,
     completed: true,
@@ -460,6 +461,69 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(exactRecoveryDeadlineHeadroom.every(
         (remainingMs) => remainingMs > 599_000 && remainingMs <= 600_000,
       )).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('shares one physical exact outcome across public and detailed joiners', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    let fetchCalls = 0;
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetchCalls++;
+      if (fetchCalls === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const publicResult = (agent as any).syncExactKnowledgeAssetsFromPeer(
+        PEER_A,
+        'coalesced-cg',
+        [EXACT_UAL_7],
+      );
+      await waitFor(() => fetchCalls === 1);
+      const detailedResult = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'coalesced-cg',
+        [EXACT_UAL_7],
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [projected, detailed] = await Promise.all([publicResult, detailedResult]);
+      expect(fetchCalls).toBe(2);
+      expect(projected).toBe(detailed.result);
+      expect(projected).not.toHaveProperty('disposition');
+      expect(detailed.disposition).toBe('clean-absent');
+
+      fetchCalls = 0;
+      const firstDetailed = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'coalesced-cg',
+        [EXACT_UAL_7],
+      );
+      const secondDetailed = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        'coalesced-cg',
+        [EXACT_UAL_7],
+      );
+      const [first, second] = await Promise.all([firstDetailed, secondDetailed]);
+      expect(fetchCalls).toBe(2);
+      expect(first.result).toBe(second.result);
+      expect(first.disposition).toBe('clean-absent');
+      expect(second.disposition).toBe('clean-absent');
     } finally {
       await agent.stop().catch(() => {});
     }

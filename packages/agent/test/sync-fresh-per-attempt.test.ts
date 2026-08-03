@@ -1064,6 +1064,72 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedSessionIds.at(-1)).not.toBe('expired-responder-token');
   });
 
+  it('reports whether an offset-zero phase reused an unfinished responder snapshot', async () => {
+    const contextGraphId = 'offset-zero-session-evidence-cg';
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      contextGraphId,
+      false,
+      'data',
+    );
+    const checkpointStore = new MemorySyncCheckpointStore({ clock: () => Date.now() });
+    checkpointStore.set(checkpointKey, 0);
+    checkpointStore.setResponderSession(
+      checkpointKey,
+      'unfinished-offset-zero-token',
+      Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    );
+    const observedSessionIds: Array<string | undefined> = [];
+
+    const runFetch = (forceFreshSession = false) => runFetchWithFakeTimers(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore,
+      forceFreshSession,
+      buildSyncRequest: async (
+        _contextGraphId,
+        _offset,
+        _limit,
+        _includeSharedMemory,
+        _remotePeerId,
+        _phase,
+        _snapshotRef,
+        _sinceBatchId,
+        syncSessionId,
+      ) => {
+        observedSessionIds.push(syncSessionId);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => new Uint8Array(),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    }));
+
+    const reused = await runFetch();
+    expect(reused.resumedFromOffset).toBe(0);
+    expect(reused.responderSessionStartedFresh).toBe(false);
+    expect(observedSessionIds.at(-1)).toBe('unfinished-offset-zero-token');
+
+    const fresh = await runFetch(true);
+    expect(fresh.resumedFromOffset).toBe(0);
+    expect(fresh.responderSessionStartedFresh).toBe(true);
+    expect(observedSessionIds.at(-1)).not.toBe('unfinished-offset-zero-token');
+  });
+
   it('drops a RESUMED session that aborts with a GENERIC transport error (network-path R1 fix)', async () => {
     // 2026-07-07 sync storm. Over the wire the responder's "superseded" message
     // is destroyed by the router's stream.abort, so the requester sees a

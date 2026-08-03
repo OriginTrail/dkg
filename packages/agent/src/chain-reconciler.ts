@@ -52,8 +52,11 @@ export type OrdinalOutcome =
   | { status: 'skip' };
 
 export interface OrdinalRecoveryTarget {
+  localCgId: string;
+  onChainCgId: string;
   ordinal: number;
   ual: string;
+  merkleRoot: string;
   kaId: string;
   reason: 'no-swm' | 'verified-vm-metadata-pending';
 }

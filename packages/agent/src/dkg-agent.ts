@@ -1678,6 +1678,9 @@ export class DKGAgent extends DKGAgentBase {
     // are rejected immediately and therefore can never start after shutdown
     // begins; an already-active pass gets a bounded grace period because
     // cancelling midway could strand a partially applied VM transition.
+    // Clear exact-absence rotations first so a late in-flight response cannot
+    // restore process-local suppression while the dispatcher drains.
+    this.closeVmReconcileRotationState();
     const vmReconcileDispatcher = this.vmReconcileDispatcher;
     if (vmReconcileDispatcher) {
       const drain = vmReconcileDispatcher.close();

@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import {
   backpressureRegistry,
   getMetrics,
@@ -20,7 +21,6 @@ export interface PriorityAdmissionEntry<Payload> extends PriorityAdmissionSchedu
   ownerKey: string;
   sequence: number;
   enqueuedAt: number;
-  now: () => number;
   agingThresholdMs: number;
 }
 
@@ -50,12 +50,13 @@ export interface PriorityAdmissionQueueHooks<Payload> {
   canRun: (entry: PriorityAdmissionEntry<Payload>) => boolean;
   onStart: (entry: PriorityAdmissionEntry<Payload>) => PriorityAdmissionRelease;
   onDepthChange?: (depth: number) => void;
+  /** Queue-wide elapsed-time source; production defaults to a monotonic clock. */
+  now?: () => number;
   observability?: {
     scheduler: string;
     operation: (entry: PriorityAdmissionEntry<Payload>) => string;
     inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
     thresholds?: SchedulerPressureThresholds;
-    now?: () => number;
     register?: boolean;
   };
 }
@@ -68,7 +69,6 @@ export interface PriorityAdmissionAcquireOptions<Payload> extends PriorityAdmiss
   signal?: AbortSignal;
   timeoutMs?: number;
   agingThresholdMs: number;
-  now?: () => number;
   /** Reserve one bounded queue slot if this running stage may hand off. */
   reserveForHandoff?: boolean;
   createBusyError: (reason: 'global_queue_full' | 'owner_queue_full') => Error;
@@ -104,15 +104,19 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly handoffReservations = new Map<number, HandoffReservation>();
   private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
   private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
+  private readonly now: () => number;
   private nextSequence = 0;
+  private agedTurnOwed = false;
 
   constructor(hooks: PriorityAdmissionQueueHooks<Payload>) {
+    const now = hooks.now ?? (() => performance.now());
     super({
       scheduler: hooks.observability?.scheduler ?? 'priority-admission',
       thresholds: hooks.observability?.thresholds,
-      now: hooks.observability?.now,
+      now,
     });
     this.hooks = hooks;
+    this.now = now;
     if (hooks.observability?.register) backpressureRegistry.register(this);
   }
 
@@ -136,9 +140,9 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     return count;
   }
 
-  oldestAgeMs(now = Date.now()): number {
+  oldestAgeMs(): number {
     if (this.queue.length === 0) return 0;
-    return Math.max(0, now - Math.min(...this.queue.map((entry) => entry.enqueuedAt)));
+    return Math.max(0, this.now() - Math.min(...this.queue.map((entry) => entry.enqueuedAt)));
   }
 
   acquire(options: PriorityAdmissionAcquireOptions<Payload>): PriorityAdmission<Payload> {
@@ -150,7 +154,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     handoffReservation?: HandoffReservation,
   ): PriorityAdmission<Payload> {
     if (options.signal?.aborted) throw abortError(options.signal.reason);
-    const now = options.now ?? Date.now;
+    this.reconcileAgedTurnOwed();
     const ownerKey = handoffReservation?.ownerKey ?? options.ownerKey ?? '';
     const queuedBefore = this.queue.length;
     const sequence = handoffReservation?.sequence ?? this.nextSequence++;
@@ -161,8 +165,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       priority: options.priority,
       priorityClass: options.priorityClass,
       sequence,
-      enqueuedAt: now(),
-      now,
+      enqueuedAt: this.now(),
       agingThresholdMs: options.agingThresholdMs,
     };
     if (this.hooks.observability) {
@@ -191,14 +194,21 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       && !reservationGlobalFull
       && !reservationOwnerFull
     ) {
-      this.recordDecision(base, 'started');
       this.observePressureEnqueue(base);
+      let release: PriorityAdmissionRelease;
+      try {
+        release = this.start(base, options);
+      } catch (error) {
+        this.observePressureReject(base, 'start_failed');
+        throw error;
+      }
+      this.recordDecision(base, 'started');
       const admission: PriorityAdmission<Payload> = {
         status: 'running',
         queuedBefore,
         sequence,
         entry: base,
-        release: Promise.resolve(this.start(base, options)),
+        release: Promise.resolve(release),
       };
       if (options.reserveForHandoff) {
         admission.handoff = (handoffOptions) => this.handoff(base, handoffOptions);
@@ -210,12 +220,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     const ownerFull = options.ownerQueueLimit !== undefined
       && this.countOwner(ownerKey) + reservedOwner >= options.ownerQueueLimit;
     if (!handoffReservation && (globalFull || ownerFull)) {
-      const victim = this.queue
-        .filter((entry) => (
-          entry.priority < options.priority
-          && (!ownerFull || entry.ownerKey === ownerKey)
-        ))
-        .sort((a, b) => a.priority - b.priority || b.sequence - a.sequence)[0];
+      const victim = this.selectDisplacementVictim(options, ownerKey, ownerFull);
       if (!victim) {
         this.recordDecision(base, 'rejected');
         this.observePressureReject(
@@ -266,7 +271,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       };
       this.observePressureEnqueue(internal);
       this.queue.push(internal);
-      this.depthChanged();
+      this.queueChanged();
       if (options.signal) {
         options.signal.addEventListener('abort', internal.onAbort, { once: true });
         if (options.signal.aborted) internal.onAbort();
@@ -294,45 +299,127 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       this.cleanup(entry);
       this.depthChanged();
       if (entry.settled) continue;
+      let release: PriorityAdmissionRelease;
+      try {
+        release = this.start(entry, entry);
+      } catch (error) {
+        this.observePressureReject(entry, 'start_failed');
+        this.recordDecision(entry, 'rejected');
+        this.rejectOnce(entry, error instanceof Error ? error : new Error(String(error)));
+        this.reconcileAgedTurnOwed();
+        continue;
+      }
       entry.settled = true;
-      const waitMs = Math.max(0, entry.now() - entry.enqueuedAt);
+      if (selected.servesDebt) this.agedTurnOwed = false;
+      else if (selected.createsDebt) this.agedTurnOwed = true;
+      this.reconcileAgedTurnOwed();
+      const waitMs = Math.max(0, this.now() - entry.enqueuedAt);
       getMetrics().syncSchedulerQueueWaitMs.record(waitMs, this.metricAttributes(entry));
       this.recordDecision(entry, 'started');
       if (selected.aged) this.recordDecision(entry, 'aged');
-      entry.resolve(this.start(entry, entry));
+      entry.resolve(release);
     }
   }
 
-  private selectNext(): { index: number; aged: boolean } | undefined {
+  private selectNext(): {
+    index: number;
+    aged: boolean;
+    createsDebt: boolean;
+    servesDebt: boolean;
+  } | undefined {
+    this.reconcileAgedTurnOwed();
+    const now = this.now();
     const runnable = this.queue
       .map((entry, index) => ({ entry, index }))
       .filter(({ entry }) => !entry.settled && this.hooks.canRun(entry));
     if (runnable.length === 0) return undefined;
     const aged = runnable
-      .filter(({ entry }) => entry.now() - entry.enqueuedAt >= entry.agingThresholdMs)
+      .filter(({ entry }) => this.isAged(entry, now))
       .sort((a, b) => a.entry.sequence - b.entry.sequence)[0];
-    if (aged) return { index: aged.index, aged: true };
+    if (this.agedTurnOwed && aged) {
+      return {
+        index: aged.index,
+        aged: true,
+        createsDebt: false,
+        servesDebt: true,
+      };
+    }
     const highest = runnable.sort((a, b) => (
       b.entry.priority - a.entry.priority
       || a.entry.sequence - b.entry.sequence
     ))[0];
-    return highest ? { index: highest.index, aged: false } : undefined;
+    if (!highest) return undefined;
+    const createsDebt = !this.agedTurnOwed && this.queue.some((entry) => (
+      !entry.settled
+      && entry !== highest.entry
+      && entry.priority < highest.entry.priority
+      && this.isAged(entry, now)
+    ));
+    return {
+      index: highest.index,
+      aged: this.isAged(highest.entry, now),
+      createsDebt,
+      servesDebt: false,
+    };
+  }
+
+  private isAged(entry: PriorityAdmissionEntry<Payload>, now = this.now()): boolean {
+    return now - entry.enqueuedAt >= entry.agingThresholdMs;
+  }
+
+  private reconcileAgedTurnOwed(): void {
+    if (!this.agedTurnOwed) return;
+    const now = this.now();
+    if (!this.queue.some((entry) => !entry.settled && this.isAged(entry, now))) {
+      this.agedTurnOwed = false;
+    }
+  }
+
+  private selectDisplacementVictim(
+    options: PriorityAdmissionAcquireOptions<Payload>,
+    ownerKey: string,
+    ownerFull: boolean,
+  ): InternalEntry<Payload> | undefined {
+    const candidates = this.queue.filter((entry) => (
+      entry.priority < options.priority
+      && (!ownerFull || entry.ownerKey === ownerKey)
+    ));
+    let protectedAged: InternalEntry<Payload> | undefined;
+    if (options.queueLimit >= 2) {
+      const now = this.now();
+      protectedAged = candidates
+        .filter((entry) => this.isAged(entry, now))
+        .sort((a, b) => a.sequence - b.sequence)[0];
+    }
+    return candidates
+      .filter((entry) => entry !== protectedAged)
+      .sort((a, b) => a.priority - b.priority || b.sequence - a.sequence)[0];
   }
 
   private start(
     entry: PriorityAdmissionEntry<Payload>,
     options: Pick<PriorityAdmissionAcquireOptions<Payload>, 'reserveForHandoff' | 'queueLimit' | 'ownerQueueLimit'>,
   ): PriorityAdmissionRelease {
-    if (options.reserveForHandoff) {
-      this.handoffReservations.set(entry.sequence, {
-        sequence: entry.sequence,
-        ownerKey: entry.ownerKey,
-        queueLimit: options.queueLimit,
-        ownerQueueLimit: options.ownerQueueLimit,
-      });
-    }
-    this.observePressureStart(entry);
     const release = this.hooks.onStart(entry);
+    try {
+      if (options.reserveForHandoff) {
+        this.handoffReservations.set(entry.sequence, {
+          sequence: entry.sequence,
+          ownerKey: entry.ownerKey,
+          queueLimit: options.queueLimit,
+          ownerQueueLimit: options.ownerQueueLimit,
+        });
+      }
+      this.observePressureStart(entry);
+    } catch (error) {
+      this.handoffReservations.delete(entry.sequence);
+      try {
+        release();
+      } catch {
+        // Preserve the admission failure; release is best-effort rollback here.
+      }
+      throw error;
+    }
     let released = false;
     return () => {
       if (released) return;
@@ -367,7 +454,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     if (index < 0) return false;
     this.queue.splice(index, 1);
     this.cleanup(entry);
-    this.depthChanged();
+    this.queueChanged();
     return true;
   }
 
@@ -386,6 +473,11 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
 
   private depthChanged(): void {
     this.hooks.onDepthChange?.(this.queue.length);
+  }
+
+  private queueChanged(): void {
+    this.reconcileAgedTurnOwed();
+    this.depthChanged();
   }
 
   private metricAttributes(entry: PriorityAdmissionScheduling) {

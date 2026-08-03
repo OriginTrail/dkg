@@ -112,6 +112,12 @@ export interface SyncPageResult {
   quads: Quad[];
   bytesReceived: number;
   resumedFromOffset: number;
+  /**
+   * True only when this phase started without reusing a requester-side
+   * responder snapshot token. Optional for rolling deep-import compatibility;
+   * proof-sensitive callers must treat an omitted value as unknown.
+   */
+  responderSessionStartedFresh?: boolean;
   nextOffset: number;
   checkpointKey: string;
   completed: boolean;
@@ -286,6 +292,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         ?? getPersistedSyncResponderSession(checkpoint, sessionStartedAt)
       )
     : undefined;
+  const responderSessionStartedFresh = savedResponderSession === undefined;
   if (usesPageSession && offset > 0 && !savedResponderSession) {
     checkpointStore.delete(checkpointKey);
     offset = 0;
@@ -554,6 +561,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         quads: allQuads,
         bytesReceived,
         resumedFromOffset,
+        responderSessionStartedFresh,
         nextOffset: offset,
         checkpointKey,
         completed: false,
@@ -612,6 +620,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     quads: allQuads,
     bytesReceived,
     resumedFromOffset,
+    responderSessionStartedFresh,
     nextOffset: offset,
     checkpointKey,
     completed: !timedOut,

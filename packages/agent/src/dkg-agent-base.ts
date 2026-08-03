@@ -362,6 +362,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -898,14 +899,20 @@ export class DKGAgentBase {
     );
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
-  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
-    Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS = (() => {
+    const configured = Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']);
+    return Number.isFinite(configured) && configured > 0
+      ? configured
+      : 10 * 60_000;
+  })();
   static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  /** Exact recovery keeps its existing curator/core-first three-peer fanout cap. */
+  static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
   /**
@@ -993,6 +1000,10 @@ export class DKGAgentBase {
   /** Keys already consulted in the durable store during this process lifetime. */
   protected readonly vmReconcileNegativeCacheHydrated = new Set<string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
+  /** Bounded, process-local clean-absence rotations for production VM recovery. */
+  protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Late exact responses must not mutate rotation state after shutdown begins. */
+  protected vmReconcileRotationClosed = false;
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */

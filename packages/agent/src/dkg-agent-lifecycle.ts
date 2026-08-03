@@ -260,6 +260,10 @@ import {
 } from './sync/requester/durable-sync-budget.js';
 import {
   runDurableSync,
+  runDurableSyncDetailed,
+  type DetailedDurableSyncResult,
+  type DurableSyncContext,
+  type ExactDurableFetchDisposition,
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
@@ -1040,6 +1044,26 @@ export type DurableSyncOptions = {
    */
   source?: SyncAdmissionSource;
 };
+
+export interface ExactKnowledgeAssetSyncResult {
+  readonly result: DurableSyncResult;
+  readonly disposition: ExactDurableFetchDisposition;
+}
+
+type PhysicalDurableSyncResult = {
+  readonly result: DurableSyncResult;
+  readonly exactFetchDisposition?: ExactDurableFetchDisposition;
+};
+
+function mergeExactDurableFetchDisposition(
+  current: ExactDurableFetchDisposition | undefined,
+  next: ExactDurableFetchDisposition,
+): ExactDurableFetchDisposition {
+  if (current === undefined) return next;
+  if (current === 'incomplete' || next === 'incomplete') return 'incomplete';
+  if (current === 'found' || next === 'found') return 'found';
+  return 'clean-absent';
+}
 
 type LegacyDurableContextGraphOptions = {
   onPhase?: PhaseCallback;
@@ -4634,6 +4658,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
+    return (await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+      this,
+      ctx,
+      remotePeerId,
+      contextGraphIds,
+      onPhase,
+      onAccessDenied,
+      sinceBatchIdFor,
+      options,
+    )).result;
+  }
+
+  async runLegacyDurableSyncDetailed(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphIds: string[],
+    onPhase?: PhaseCallback,
+    onAccessDenied?: (contextGraphId: string) => void,
+    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
+    options?: DurableSyncOptions,
+  ): Promise<PhysicalDurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const operationBoundary = createDurableSyncOperationBoundary({
@@ -4648,79 +4693,105 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds,
       this.config.syncContextGraphPriorities,
     );
-    const runSync = async () => finalizeDurableSyncCompletion(await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
-      work: orderedContextGraphIds.map((contextGraphId) => ({
-        contextGraphId,
-        lane: 'durable' as const,
-        operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
-        run: async (remainingContextGraphs) => durableSyncAccumulatorFromResult(
-          await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
-            this,
-            ctx,
-            remotePeerId,
-            contextGraphId,
-            remainingContextGraphs,
-            {
-              onPhase,
-              onAtomicCommitStarted: options?.onAtomicCommitStarted,
-              onAccessDenied,
-              sinceBatchIdFor,
-              stopOnBackoffWorthyFailure,
-              fetchTimeoutMs,
-              exactAssetUals: options?.exactAssetUals,
-              authenticationTimeoutMs,
-              operationDeadline: operationBoundary.deadline,
-              signal: operationBoundary.signal,
-            },
-          ),
-        ),
-      })),
-      priorities: this.config.syncContextGraphPriorities,
-      emptyResult: createDurableSyncAccumulator,
-      runWithAdmission: async (item, work) => {
-        try {
-          return await runSerializedDurableContextGraphSync(
-            this,
-            remotePeerId,
-            item.contextGraphId,
-            () => this.runContextGraphSyncWithBackpressure(
+    let exactFetchDisposition: ExactDurableFetchDisposition | undefined;
+    const markExactFetchIncomplete = () => {
+      if (options?.exactAssetUals === undefined) return;
+      exactFetchDisposition = mergeExactDurableFetchDisposition(
+        exactFetchDisposition,
+        'incomplete',
+      );
+    };
+    const runSync = async (): Promise<PhysicalDurableSyncResult> => {
+      const accumulator = await runOrderedContextGraphSyncs<DurableSyncAccumulator>({
+        work: orderedContextGraphIds.map((contextGraphId) => ({
+          contextGraphId,
+          lane: 'durable' as const,
+          operationId: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
+          run: async (remainingContextGraphs) => {
+            const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
+              this,
               ctx,
-              item.contextGraphId,
-              item.lane,
-              item.operationId,
-              work,
+              remotePeerId,
+              contextGraphId,
+              remainingContextGraphs,
               {
-                priorityOverride: options?.priority,
-                operationSignal: operationBoundary.signal,
-                source: options?.source,
+                onPhase,
+                onAtomicCommitStarted: options?.onAtomicCommitStarted,
+                onAccessDenied,
+                sinceBatchIdFor,
+                stopOnBackoffWorthyFailure,
+                fetchTimeoutMs,
+                exactAssetUals: options?.exactAssetUals,
+                authenticationTimeoutMs,
+                operationDeadline: operationBoundary.deadline,
+                signal: operationBoundary.signal,
               },
-            ),
-            operationBoundary.signal,
-          );
-        } catch (error) {
-          if (!operationBoundary.signal?.aborted) throw error;
-          return markDurableTerminalBoundary(createDurableSyncAccumulator(), false);
-        }
-      },
-      merge: mergeDurableSyncAccumulatorInto,
-      markDeferred: (summary) => {
-        recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
-        return markDurableTerminalBoundary(summary, false);
-      },
-      // Preserve already-merged progress, but record that cancellation left
-      // requested Context Graphs unvisited so the aggregate cannot finalize
-      // as complete.
-      markSkipped: (summary) => markDurableTerminalBoundary(summary, false),
-      shouldContinue: () => !operationBoundary.signal?.aborted,
-      shouldStop: (part) => Boolean(
-        stopOnBackoffWorthyFailure
-        && durableSyncAccumulatorHasBackoffWorthyFailure(part),
-      ),
-      onDeferred: (item, error) => this.log.info(
-        ctx,
-        `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
-      ),
-    }));
+            );
+            if (detailed.exactFetchDisposition !== undefined) {
+              exactFetchDisposition = mergeExactDurableFetchDisposition(
+                exactFetchDisposition,
+                detailed.exactFetchDisposition,
+              );
+            }
+            return durableSyncAccumulatorFromResult(detailed.result);
+          },
+        })),
+        priorities: this.config.syncContextGraphPriorities,
+        emptyResult: createDurableSyncAccumulator,
+        runWithAdmission: async (item, work) => {
+          try {
+            return await runSerializedDurableContextGraphSync(
+              this,
+              remotePeerId,
+              item.contextGraphId,
+              () => this.runContextGraphSyncWithBackpressure(
+                ctx,
+                item.contextGraphId,
+                item.lane,
+                item.operationId,
+                work,
+                {
+                  priorityOverride: options?.priority,
+                  operationSignal: operationBoundary.signal,
+                  source: options?.source,
+                },
+              ),
+              operationBoundary.signal,
+            );
+          } catch (error) {
+            if (!operationBoundary.signal?.aborted) throw error;
+            markExactFetchIncomplete();
+            return markDurableTerminalBoundary(createDurableSyncAccumulator(), false);
+          }
+        },
+        merge: mergeDurableSyncAccumulatorInto,
+        markDeferred: (summary) => {
+          markExactFetchIncomplete();
+          recordDurableSyncDiagnostics(summary, { deferredBackpressure: 1 });
+          return markDurableTerminalBoundary(summary, false);
+        },
+        // Preserve already-merged progress, but record that cancellation left
+        // requested Context Graphs unvisited so the aggregate cannot finalize
+        // as complete.
+        markSkipped: (summary) => {
+          markExactFetchIncomplete();
+          return markDurableTerminalBoundary(summary, false);
+        },
+        shouldContinue: () => !operationBoundary.signal?.aborted,
+        shouldStop: (part) => Boolean(
+          stopOnBackoffWorthyFailure
+          && durableSyncAccumulatorHasBackoffWorthyFailure(part),
+        ),
+        onDeferred: (item, error) => this.log.info(
+          ctx,
+          `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
+        ),
+      });
+      return {
+        result: finalizeDurableSyncCompletion(accumulator),
+        ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+      };
+    };
 
     const singleFlightKey = durableSyncSingleFlightKey({
       remotePeerId,
@@ -4781,6 +4852,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
+  async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    requestedAssetUals: string[],
+  ): Promise<ExactKnowledgeAssetSyncResult> {
+    const assetUals = requireExactAssetUals(requestedAssetUals);
+    const ctx = createOperationContext('sync');
+    const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+      this,
+      ctx,
+      remotePeerId,
+      [contextGraphId],
+      undefined,
+      undefined,
+      undefined,
+      {
+        exactAssetUals: assetUals,
+        stopOnBackoffWorthyFailure: true,
+        priority: 1_000,
+        source: 'vm-recovery',
+      },
+    );
+    return {
+      result: detailed.result,
+      disposition: detailed.exactFetchDisposition ?? 'incomplete',
+    };
+  }
+
   /** Execute one legacy durable Context Graph after its caller owns admission. */
   async runLegacyDurableSyncForContextGraph(this: DKGAgent,
     ctx: OperationContext,
@@ -4789,6 +4888,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remainingContextGraphs: number,
     options: LegacyDurableContextGraphOptions = {},
   ): Promise<DurableSyncResult> {
+    return (await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
+      this,
+      ctx,
+      remotePeerId,
+      contextGraphId,
+      remainingContextGraphs,
+      options,
+    )).result;
+  }
+
+  async runLegacyDurableSyncForContextGraphDetailed(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    remainingContextGraphs: number,
+    options: LegacyDurableContextGraphOptions = {},
+  ): Promise<DetailedDurableSyncResult> {
     const {
       onPhase,
       onAtomicCommitStarted,
@@ -4849,7 +4965,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       remainingContextGraphs,
     });
-    return runDurableSync({
+    const durableContext: DurableSyncContext = {
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
@@ -4958,7 +5074,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-    });
+    };
+    if (exactAssetUals !== undefined) {
+      return runDurableSyncDetailed(durableContext);
+    }
+    return { result: await runDurableSync(durableContext) };
   }
 
   /**

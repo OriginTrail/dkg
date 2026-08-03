@@ -9,6 +9,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -354,6 +355,7 @@ import {
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -3553,6 +3555,274 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.pruneVmReconcileState();
   }
 
+  vmReconcileRotationNow(this: DKGAgent): number {
+    return performance.now();
+  }
+
+  vmReconcileRotationSlotKey(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+  ): string {
+    return `${target.localCgId}\0${target.onChainCgId}\0${target.ordinal}`;
+  }
+
+  clearVmReconcileRotationStateForSlot(
+    this: DKGAgent,
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+  ): void {
+    this.vmReconcileRotationState.delete(`${localCgId}\0${onChainCgId.toString()}\0${ordinal}`);
+  }
+
+  vmReconcileRotationFingerprint(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+  ): string {
+    return `${target.ual}\0${target.merkleRoot.toLowerCase()}`;
+  }
+
+  vmReconcileObservedCandidatePeerIds(
+    this: DKGAgent,
+    localCgId: string,
+  ): string[] {
+    const libp2p = (this.node as any)?.libp2p;
+    const getConnections = libp2p?.getConnections;
+    if (typeof getConnections !== 'function') return [];
+    const peersById = new Map<string, { toString(): string }>();
+    for (const connection of getConnections.call(libp2p) as Array<{
+      remotePeer?: { toString(): string };
+    }>) {
+      const peer = connection.remotePeer;
+      const peerId = peer?.toString();
+      if (!peer || !peerId || peerId === this.peerId || peersById.has(peerId)) continue;
+      peersById.set(peerId, peer);
+    }
+    // `getConnections()` iteration order is transport state, not candidate
+    // identity. Sort before tiering/capping so harmless connection reorder can
+    // never replace one member of the bounded proof roster.
+    const canonicalPeers = [...peersById.values()].sort((left, right) =>
+      left.toString().localeCompare(right.toString()));
+    return this.selectCatchupPeers(
+      canonicalPeers,
+      this.preferredSyncPeers.get(localCgId),
+      false,
+    )
+      .map((peer) => peer.toString())
+      .slice(0, DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
+  }
+
+  vmReconcilePeerMembershipMatches(
+    this: DKGAgent,
+    left: ReadonlySet<string>,
+    right: readonly string[],
+  ): boolean {
+    return left.size === right.length && right.every((peerId) => left.has(peerId));
+  }
+
+  touchVmReconcileRotationRecord(
+    this: DKGAgent,
+    slotKey: string,
+    record: VmReconcileRotationRecord,
+  ): void {
+    if (this.vmReconcileRotationState.get(slotKey) !== record) return;
+    this.vmReconcileRotationState.delete(slotKey);
+    this.vmReconcileRotationState.set(slotKey, record);
+  }
+
+  prepareVmReconcileRotationTarget(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+    candidatePeerIds: readonly string[],
+    now: number,
+  ): {
+    slotKey: string;
+    record?: VmReconcileRotationRecord;
+    suppressed: boolean;
+  } {
+    const slotKey = this.vmReconcileRotationSlotKey(target);
+    if (this.vmReconcileRotationClosed) return { slotKey, suppressed: true };
+
+    const fingerprint = this.vmReconcileRotationFingerprint(target);
+    let record = this.vmReconcileRotationState.get(slotKey);
+    if (candidatePeerIds.length === 0) {
+      // An empty observed roster cannot prove absence. Drop all partial credit
+      // so a later connection begins a genuinely fresh cycle.
+      this.vmReconcileRotationState.delete(slotKey);
+      return { slotKey, suppressed: false };
+    }
+
+    if (!record || record.fingerprint !== fingerprint) {
+      const replacingSlot = record !== undefined;
+      if (replacingSlot) {
+        this.vmReconcileRotationState.delete(slotKey);
+      } else if (!this.makeRoomForVmReconcileRotationRecord()) {
+        // Stable-capacity overflow remains fail-open. It still participates in
+        // ordinary exact recovery, but owns no cursor/absence evidence and can
+        // neither suppress nor evict an in-progress collection.
+        return { slotKey, suppressed: false };
+      }
+      record = {
+        localCgId: target.localCgId,
+        onChainCgId: target.onChainCgId,
+        ordinal: target.ordinal,
+        fingerprint,
+        phase: 'collecting',
+        candidatePeerIds: new Set(candidatePeerIds),
+        cleanAbsentPeerIds: new Set(),
+        collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+        failures: 0,
+        nextRetryAt: 0,
+      };
+      this.vmReconcileRotationState.set(slotKey, record);
+      return {
+        slotKey,
+        record: this.vmReconcileRotationState.get(slotKey) === record ? record : undefined,
+        suppressed: false,
+      };
+    }
+
+    const membershipUnchanged = this.vmReconcilePeerMembershipMatches(
+      record.candidatePeerIds,
+      candidatePeerIds,
+    );
+    if (!membershipUnchanged) {
+      record.candidatePeerIds = new Set(candidatePeerIds);
+      record.phase = 'collecting';
+      record.nextRetryAt = 0;
+      record.collectionDeadlineAt = now
+        + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+      record.lastAttemptedPeerId = undefined;
+      // A roster change starts a fresh proof cycle. Mixing credits obtained
+      // against different candidate sets could manufacture exhaustion when a
+      // peer disappears and later rejoins.
+      record.cleanAbsentPeerIds.clear();
+    } else if (record.phase === 'backoff') {
+      if (now < record.nextRetryAt) {
+        this.touchVmReconcileRotationRecord(slotKey, record);
+        return { slotKey, record, suppressed: true };
+      }
+      // A deadline only opens a new collection cycle. It never earns another
+      // failure/backoff without fresh clean-absence evidence from every peer.
+      record.phase = 'collecting';
+      record.cleanAbsentPeerIds.clear();
+      record.collectionDeadlineAt = now
+        + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+      record.nextRetryAt = 0;
+    } else if (now >= record.collectionDeadlineAt) {
+      // A partial rotation must not pin already-credited peers forever when a
+      // stable sibling repeatedly fails protocol/admission or returns an
+      // incomplete response. Start a fresh proof cycle without treating the
+      // incomplete cycle as a failure or scheduling a timer.
+      record.cleanAbsentPeerIds.clear();
+      record.collectionDeadlineAt = now
+        + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+    }
+
+    this.touchVmReconcileRotationRecord(slotKey, record);
+    return { slotKey, record, suppressed: false };
+  }
+
+  vmReconcileUncreditedCandidateOrder(
+    this: DKGAgent,
+    record: VmReconcileRotationRecord,
+  ): string[] {
+    const candidates = [...record.candidatePeerIds];
+    if (candidates.length === 0) return candidates;
+    const lastIndex = record.lastAttemptedPeerId === undefined
+      ? -1
+      : candidates.indexOf(record.lastAttemptedPeerId);
+    const start = lastIndex < 0 ? 0 : (lastIndex + 1) % candidates.length;
+    return [
+      ...candidates.slice(start),
+      ...candidates.slice(0, start),
+    ].filter((peerId) => !record.cleanAbsentPeerIds.has(peerId));
+  }
+
+  makeRoomForVmReconcileRotationRecord(this: DKGAgent): boolean {
+    if (this.vmReconcileRotationState.size < DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
+      return true;
+    }
+    // Map order is LRU order. A completed backoff record is replaceable: the
+    // evicted slot merely retries fail-open. Collecting records stay installed
+    // until they finish or are invalidated, preventing cap+1 churn from making
+    // every partial rotation useless.
+    for (const [key, record] of this.vmReconcileRotationState) {
+      if (record.phase !== 'backoff') continue;
+      this.vmReconcileRotationState.delete(key);
+      return true;
+    }
+    return false;
+  }
+
+  clearVmReconcileRotationStateForContextGraph(
+    this: DKGAgent,
+    localCgId: string,
+  ): void {
+    const prefix = `${localCgId}\0`;
+    for (const key of this.vmReconcileRotationState.keys()) {
+      if (key.startsWith(prefix)) this.vmReconcileRotationState.delete(key);
+    }
+  }
+
+  closeVmReconcileRotationState(this: DKGAgent): void {
+    this.vmReconcileRotationClosed = true;
+    this.vmReconcileRotationState.clear();
+  }
+
+  vmReconcileRecoveryTargetMatches(
+    this: DKGAgent,
+    expected: OrdinalRecoveryTarget,
+    actual: OrdinalRecoveryTarget,
+  ): boolean {
+    return expected.localCgId === actual.localCgId
+      && expected.onChainCgId === actual.onChainCgId
+      && expected.ordinal === actual.ordinal
+      && expected.ual === actual.ual
+      && expected.merkleRoot.toLowerCase() === actual.merkleRoot.toLowerCase();
+  }
+
+  creditVmReconcileCleanAbsence(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+    peerId: string,
+    expectedCandidatePeerIds: readonly string[],
+    capturedRecord: VmReconcileRotationRecord,
+  ): void {
+    if (this.vmReconcileRotationClosed) return;
+    const slotKey = this.vmReconcileRotationSlotKey(target);
+    if (this.vmReconcileRotationState.get(slotKey) !== capturedRecord) return;
+    if (!this.vmReconcilePeerMembershipMatches(
+      capturedRecord.candidatePeerIds,
+      expectedCandidatePeerIds,
+    )) return;
+    if (!capturedRecord.candidatePeerIds.has(peerId)) return;
+
+    capturedRecord.cleanAbsentPeerIds.add(peerId);
+    const exhausted = [...capturedRecord.candidatePeerIds]
+      .every((candidatePeerId) => capturedRecord.cleanAbsentPeerIds.has(candidatePeerId));
+    if (exhausted) {
+      capturedRecord.failures += 1;
+      const exponentialBackoff = Math.min(
+        DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+        DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS
+          * 2 ** Math.max(0, capturedRecord.failures - 1),
+      );
+      const jitterSample = createHash('sha256')
+        .update(`${this.peerId}\0${slotKey}\0${capturedRecord.fingerprint}\0${capturedRecord.failures}`)
+        .digest()
+        .readUInt32BE(0) / 0x1_0000_0000;
+      const backoff = Math.min(
+        DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+        Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
+      );
+      capturedRecord.phase = 'backoff';
+      capturedRecord.collectionDeadlineAt = 0;
+      capturedRecord.nextRetryAt = this.vmReconcileRotationNow() + backoff;
+    }
+    this.touchVmReconcileRotationRecord(slotKey, capturedRecord);
+  }
+
   shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
     const now = Date.now();
     this.pruneVmReconcileState(now);
@@ -3631,6 +3901,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Best-effort durable cleanup; generation checks still reject stale rows.
       });
     this.reconcileCursors.delete(localCgId);
+    this.clearVmReconcileRotationStateForContextGraph(localCgId);
     this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
@@ -3702,16 +3973,37 @@ export class SwmHostModeMethods extends DKGAgentBase {
     });
     if (!isTargetCurrent() || targets.length === 0) return noRecovery();
 
+    const expectedOnChainCgId = onChainCgId.toString();
+    const currentTargets = targets.filter((target) =>
+      target.localCgId === localCgId && target.onChainCgId === expectedOnChainCgId);
+    if (currentTargets.length === 0) return noRecovery();
+
+    // Suppression consults only the already-observed, capped connection view.
+    // This is intentionally before curator resolution, dialing, protocol waits,
+    // and admission probes. Every target reached this method only after the
+    // production ordinal/finalization check proved it still pending locally.
+    const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
+    const now = this.vmReconcileRotationNow();
+    const initiallyEligible = currentTargets.filter((target) =>
+      !this.prepareVmReconcileRotationTarget(
+        target,
+        observedCandidatePeerIds,
+        now,
+      ).suppressed);
+    if (initiallyEligible.length === 0) {
+      this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by exact-absence backoff`);
+      return noRecovery();
+    }
+
     // Damping: the batched path deliberately skips the per-UAL negative cache
     // (consulting it primes connections to every discovered agent — the walk
     // this path exists to avoid), so the per-CG active-fetch cooldown is the
-    // only damper between this batch and the network. A wholly unproductive
-    // batch (e.g. the curator is offline) therefore costs one bounded exact
-    // fetch per sweep interval, not one per reconcile pass. Progress clears
-    // the cooldown below so a draining backlog proceeds slice after slice.
+    // short-term damper between fresh rotation attempts. Completed clean-
+    // absence rotations use the slot-specific exponential backoff above;
+    // transient/incomplete attempts retain this sweep-interval cooldown.
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
-      return noRecovery(targets[0]?.ordinal, true);
+      return noRecovery(initiallyEligible[0]?.ordinal, true);
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -3745,64 +4037,110 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.node.libp2p.getConnections()
         .map((connection) => [connection.remotePeer.toString(), connection.remotePeer]),
     );
-    const connected = [...connectedByPeerId.values()];
-    const connectedPeerIds = new Set(connectedByPeerId.keys());
-    const orderedConnectedPeerIds = this.selectCatchupPeers(
-      connected,
-      approvedCuratorPeerId ?? curatorPeerIds[0],
-      false,
-    ).map((peer) => peer.toString());
-    const orderedPeerIds = [...new Set([
-      ...curatorPeerIds.filter((peerId) => connectedPeerIds.has(peerId)),
-      ...orderedConnectedPeerIds,
-    ])].slice(0, 3);
-    const rotationCandidates = orderedPeerIds
-      .map((peerId) => connectedByPeerId.get(peerId))
-      .filter((peer): peer is NonNullable<typeof peer> => peer !== undefined);
-    const peerPriorityRanks = new Map(
-      orderedPeerIds.map((peerId) => [
-        peerId,
-        curatorPeerIds.includes(peerId) ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0,
-      ]),
-    );
-    // Preserve curator preference for the first attempt, then rotate the full
-    // connected order one peer per network-eligible window. Exact recovery
-    // often has a single pending KA, so replaying the static preferred-first
-    // order would otherwise pin that KA to the same unproductive peer forever.
-    const rotationAnchor = this.selectCatchupPeerWindow(rotationCandidates, {
-      maxPeers: 1,
-      peerRotationKey: localCgId,
-      peerPriorityRanks,
-    })[0]?.toString();
-    const rotationStart = rotationAnchor === undefined
-      ? 0
-      : Math.max(0, orderedPeerIds.indexOf(rotationAnchor));
-    const peerIds = [
-      ...orderedPeerIds.slice(rotationStart),
-      ...orderedPeerIds.slice(0, rotationStart),
-    ];
+    // Use the exact same memory-only canonicalizer as the suppression gate.
+    // Curator resolution may connect a missing peer, but it must not substitute
+    // a different ranking algorithm and invalidate an otherwise stable roster.
+    const orderedPeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
+
+    // Curator preparation may have grown or shrunk the connected candidate
+    // set. Re-evaluate every target against that observed change. Any roster
+    // change breaks backoff and starts a fresh proof cycle.
+    const preparedEntries = currentTargets
+      .map((target, index) => ({
+        index,
+        target,
+        prepared: this.prepareVmReconcileRotationTarget(
+          target,
+          orderedPeerIds,
+          this.vmReconcileRotationNow(),
+        ),
+      }));
+    const eligible = preparedEntries
+      .map((entry) => {
+        const { record } = entry.prepared;
+        if (
+          record
+          && this.vmReconcileRotationState.get(entry.prepared.slotKey) !== record
+        ) {
+          // A later slot may have fairly replaced this backoff record while the
+          // batch was prepared. Continue as evidence-free overflow; never send
+          // transport work against the evicted object or preserve its suppress.
+          return {
+            ...entry,
+            prepared: { slotKey: entry.prepared.slotKey, suppressed: false },
+          };
+        }
+        return entry;
+      })
+      .filter((entry) => !entry.prepared.suppressed)
+      // Installed collecting records get first use of the bounded peer set so
+      // overflow cannot consume the one peer they still need to complete. The
+      // original target order remains stable within each class.
+      .sort((left, right) => {
+        const leftInstalled = left.prepared.record
+          && this.vmReconcileRotationState.get(left.prepared.slotKey) === left.prepared.record
+          ? 1 : 0;
+        const rightInstalled = right.prepared.record
+          && this.vmReconcileRotationState.get(right.prepared.slotKey) === right.prepared.record
+          ? 1 : 0;
+        return rightInstalled - leftInstalled || left.index - right.index;
+      });
+
     const outcomes = new Map<number, OrdinalOutcome>();
     const attemptedOrdinals = new Set<number>();
-    let remaining = [...targets];
+    const usedPeerIds = new Set<string>();
+    const unavailablePeerIds = new Set<string>();
     let attemptedFetch = false;
 
-    for (const peerId of peerIds) {
-      if (!isTargetCurrent() || remaining.length === 0) break;
-      const connectedPeer = connectedByPeerId.get(peerId);
-      if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) continue;
-      // Network boundary: a merely-connected peer is not necessarily admitted
-      // to this DKG network (curator hints and getConnections() both predate
-      // the identity probe). Never send an authenticated exact request to an
-      // unverified or rejected peer.
-      if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'VM exact fetch'))) continue;
+    for (const entry of eligible) {
+      if (!isTargetCurrent()) break;
+      const { target } = entry;
+      const record = entry.prepared.record;
+      const installedRecord = record
+        && this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(target)) === record
+        ? record
+        : undefined;
+      const candidatePeerIds = installedRecord
+        ? [...installedRecord.candidatePeerIds]
+        : orderedPeerIds;
+
+      // Rotate every physical outcome, including incomplete responses, without
+      // conflating the attempt cursor with clean-absence evidence. Try the
+      // target's next available peer; protocol/admission failures remain
+      // uncredited and fall through to a later candidate in this same pass.
+      let peerId: string | undefined;
+      const candidateOrder = installedRecord
+        ? this.vmReconcileUncreditedCandidateOrder(installedRecord)
+        : orderedPeerIds;
+      for (const candidatePeerId of candidateOrder) {
+        if (usedPeerIds.has(candidatePeerId) || unavailablePeerIds.has(candidatePeerId)) continue;
+        const connectedPeer = connectedByPeerId.get(candidatePeerId);
+        if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) {
+          unavailablePeerIds.add(candidatePeerId);
+          continue;
+        }
+        // Network boundary: a merely-connected peer is not necessarily
+        // admitted to this DKG network. Never send an authenticated exact
+        // request to an unverified or rejected peer.
+        if (!(await this.ensurePeerAdmittedForRecovery(
+          candidatePeerId,
+          ctx,
+          'VM exact fetch',
+        ))) {
+          unavailablePeerIds.add(candidatePeerId);
+          continue;
+        }
+        peerId = candidatePeerId;
+        break;
+      }
+      if (!peerId) continue;
+      usedPeerIds.add(peerId);
 
       // A recovery target can approach the frame budget by itself. Each peer
       // attempt therefore consumes at most one queue item, and each queue item
       // consumes at most one peer attempt per eligible pass. A still-pending
       // item rotates behind untouched work so one unavailable KA cannot spend
       // every peer budget and starve the rest of the queue.
-      const [target, ...deferredTargets] = remaining;
-      if (!target) break;
       if (attemptedOrdinals.has(target.ordinal)) break;
       this.emitReplication({
         contextGraphId: localCgId,
@@ -3814,17 +4152,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
         detail: 'exact-asset',
       });
 
+      let disposition: 'found' | 'clean-absent' | 'incomplete' = 'incomplete';
       try {
         attemptedFetch = true;
         attemptedOrdinals.add(target.ordinal);
-        const result = await this.syncExactKnowledgeAssetsFromPeer(
+        if (installedRecord) {
+          installedRecord.lastAttemptedPeerId = peerId;
+          this.touchVmReconcileRotationRecord(
+            this.vmReconcileRotationSlotKey(target),
+            installedRecord,
+          );
+        }
+        const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
           peerId,
           localCgId,
           [target.ual],
         );
+        const { result } = detailed;
+        disposition = detailed.disposition;
         this.log.info(
           ctx,
-          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=1 fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure}`,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=1 fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
         );
       } catch (error) {
         this.log.info(
@@ -3843,9 +4191,39 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       outcomes.set(target.ordinal, outcome);
       if (outcome.status === 'pending' && outcome.recovery) {
-        remaining = [...deferredTargets, outcome.recovery];
+        if (!installedRecord) continue;
+        if (this.vmReconcileRotationClosed) continue;
+        if (
+          this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(target))
+          !== installedRecord
+        ) continue;
+        const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(
+          localCgId,
+        );
+        if (!this.vmReconcilePeerMembershipMatches(
+          installedRecord.candidatePeerIds,
+          candidateMembershipAfter,
+        )) {
+          // Membership changed while the request was in flight. Invalidate the
+          // cycle before considering its response, then fail open.
+          this.prepareVmReconcileRotationTarget(
+            outcome.recovery,
+            candidateMembershipAfter,
+            this.vmReconcileRotationNow(),
+          );
+        } else if (
+          disposition === 'clean-absent'
+          && this.vmReconcileRecoveryTargetMatches(target, outcome.recovery)
+        ) {
+          this.creditVmReconcileCleanAbsence(
+            target,
+            peerId,
+            candidatePeerIds,
+            installedRecord,
+          );
+        }
       } else {
-        remaining = deferredTargets;
+        this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(target));
       }
     }
 
@@ -3866,8 +4244,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // attempts are rotated inside `remaining` to give untouched targets the
       // next peer, but once every submitted target has consumed one attempt
       // the outer fair scan must wrap from its watermark on the next cycle.
-      continuationOrdinal: targets.find(
-        (target) => !attemptedOrdinals.has(target.ordinal),
+      continuationOrdinal: currentTargets.find(
+        (target) => eligible.some((entry) => entry.target.ordinal === target.ordinal)
+          && !attemptedOrdinals.has(target.ordinal),
       )?.ordinal,
       cooldownOnly: false,
     };
@@ -3914,7 +4293,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       // Recently reconciled (live-burst guard): treat as already-done so the
       // cursor advances without redoing chain reads + an SWM scan.
-      if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
+      if (this.recentReconciledUals.has(cacheKey)) {
+        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
+        return { status: 'already', blockNumber: versionBlock };
+      }
 
       if (!options.deferActiveFetch && await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
@@ -3970,8 +4352,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return {
           status: 'pending',
           recovery: {
+            localCgId,
+            onChainCgId: onChainCgId.toString(),
             ordinal,
             ual,
+            merkleRoot: Array.from(
+              merkleRoot,
+              (byte) => byte.toString(16).padStart(2, '0'),
+            ).join(''),
             kaId: kaId.toString(),
             reason: outcome,
           },
@@ -4061,6 +4449,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     switch (outcome) {
       case 'promoted':
+        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.recentReconciledUals.add(cacheKey);
@@ -4070,6 +4459,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         });
         return { status: 'reconciled', blockNumber: versionBlock };
       case 'already-confirmed':
+        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({
@@ -4079,6 +4469,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: versionBlock };
       case 'stale-target':
+        this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
         // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({
