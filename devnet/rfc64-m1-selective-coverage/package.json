@@ -6,7 +6,7 @@
   "description": "Fail-closed evidence contract for RFC-64 M1 Edge selection and bounded Core public coverage.",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-strip-types --test verifier.test.ts runtime.test.ts process-runtime.test.ts adapter-environment.test.ts operator-input.test.ts boundary-codec.test.ts && node --import tsx --test testnet-operator-common.test.ts",
+    "test": "node --experimental-strip-types --test verifier.test.ts runtime.test.ts process-runtime.test.ts live-launcher-config.test.ts adapter-environment.test.ts operator-input.test.ts boundary-codec.test.ts && node --import tsx --test testnet-operator-common.test.ts",
     "prepare-testnet": "node --import tsx prepare-testnet-corpus.ts",
     "anchor-testnet": "node --import tsx create-testnet-trust-anchor.ts",
     "live": "node --import tsx launch-live.ts",
