@@ -496,6 +496,53 @@ describe('W1 A6/M6 — the changelog lane reports its own attempts AND bytes', (
     expect(await harness.counter(I3)).toEqual([]);
   });
 
+  it('P1-A: a ROUTER DEADLINE is transport_error, not a cancellation', async () => {
+    // The discriminating case, and the one a generic `new Error('...')`
+    // transport test cannot reach. `ProtocolRouter` coerces a deadline into an
+    // `AbortError` whose CAUSE is the original `TimeoutError`, so the wire shape
+    // of "the peer took 45 s" is indistinguishable from "the caller cancelled"
+    // by error class alone. Classifying on the error therefore reported real
+    // transport strain as caller/shutdown activity — inverting the meaning of
+    // the one label an operator would use to tell a struggling network from a
+    // node that is simply stopping.
+    //
+    // The rule this pins is stated twice in the source: `attempt-telemetry.ts`
+    // ("any pre-response rejection that is not caller cancellation is
+    // `transport_error`") and `sync-transport.ts` ("the caller's own signal is
+    // the only non-textual evidence of caller cancellation that exists").
+    harness.install();
+    const timeoutCause = Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    });
+    const routerDeadline = Object.assign(
+      new Error('The operation was aborted due to timeout'),
+      { name: 'AbortError', cause: timeoutCause },
+    );
+    const agent = await createAgent({
+      sendToPeer: async () => { throw routerDeadline; },
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+    });
+
+    // The node is NOT shutting down. That is the whole point: the only
+    // difference from the mid-flight control below is the stop signal.
+    expect((agent as any).node.stopSignal?.aborted ?? false).toBe(false);
+
+    await expect((agent as any).runChangelogSyncForCg(
+      createOperationContext('sync'), PEER_A, CG,
+    )).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(await harness.matching(I1, {
+      transport: 'changelog', phase: 'delta', outcome: 'transport_error',
+    })).toHaveLength(1);
+    expect(await harness.matching(I1, { transport: 'changelog', outcome: 'cancelled' })).toEqual([]);
+    // The send was physically invoked, so its request bytes are owed…
+    expect(await harness.total(I2)).toBeGreaterThan(0);
+    // …and no response arrived, so I3 stays empty.
+    expect(await harness.counter(I3)).toEqual([]);
+  });
+
   it('P1-A control: a MID-FLIGHT abort is still a real attempt, with its bytes', async () => {
     // The positive control. Without it the fix is indistinguishable from having
     // deleted the changelog bracket: a guard that suppressed everything would

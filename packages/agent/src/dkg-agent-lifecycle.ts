@@ -1344,6 +1344,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // parameter, so it can never reach a coalescing key.
         return await withSyncAdmissionSource(source, work);
       } catch (error) {
+        // NOTE — deliberately error-class based here, unlike the attempt-level
+        // classifier in the changelog bracket, which uses its captured signal.
+        // The two levels are governed differently and the difference is not an
+        // oversight: I1 has an explicit written rule ("any pre-response
+        // rejection that is not caller cancellation is `transport_error`",
+        // `attempt-telemetry.ts`) because it measures PHYSICAL SENDS, where a
+        // router deadline is transport strain rather than anybody's decision.
+        // I4 measures a whole logical operation, has no such rule, and the
+        // suite below deliberately pins this shape — an inner component
+        // throwing `AbortError` counts as a cancelled operation even when no
+        // admission signal aborted.
+        //
+        // Switching this to `admissionBoundary.signal?.aborted` was tried and
+        // reverted: it is a defensible reading, it fails that existing test,
+        // and it is a semantic change to an instrument no reviewer has flagged.
+        // Raised for a decision rather than changed unilaterally.
         outcome = isSyncOperationCancellation(error) ? 'cancelled' : 'error';
         throw error;
       } finally {
@@ -5112,15 +5128,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // produce `validation_rejected`: a `denied` changelog response is a
           // successfully DELIVERED response that the decoder classifies later.
           //
-          // Classified from the ERROR, not from re-reading the signal. Two
-          // reasons, both real: `node.stopSignal` is a getter over a controller
-          // `stop()` nulls in its finally, so a shutdown that completes between
-          // the rejection and this line would read "not aborted" and file a
-          // cancellation as a fabricated FAILURE; and libp2p's transport raises
-          // `DOMException`s carrying `code: 'ABORT_ERR'` with no `name` match,
-          // which a signal check cannot see either. The error is the durable
-          // record of what happened; the signal is live state that has moved on.
-          outcome = isSyncOperationCancellation(error) ? 'cancelled' : 'transport_error';
+          // Classified from the CAPTURED signal — not from the error class, and
+          // not by re-reading `this.node.stopSignal`.
+          //
+          // Not the error class: the router coerces a deadline `TimeoutError`
+          // into an `AbortError` (`asAbortError`), so any predicate keyed on
+          // `name === 'AbortError'` / `code === 'ABORT_ERR'` reports a 45 s
+          // transport timeout as a caller cancellation. That is the rule this
+          // file states twice — `attempt-telemetry.ts`: "Any pre-response
+          // rejection that is not caller cancellation is `transport_error`",
+          // and `sync-transport.ts`: "the caller's own signal is the only
+          // non-textual evidence of caller cancellation that exists".
+          //
+          // Not a re-read: `node.stopSignal` is a getter over a controller
+          // `stop()` nulls in its finally, so a shutdown completing between the
+          // rejection and this line would read "not aborted" and file a real
+          // cancellation as a fabricated FAILURE.
+          //
+          // The captured `AbortSignal` is the durable causal evidence: once
+          // aborted it stays aborted for the object's lifetime, even after the
+          // node clears the controller behind the getter. `Boolean(...)` rather
+          // than `=== true` because the pre-send guard above narrows this to
+          // `false | undefined`, and that narrowing is unsound — the signal
+          // genuinely flips mid-flight, which the control test proves.
+          outcome = Boolean(stopSignal?.aborted) ? 'cancelled' : 'transport_error';
           throw error;
         } finally {
           recordSyncAttempt(attributes, outcome);
