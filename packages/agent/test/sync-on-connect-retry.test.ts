@@ -12,6 +12,7 @@ import {
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   runSyncOnConnect,
+  runSyncOnConnectWithScopePlan,
   SyncOnConnectPostSyncError,
   type SyncOnConnectPeerOutcome,
 } from '../src/sync/on-connect/sync-on-connect.js';
@@ -105,6 +106,68 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('completes bounded public VM and SWM before a bootstrap backlog can time out', async () => {
+    const remotePeer = freshPeerIdString();
+    const phases: string[] = [];
+    const peerOutcomes: SyncOnConnectPeerOutcome[] = [];
+    let durableCall = 0;
+
+    const outcome = await runSyncOnConnectWithScopePlan({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      createScopePlan: () => ({
+        initialBootstrapContextGraphIds: [
+          SYSTEM_CONTEXT_GRAPHS.AGENTS,
+          SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        ],
+        initialDurableContextGraphIds: ['public-a', 'public-b'],
+        prioritizeInitialDurableBeforeBootstrap: true,
+        contextGraphIdsAfterDiscovery: () => ['public-a', 'public-b'],
+      }),
+      syncFromPeer: async (_peerId, contextGraphIds) => {
+        durableCall += 1;
+        phases.push(`durable:${(contextGraphIds ?? []).join(',')}`);
+        if (durableCall === 1) return 12;
+        return {
+          insertedTriples: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          timedOutPhases: 1,
+          failedPeers: 0,
+          deniedPhases: 0,
+        };
+      },
+      refreshMetaSyncedFlags: async (contextGraphIds) => {
+        phases.push(`meta:${[...contextGraphIds].join(',')}`);
+      },
+      discoverContextGraphsFromStore: async () => {
+        phases.push('discover');
+        return 0;
+      },
+      getSharedMemorySyncContextGraphs: async (_peerId, contextGraphIds) =>
+        [...contextGraphIds],
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        phases.push(`shared:${contextGraphIds.join(',')}`);
+        return 8;
+      },
+      logInfo: noopLog,
+      onPeerSynced: (_peerId, peerOutcome) => {
+        if (peerOutcome) peerOutcomes.push(peerOutcome);
+      },
+    });
+
+    expect(outcome).toBe('synced');
+    expect(phases).toEqual([
+      'durable:public-a,public-b',
+      'meta:public-a,public-b',
+      'shared:public-a,public-b',
+      `durable:${SYSTEM_CONTEXT_GRAPHS.AGENTS},${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`,
+    ]);
+    expect(peerOutcomes).toEqual([{ fresh: false, progress: true }]);
+  });
+
   it('can resume one explicit Edge scope without bootstrapping system graphs', async () => {
     const remotePeer = freshPeerIdString();
     const durableScopes: string[][] = [];
@@ -1308,22 +1371,23 @@ describe('DKGAgent peer-round scope wiring', () => {
       await (agent as any).trySyncFromPeer(remotePeer);
 
       expect(durable.calls[0]?.[1]).toEqual([
-        SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
         'initial-selected',
         'automatic-public-a',
       ]);
-      expect(durable.calls[1]?.[1]).toEqual(['restored-private']);
+      expect(durable.calls[1]?.[1]).toEqual([
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      ]);
+      expect(durable.calls[2]?.[1]).toEqual(['restored-private']);
       expect(planShared.calls[0]?.[1]).toEqual([
         'initial-selected',
-        'restored-private',
         'automatic-public-a',
       ]);
       expect(shared.calls[0]?.[1]).toEqual([
         'initial-selected',
-        'restored-private',
         'automatic-public-a',
       ]);
+      expect(shared.calls[1]?.[1]).toEqual(['restored-private']);
     } finally {
       await agent.stop().catch(() => {});
     }

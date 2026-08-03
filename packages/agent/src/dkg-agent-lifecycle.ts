@@ -938,6 +938,7 @@ interface LifecycleSyncScopePlan {
   readonly automaticContextGraphIds: readonly string[];
   readonly initialBootstrapContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
+  readonly prioritizeInitialDurableBeforeBootstrap?: boolean;
   contextGraphIdsAfterDiscovery(): string[];
 }
 

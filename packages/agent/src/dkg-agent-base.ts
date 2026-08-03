@@ -441,6 +441,7 @@ interface PeerSyncScope {
   readonly automaticContextGraphIds: readonly string[];
   readonly initialBootstrapContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
+  readonly prioritizeInitialDurableBeforeBootstrap?: boolean;
   contextGraphIdsAfterDiscovery(): string[];
 }
 
@@ -1776,6 +1777,8 @@ export class DKGAgentBase {
         ? { automaticCoverageEpoch: this.corePublicSyncCoverageScheduler.getCoverageEpoch() }
         : {}),
       automaticContextGraphIds,
+      prioritizeInitialDurableBeforeBootstrap:
+        (this.config.nodeRole ?? 'edge') === 'core' && automaticContextGraphIds.length > 0,
       initialBootstrapContextGraphIds: [
         SYSTEM_CONTEXT_GRAPHS.AGENTS,
         SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
