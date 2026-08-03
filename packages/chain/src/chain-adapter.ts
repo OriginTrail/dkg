@@ -1840,6 +1840,22 @@ export interface ChainAdapter {
     contextGraphId: bigint,
     options?: ChainReadOptions,
   ): Promise<string | null>;
+
+  /**
+   * Resolve the numeric ContextGraphStorage slot committed to an exact
+   * `ContextGraphCreated.nameHash` topic.
+   *
+   * This is the cold-start inverse of {@link getContextGraphNameHash}: a node
+   * that selected a CG after its creation event fell outside the live poller's
+   * lookback still needs an authoritative hash -> numeric-id binding before it
+   * can evaluate policy or authorize SWM. Implementations MUST fail closed on
+   * ambiguous matches and independently verify the current slot still commits
+   * to `nameHash` before returning it.
+   */
+  resolveContextGraphIdByNameHash?(
+    nameHash: string,
+    options?: ChainReadOptions,
+  ): Promise<bigint | null>;
 }
 
 // ----- Backward-compat deprecated aliases -----
