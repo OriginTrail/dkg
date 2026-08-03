@@ -35,6 +35,7 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
+  sharedMemoryMetaUriForAssertionGraph,
   type ParsedGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-core';
 import {
@@ -926,13 +927,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     graphs: readonly string[],
     reads: StoreReadLane,
   ): Promise<Set<string>> {
-    const marker = '/_shared_memory';
     const metaGraphs = new Set<string>();
     for (const graph of graphs) {
-      const markerIndex = graph.lastIndexOf(marker);
-      if (markerIndex < 0) continue;
-      const bucketEnd = markerIndex + marker.length;
-      metaGraphs.add(`${graph.slice(0, bucketEnd)}_meta`);
+      const metaGraph = sharedMemoryMetaUriForAssertionGraph(graph);
+      if (metaGraph) metaGraphs.add(metaGraph);
     }
     return discoverLocallyRetiredSwmGraphs([...metaGraphs], reads);
   }

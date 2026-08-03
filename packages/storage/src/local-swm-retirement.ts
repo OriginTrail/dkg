@@ -7,7 +7,8 @@ import type { Quad, QueryResult } from './triple-store.js';
 
 const DKG_ASSERTION_GRAPH = 'http://dkg.io/ontology/assertionGraph';
 const DKG_ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
+const XSD_INTEGER = `${XSD_NAMESPACE}integer`;
 
 function assertionVersionLiteral(assertionVersion: string | number | bigint): string {
   const version = BigInt(assertionVersion);
@@ -60,11 +61,17 @@ export async function discoverLocallyRetiredSwmGraphs(
   if (safeMetaGraphs.length === 0) return new Set();
 
   const result = await reader.query(
-    `SELECT DISTINCT ?graph WHERE {
-      VALUES ?metaGraph { ${safeMetaGraphs.map((graph) => `<${graph}>`).join(' ')} }
-      GRAPH ?metaGraph {
-        ?head <${DKG_ASSERTION_GRAPH}> ?graph ;
-          <${DKG_ASSERTION_VERSION}> ?assertionVersion .
+    `PREFIX xsd: <${XSD_NAMESPACE}>
+    SELECT DISTINCT ?graph WHERE {
+      {
+        SELECT ?graph (MAX(xsd:integer(?candidateVersion)) AS ?assertionVersion) WHERE {
+          VALUES ?metaGraph { ${safeMetaGraphs.map((graph) => `<${graph}>`).join(' ')} }
+          GRAPH ?metaGraph {
+            ?head <${DKG_ASSERTION_GRAPH}> ?graph ;
+              <${DKG_ASSERTION_VERSION}> ?candidateVersion .
+          }
+        }
+        GROUP BY ?graph
       }
       GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
         ?graph <${DKG_SWM_FINALIZED_PREDICATE}> ?assertionVersion .

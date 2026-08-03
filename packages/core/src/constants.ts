@@ -324,6 +324,31 @@ export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraph
 }
 
 /**
+ * Resolve the sibling SWM metadata graph for one canonical per-KA assertion
+ * graph. This is deliberately structural: readers must not depend on ontology
+ * discovery to map `.../_shared_memory/{agent}/{version}` back to the metadata
+ * graph that owns its durable head.
+ */
+export function sharedMemoryMetaUriForAssertionGraph(assertionGraph: string): string | undefined {
+  const safeAssertionGraph = assertSafeIri(assertionGraph);
+  const marker = '/_shared_memory/';
+  const markerIndex = safeAssertionGraph.lastIndexOf(marker);
+  if (markerIndex < 0) return undefined;
+
+  const assertionIdentity = safeAssertionGraph.slice(markerIndex + marker.length);
+  const identityParts = assertionIdentity.split('/');
+  if (
+    identityParts.length !== 2
+    || identityParts.some((part) => part.length === 0)
+    || identityParts[0] === 'staging'
+  ) {
+    return undefined;
+  }
+
+  return `${safeAssertionGraph.slice(0, markerIndex)}/_shared_memory_meta`;
+}
+
+/**
  * Node-local marker for a graph-scoped SWM assertion that reached confirmed
  * VM. The physical SWM snapshot remains available to receipt/reorg recovery;
  * strict SWM queries hide it only when the marker version matches the current

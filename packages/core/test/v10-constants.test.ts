@@ -29,6 +29,7 @@ import {
   contextGraphPrivateUri,
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
+  sharedMemoryMetaUriForAssertionGraph,
   sharedMemoryReadBothFilter,
   contextGraphVerifiableMemoryUri,
   contextGraphVerifiableMemoryMetaUri,
@@ -169,6 +170,27 @@ describe('V10 named graph URIs', () => {
 
   it('shared memory meta URI', () => {
     expect(contextGraphSharedMemoryMetaUri(id)).toBe('did:dkg:context-graph:42/_shared_memory_meta');
+  });
+
+  it('maps canonical root and sub-graph SWM assertions to their sibling metadata graph', () => {
+    expect(sharedMemoryMetaUriForAssertionGraph(
+      'did:dkg:context-graph:42/_shared_memory/0xabc/7',
+    )).toBe('did:dkg:context-graph:42/_shared_memory_meta');
+    expect(sharedMemoryMetaUriForAssertionGraph(
+      'did:dkg:context-graph:42/code/_shared_memory/0xabc/7',
+    )).toBe('did:dkg:context-graph:42/code/_shared_memory_meta');
+  });
+
+  it('rejects non-canonical and staging SWM graph shapes', () => {
+    expect(sharedMemoryMetaUriForAssertionGraph(
+      'did:dkg:context-graph:42/_shared_memory',
+    )).toBeUndefined();
+    expect(sharedMemoryMetaUriForAssertionGraph(
+      'did:dkg:context-graph:42/_shared_memory/staging/tmp',
+    )).toBeUndefined();
+    expect(sharedMemoryMetaUriForAssertionGraph(
+      'did:dkg:context-graph:42/_shared_memory/0xabc/7/extra',
+    )).toBeUndefined();
   });
 
   it('verifiable memory URI', () => {

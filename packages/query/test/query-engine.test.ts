@@ -1343,6 +1343,33 @@ describe('DKGQueryEngine', () => {
     ]);
   });
 
+  it('does not let a stale retired version hide a newer durable SWM head', async () => {
+    const assertionGraph = `${GRAPH}/_shared_memory/0x1111111111111111111111111111111111111111/1`;
+    const swmMeta = `${GRAPH}/_shared_memory_meta`;
+    const staleHead = 'urn:dkg:swm-head:stale';
+    const currentHead = 'urn:dkg:swm-head:current';
+    await store.insert([
+      q('urn:swm:current', SCHEMA_NAME, '"current-draft"', assertionGraph),
+      q(staleHead, `${DKG}assertionGraph`, assertionGraph, swmMeta),
+      q(staleHead, `${DKG}assertionVersion`, `"1"^^<${XSD_INTEGER}>`, swmMeta),
+      q(currentHead, `${DKG}assertionGraph`, assertionGraph, swmMeta),
+      q(currentHead, `${DKG}assertionVersion`, `"2"^^<${XSD_INTEGER}>`, swmMeta),
+      q(
+        assertionGraph,
+        DKG_SWM_FINALIZED_PREDICATE,
+        `"1"^^<${XSD_INTEGER}>`,
+        LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+      ),
+    ]);
+
+    const result = await engine.query(
+      `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
+    );
+
+    expect(result.bindings).toEqual([{ name: '"current-draft"' }]);
+  });
+
   it('view requires contextGraphId', async () => {
     await expect(
       engine.query('SELECT ?s WHERE { ?s ?p ?o }', { view: 'verifiable-memory' }),
