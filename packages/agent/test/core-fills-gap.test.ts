@@ -1599,15 +1599,22 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('47', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
     expect(fetch.calls).toHaveLength(2);
+    // W1 §5.5 — `sourceOverride` is attribution only: it changes no peer
+    // selection, no rotation and no admission priority, which is why this
+    // options object is otherwise unchanged. Pinned as an EXACT literal
+    // because "not catchup-background" would also be satisfied by dropping
+    // the override entirely and landing on some other excluded source.
     expect(fetch.calls[0]).toEqual(['47', {
       includeSharedMemory: true,
       maxPeers: 1,
       peerRotationKey: '47',
+      sourceOverride: 'vm-recovery',
     }]);
     expect(fetch.calls[1]).toEqual(['47', {
       includeSharedMemory: true,
       maxPeers: 1,
       peerRotationKey: '47',
+      sourceOverride: 'vm-recovery',
     }]);
   });
 

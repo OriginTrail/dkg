@@ -128,6 +128,37 @@ const CATALOG_META_PREDICATES = new Set<string>([
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
 ]);
 
+/**
+ * A `ContextGraphMetaRecord` with no facts loaded yet.
+ *
+ * Shared by every reader so a field added to the record cannot be initialized
+ * in one loader and forgotten in another.
+ */
+function emptyContextGraphMetaRecord(
+  contextGraphId: string,
+  uri: string,
+): ContextGraphMetaRecord {
+  const isSystem = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
+  return {
+    id: contextGraphId,
+    uri,
+    declared: isSystem,
+    isSystem,
+    creators: [],
+    curators: [],
+    allowedPeers: [],
+    allowedAgents: [],
+    participantAgents: [],
+    participantIdentityIds: [],
+    revokedAgents: [],
+    delegations: [],
+    subGraphs: [],
+    hasAgentGate: false,
+    hasPeerGate: false,
+    hasLegacyParticipantGate: false,
+  };
+}
+
 export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
 
@@ -312,6 +343,50 @@ export class ContextGraphMetaProjection {
     return (await this.store.listGraphs(options)).filter((graphUri) => graphUri.startsWith(prefix));
   }
 
+  /**
+   * Facts the Context Graph declared about ITSELF in its own `_meta` graph.
+   *
+   * `get()` deliberately unions `_meta`, AGENTS, `_catalog` and ONTOLOGY under
+   * first-wins precedence, which is right for privacy and listing reads — an
+   * AGENTS-only declaration can legitimately mark a graph private. It is NOT
+   * right for deciding who speaks for the graph: the merged record discards
+   * WHICH graph supplied each fact, so a creator contributed by AGENTS or
+   * `_catalog` (both of which carry THIRD-PARTY assertions — other agents'
+   * self-declarations and peer-fetchable catalog records) is indistinguishable
+   * from one the Context Graph declared about itself.
+   *
+   * Only `<cg>/_meta` is read. ONTOLOGY is deliberately NOT included even
+   * though a PUBLIC graph writes its definition there
+   * (`defGraph = isCurated ? cgMetaGraph : ontologyGraph`): ONTOLOGY is
+   * network-replicated, so any node can assert a `DKG_CREATOR` for a subject,
+   * and a row being the only one currently visible LOCALLY proves nothing
+   * about what the network holds. Requiring local uniqueness there would
+   * repeat, one graph over, the same local-cardinality fallacy that makes the
+   * Agent Registry route non-authoritative.
+   *
+   * The consequence is deliberate, and is a real cost: a public graph whose
+   * identity facts live only in replicated ONTOLOGY has NO locally trustworthy
+   * binding, so it earns no authority and its catch-up degrades to the previous
+   * bounded fan-out. That is today's behaviour rather than a regression — the
+   * fan-out reduction is earned by graphs that declare their own binding, and
+   * settling a graph on an unverifiable claim is the worse trade.
+   *
+   * Catch-up authority needs this distinction (issue #2006).
+   */
+  async getOwnMetaFacts(
+    contextGraphId: string,
+    options: QueryOptions = {},
+  ): Promise<ContextGraphMetaRecord> {
+    const uri = contextGraphDataUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    assertSafeIri(uri);
+    assertSafeIri(metaGraph);
+
+    const record = emptyContextGraphMetaRecord(contextGraphId, uri);
+    await this.loadContextGraphFacts(metaGraph, uri, record, options);
+    return record;
+  }
+
   private async rebuild(contextGraphId: string, options: QueryOptions): Promise<ContextGraphMetaRecord> {
     const uri = contextGraphDataUri(contextGraphId);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -330,24 +405,7 @@ export class ContextGraphMetaProjection {
     assertSafeIri(metaGraph);
     assertSafeIri(catalogGraph);
 
-    const record: ContextGraphMetaRecord = {
-      id: contextGraphId,
-      uri,
-      declared: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
-      isSystem: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
-      creators: [],
-      curators: [],
-      allowedPeers: [],
-      allowedAgents: [],
-      participantAgents: [],
-      participantIdentityIds: [],
-      revokedAgents: [],
-      delegations: [],
-      subGraphs: [],
-      hasAgentGate: false,
-      hasPeerGate: false,
-      hasLegacyParticipantGate: false,
-    };
+    const record = emptyContextGraphMetaRecord(contextGraphId, uri);
 
     // Authoritative (local, fully trusted) sources first, meta-first so its
     // scalars win via first-wins (`??=`) precedence. The floor-filtered `_catalog`

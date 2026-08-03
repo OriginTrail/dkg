@@ -1500,6 +1500,8 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+        peersNotAttempted?: number;
         deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
@@ -1573,6 +1575,8 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+        peersNotAttempted?: number;
         deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
@@ -1642,6 +1646,8 @@ export class ApiClient {
       peersTried: number;
       peersResponded: number;
       peersSucceeded: number;
+      /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+      peersNotAttempted?: number;
       deferredBackpressure: number;
       dataSynced: number;
       sharedMemorySynced: number;

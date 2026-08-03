@@ -166,26 +166,122 @@ export function isTelemetryConfigured(): boolean {
 }
 
 /**
+ * Wall-clock reserve for the terminal flush in the daemon's graceful-shutdown
+ * path. `SHUTDOWN_HARD_TIMEOUT_MS` is 15 s and the catch-up grace drain ahead
+ * of this may already have consumed 5 s, so the flush gets a fixed 2 s — well
+ * under the ~10 s remainder, leaving room for runner close, `agent.stop()`,
+ * the final `shutdownTelemetry()` and the database close behind it.
+ */
+export const TERMINAL_FLUSH_BUDGET_MS = 2_000;
+
+/**
+ * Flush pending spans/metrics WITHOUT tearing anything down.
+ *
+ * Exists because `shutdownTelemetry()` is not a flush: it shuts the providers
+ * down, clears the OTel API globals and calls `rebuildMetrics()`, so every
+ * later `getMetrics()` binds to a no-op meter. The daemon needs a point in
+ * shutdown where already-recorded terminal state is exported while the
+ * provider stays LIVE, because work that runs afterwards (`agent.stop()`
+ * quiescing parent-side sync) still emits the attempts, bytes and active time
+ * that belong to those same terminal records.
+ *
+ * ## Why each side is bounded differently
+ *
+ * Neither provider is bounded by default, and they are not bounded the same
+ * way (verified against the installed `@opentelemetry/sdk-*@2.8.0`):
+ *
+ * - `MetricReader.forceFlush(options)` applies **no timeout at all** when
+ *   `options.timeoutMillis` is absent — it just awaits `onForceFlush()`, whose
+ *   trailing `this._exporter.forceFlush()` is wrapped by nothing. Passing
+ *   `timeoutMillis` routes the whole thing through `callWithTimeout`, so the
+ *   argument — not this comment — is what bounds the meter.
+ * - `BasicTracerProvider.forceFlush()` accepts **no arguments**; it reads the
+ *   constructor's `forceFlushTimeoutMillis` (default 30 000). The only way to
+ *   bound it per call is to race it.
+ *
+ * The two bounded legs run concurrently, so the aggregate wait is also the
+ * budget. Deliberately there is NO extra outer race around both: an outer
+ * bound would return inside the budget even if one leg's own bound were
+ * removed, which would make the per-leg bounds untestable — and an untestable
+ * bound is how the previous "bounded" flush turned out to have no bound.
+ *
+ * Never throws into the shutdown path: a timeout or rejection is logged and
+ * teardown continues. Bounded effort, not a delivery guarantee — an exporter
+ * that cannot flush inside the reserve still loses its last points.
+ */
+export async function flushTelemetry(
+  options: { budgetMs?: number; log?: (message: string) => void } = {},
+): Promise<void> {
+  const budgetMs = options.budgetMs ?? TERMINAL_FLUSH_BUDGET_MS;
+  const log = options.log ?? ((message: string) => console.warn(message));
+  const tracer = tracerProvider;
+  const meter = meterProvider;
+  if (!tracer && !meter) return;
+
+  const legs: Array<Promise<void>> = [];
+  if (meter) {
+    legs.push(
+      meter.forceFlush({ timeoutMillis: budgetMs }).catch((err: unknown) => {
+        log(`[telemetry-flush] metrics flush did not complete: ${errText(err)}`);
+      }),
+    );
+  }
+  if (tracer) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raced = Promise.race([
+      tracer.forceFlush(),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), budgetMs);
+      }),
+    ])
+      .then((outcome) => {
+        if (outcome === 'timeout') {
+          log(`[telemetry-flush] traces flush exceeded ${budgetMs}ms; continuing teardown.`);
+        }
+      })
+      .catch((err: unknown) => {
+        log(`[telemetry-flush] traces flush did not complete: ${errText(err)}`);
+      })
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    legs.push(raced);
+  }
+  await Promise.all(legs);
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
  * Flush + shut down providers. Used both at daemon teardown AND when telemetry
  * is turned off via the runtime master gate, so it must FULLY reverse
  * `initTelemetry`: stop the exporters, then clear the OTel API globals so a
  * later `initTelemetry` (live re-enable) can register fresh providers — without
  * the `disable()` calls, the API keeps the first (now shut-down) provider and a
  * re-enable would silently no-op. Safe if never initialized; idempotent.
+ *
+ * Flush and shutdown run SEQUENTIALLY per provider, and that is not tidiness.
+ * They used to be pushed into one array and awaited by a single `Promise.all`,
+ * i.e. started concurrently against the same provider — and
+ * `MeterProvider.forceFlush()` opens with `if (this._shutdown) { diag.warn(…);
+ * return; }`. Whichever call won the race decided whether the flush happened at
+ * all; it worked only because the synchronous `_shutdown` read happened to be
+ * scheduled first. Awaiting the flush before starting the shutdown removes the
+ * race instead of relying on scheduling order.
  */
 export async function shutdownTelemetry(): Promise<void> {
   const hadTracer = !!tracerProvider;
   const hadMeter = !!meterProvider;
-  const tasks: Promise<void>[] = [];
   if (tracerProvider) {
-    tasks.push(tracerProvider.forceFlush().catch(() => {}));
-    tasks.push(tracerProvider.shutdown().catch(() => {}));
+    await tracerProvider.forceFlush().catch(() => {});
+    await tracerProvider.shutdown().catch(() => {});
   }
   if (meterProvider) {
-    tasks.push(meterProvider.forceFlush().catch(() => {}));
-    tasks.push(meterProvider.shutdown().catch(() => {}));
+    await meterProvider.forceFlush().catch(() => {});
+    await meterProvider.shutdown().catch(() => {});
   }
-  await Promise.all(tasks);
   // Reset the global API so a subsequent initTelemetry() can re-register
   // (setGlobal*Provider only takes effect once until the slot is disabled).
   if (hadTracer) otelTrace.disable();

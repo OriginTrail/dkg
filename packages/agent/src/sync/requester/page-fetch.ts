@@ -5,6 +5,7 @@ import {
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
 import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
+import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -348,6 +349,12 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         contextGraphId,
         offset,
         protocolId: protocolSync,
+        // W1 attempt labels. The admission source is NOT threaded here: it
+        // belongs to the enclosing operation and is read from the ambient
+        // context at the record site, which also keeps it structurally out of
+        // every coalescing key.
+        plane: syncPlaneFor(includeSharedMemory),
+        phase,
         // `requestFactory` runs per-attempt so each retry carries a
         // fresh `issuedAtMs`/`requestId`. Required for sync's auth
         // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +

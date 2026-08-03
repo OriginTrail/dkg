@@ -208,8 +208,10 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
   if (status.result) {
     const totalConnectedPeers = status.result.totalPeers ?? status.result.connectedPeers;
+    const notAttempted = status.result.peersNotAttempted ?? 0;
     console.log(
-      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}`
+      + `${notAttempted > 0 ? `, ${notAttempted} not needed` : ''}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
     if (status.result.deferredBackpressure > 0) {
       console.log(`Deferred:      ${status.result.deferredBackpressure} phase(s) by local scheduler backpressure`);

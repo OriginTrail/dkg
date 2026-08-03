@@ -69,6 +69,43 @@ The first registered sources are:
   `normal`, and `background` lanes;
 - `sync-global`: the process-wide sync admission queue and its sync lanes.
 
+### Attributing `sync-global` pressure to a trigger
+
+The `lane` of a `sync-global` entry says *what kind of work* is queued
+(`durable`, `changelog`, `shared_memory`, `swm_recovery`), but every trigger
+funnels into the same few lanes. Its `operation` label therefore pairs the
+collapsed work class with the **admission source** — the trigger that enqueued
+it — as `<work class>:<source>`:
+
+| Source | Trigger |
+| --- | --- |
+| `catchup-foreground` | explicit Context Graph catch-up (`POST /api/context-graph/subscribe`) |
+| `catchup-background` | automatic post-approval / reconcile catch-up |
+| `on-connect` | sync-on-connect after a peer dial |
+| `reconcile` | the periodic sync reconciler |
+| `vm-recovery` | foreground repair of specific missing Knowledge Assets |
+| `swm-recovery` | curator-targeted shared-memory recovery |
+| `unspecified` | a caller that did not declare an origin |
+
+### Tuning foreground catch-up
+
+Two knobs govern the foreground Context Graph catch-up that most often shows up
+as `catchup-foreground` pressure. Both are read once at daemon start.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `DKG_CATCHUP_STOP_ON_PROOF` | on | The catch-up walks peers in escalating waves and stops once the resolved curator has settled every requested plane. Set to `0`, `false`, `no`, or `off` to restore the previous behaviour: every sync-capable peer, both requested planes, no early stop. Use this if a graph ever lands short — foreground catch-up optimises for one authoritative payload, while breadth remains the background reconcile lane's job. |
+| `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS` | `180000` | Wall-clock budget one foreground plane may spend being **refused** by local `sync-global` admission before the job reports a retryable `deferred`. Measured from before the first attempt, so an attempt's own queue time counts against it. It does not cancel a round the scheduler has already accepted — that one is doing real work and is bounded by `SYNC_TOTAL_TIMEOUT_MS`. The default sits above both a full head-of-line round (120 s) and the queue waits that motivated it. An explicit `0` disables retries; a blank value is treated as unset. |
+| `DKG_CATCHUP_MAX_CONCURRENT_PEERS` | `4` | Caps in-flight per-peer sync rounds, and therefore the widest escalation wave. Raising it above the `sync-global` queue depth lets a single catch-up saturate the scheduler against itself. |
+
+So `{"operation":"durable:catchup-foreground","count":4,"oldestAgeMs":109000}`
+in a `queuedOperations` summary reads as "four explicit catch-up durable
+admissions are queued, the oldest for 109 seconds", and the matching
+`activeOperations` entry gives the same view for admitted work. Both halves are
+closed sets, so the label space stays bounded (5 × 7) and, as before, no Context
+Graph id or peer id ever reaches a metric, log line, or diagnostics response —
+an unrecognized source is clamped to `unspecified`.
+
 Other schedulers can extend `ObservableScheduler` and call its protected
 lifecycle methods at their existing admission boundaries. They keep complete
 ownership of policy.

@@ -12,6 +12,7 @@ import {
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
 import { PriorityAdmissionQueue } from '../src/sync/priority-admission-queue.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -216,6 +217,53 @@ describe('sync global backpressure', () => {
     ]);
   });
 
+  it('carries the admission source from the production helper through to the scheduler', async () => {
+    // The two halves of this contract were covered separately: the call sites
+    // were proven to SUPPLY a source, and `withGlobalSyncBackpressure` was proven
+    // to RENDER it as `<work class>:<source>`. Nothing covered the line between
+    // them — the `source,` handed to `withGlobalSyncBackpressure` inside
+    // `runContextGraphSyncWithBackpressure`. Dropping it leaves both groups green
+    // while every real admission reports `durable:unspecified` on
+    // /api/diagnostics/backpressure, which is the attribution issue #2006 had to
+    // reconstruct from daemon logs.
+    const agentLike = {
+      config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 },
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    let releaseWork!: () => void;
+    const admitted = LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agentLike as never,
+      createOperationContext('sync'),
+      'urn:cg:private:e2e',
+      'durable' as never,
+      'durable:urn:cg:private:e2e',
+      () => new Promise<void>((resolve) => { releaseWork = resolve; }),
+      { source: 'catchup-foreground' },
+    );
+    await tick();
+
+    // Release in `finally`: this admission is registered in the SHARED
+    // backpressureRegistry, so a failed assertion that skipped the release would
+    // leave it active and cascade into every later test in this file.
+    try {
+      const snapshot = backpressureRegistry.capture().schedulers.find(
+        (scheduler) => scheduler.scheduler === 'sync-global',
+      );
+      expect(snapshot).toMatchObject({
+        lanes: [expect.objectContaining({
+          activeOperations: [expect.objectContaining({ operation: 'durable:catchup-foreground' })],
+        })],
+      });
+      // …and the Context Graph id still never reaches node-wide diagnostics.
+      expect(JSON.stringify(snapshot)).not.toContain('urn:cg:private');
+    } finally {
+      releaseWork();
+      await admitted;
+    }
+  });
+
   it('removes CG and peer correlation identifiers from node-wide pressure diagnostics', async () => {
     const ctx = createOperationContext('sync');
     const policy = resolveSyncGlobalBackpressure({
@@ -228,6 +276,7 @@ describe('sync global backpressure', () => {
         policy,
         ctx,
         label: 'durable:urn:cg:private:peer-a',
+        source: 'catchup-foreground',
       },
       async () => new Promise<void>((resolve) => {
         releaseRunning = resolve;
@@ -239,6 +288,7 @@ describe('sync global backpressure', () => {
         policy,
         ctx,
         label: 'swm-recovery:urn:cg:private:peer-b',
+        source: 'reconcile',
       },
       async () => undefined,
     );
@@ -247,10 +297,14 @@ describe('sync global backpressure', () => {
     const snapshot = backpressureRegistry.capture().schedulers.find(
       (scheduler) => scheduler.scheduler === 'sync-global',
     );
+    // The operation dimension pairs the collapsed work class with the bounded
+    // admission origin, so a saturated queue can be attributed to a trigger
+    // (issue #2006 had to reconstruct that from daemon logs) without any
+    // Context Graph or peer identifier reaching node-wide diagnostics.
     expect(snapshot).toMatchObject({
       lanes: [expect.objectContaining({
-        activeOperations: [expect.objectContaining({ operation: 'durable' })],
-        queuedOperations: [expect.objectContaining({ operation: 'swm-recovery' })],
+        activeOperations: [expect.objectContaining({ operation: 'durable:catchup-foreground' })],
+        queuedOperations: [expect.objectContaining({ operation: 'swm-recovery:reconcile' })],
       })],
     });
     expect(JSON.stringify(snapshot)).not.toContain('urn:cg:private');
@@ -259,6 +313,46 @@ describe('sync global backpressure', () => {
 
     releaseRunning();
     await Promise.all([running, queued]);
+  });
+
+  it('clamps an unknown admission origin instead of widening the diagnostic label space', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 1,
+    });
+    let releaseRunning!: () => void;
+    // The union is compile-time only; a value crossing the worker RPC boundary
+    // (or an outright cast) must not be able to smuggle an identifier into a
+    // metric/log dimension or blow up its cardinality.
+    const running = withGlobalSyncBackpressure(
+      {
+        policy,
+        ctx,
+        label: 'durable:cg-x:peer-x',
+        // The option is typed `SyncAdmissionSource`; the cast is the point —
+        // the scheduler clamp is defence in depth for exactly this.
+        source: 'leak-urn:cg:private:xyz' as never,
+      },
+      async () => new Promise<void>((resolve) => {
+        releaseRunning = resolve;
+      }),
+    );
+    await tick();
+
+    const snapshot = backpressureRegistry.capture().schedulers.find(
+      (scheduler) => scheduler.scheduler === 'sync-global',
+    );
+    expect(snapshot).toMatchObject({
+      lanes: [expect.objectContaining({
+        activeOperations: [expect.objectContaining({ operation: 'durable:unspecified' })],
+      })],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain('leak-');
+    expect(JSON.stringify(snapshot)).not.toContain('urn:cg:private');
+
+    releaseRunning();
+    await running;
   });
 
   it('starts a later elevated CG before an earlier deprioritized queued CG', async () => {

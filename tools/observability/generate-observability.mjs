@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Source of truth for the DKG observability Grafana artifacts.
 //
-// Emits the four dashboard JSONs and alert-rules.provisioning.json in this
-// directory. Edit THIS file (compact helpers below), regenerate, commit both —
-// never hand-edit the rendered JSON.
+// Emits the four dashboard JSONs, alert-rules.provisioning.json,
+// example-alerts.md and the W1 sync-measurement artifacts (w1/) in this
+// directory. Edit the lib/ sources, regenerate, commit both — never hand-edit
+// a rendered artifact.
 //
 //   node generate-observability.mjs [outDir] [--vm-uid <uid>] [--loki-uid <uid>]
 //                                   [--prom-node-label <label>] [--check]
@@ -22,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { buildDashboards } from './lib/dashboards.mjs';
 import { buildAlerts } from './lib/alerts.mjs';
 import { buildDocs } from './lib/docs.mjs';
+import { buildW1Artifacts } from './lib/w1.mjs';
 import { promNodeProfile } from './lib/profile.mjs';
 import { assertPromLabel, parseCliArgs } from './lib/cli.mjs';
 
@@ -54,6 +56,9 @@ const nodeProfile = promNodeProfile(PROM_NODE_LABEL);
 const { fleet, nodeLogs, metrics, traces } = buildDashboards({ nodeProfile });
 const { alerts, specs, routes } = buildAlerts({ nodeProfile, VM_UID, LOKI_UID });
 const docs = buildDocs({ specs, routes });
+// W1 sync-measurement decision queries (lib/w1.mjs) render into a NESTED key
+// (w1/…) — see the per-file mkdir in write mode below.
+const w1 = buildW1Artifacts({ nodeProfile });
 
 // -------------------------------------------------------- write / --check
 // Everything (JSON artifacts AND docs) renders fully in memory; write mode
@@ -68,14 +73,26 @@ const rendered = new Map([
   ['grafana-dashboard-dkg-node-traces.json', JSON.stringify(traces, null, 2) + '\n'],
   ['alert-rules.provisioning.json', JSON.stringify(alerts, null, 2) + '\n'],
   ...Object.entries(docs),
+  ...Object.entries(w1),
 ]);
+
+// Line endings are NOT part of any artifact's contract: the generator always
+// renders LF, while git checks these textual files out with the platform
+// convention (core.autocrlf=true on Windows rewrites every one of them to
+// CRLF — the metrics dashboard alone holds ~660 pairs). A byte comparison
+// therefore reports the whole set stale on a Windows checkout, which would
+// leave the documented developer environment permanently red and make this
+// gate unusable exactly where implementation happens. Both sides are
+// normalized so ONE command is green on Windows and Linux alike; every
+// artifact here is text and none of them encodes a meaningful CR.
+const normalizeEol = (s) => s.replace(/\r\n/g, '\n');
 
 if (opts['--check']) {
   const stale = [];
   for (const [file, want] of rendered) {
     const p = path.join(outDir, file);
     const have = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '<missing>';
-    if (have !== want) stale.push(file);
+    if (normalizeEol(have) !== normalizeEol(want)) stale.push(file);
   }
   if (stale.length) {
     console.error('STALE generated artifacts (regenerate with: node generate-observability.mjs):');
@@ -84,9 +101,13 @@ if (opts['--check']) {
   }
   console.log('check OK: all generated artifacts match the generator output');
 } else {
-  fs.mkdirSync(outDir, { recursive: true });
+  // Per-file mkdir, not one mkdir of outDir: artifact keys may be NESTED
+  // (w1/w1-rules.yaml), and creating only outDir would ENOENT on the first
+  // nested write.
   for (const [file, content] of rendered) {
-    fs.writeFileSync(path.join(outDir, file), content);
-    console.log('wrote', path.join(outDir, file));
+    const p = path.join(outDir, file);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+    console.log('wrote', p);
   }
 }

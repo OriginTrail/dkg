@@ -349,6 +349,8 @@ importers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
+  devnet/rfc64-m0-public-baseline: {}
+
   devnet/rfc64-persistence-lifecycle:
     dependencies:
       '@origintrail-official/dkg-agent':

@@ -790,6 +790,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     const remotePeer = { toString: () => PEER_A };
     const order: string[] = [];
     const priorities: Array<number | undefined> = [];
+    const sources: Array<string | undefined> = [];
     let durableCalls = 0;
 
     try {
@@ -802,10 +803,11 @@ describe('DKGAgent sync fetch coalescing', () => {
         _onPhase: unknown,
         _onAccessDenied: unknown,
         _sinceBatchIdFor: unknown,
-        options: { priority?: number } | undefined,
+        options: { priority?: number; source?: string } | undefined,
       ) => {
         durableCalls += 1;
         priorities.push(options?.priority);
+        sources.push(options?.source);
         order.push(`durable-${durableCalls}`);
         return durableCalls === 1
           ? {
@@ -818,9 +820,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       (agent as any).syncSharedMemoryFromPeerDetailed = async (
         _peerId: string,
         _contextGraphIds: string[],
-        options: { priority?: number } | undefined,
+        options: { priority?: number; source?: string } | undefined,
       ) => {
         priorities.push(options?.priority);
+        sources.push(options?.source);
         order.push('shared');
         return cleanSharedMemorySyncResult();
       };
@@ -838,6 +841,15 @@ describe('DKGAgent sync fetch coalescing', () => {
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
+      ]);
+      // The admission ORIGIN travels with the priority on the in-agent runner
+      // too: dropping it here while keeping the priority would silently report
+      // inline foreground catch-up as `durable:unspecified` in node-wide
+      // scheduler diagnostics (issue #2006).
+      expect(sources).toEqual([
+        'catchup-foreground',
+        'catchup-foreground',
+        'catchup-foreground',
       ]);
     } finally {
       await agent.stop().catch(() => {});
