@@ -3692,45 +3692,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
       candidatePeerIds,
     );
     if (!membershipUnchanged) {
+      const previousCandidatePeerIds = record.candidatePeerIds;
       const nextCandidatePeerIds = new Set(candidatePeerIds);
-      const wasBackoff = record.phase === 'backoff';
-      const activeBackoff = record.phase === 'backoff' && now < record.nextRetryAt;
       record.candidatePeerIds = new Set(candidatePeerIds);
-      // Preserve only evidence belonging to retained identities. Added or
-      // rejoined peers remain unattempted and break backoff; removed peers can
-      // never contribute to exhaustion of the new roster.
-      for (const peerId of [...record.attemptedPeerIds]) {
-        if (!nextCandidatePeerIds.has(peerId)) record.attemptedPeerIds.delete(peerId);
-      }
-      for (const peerId of [...record.cleanAbsentPeerIds]) {
-        if (!nextCandidatePeerIds.has(peerId)) record.cleanAbsentPeerIds.delete(peerId);
-      }
-      if (
-        record.lastAttemptedPeerId !== undefined
-        && !nextCandidatePeerIds.has(record.lastAttemptedPeerId)
-      ) record.lastAttemptedPeerId = undefined;
-      const hasUnattemptedPeer = candidatePeerIds.some(
-        (peerId) => !record!.attemptedPeerIds.has(peerId),
-      );
-      if (activeBackoff && !hasUnattemptedPeer) {
-        // A removal-only change cannot reopen work already bounded by the
-        // active retry window.
-        record.phase = 'backoff';
-        record.collectionDeadlineAt = 0;
-      } else if (hasUnattemptedPeer) {
-        record.phase = 'collecting';
-        record.nextRetryAt = 0;
-        record.collectionDeadlineAt = now
-          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
-      } else if (!wasBackoff) {
-        this.enterVmReconcileRotationBackoff(slotKey, record);
-      } else {
-        // An expired backoff opens a genuinely fresh cycle even when the only
-        // topology change was removal.
+      const removedPeer = [...previousCandidatePeerIds]
+        .some((peerId) => !nextCandidatePeerIds.has(peerId));
+      if (removedPeer) {
+        // A proof roster is a set, not an accumulation of surviving credits.
+        // Any removal/replacement invalidates the whole cycle so shrink can
+        // never manufacture exhaustion or preserve an active suppression.
         record.phase = 'collecting';
         record.nextRetryAt = 0;
         record.attemptedPeerIds.clear();
         record.cleanAbsentPeerIds.clear();
+        record.lastAttemptedPeerId = undefined;
+        record.collectionDeadlineAt = now
+          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+      } else {
+        // Pure growth preserves valid credits for retained identities, but the
+        // newly observed peer is uncredited and immediately breaks backoff.
+        record.phase = 'collecting';
+        record.nextRetryAt = 0;
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       }
@@ -3868,14 +3850,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     capturedRecord.attemptedPeerIds.add(peerId);
     if (disposition === 'clean-absent') capturedRecord.cleanAbsentPeerIds.add(peerId);
-    const exhausted = [...capturedRecord.candidatePeerIds]
+    const attemptedEveryPeer = [...capturedRecord.candidatePeerIds]
       .every((candidatePeerId) => capturedRecord.attemptedPeerIds.has(candidatePeerId));
-    if (exhausted) {
-      // A full cycle of fail-closed incomplete outcomes is not absence proof,
-      // but it is still a bounded no-progress retry cycle. Throttle it without
-      // changing authentication/materialization semantics; a target/root or
-      // candidate change breaks this finite backoff immediately.
+    const cleanAbsentFromEveryPeer = [...capturedRecord.candidatePeerIds]
+      .every((candidatePeerId) => capturedRecord.cleanAbsentPeerIds.has(candidatePeerId));
+    if (cleanAbsentFromEveryPeer) {
       this.enterVmReconcileRotationBackoff(slotKey, capturedRecord);
+    } else if (attemptedEveryPeer) {
+      // An incomplete, failed, or still-pending result is not absence proof.
+      // Reset the entire proof cycle and rely only on the existing per-CG
+      // sweep cooldown; retain the cursor so the next cycle starts elsewhere.
+      capturedRecord.attemptedPeerIds.clear();
+      capturedRecord.cleanAbsentPeerIds.clear();
+      capturedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
+        + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
     }
     this.touchVmReconcileRotationRecord(slotKey, capturedRecord);
   }
@@ -4063,14 +4051,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // production ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
-    const initialPreparations = currentTargets.map((target) => ({
-      target,
-      prepared: this.prepareVmReconcileRotationTarget(
+    const initialPreparations = currentTargets.map((target) => {
+      const slotKey = this.vmReconcileRotationSlotKey(target);
+      const existing = this.vmReconcileRotationState.get(slotKey);
+      if (!existing || existing.fingerprint !== this.vmReconcileRotationFingerprint(target)) {
+        // The pre-network pass only consults already-earned suppression. A new
+        // cycle is installed after curator resolution so its first roster is
+        // authoritative-first; a stale fingerprint is invalidated immediately.
+        if (existing) this.vmReconcileRotationState.delete(slotKey);
+        return {
+          target,
+          prepared: {
+            slotKey,
+            record: undefined,
+            suppressed: this.vmReconcileRotationClosed,
+          },
+        };
+      }
+      return {
         target,
-        observedCandidatePeerIds,
-        now,
-      ),
-    }));
+        prepared: this.prepareVmReconcileRotationTarget(
+          target,
+          observedCandidatePeerIds,
+          now,
+        ),
+      };
+    });
     const initiallyEligible = initialPreparations
       .filter(({ prepared }) => !prepared.suppressed)
       .map(({ target }) => target);
@@ -4108,26 +4114,45 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // registry resolver is authoritative for `0x…/slug` graphs and can return
     // every node registered to that curator wallet.
     const approvedCuratorPeerId = this.preferredSyncPeers.get(localCgId);
+    const cachedCuratorPeerIds = [
+      ...(this.vmReconcileCuratorPeersByCg.get(localCgId) ?? []),
+    ].sort((left, right) => left.localeCompare(right));
     const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId)
-      .catch(() => ({ peerIds: [] as string[], curatorIsLocal: false, legacyTripleResolved: false }));
+      .catch(() => ({
+        peerIds: [] as string[],
+        curatorIsLocal: false,
+        legacyTripleResolved: false,
+        lookupFailed: true,
+      }));
+    const resolutionSucceeded = curatorResolution.lookupFailed !== true;
+    const resolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
+      .filter((peerId) => peerId && peerId !== this.peerId))]
+      .sort((left, right) => left.localeCompare(right))
+      .slice(0, DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
+    const authoritativeCuratorPeerIds = resolutionSucceeded
+      ? resolvedCuratorPeerIds
+      : cachedCuratorPeerIds;
+    if (resolutionSucceeded) {
+      // A successful empty/local resolution is authoritative and must clear a
+      // stale prior roster. A failed lookup retains the last known IDs so an
+      // unrelated discovery outage cannot reorder or erase the proof set.
+      this.vmReconcileCuratorPeersByCg.delete(localCgId);
+      if (!curatorResolution.curatorIsLocal && resolvedCuratorPeerIds.length > 0) {
+        this.vmReconcileCuratorPeersByCg.set(localCgId, resolvedCuratorPeerIds);
+      }
+      this.pruneVmReconcileState();
+    }
     let legacyPreferredPeerId: string | undefined;
-    if (curatorResolution.peerIds.length === 0) {
+    if (resolutionSucceeded && !curatorResolution.curatorIsLocal
+      && resolvedCuratorPeerIds.length === 0) {
       legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
     }
     const curatorPeerIds = [...new Set([
-      approvedCuratorPeerId,
-      ...curatorResolution.peerIds,
+      ...authoritativeCuratorPeerIds,
       legacyPreferredPeerId,
+      approvedCuratorPeerId,
     ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))]
-      .slice(0, 3);
-    if (curatorPeerIds.length > 0) {
-      // Cache only already-resolved identifiers. This gives the pre-network
-      // suppression gate the same authoritative roster on later sweeps without
-      // adding decision-path discovery, dialing, or chain reads.
-      this.vmReconcileCuratorPeersByCg.delete(localCgId);
-      this.vmReconcileCuratorPeersByCg.set(localCgId, curatorPeerIds);
-      this.pruneVmReconcileState();
-    }
+      .slice(0, DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
     for (const peerId of curatorPeerIds) {
       await this.ensurePeerConnected(peerId).catch((error) => {
         this.log.info(
@@ -4262,7 +4287,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         attemptedOrdinals.add(target.ordinal);
         if (installedRecord) {
           installedRecord.lastAttemptedPeerId = peerId;
-          installedRecord.attemptedPeerIds.add(peerId);
           this.touchVmReconcileRotationRecord(
             this.vmReconcileRotationSlotKey(target),
             installedRecord,

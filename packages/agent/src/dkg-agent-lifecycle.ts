@@ -5609,30 +5609,43 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async resolveCuratorPeerIdsForCg(this: DKGAgent,
     contextGraphId: string,
-  ): Promise<{ peerIds: string[]; curatorIsLocal: boolean; legacyTripleResolved: boolean }> {
+  ): Promise<{
+    peerIds: string[];
+    curatorIsLocal: boolean;
+    legacyTripleResolved: boolean;
+    lookupFailed?: boolean;
+  }> {
     const structuralCuratorDid = deriveCuratorDidFromCgId(contextGraphId);
     if (structuralCuratorDid) {
       const structuralAgent = structuralCuratorDid.slice('did:dkg:agent:'.length).toLowerCase();
       if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
         return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: false };
       }
-      const resolve = async (): Promise<string[]> => {
+      const resolve = async (): Promise<{ peerIds: string[]; lookupFailed: boolean }> => {
         let agents: Array<{ agentAddress?: string; peerId: string }>;
         try {
           agents = await this.discovery.findAgents();
         } catch {
-          agents = [];
+          return { peerIds: [], lookupFailed: true };
         }
-        return agents
-          .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
-          .map((a) => a.peerId);
+        return {
+          peerIds: agents
+            .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
+            .map((a) => a.peerId),
+          lookupFailed: false,
+        };
       };
-      let curatorPeers = await resolve();
-      if (curatorPeers.length === 0) {
+      let resolution = await resolve();
+      if (resolution.peerIds.length === 0) {
         await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
-        curatorPeers = await resolve();
+        resolution = await resolve();
       }
-      return { peerIds: curatorPeers, curatorIsLocal: false, legacyTripleResolved: false };
+      return {
+        peerIds: resolution.peerIds,
+        curatorIsLocal: false,
+        legacyTripleResolved: false,
+        lookupFailed: resolution.lookupFailed,
+      };
     }
     // Legacy non-wallet-scoped CG: fall back to triple-based curator resolution.
     if (await this.isCuratorOf(contextGraphId)) {

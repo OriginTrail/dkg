@@ -63,7 +63,7 @@ function syncOperationClass(label: string): string {
  * admission source is what lets an operator attribute a saturated `sync-global`
  * queue to explicit catch-up versus sync-on-connect versus reconcile, and read
  * per-trigger queue/active ages straight off the snapshot. Both halves are
- * closed sets (5 × 7), so the label space stays bounded and free of Context
+ * closed sets (5 × 8), so the label space stays bounded and free of Context
  * Graph and peer identifiers.
  */
 function syncAdmissionOperation(payload: GlobalQueuePayload): string {

@@ -262,6 +262,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
         internal.timer = setTimeout(() => {
           if (!this.remove(internal)) return;
           this.observePressureReject(internal, 'queue_wait_timeout');
+          this.recordDecision(internal, 'rejected');
           this.rejectOnce(
             internal,
             options.createTimeoutError?.() ?? options.createBusyError('global_queue_full'),

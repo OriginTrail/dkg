@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   backpressureRegistry,
   createOperationContext,
+  getMetrics,
 } from '@origintrail-official/dkg-core';
 import {
   getSyncBackpressureSnapshot,
@@ -237,6 +238,53 @@ describe('sync global backpressure', () => {
       'second-start',
       'third-start',
     ]);
+  });
+
+  it('starts foreground on the next release without preempting two active VM recoveries', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 4,
+    });
+    const events: string[] = [];
+    let releaseVmA!: () => void;
+    let releaseVmB!: () => void;
+    let releaseForeground!: () => void;
+    const blockingWork = (label: string, setRelease: (release: () => void) => void) =>
+      async () => {
+        events.push(`${label}-start`);
+        await new Promise<void>((resolve) => setRelease(resolve));
+        events.push(`${label}-end`);
+      };
+
+    const vmA = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:vm-a', priority: 1_000, source: 'vm-recovery',
+    }, blockingWork('vm-a', (release) => { releaseVmA = release; }));
+    const vmB = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:vm-b', priority: 1_000, source: 'vm-recovery',
+    }, blockingWork('vm-b', (release) => { releaseVmB = release; }));
+    await tick();
+
+    const queuedVm = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:vm-c', priority: 1_000, source: 'vm-recovery',
+    }, async () => { events.push('vm-c-start'); });
+    const foreground = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:foreground', priority: 2_000,
+      source: 'catchup-foreground',
+    }, blockingWork('foreground', (release) => { releaseForeground = release; }));
+    await tick();
+
+    expect(events).toEqual(['vm-a-start', 'vm-b-start']);
+    releaseVmA();
+    await tick();
+    expect(events).toEqual(['vm-a-start', 'vm-b-start', 'vm-a-end', 'foreground-start']);
+
+    releaseForeground();
+    await foreground;
+    await tick();
+    expect(events).toContain('vm-c-start');
+    releaseVmB();
+    await Promise.all([vmA, vmB, queuedVm]);
   });
 
   it('carries the admission source from the production helper through to the scheduler', async () => {
@@ -677,6 +725,39 @@ describe('sync global backpressure', () => {
     releaseNextHigh();
     const releaseNextLow = await nextLow.release;
     releaseNextLow();
+  });
+
+  it('records a queued timeout as a rejected scheduler decision', async () => {
+    let running = 0;
+    const decisionCounter = getMetrics().syncSchedulerDecisionsTotal as unknown as {
+      add(value: number, attributes: Record<string, unknown>): void;
+    };
+    const originalAdd = decisionCounter.add;
+    const decisions: Array<Record<string, unknown>> = [];
+    decisionCounter.add = (_value, attributes) => { decisions.push(attributes); };
+    try {
+      const queue = new PriorityAdmissionQueue<string>({
+        canRun: () => running < 1,
+        onStart: () => {
+          running += 1;
+          return () => { running -= 1; };
+        },
+      });
+      const active = queue.acquire(queueOptions('active', 0));
+      const releaseActive = await active.release;
+      const timedOut = queue.acquire(queueOptions('timed-out', 0, {
+        timeoutMs: 5,
+        createTimeoutError: () => new Error('timed out'),
+      }));
+
+      await expect(timedOut.release).rejects.toThrow('timed out');
+      expect(decisions).toContainEqual({
+        lane: 'durable', priority_class: 'default', outcome: 'rejected',
+      });
+      releaseActive();
+    } finally {
+      decisionCounter.add = originalAdd;
+    }
   });
 
   it('preserves debt across a running-to-queued responder handoff', async () => {
