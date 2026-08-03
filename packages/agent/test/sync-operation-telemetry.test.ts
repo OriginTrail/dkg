@@ -455,6 +455,81 @@ describe('W1 A6/M6 — the changelog lane reports its own attempts AND bytes', (
     expect(await harness.counter(I3)).toEqual([]);
   });
 
+  it('P1-A: a PRE-ABORTED changelog send is not an attempt and owes no bytes', async () => {
+    // The changelog driver is abort-unaware, so a stop landing inside
+    // `applyPage` surfaces as the NEXT round's already-aborted send. The router
+    // rejects that in its preflight — before peer admission, before any dial,
+    // before a stream exists — so nothing was physically invoked and I1's
+    // contract ("exactly one terminal point per physically invoked send") owes
+    // no point. Before the pre-send boundary this recorded BOTH an attempt and
+    // its request bytes, inflating precisely the denominators W1 exists to make
+    // decision-grade, and doing it only during shutdown.
+    harness.install();
+    let sends = 0;
+    const agent = await createAgent({
+      sendToPeer: async () => { sends += 1; return new Uint8Array(0); },
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+    });
+
+    // Abort with a NON-AbortError reason on purpose. `controller.abort()` alone
+    // yields a reason that ALREADY has name === 'AbortError', so `throw reason`
+    // and `throw asSyncFetchAbortError(reason)` are indistinguishable — a check
+    // that cannot fail. Only a foreign reason can prove the coercion happened.
+    const reason = new Error('node stopping');
+    const controller = new AbortController();
+    controller.abort(reason);
+    (agent as any).node = { ...(agent as any).node, stopSignal: controller.signal };
+
+    await expect((agent as any).runChangelogSyncForCg(
+      createOperationContext('sync'), PEER_A, CG,
+    )).rejects.toMatchObject({ name: 'AbortError', cause: reason });
+
+    // Nothing was dispatched…
+    expect(sends).toBe(0);
+    // …and all three legs are silent. Asserting only I1 would pass with the
+    // guard one line too low, which still mints I2 — and I2 feeds the byte
+    // panels, so that variant would corrupt the number without failing a test.
+    expect(await harness.counter(I1)).toEqual([]);
+    expect(await harness.counter(I2)).toEqual([]);
+    expect(await harness.counter(I3)).toEqual([]);
+  });
+
+  it('P1-A control: a MID-FLIGHT abort is still a real attempt, with its bytes', async () => {
+    // The positive control. Without it the fix is indistinguishable from having
+    // deleted the changelog bracket: a guard that suppressed everything would
+    // pass the test above. Here the send is genuinely dispatched and the signal
+    // fires during it, so the attempt IS physical and must be counted —
+    // labelled `cancelled`, with its request bytes retained.
+    harness.install();
+    const controller = new AbortController();
+    let sends = 0;
+    const agent = await createAgent({
+      sendToPeer: async () => {
+        sends += 1;
+        controller.abort(new Error('node stopping mid-flight'));
+        throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      },
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+    });
+    (agent as any).node = { ...(agent as any).node, stopSignal: controller.signal };
+
+    await expect((agent as any).runChangelogSyncForCg(
+      createOperationContext('sync'), PEER_A, CG,
+    )).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(sends).toBe(1);
+    expect(await harness.matching(I1, {
+      transport: 'changelog', phase: 'delta', outcome: 'cancelled',
+    })).toHaveLength(1);
+    expect(await harness.total(I2)).toBeGreaterThan(0);
+    // No response arrived, so I3 stays empty — the byte-leg rule, unchanged.
+    expect(await harness.counter(I3)).toEqual([]);
+  });
+
   it('inherits the ambient admission source, so both lanes share one denominator', async () => {
     harness.install();
     const agent = await createAgent({

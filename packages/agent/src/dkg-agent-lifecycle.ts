@@ -5065,6 +5065,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // transfers is durable. Shared-memory content defers to `runResync`,
       // which is separately instrumented as `transport=legacy`.
       send: async (bytes) => {
+        // Read the stop signal ONCE. `node.stopSignal` is a getter over a
+        // controller that `stop()` nulls in its finally, so a second read can
+        // return undefined mid-shutdown — which would downgrade a `cancelled`
+        // attempt to a fabricated `transport_error` failure. `ProtocolRouter`
+        // caches the same way for the same reason.
+        const stopSignal = this.node.stopSignal;
+        // PRE-SEND BOUNDARY, mirroring `sync-transport.ts`'s `throwIfAborted`
+        // before `sendStarted = true`. An already-aborted signal is rejected by
+        // `ProtocolRouter.sendInner` in its preflight — BEFORE peer admission,
+        // before any dial, before a stream is opened — so nothing is physically
+        // invoked and no bytes cross the boundary. Recording there would mint an
+        // attempt and request bytes for work that never happened, violating I1's
+        // stated contract ("exactly one terminal point per physically invoked
+        // send") and inflating the very denominators W1 exists to make
+        // decision-grade. It is concentrated on the shutdown path: the changelog
+        // driver is abort-unaware, so a stop landing inside `applyPage` surfaces
+        // as the next round's pre-aborted send.
+        //
+        // Throw the COERCED form rather than `stopSignal.throwIfAborted()`: that
+        // throws `reason` raw, and a non-`AbortError` reason would then reach
+        // callers with the wrong `name`, breaking `isSyncOperationCancellation`
+        // and turning a cancellation into an error. `asSyncFetchAbortError`
+        // returns an `AbortError` reason by identity and wraps anything else
+        // with `cause`, which is what the router itself does.
+        if (stopSignal?.aborted === true) throw asSyncFetchAbortError(stopSignal.reason);
         const attributes = syncAttemptAttributes({
           transport: 'changelog',
           plane: 'durable',
@@ -5076,7 +5101,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         try {
           const response = await this.messenger.sendToPeer(remotePeerId, PROTOCOL_SYNC_CHANGELOG, bytes, {
             timeoutMs: SYNC_PAGE_TIMEOUT_MS,
-            signal: this.node.stopSignal ?? undefined,
+            signal: stopSignal ?? undefined,
           });
           responseByteLength = response.byteLength;
           outcome = 'response';
@@ -5086,7 +5111,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // bracket. This lane has no in-transport validator, so it can never
           // produce `validation_rejected`: a `denied` changelog response is a
           // successfully DELIVERED response that the decoder classifies later.
-          outcome = this.node.stopSignal?.aborted === true ? 'cancelled' : 'transport_error';
+          //
+          // Classified from the ERROR, not from re-reading the signal. Two
+          // reasons, both real: `node.stopSignal` is a getter over a controller
+          // `stop()` nulls in its finally, so a shutdown that completes between
+          // the rejection and this line would read "not aborted" and file a
+          // cancellation as a fabricated FAILURE; and libp2p's transport raises
+          // `DOMException`s carrying `code: 'ABORT_ERR'` with no `name` match,
+          // which a signal check cannot see either. The error is the durable
+          // record of what happened; the signal is live state that has moved on.
+          outcome = isSyncOperationCancellation(error) ? 'cancelled' : 'transport_error';
           throw error;
         } finally {
           recordSyncAttempt(attributes, outcome);

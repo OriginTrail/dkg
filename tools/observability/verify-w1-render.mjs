@@ -55,22 +55,28 @@ const fail = (where, msg) => violations.push(`${where}: ${msg}`);
 const read = (rel) => fs.readFileSync(path.join(DIR, rel), 'utf8').replace(/\r\n/g, '\n');
 
 // ── the W1 contract, transcribed independently ────────────────────────────
+// `property` is the field on the object `buildMetrics()` returns — the handle
+// every record site actually calls. Binding it to the public name (below) is
+// what makes "the route wrote to the wrong instrument" detectable: a name-only
+// check compares an unordered SET and is byte-identical after a swap.
 const EXPECTED_INSTRUMENTS = [
-  { id: 'I1', name: 'dkg.sync.attempt.total', kind: 'counter', unit: '1' },
-  { id: 'I2', name: 'dkg.sync.attempt.request_bytes', kind: 'counter', unit: 'By' },
-  { id: 'I3', name: 'dkg.sync.attempt.response_bytes', kind: 'counter', unit: 'By' },
-  { id: 'I4', name: 'dkg.sync.operation.duration_ms', kind: 'histogram', unit: 'ms' },
-  { id: 'I5', name: 'dkg.sync.operation.rejected_total', kind: 'counter', unit: '1' },
-  { id: 'I6', name: 'dkg.sync.singleflight.joins_total', kind: 'counter', unit: '1' },
-  { id: 'I7', name: 'dkg.context_graph.catchup.requests_total', kind: 'counter', unit: '1' },
-  { id: 'I8', name: 'dkg.context_graph.catchup.jobs_total', kind: 'counter', unit: '1' },
-  { id: 'I9', name: 'dkg.context_graph.catchup.job_duration_ms', kind: 'histogram', unit: 'ms' },
+  { id: 'I1', property: 'syncAttemptTotal', name: 'dkg.sync.attempt.total', kind: 'counter', unit: '1' },
+  { id: 'I2', property: 'syncAttemptRequestBytes', name: 'dkg.sync.attempt.request_bytes', kind: 'counter', unit: 'By' },
+  { id: 'I3', property: 'syncAttemptResponseBytes', name: 'dkg.sync.attempt.response_bytes', kind: 'counter', unit: 'By' },
+  { id: 'I4', property: 'syncOperationDurationMs', name: 'dkg.sync.operation.duration_ms', kind: 'histogram', unit: 'ms' },
+  { id: 'I5', property: 'syncOperationRejectedTotal', name: 'dkg.sync.operation.rejected_total', kind: 'counter', unit: '1' },
+  { id: 'I6', property: 'syncSingleflightJoinsTotal', name: 'dkg.sync.singleflight.joins_total', kind: 'counter', unit: '1' },
+  { id: 'I7', property: 'contextGraphCatchupRequestsTotal', name: 'dkg.context_graph.catchup.requests_total', kind: 'counter', unit: '1' },
+  { id: 'I8', property: 'contextGraphCatchupJobsTotal', name: 'dkg.context_graph.catchup.jobs_total', kind: 'counter', unit: '1' },
+  { id: 'I9', property: 'contextGraphCatchupJobDurationMs', name: 'dkg.context_graph.catchup.job_duration_ms', kind: 'histogram', unit: 'ms' },
 ];
 // Pre-existing corroborating instruments: not part of the inventory floor, but
-// a selector reading one still has to be dual-spelled and node-filtered.
+// a selector reading one still has to be dual-spelled and node-filtered. They
+// are bound here too because NOTHING else binds them — no test in the repo
+// asserts either public name.
 const EXPECTED_CORROBORATING = [
-  { id: 'P1', name: 'dkg.sync.scheduler.queue_wait_ms', kind: 'histogram', unit: 'ms' },
-  { id: 'P2', name: 'dkg.backpressure.oldest_queued_age_ms', kind: 'gauge', unit: 'ms' },
+  { id: 'P1', property: 'syncSchedulerQueueWaitMs', name: 'dkg.sync.scheduler.queue_wait_ms', kind: 'histogram', unit: 'ms' },
+  { id: 'P2', property: 'backpressureOldestQueuedAgeMs', name: 'dkg.backpressure.oldest_queued_age_ms', kind: 'gauge', unit: 'ms' },
 ];
 const EXPECTED_FAMILIES = [
   { id: 'foreground', role: 'eligible', sources: ['catchup-foreground'] },
@@ -306,20 +312,59 @@ for (const rule of allRules) {
     fail('metric declaration', `${declRel} not found from repo root ${REPO_ROOT} — the binding check cannot run`);
   } else {
     const src = fs.readFileSync(declPath, 'utf8');
-    const declared = new Set(
-      [...src.matchAll(/\.create(?:Counter|UpDownCounter|Histogram|Gauge|Observable(?:Counter|UpDownCounter|Gauge))\(\s*'([^']+)'/g)]
-        .map((m) => m[1]),
-    );
-    // Anti-vacuity: if the declaration style ever changes (double quotes, a
-    // helper wrapper, a name built by concatenation) this regex matches nothing
-    // and every name below would "pass" against an empty set — the exact
-    // failure shape this whole check exists to remove.
-    if (declared.size === 0) {
-      fail('metric declaration', `no \`meter.create*('name')\` literals found in ${declRel} — the binding check would pass vacuously`);
+    // Captures PROPERTY -> (factory kind, public name). A name-only SET cannot
+    // see a swap: exchanging two `create*` literals leaves the set identical.
+    // The `\s*` after `(` is load-bearing — without it the multi-line
+    // declarations in this file are silently skipped.
+    const DECL_RE = /(?:^|[{,;\s])([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*meter\.create(Counter|UpDownCounter|Histogram|Gauge|ObservableCounter|ObservableUpDownCounter|ObservableGauge)\(\s*'([^']+)'/g;
+    const pairs = [...src.matchAll(DECL_RE)].map((m) => ({
+      property: m[1],
+      kind: m[2].replace(/^Observable/, '').toLowerCase(),
+      name: m[3],
+    }));
+    const callSites = [...src.matchAll(/meter\.create[A-Za-z]*\(/g)].length;
+
+    // Anti-vacuity #1: a TOTAL parse failure would make everything below pass
+    // against nothing.
+    if (pairs.length === 0) {
+      fail('metric declaration', `no \`property: meter.create*('name')\` declarations found in ${declRel} — the binding would pass vacuously`);
+    } else if (pairs.length !== callSites) {
+      // Anti-vacuity #2, and the one that actually bites: a PARTIAL parse looks
+      // healthy. A dropped declaration is simply never checked — silently.
+      fail('metric declaration', `parsed ${pairs.length} declarations but found ${callSites} \`meter.create*(\` call sites in ${declRel} — the parse is incomplete, so some instruments would go unchecked`);
     }
+
+    const byProperty = new Map();
+    const byName = new Map();
+    for (const pair of pairs) {
+      // A duplicate property silently wins in an object literal; a duplicate
+      // name means two handles emit one series. Both are contract breaks.
+      if (byProperty.has(pair.property)) fail('metric declaration', `property "${pair.property}" is declared twice in ${declRel} — the later one silently wins`);
+      if (byName.has(pair.name)) fail('metric declaration', `public name "${pair.name}" is declared twice in ${declRel} (properties "${byName.get(pair.name)}" and "${pair.property}")`);
+      byProperty.set(pair.property, pair);
+      byName.set(pair.name, pair.property);
+    }
+
     for (const inst of [...EXPECTED_INSTRUMENTS, ...EXPECTED_CORROBORATING]) {
-      if (declared.size > 0 && !declared.has(inst.name)) {
-        fail('metric declaration', `${inst.id} "${inst.name}" is queried by the W1 artifacts but is NOT declared in ${declRel} — the queries read a name nothing emits`);
+      if (pairs.length === 0) break;
+      const declared = byProperty.get(inst.property);
+      if (!declared) {
+        fail('metric declaration', `${inst.id} property "${inst.property}" is not declared in ${declRel} — the record sites that call it emit nothing the W1 queries read`);
+        continue;
+      }
+      // Both directions: membership alone would accept a swap in either sense.
+      if (declared.name !== inst.name) {
+        fail('metric declaration', `${inst.id} property "${inst.property}" must emit "${inst.name}"; found "${declared.name}"`);
+      }
+      const owner = byName.get(inst.name);
+      if (owner !== undefined && owner !== inst.property) {
+        fail('metric declaration', `${inst.id} public name "${inst.name}" is emitted by property "${owner}", not "${inst.property}" — a record site calling the expected property would write a different series`);
+      }
+      // `kind` drives `_total` suffixing and the histogram `_bucket/_sum/_count`
+      // series set, so a histogram silently becoming a counter would invalidate
+      // every derived selector — including I4's `_sum` strain denominator.
+      if (declared.kind !== inst.kind) {
+        fail('metric declaration', `${inst.id} "${inst.name}" is declared as a ${declared.kind} but the W1 catalog treats it as a ${inst.kind} — the derived Prometheus series names would not exist`);
       }
     }
   }

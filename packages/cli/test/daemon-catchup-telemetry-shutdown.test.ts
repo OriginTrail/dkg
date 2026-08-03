@@ -92,43 +92,64 @@ interface Point {
 }
 
 /**
- * Capture the I7/I8/I9 points the route and the drain emit.
+ * Capture the I7/I8/I9 points the route and the drain emit, keyed by the
+ * INSTRUMENT that received each one.
+ *
+ * ## Why not `vi.spyOn(counter, 'add')`
  *
  * The API's no-op meter hands out SINGLETON instrument objects, so with no
  * provider registered `contextGraphCatchupRequestsTotal` and
- * `contextGraphCatchupJobsTotal` are literally the same object — spying on
- * each in turn would leave only the last spy installed and silently funnel
- * every counter into one bucket. Spy once per distinct object and separate the
- * points by their attributes, which works either way.
+ * `contextGraphCatchupJobsTotal` are literally the same object. `packages/cli`
+ * has no OpenTelemetry dependency at all, so that is structural here, not a
+ * configuration accident. Spying therefore cannot separate them, and a previous
+ * version of this harness separated the points by ATTRIBUTE instead — which
+ * proved the shape of each point and NOT which instrument produced it.
+ *
+ * That left a live mutant green: pointing `recordCatchupRequest` at
+ * `contextGraphCatchupJobsTotal` kept every assertion passing while, in
+ * production, it deleted I7 and wrote request-shaped points into I8 —
+ * destroying the requests-to-jobs relationship W1 is built on.
+ *
+ * Replacing the PROPERTIES on the cached metrics object gives each instrument a
+ * distinct sink. Both record sites call `getMetrics()` freshly, so they observe
+ * the swap; `restore()` puts the original objects back by assignment, which is
+ * exact, unlike nested `mockRestore()` ordering.
+ *
+ * The attribute predicates remain, but only as a secondary shape assertion —
+ * never as the classifier.
  */
 function captureCatchupMetrics() {
-  const m = getMetrics();
-  const counterPoints: Point[] = [];
+  const m = getMetrics() as unknown as Record<string, unknown>;
+  const requestPoints: Point[] = [];
+  const jobPoints: Point[] = [];
   const durations: Point[] = [];
-  const record = (sink: Point[]) =>
-    ((value: number, attrs: Record<string, unknown>) => {
+  const saved = {
+    contextGraphCatchupRequestsTotal: m.contextGraphCatchupRequestsTotal,
+    contextGraphCatchupJobsTotal: m.contextGraphCatchupJobsTotal,
+    contextGraphCatchupJobDurationMs: m.contextGraphCatchupJobDurationMs,
+  };
+  const push = (sink: Point[]) =>
+    (value: number, attrs: Record<string, unknown> = {}) => {
       sink.push({ value, attrs: { ...attrs } });
-    }) as any;
+    };
 
-  const counters = new Set<object>([
-    m.contextGraphCatchupRequestsTotal,
-    m.contextGraphCatchupJobsTotal,
-  ]);
-  const spies = [...counters].map((counter) =>
-    vi.spyOn(counter as any, 'add').mockImplementation(record(counterPoints)),
-  );
-  spies.push(
-    vi.spyOn(m.contextGraphCatchupJobDurationMs, 'record').mockImplementation(record(durations)),
-  );
+  m.contextGraphCatchupRequestsTotal = { add: push(requestPoints) };
+  m.contextGraphCatchupJobsTotal = { add: push(jobPoints) };
+  m.contextGraphCatchupJobDurationMs = { record: push(durations) };
 
-  const requests = () => counterPoints.filter((p) => 'result' in p.attrs);
-  const jobs = () => counterPoints.filter((p) => 'status' in p.attrs);
+  // Anti-vacuity: distinctness is the entire point of this harness. If these
+  // ever became the same object again the sinks would merge and every
+  // per-instrument assertion below would silently go back to proving shape only.
+  expect(m.contextGraphCatchupRequestsTotal).not.toBe(m.contextGraphCatchupJobsTotal);
+
   return {
-    requests,
-    jobs,
+    /** Points that reached I7 — by instrument, not by attribute. */
+    requests: () => requestPoints,
+    /** Points that reached I8. */
+    jobs: () => jobPoints,
     durations,
-    results: () => requests().map((p) => p.attrs.result as string),
-    restore: () => spies.forEach((spy) => spy.mockRestore()),
+    results: () => requestPoints.map((p) => p.attrs.result as string),
+    restore: () => { Object.assign(m, saved); },
   };
 }
 
