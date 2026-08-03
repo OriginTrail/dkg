@@ -137,6 +137,17 @@ describe('finalized chain-read admission registry', () => {
     await held;
   });
 
+  it('exposes a runtime-FROZEN owner tuple, not just an `as const` one', async () => {
+    // `as const` is compile-time only. Config validation reads this tuple while
+    // admission checks a Set derived from it — if the tuple were mutable, a
+    // consumer could widen one side and create split-brain behaviour where a
+    // config validates but the run is refused.
+    expect(Object.isFrozen(FINALIZED_CHAIN_READ_OWNERS)).toBe(true);
+    const before = [...FINALIZED_CHAIN_READ_OWNERS];
+    expect(() => (FINALIZED_CHAIN_READ_OWNERS as unknown as string[]).push('mutant-owner')).toThrow();
+    expect([...FINALIZED_CHAIN_READ_OWNERS]).toEqual(before);
+  });
+
   it('rejects an unknown owner rather than silently admitting it', async () => {
     resetFinalizedChainReadRegistryForTests();
     await expect(

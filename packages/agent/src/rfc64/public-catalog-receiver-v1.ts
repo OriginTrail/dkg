@@ -48,6 +48,16 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
   readonly maxProvidersPerHead?: number;
   /** Base backoff between attempts (doubled per retry). Default 250ms. */
   readonly retryBackoffMs?: number;
+  /**
+   * Wait before re-queuing a task that found the process-wide finalized
+   * chain-read lane busy. Default 500ms.
+   */
+  readonly admissionDeferralMs?: number;
+  /**
+   * Bound on those deferrals so a permanently wedged lane degrades into an
+   * ordinary failure instead of looping. Default 240 (~2 minutes at 500ms).
+   */
+  readonly maxAdmissionDeferrals?: number;
   readonly onHeadApplied?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
@@ -68,6 +78,11 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly failed: number;
   readonly droppedQueueFull: number;
   readonly droppedProviders: number;
+  /**
+   * Times a task stepped aside for a busy finalized chain lane. Distinct from
+   * `failed`: the head is still pending, not lost.
+   */
+  readonly admissionDeferred: number;
   readonly inFlight: number;
   readonly queued: number;
 }
@@ -77,6 +92,12 @@ interface ReceiverTaskV1 {
   readonly scopeKey: string;
   readonly providers: ReceiverProviderV1[];
   readonly providerKeys: Set<string>;
+  /**
+   * How many times this task has stepped aside for a busy finalized chain lane.
+   * Mutable, and deliberately NOT a provider attempt: contention says nothing
+   * about the head or the peer.
+   */
+  admissionDeferrals?: number;
 }
 
 interface ReceiverProviderV1 {
@@ -91,7 +112,32 @@ const DEFAULTS = Object.freeze({
   maxAttempts: 3,
   maxProvidersPerHead: 8,
   retryBackoffMs: 250,
+  admissionDeferralMs: 500,
+  maxAdmissionDeferrals: 240,
 });
+
+/**
+ * Is this failure "the chain lane is busy" rather than "this head is bad"?
+ *
+ * The pinned finalized read is one-per-chain PROCESS-WIDE, so an unrelated
+ * context graph on the same chain can legitimately hold it for up to the
+ * snapshot deadline. That is contention, not an error about this head — but the
+ * generic retry path treats it like a provider failure: three attempts and
+ * exponential backoff finish in under two seconds, the task is marked failed,
+ * and its pending key is deleted. The head is then only retried if some later
+ * announcement or explicit pull happens to arrive.
+ *
+ * Matching is on the chain layer's own typed code, not on message text.
+ */
+function isChainAdmissionContention(error: unknown): boolean {
+  for (let cause: unknown = error, depth = 0; cause !== undefined && cause !== null && depth < 8; depth += 1) {
+    if (typeof cause === 'object' && (cause as { code?: unknown }).code === 'concurrency-saturated') {
+      return true;
+    }
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 export class Rfc64PublicCatalogReceiverV1 {
   readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerV1;
@@ -113,7 +159,12 @@ export class Rfc64PublicCatalogReceiverV1 {
   #closed = false;
   #idleWaiters: Array<() => void> = [];
 
+  readonly #admissionDeferralMs: number;
+  readonly #maxAdmissionDeferrals: number;
+  readonly #deferralTimers = new Set<ReturnType<typeof setTimeout>>();
+
   #scheduled = 0;
+  #admissionDeferred = 0;
   #dedupedInFlight = 0;
   #dedupedAlreadyApplied = 0;
   #applied = 0;
@@ -136,6 +187,14 @@ export class Rfc64PublicCatalogReceiverV1 {
       DEFAULTS.maxProvidersPerHead,
     );
     this.#retryBackoffMs = nonNegativeInt(options.retryBackoffMs, DEFAULTS.retryBackoffMs);
+    this.#admissionDeferralMs = nonNegativeInt(
+      options.admissionDeferralMs,
+      DEFAULTS.admissionDeferralMs,
+    );
+    this.#maxAdmissionDeferrals = positiveInt(
+      options.maxAdmissionDeferrals,
+      DEFAULTS.maxAdmissionDeferrals,
+    );
     this.#onHeadApplied = options.onHeadApplied;
     this.#onError = options.onError;
   }
@@ -199,6 +258,8 @@ export class Rfc64PublicCatalogReceiverV1 {
       return;
     }
     this.#closed = true;
+    for (const timer of this.#deferralTimers) clearTimeout(timer);
+    this.#deferralTimers.clear();
     const abandoned = this.#queue.splice(0);
     for (const task of abandoned) this.#pendingByKey.delete(task.key);
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
@@ -217,6 +278,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       failed: this.#failed,
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
+      admissionDeferred: this.#admissionDeferred,
       inFlight: this.#active.size,
       queued: this.#queue.length,
     });
@@ -231,10 +293,18 @@ export class Rfc64PublicCatalogReceiverV1 {
       const [task] = this.#queue.splice(taskIndex, 1);
       if (task === undefined) return;
       this.#activeScopeKeys.add(task.scopeKey);
-      const run = this.#runTask(task).finally(() => {
+      const run = this.#runTask(task).then((outcome) => {
+        // A deferral releases the concurrency slot AND the semantic scope lock
+        // before waiting, and keeps the pending key so a duplicate announcement
+        // still dedupes onto this task instead of creating a second writer.
+        if (outcome === 'defer-admission' && !this.#closed) {
+          this.#scheduleAdmissionRetry(task);
+          return;
+        }
+        this.#pendingByKey.delete(task.key);
+      }).finally(() => {
         this.#active.delete(run);
         this.#activeScopeKeys.delete(task.scopeKey);
-        this.#pendingByKey.delete(task.key);
         if (!this.#closed) this.#pump();
         if (this.#isIdle()) this.#resolveIdle();
       });
@@ -242,13 +312,48 @@ export class Rfc64PublicCatalogReceiverV1 {
     }
   }
 
-  async #runTask(task: ReceiverTaskV1): Promise<void> {
+  /**
+   * Re-queue a task whose chain lane was busy, after a bounded delay.
+   *
+   * Detached on purpose: the receiver slot and the per-scope semantic lock are
+   * already released by the time this runs, so waiting here costs no capacity.
+   * The counter bounds it so a permanently wedged lane degrades into a normal
+   * failure instead of looping forever.
+   */
+  #scheduleAdmissionRetry(task: ReceiverTaskV1): void {
+    task.admissionDeferrals = (task.admissionDeferrals ?? 0) + 1;
+    this.#admissionDeferred += 1;
+    if (task.admissionDeferrals > this.#maxAdmissionDeferrals) {
+      this.#failed += 1;
+      this.#pendingByKey.delete(task.key);
+      this.#safeNotify(() => this.#onError?.(
+        task.providers[0]!.announcement,
+        new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
+      ));
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.#deferralTimers.delete(timer);
+      if (this.#closed || this.#closing.signal.aborted) {
+        this.#pendingByKey.delete(task.key);
+        if (this.#isIdle()) this.#resolveIdle();
+        return;
+      }
+      this.#queue.push(task);
+      this.#pump();
+    }, this.#admissionDeferralMs);
+    // Never hold the process open for a retry.
+    (timer as { unref?: () => void }).unref?.();
+    this.#deferralTimers.add(timer);
+  }
+
+  async #runTask(task: ReceiverTaskV1): Promise<'done' | 'defer-admission'> {
     let lastError: unknown;
     const notFoundProviders = new Set<string>();
     const attemptsByProvider = new Map<string, number>();
     let providerCursor = 0;
     while (true) {
-      if (this.#closing.signal.aborted) return;
+      if (this.#closing.signal.aborted) return 'done';
       const selection = nextEligibleProvider(
         task.providers,
         notFoundProviders,
@@ -262,11 +367,11 @@ export class Rfc64PublicCatalogReceiverV1 {
           && task.providers.every((provider) => notFoundProviders.has(provider.key))
         ) {
           this.#notFound += 1;
-          return;
+          return 'done';
         }
         this.#failed += 1;
         this.#safeNotify(() => this.#onError?.(task.providers[0]!.announcement, lastError));
-        return;
+        return 'done';
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
@@ -275,7 +380,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       try {
         if (await this.#reconciler.isHeadApplied(provider.announcement)) {
           this.#dedupedAlreadyApplied += 1;
-          return;
+          return 'done';
         }
         const result = await this.#reconciler.reconcileHead(
           provider.peerId,
@@ -288,14 +393,20 @@ export class Rfc64PublicCatalogReceiverV1 {
         }
         if (result === 'staged-only') {
           this.#stagedOnly += 1;
-          return;
+          return 'done';
         }
         this.#applied += 1;
         this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
-        return;
+        return 'done';
       } catch (error) {
+        if (isChainAdmissionContention(error)) {
+          // Not this head's fault and not this provider's fault: give the
+          // attempt back and let the task wait for the lane outside the slot.
+          attemptsByProvider.set(provider.key, providerAttempt - 1);
+          return 'defer-admission';
+        }
         lastError = error;
-        if (this.#closing.signal.aborted) return;
+        if (this.#closing.signal.aborted) return 'done';
         await this.#backoff(providerAttempt - 1);
       }
     }

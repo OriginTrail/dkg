@@ -109,6 +109,28 @@ describe('strict finalized snapshot config validation', () => {
     ).toThrow(/unknown or missing fields/);
   });
 
+  it('distinguishes an OMITTED owner from an explicitly present null/undefined', () => {
+    // `??` would have treated all three the same. Omission is the documented
+    // default; an explicit value is a caller assertion and must be a real owner.
+    expect(
+      snapshotStrictFinalizedSnapshotConfigV1({ chainId: CHAIN_ID, endpoints: [ENDPOINT] }),
+    ).toMatchObject({ owner: 'foreground' });
+    expect(() =>
+      snapshotStrictFinalizedSnapshotConfigV1({
+        chainId: CHAIN_ID,
+        endpoints: [ENDPOINT],
+        owner: null,
+      } as never),
+    ).toThrow(/unknown owner/i);
+    expect(() =>
+      snapshotStrictFinalizedSnapshotConfigV1({
+        chainId: CHAIN_ID,
+        endpoints: [ENDPOINT],
+        owner: undefined,
+      } as never),
+    ).toThrow(/unknown owner/i);
+  });
+
   it('accepts the ordinary plain-data shapes, with and without owner', () => {
     expect(
       snapshotStrictFinalizedSnapshotConfigV1({ chainId: CHAIN_ID, endpoints: [ENDPOINT] }),

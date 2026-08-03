@@ -33,14 +33,20 @@ import { parseCanonicalDecimalU256, type ChainIdV1 } from '@origintrail-official
  * and a test can prove every owner shares the one lane; a bare type union is
  * invisible at runtime and cannot be checked.
  */
-export const FINALIZED_CHAIN_READ_OWNERS = [
+export const FINALIZED_CHAIN_READ_OWNERS = Object.freeze([
   'foreground',
   'rfc64',
   'w2-page',
   'w2-target',
-] as const;
+] as const);
 export type FinalizedChainReadOwnerV1 = (typeof FINALIZED_CHAIN_READ_OWNERS)[number];
 
+/**
+ * Derived from the frozen tuple. It was previously a `Set` captured at module
+ * initialization while config validation read the (then-mutable) array — two
+ * sources of truth that could disagree. The tuple is frozen now, so the snapshot
+ * is safe, and this comment records why it must stay that way.
+ */
 const OWNER_SET: ReadonlySet<string> = new Set(FINALIZED_CHAIN_READ_OWNERS);
 
 /** One heavyweight pinned finalized read per chain, across every owner. */

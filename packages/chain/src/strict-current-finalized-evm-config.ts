@@ -47,7 +47,12 @@ export function snapshotStrictFinalizedSnapshotConfigV1(
   // this work exists to add is preserved, because the registry is process-wide
   // regardless of who holds it, and RFC64/W2 pass their owner explicitly rather
   // than relying on the default.
-  const owner = input.owner ?? 'foreground';
+  // OMITTED means foreground. An explicitly PRESENT `owner` must be a known
+  // value — including `null`/`undefined`, which are rejected rather than
+  // silently treated as omission. `??` would have let the API contract for an
+  // explicit null be decided by accident.
+  const ownerPresent = Object.prototype.hasOwnProperty.call(input, 'owner');
+  const owner = ownerPresent ? input.owner : 'foreground';
   if (!FINALIZED_CHAIN_READ_OWNERS.includes(owner as FinalizedChainReadOwnerV1)) {
     throw new TypeError(
       `Strict finalized snapshot RPC config received an unknown owner "${String(input.owner)}"`,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE,
   MAX_LOG_TOPICS,
   MAX_ROOTLESS_KA_NUMBER,
   MAX_UPDATE_PAGE_EVENTS,
@@ -253,6 +254,210 @@ describe('UAL chain ids are NAMESPACED, not bare decimals', () => {
   });
 });
 
+describe('malformed arrays cannot mint authority (review P1-1)', () => {
+  const originProof = (origins: unknown) => proof({ normalizedOrigins: origins as string[] });
+
+  function holed(...entries: (string | undefined)[]): string[] {
+    // A genuine hole, not an `undefined` element: index 1 is never assigned.
+    const out = new Array<string>(entries.length);
+    entries.forEach((value, index) => {
+      if (value !== undefined) out[index] = value;
+    });
+    return out;
+  }
+
+  it('refuses one URL plus a HOLE as two distinct origins', () => {
+    // `map` skips holes while `new Set` observes them as `undefined`, so this
+    // array had length 2 AND set size 2, minting a corroborated proof that
+    // serialized as one URL plus a null.
+    const origins = holed('https://a.example.com', undefined);
+    expect(origins.length).toBe(2);
+    expect(new Set(origins).size).toBe(2); // the trap, still true of raw JS
+    expect(codeOf(() => canonicalPageProof(originProof(origins)))).toBe('page-malformed');
+  });
+
+  it('refuses an accessor-backed origin WITHOUT invoking its getter', () => {
+    let reads = 0;
+    const origins: string[] = ['https://a.example.com'];
+    Object.defineProperty(origins, 1, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads += 1;
+        return 'https://b.example.com';
+      },
+    });
+    expect(codeOf(() => canonicalPageProof(originProof(origins)))).toBe('page-malformed');
+    expect(reads).toBe(0);
+  });
+
+  it('refuses sparse and accessor-backed topics', () => {
+    const base = { address: KA_STORAGE, data: '0x', position: position() };
+
+    const sparseTopics = new Array<string>(2);
+    sparseTopics[0] = HASH_A;
+    expect(codeOf(() => orderedLogCommitment([{ ...base, topics: sparseTopics }]))).toBe(
+      'page-malformed',
+    );
+
+    let reads = 0;
+    const accessorTopics: string[] = [HASH_A];
+    Object.defineProperty(accessorTopics, 1, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        reads += 1;
+        return HASH_B;
+      },
+    });
+    expect(codeOf(() => orderedLogCommitment([{ ...base, topics: accessorTopics }]))).toBe(
+      'page-malformed',
+    );
+    expect(reads).toBe(0);
+  });
+
+  it('refuses a sparse PAGE, not just sparse fields inside a log', () => {
+    const page = new Array<RawLogV1>(2);
+    page[0] = { address: KA_STORAGE, topics: [HASH_A], data: '0x', position: position() };
+    expect(codeOf(() => orderedLogCommitment(page))).toBe('page-malformed');
+  });
+
+  it('authority is not claimable by declaration', () => {
+    // The predicate canonicalizes. A hand-built object carrying the right
+    // assurance string but malformed evidence must not answer true.
+    expect(
+      codeOf(() => isAuthoritativePage(originProof(holed('https://a.example.com', undefined)))),
+    ).toBe('page-malformed');
+    // …and a genuinely corroborated proof still answers true.
+    expect(isAuthoritativePage(proof())).toBe(true);
+  });
+});
+
+describe('raw event data is bounded per page, not by the identity cap (review P1-2)', () => {
+  const logWith = (data: string, logIndex = 0): RawLogV1 => ({
+    address: KA_STORAGE,
+    topics: [HASH_A],
+    data,
+    position: position({ logIndex }),
+  });
+
+  it('accepts a legal 21-entry MerkleRoot[] payload the 4096 identity cap rejected', () => {
+    // `setMerkleRoots` emits `KnowledgeAssetMerkleRootsUpdated(uint256,MerkleRoot[])`;
+    // each MerkleRoot is three ABI words, so 21 entries is 64 + 21*96 = 2080
+    // data bytes = 4162 hex chars. Under the old shared 4096-byte scalar cap this
+    // legal event was rejected — and it is a BLOCKING mutation, so W2 would have
+    // halted before persisting the latch that is supposed to fail closed.
+    const payloadBytes = 64 + 21 * 96;
+    expect(payloadBytes).toBe(2_080);
+    const data = `0x${'ab'.repeat(payloadBytes)}`;
+    expect(data.length).toBeGreaterThan(4_096);
+    expect(() => orderedLogCommitment([logWith(data)])).not.toThrow();
+  });
+
+  it('still refuses a page above the aggregate raw-bytes budget', () => {
+    const oversized = `0x${'ab'.repeat(MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE / 2 + 8)}`;
+    expect(codeOf(() => orderedLogCommitment([logWith(oversized)]))).toBe('page-oversized');
+  });
+
+  it('charges the budget ACROSS logs, not per log', () => {
+    // Two logs each under the cap but jointly over it must still be refused.
+    const chunk = `0x${'cd'.repeat(Math.floor(MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE / 3))}`;
+    expect(codeOf(() => orderedLogCommitment([logWith(chunk, 0), logWith(chunk, 1)]))).toBe(
+      'page-oversized',
+    );
+  });
+
+  it('keeps the tight cap on identity scalars', () => {
+    expect(codeOf(() => canonicalUalChainId(`base:${'9'.repeat(5_000)}`))).toBe(
+      'noncanonical-scalar',
+    );
+  });
+});
+
+describe('resume filtering compares identity at equality (review P1-4)', () => {
+  const resume = position({ blockNumber: 101, transactionIndex: 2, logIndex: 3 });
+
+  it('throws rather than silently discarding a DIFFERENT event at the same position', () => {
+    const impostor = { ...resume, transactionHash: HASH_C };
+    expect(compareEventPosition(impostor, resume)).toBe(0);
+    expect(sameEventIdentity(impostor, resume)).toBe(false);
+    expect(codeOf(() => isDiscardedByResume(impostor, resume))).toBe('resume-identity-conflict');
+  });
+
+  it('also catches a different block hash at the same position', () => {
+    expect(
+      codeOf(() => isDiscardedByResume({ ...resume, blockHash: HASH_C }, resume)),
+    ).toBe('resume-identity-conflict');
+  });
+
+  it('still discards the genuinely identical event and retains later ones', () => {
+    expect(isDiscardedByResume({ ...resume }, resume)).toBe(true);
+    expect(
+      isDiscardedByResume(position({ blockNumber: 101, transactionIndex: 2, logIndex: 4 }), resume),
+    ).toBe(false);
+    expect(
+      isDiscardedByResume(position({ blockNumber: 101, transactionIndex: 2, logIndex: 2 }), resume),
+    ).toBe(true);
+  });
+});
+
+describe('the exported UAL builder validates its inputs (review P2-2)', () => {
+  it('rejects a negative kaId instead of emitting a nonsense UAL', () => {
+    expect(codeOf(() => buildScopedKnowledgeAssetUal('84532', KA_STORAGE, -1n))).toBe(
+      'noncanonical-scalar',
+    );
+  });
+
+  it('rejects a kaId above uint256', () => {
+    expect(codeOf(() => buildScopedKnowledgeAssetUal('84532', KA_STORAGE, 1n << 256n))).toBe(
+      'ka-number-overflow',
+    );
+  });
+
+  it('rejects a noncanonical chain id and a non-address storage segment', () => {
+    expect(codeOf(() => buildScopedKnowledgeAssetUal('Base:84532', KA_STORAGE, 7n))).toBe(
+      'noncanonical-scalar',
+    );
+    expect(codeOf(() => buildScopedKnowledgeAssetUal('84532', 'not-an-address', 7n))).toBe(
+      'noncanonical-scalar',
+    );
+  });
+
+  it('rejects a mixed-case storage address rather than silently lowercasing it', () => {
+    expect(codeOf(() => buildScopedKnowledgeAssetUal('84532', `0x${'A1'.repeat(20)}`, 7n))).toBe(
+      'noncanonical-scalar',
+    );
+  });
+
+  it('still builds both canonical forms', () => {
+    expect(buildScopedKnowledgeAssetUal('84532', KA_STORAGE, 7n)).toBe(
+      `did:dkg:84532/${KA_STORAGE}/7`,
+    );
+    expect(
+      buildScopedKnowledgeAssetUal('84532', KA_STORAGE, (BigInt(OTHER_ADDRESS) << 96n) | 7n),
+    ).toBe(`did:dkg:84532/${OTHER_ADDRESS}/7`);
+  });
+});
+
+describe('closed vocabularies are frozen at runtime (review P2-1)', () => {
+  it('refuses mutation of every exported tuple', () => {
+    for (const vocabulary of [
+      UPDATE_PAGE_ASSURANCES,
+      VM_UPDATE_SCAN_OUTCOMES,
+      VM_UPDATE_EVENT_RESULTS,
+      VM_UPDATE_COVERAGE_STATES,
+      VM_UPDATE_ERROR_CODES,
+    ]) {
+      expect(Object.isFrozen(vocabulary)).toBe(true);
+      const before = [...vocabulary];
+      // `as const` is compile-time only; without a runtime freeze a consumer
+      // could widen a "closed" vocabulary at import time.
+      expect(() => (vocabulary as unknown as string[]).push('injected')).toThrow();
+      expect([...vocabulary]).toEqual(before);
+    }
+  });
+});
+
 describe('scope identity', () => {
   it('derives one id from the four identity fields', () => {
     expect(deriveVmUpdateScopeId(scope())).toBe(deriveVmUpdateScopeId(scope()));
@@ -415,14 +620,17 @@ describe('ordered log commitment', () => {
     // come straight off an untrusted RPC response.
     expect(MAX_LOG_TOPICS).toBe(4);
     expect(() => orderedLogCommitment([log({ topics: Array(4).fill(HASH_A) })])).not.toThrow();
+    // A length violation is `page-oversized`; a shape violation (non-array,
+    // hole, accessor) is `page-malformed`. Both refuse, but an operator reading
+    // the metric should be able to tell "too big" from "not well formed".
     expect(codeOf(() => orderedLogCommitment([log({ topics: Array(5).fill(HASH_A) })]))).toBe(
-      'page-malformed',
+      'page-oversized',
     );
 
     // A hostile page must be refused without the allocation. If the guard ran
     // after `topics.map`, this call would build a million-entry array first.
     const hostile = log({ topics: Array.from({ length: 1_000_000 }, () => HASH_A) });
-    expect(codeOf(() => orderedLogCommitment([hostile]))).toBe('page-malformed');
+    expect(codeOf(() => orderedLogCommitment([hostile]))).toBe('page-oversized');
   });
 
   it('rejects a non-array topics field rather than throwing a TypeError', () => {

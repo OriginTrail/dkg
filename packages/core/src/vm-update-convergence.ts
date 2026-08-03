@@ -55,8 +55,30 @@ function adapt<T>(label: string, assertion: () => T, code: VmUpdateErrorCodeV1 =
 
 /** `(1 << 96) - 1` — the rootless KA-number field width. */
 export const MAX_ROOTLESS_KA_NUMBER = (1n << 96n) - 1n;
-/** Bound on any single canonicalized string this module will hash or persist. */
+/** Upper bound of the on-chain id domain. */
+const MAX_UINT256 = (1n << 256n) - 1n;
+/**
+ * Bound on an IDENTITY scalar — chain id, deployment id, UAL, origin.
+ *
+ * Deliberately NOT applied to raw event data. `log.data` for a legal
+ * `KnowledgeAssetMerkleRootsUpdated` is `64 + n * 96` bytes: 21 MerkleRoot
+ * entries is 2,080 bytes, i.e. 4,162 hex characters, which this cap would
+ * reject. That event is a BLOCKING mutation, so rejecting it would stop W2
+ * before it can persist the unsupported-mutation latch that is supposed to fail
+ * closed — a legal on-chain event turned into a wedge. Raw log bytes are bounded
+ * by {@link MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE} instead, per page, as the
+ * plan specifies.
+ */
 const MAX_SCALAR_BYTES = 4_096;
+
+/**
+ * Aggregate bound on the raw topic+data hex a single page may carry.
+ *
+ * Enforced while walking the page, before the commitment input is assembled, so
+ * an oversized page is refused rather than expanded. The transport answers this
+ * with adaptive range halving.
+ */
+export const MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE = 8 * 1024 * 1024;
 /** Bound on one page's event count, mirroring the transport's own page bound. */
 export const MAX_UPDATE_PAGE_EVENTS = 4_096;
 /**
@@ -72,10 +94,10 @@ export const MAX_LOG_TOPICS = 4;
 // verifier can prove the runtime set matches the type. A bare `type` union is
 // invisible at runtime and cannot be checked for drift.
 
-export const UPDATE_PAGE_ASSURANCES = ['unattested', 'dual-origin-corroborated'] as const;
+export const UPDATE_PAGE_ASSURANCES = Object.freeze(['unattested', 'dual-origin-corroborated'] as const);
 export type UpdatePageAssuranceV1 = (typeof UPDATE_PAGE_ASSURANCES)[number];
 
-export const VM_UPDATE_SCAN_OUTCOMES = [
+export const VM_UPDATE_SCAN_OUTCOMES = Object.freeze([
   'corroborated',
   'unattested',
   'empty',
@@ -86,10 +108,10 @@ export const VM_UPDATE_SCAN_OUTCOMES = [
   'corroboration_disagreement',
   'oversized',
   'unsupported',
-] as const;
+] as const);
 export type VmUpdateScanOutcomeV1 = (typeof VM_UPDATE_SCAN_OUTCOMES)[number];
 
-export const VM_UPDATE_EVENT_RESULTS = [
+export const VM_UPDATE_EVENT_RESULTS = Object.freeze([
   'newer',
   'duplicate',
   'discarded_resume',
@@ -97,18 +119,18 @@ export const VM_UPDATE_EVENT_RESULTS = [
   'unsupported',
   'unbound',
   'promoted',
-] as const;
+] as const);
 export type VmUpdateEventResultV1 = (typeof VM_UPDATE_EVENT_RESULTS)[number];
 
-export const VM_UPDATE_COVERAGE_STATES = [
+export const VM_UPDATE_COVERAGE_STATES = Object.freeze([
   'bootstrapping',
   'caught_up',
   'reorg_recovering',
   'unavailable',
-] as const;
+] as const);
 export type VmUpdateCoverageStateV1 = (typeof VM_UPDATE_COVERAGE_STATES)[number];
 
-export const VM_UPDATE_ERROR_CODES = [
+export const VM_UPDATE_ERROR_CODES = Object.freeze([
   'scope-drift',
   'noncanonical-scalar',
   'foreign-chain',
@@ -122,8 +144,9 @@ export const VM_UPDATE_ERROR_CODES = [
   'origin-not-distinct',
   'commitment-mismatch',
   'cursor-regression',
+  'resume-identity-conflict',
   'coverage-invalid',
-] as const;
+] as const);
 export type VmUpdateErrorCodeV1 = (typeof VM_UPDATE_ERROR_CODES)[number];
 
 /**
@@ -148,6 +171,52 @@ export class VmUpdateConvergenceError extends Error {
 
 function fail(code: VmUpdateErrorCodeV1, detail: string, cause?: unknown): never {
   throw new VmUpdateConvergenceError(code, detail, cause === undefined ? undefined : { cause });
+}
+
+/**
+ * Snapshot an array as dense, own, enumerable DATA properties — or fail.
+ *
+ * `Array.isArray` plus `.map()` is not enough, and the gap is exploitable:
+ * `map` skips holes while `new Set(sparse)` observes them as `undefined`, so
+ * `['https://a', <hole>]` has length 2 AND set size 2 and was accepted as two
+ * distinct corroborating origins. The frozen proof then serialized as one URL
+ * and a `null`.
+ *
+ * Descriptors are read with `getOwnPropertyDescriptor`, which does NOT invoke
+ * getters, so an accessor-backed element is refused without running caller code.
+ * Holes and inherited indices have no own descriptor and are refused the same
+ * way.
+ *
+ * `Array.from` is not a substitute: it materializes holes as `undefined` and can
+ * invoke an iterator and getters. `Object.isFrozen` is not a substitute either —
+ * a caller can freeze a malformed object itself.
+ */
+function denseDataArray(
+  value: unknown,
+  label: string,
+  maxLength: number,
+): readonly unknown[] {
+  if (!Array.isArray(value)) fail('page-malformed', `${label} must be an array`);
+  // Length is checked BEFORE any iteration, so an absurd length cannot cost a
+  // walk before it is refused.
+  if (value.length > maxLength) {
+    fail('page-oversized', `${label} carries ${value.length} entries, above ${maxLength}`);
+  }
+  const out: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, index);
+    if (descriptor === undefined) {
+      fail('page-malformed', `${label}[${index}] is a hole or inherited, not own data`);
+    }
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      fail('page-malformed', `${label}[${index}] is an accessor, not a data property`);
+    }
+    if (!descriptor.enumerable) {
+      fail('page-malformed', `${label}[${index}] is not enumerable`);
+    }
+    out.push(descriptor.value);
+  }
+  return out;
 }
 
 // ── canonical scalars ─────────────────────────────────────────────────────
@@ -451,12 +520,28 @@ const LOG_COMMITMENT_DOMAIN = UTF8.encode('dkg:w2:ordered-log-commitment:v1');
  * exact failure the two-origin comparison exists to catch.
  */
 export function orderedLogCommitment(logs: readonly RawLogV1[]): Digest32V1 {
-  if (logs.length > MAX_UPDATE_PAGE_EVENTS) {
-    fail('page-oversized', `page carries ${logs.length} logs, above ${MAX_UPDATE_PAGE_EVENTS}`);
-  }
+  // The page itself must be dense own data before anything is read from it: a
+  // hole here would reach the loop as `undefined` and blow up inside a
+  // canonicalizer with an untyped error instead of a typed malformed page.
+  const dense = denseDataArray(logs, 'page logs', MAX_UPDATE_PAGE_EVENTS);
+
   const parts: string[] = [];
   let previous: FinalizedEventPositionV1 | undefined;
-  for (const log of logs) {
+  // Aggregate raw-bytes budget for the whole page, charged as we walk so an
+  // oversized page is refused before its commitment input is assembled.
+  let encodedBytes = 0;
+  const charge = (hex: string, label: string) => {
+    encodedBytes += hex.length;
+    if (encodedBytes > MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE) {
+      fail(
+        'page-oversized',
+        `page raw log bytes exceed ${MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE} at ${label}`,
+      );
+    }
+  };
+
+  for (const entry of dense) {
+    const log = entry as RawLogV1;
     const position = canonicalPosition(log.position, 'log');
     if (previous !== undefined) {
       const order = compareEventPosition(previous, position);
@@ -464,22 +549,32 @@ export function orderedLogCommitment(logs: readonly RawLogV1[]): Digest32V1 {
       if (order === 0) fail('page-malformed', 'two logs occupy one ordering position');
     }
     previous = position;
-    const data = boundedString(log.data, 'log.data');
-    adapt('log.data', () => assertCanonicalHexBytes(data, 'log.data', 0, MAX_SCALAR_BYTES));
-    // Bound BEFORE expanding: `topics.map` on an unbounded array is the
-    // allocation this guard exists to prevent, so it cannot come after.
-    if (!Array.isArray(log.topics)) fail('page-malformed', 'log.topics must be an array');
-    if (log.topics.length > MAX_LOG_TOPICS) {
-      fail(
-        'page-malformed',
-        `log carries ${log.topics.length} topics, above the EVM bound of ${MAX_LOG_TOPICS}`,
-      );
-    }
+
+    // Topics: dense own data, bounded at the EVM's own LOG0..LOG4 limit, and
+    // bounded BEFORE expansion.
+    const topics = denseDataArray(log.topics, 'log.topics', MAX_LOG_TOPICS);
+
+    if (typeof log.data !== 'string') fail('page-malformed', 'log.data must be a string');
+    charge(log.data, 'log.data');
+    // Raw event data is bounded by the PAGE budget, not the identity-scalar cap.
+    adapt('log.data', () => assertCanonicalHexBytes(
+      log.data,
+      'log.data',
+      0,
+      MAX_ENCODED_UPDATE_LOG_BYTES_PER_PAGE,
+    ));
+
+    const canonicalTopics = topics.map((topic, index) => {
+      const digest = canonicalDigest32(topic, `log.topics[${index}]`);
+      charge(digest, `log.topics[${index}]`);
+      return digest;
+    });
+
     parts.push(
       canonicalEvmAddress(log.address, 'log.address'),
-      String(log.topics.length),
-      ...log.topics.map((topic, index) => canonicalDigest32(topic, `log.topics[${index}]`)),
-      data,
+      String(canonicalTopics.length),
+      ...canonicalTopics,
+      log.data,
       String(position.blockNumber),
       position.blockHash,
       position.transactionHash,
@@ -548,10 +643,14 @@ export function canonicalPageProof(
   if (input.assurance !== 'unattested' && input.assurance !== 'dual-origin-corroborated') {
     fail('assurance-insufficient', 'proof.assurance is not a known assurance level');
   }
-  if (!Array.isArray(input.normalizedOrigins) || input.normalizedOrigins.length === 0) {
+  // Dense own data BEFORE mapping. `map` skips holes while `new Set` observes
+  // them as `undefined`, so `['https://a', <hole>]` previously had length 2 and
+  // set size 2 and minted a false `dual-origin-corroborated` proof.
+  const rawOrigins = denseDataArray(input.normalizedOrigins, 'proof.normalizedOrigins', 2);
+  if (rawOrigins.length === 0) {
     fail('origin-not-distinct', 'proof.normalizedOrigins must carry at least one origin');
   }
-  const origins = input.normalizedOrigins.map((origin, index) =>
+  const origins = rawOrigins.map((origin, index) =>
     normalizeEndpointOrigin(origin, `proof.normalizedOrigins[${index}]`),
   );
   const distinct = new Set(origins);
@@ -608,9 +707,19 @@ export function canonicalPageProof(
   });
 }
 
-/** Only a corroborated page may move authoritative coverage or feed the reducer. */
+/**
+ * Only a corroborated page may move authoritative coverage or feed the reducer.
+ *
+ * This CANONICALIZES rather than reading `proof.assurance` off whatever it was
+ * handed. Reading the string alone made authority a declaration: any object
+ * literal carrying `assurance: 'dual-origin-corroborated'` — including one whose
+ * origin list was sparse or accessor-backed — answered true. It throws a typed
+ * error on malformed evidence rather than quietly answering `false`, because a
+ * page that cannot be canonicalized is a defect to surface, not an unattested
+ * page to skip.
+ */
 export function isAuthoritativePage(proof: FinalizedUpdatePageProofV1): boolean {
-  return proof.assurance === 'dual-origin-corroborated';
+  return canonicalPageProof(proof).assurance === 'dual-origin-corroborated';
 }
 
 // ── two-cursor model ──────────────────────────────────────────────────────
@@ -683,7 +792,25 @@ export function isDiscardedByResume(
   resumeAfter: FinalizedEventPositionV1 | undefined,
 ): boolean {
   if (resumeAfter === undefined) return false;
-  return compareEventPosition(event, resumeAfter) <= 0;
+  const order = compareEventPosition(event, resumeAfter);
+  if (order < 0) return true;
+  if (order > 0) return false;
+  // Equal ORDER is not equal IDENTITY. `(block, txIndex, logIndex)` is the chain
+  // order; `blockHash` and `transactionHash` are part of the event's identity.
+  // A different event at the same numeric position means the page is malformed
+  // or the chain reorganised exactly at the resume boundary — treating it as
+  // "already reduced" silently drops that event AND destroys the only signal
+  // that would have caught the reorg.
+  //
+  // The hashes are deliberately NOT added to `compareEventPosition`:
+  // lexicographic hash ordering would invent a position the chain never assigned.
+  if (!sameEventIdentity(event, resumeAfter)) {
+    fail(
+      'resume-identity-conflict',
+      'a different event occupies the resume position; page is malformed or reorged',
+    );
+  }
+  return true;
 }
 
 // ── scoped KA candidate parser ────────────────────────────────────────────
@@ -718,12 +845,22 @@ export function buildScopedKnowledgeAssetUal(
   legacyStorageAddress: string,
   kaId: bigint,
 ): string {
+  // Validate before formatting. An exported builder that accepts a negative
+  // kaId, a value above uint256, a noncanonical chain id, or an arbitrary
+  // address string emits a syntactically well-formed UAL that denotes nothing —
+  // and silently lowercasing the address would make two spellings one identity.
+  const canonicalChain = canonicalUalChainId(chainId, 'ual chainId');
+  const canonicalStorage = canonicalEvmAddress(legacyStorageAddress, 'ual storage address');
+  if (typeof kaId !== 'bigint') fail('noncanonical-scalar', 'kaId must be a bigint');
+  if (kaId < 0n) fail('noncanonical-scalar', 'kaId must not be negative');
+  if (kaId > MAX_UINT256) fail('ka-number-overflow', 'kaId exceeds uint256');
+
   if (kaId >> 96n === 0n) {
-    return `did:dkg:${chainId}/${legacyStorageAddress.toLowerCase()}/${kaId.toString()}`;
+    return `did:dkg:${canonicalChain}/${canonicalStorage}/${kaId.toString()}`;
   }
   const agentAddress = `0x${(kaId >> 96n).toString(16).padStart(40, '0')}`;
   const kaNumber = kaId & MAX_ROOTLESS_KA_NUMBER;
-  return `did:dkg:${chainId}/${agentAddress.toLowerCase()}/${kaNumber.toString()}`;
+  return `did:dkg:${canonicalChain}/${agentAddress}/${kaNumber.toString()}`;
 }
 
 /**
@@ -833,29 +970,19 @@ export interface FinalizedKaTargetV1 {
 }
 
 /**
- * The durable surface W2a needs. Implemented by the node-UI SQLite store; kept
- * here so the reducer's rules can be tested against an in-memory fake without
- * the store package.
+ * The durable store contract is intentionally NOT exported from this PR.
+ *
+ * An earlier revision published `VmUpdateConvergenceStoreV1` with five broad
+ * operations. It had no in-repository implementation or consumer, and its shape
+ * could not express the contract the plan actually requires: every cursor
+ * mutation is an expected-revision PLUS expected-prior-cursor CAS, with the
+ * canonical proof supplied to the atomic boundary. Two stale callers can
+ * legitimately hold the same revision, so a bare `expectedRevision` does not
+ * make the operations safe, and accepting an assurance string would re-open the
+ * forgeable-evidence hole this module closes.
+ *
+ * Publishing that shape as `V1` would turn a placeholder into an API promise and
+ * force a breaking change later. It lands with the SQLite store slice (plan
+ * §10.4), where its operations and CAS predicates can be defined and tested
+ * together.
  */
-export interface VmUpdateConvergenceStoreV1 {
-  loadScope(scopeId: string): Promise<Readonly<VmUpdateScopeV1> | null>;
-  loadCursor(scopeId: string): Promise<Readonly<UpdateCoverageCursorV1> | null>;
-  /** Reducing a chunk advances only `resumeAfter`, atomically with the events. */
-  reduceChunk(input: {
-    scopeId: string;
-    coverageRevision: number;
-    events: readonly Readonly<FinalizedKnowledgeAssetUpdateV1>[];
-    resumeAfter: FinalizedEventPositionV1;
-  }): Promise<void>;
-  /** Completing a page advances `coveredThrough` and clears `resumeAfter`. */
-  completePage(input: {
-    scopeId: string;
-    coverageRevision: number;
-    coveredThrough: BlockRefV1;
-  }): Promise<void>;
-  /** An unattested page moves observation only; it never touches coverage. */
-  recordUnattestedObservation(input: {
-    scopeId: string;
-    observation: UnattestedObservationV1;
-  }): Promise<void>;
-}

@@ -34,6 +34,7 @@ export default defineConfig({
       "test/confirmed-meta-source-labels.test.ts",
       "test/sync-envelope-cursor.test.ts",
       "test/w2-ual-parity.test.ts",
+      "test/rfc64-receiver-admission-deferral.test.ts",
       "test/exact-assets.test.ts",
       "test/exact-asset-responder.test.ts",
       "test/exact-asset-wire-parse.test.ts",
