@@ -1081,4 +1081,37 @@ describe('W1 D3 — releasing an older ledger generation must not evict a live n
     expect(expired).toBe(false);
     expect(drained).toBe(1);
   });
+
+  it('actually FREES the slot when it still holds that entry', () => {
+    // D4. The test above pins the identity guard's `=== entry` half — it must
+    // not evict a newer generation — and is structurally blind to the other
+    // half: a `releaseCatchupJob` that deletes NOTHING passes it. Both jobs
+    // above share one id, so the ledger holds 1 entry either way, and the
+    // `drained`/`newerSettled` assertions are satisfied by the slot staying
+    // occupied. Measured, not assumed: with `releaseCatchupJob` reduced to
+    // `void entry;` the whole suite was 31/31 green.
+    //
+    // NO DRAIN HERE, AND THAT IS THE POINT. `drainCatchupJobs` ends with
+    // `ledger.clear()`, so ANY ledger-size assertion placed after one is
+    // unfalsifiable — the drain empties the map regardless of what release
+    // did. This is the only placement where "release actually deletes" can
+    // fail.
+    //
+    // What it protects is not a counting bug: `recordTerminalOnce` is
+    // idempotent, so I8 stays exact either way. It is unbounded growth — every
+    // settled walk job retained for the process lifetime on a node that may
+    // never shut down.
+    const only = beginWalkCatchupJob({
+      jobId: 'solo-job-id',
+      contextGraphId: 'cg-d4',
+      includeWorkspace: false,
+      status: 'running' as const,
+      queuedAt: 0,
+      startedAt: 0,
+    });
+    expect(catchupLedgerSize()).toBe(1);
+
+    releaseCatchupJob(only);
+    expect(catchupLedgerSize()).toBe(0);
+  });
 });

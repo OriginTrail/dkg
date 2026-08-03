@@ -220,6 +220,12 @@ export async function drainCatchupJobs(
     }
   }
   for (const entry of entries) recordTerminalOnce(entry);
+  // TRAP FOR TEST AUTHORS: this `clear()` empties the ledger unconditionally,
+  // so ANY `catchupLedgerSize()` assertion placed after a drain is
+  // unfalsifiable — it reads 0 whatever `releaseCatchupJob` did, or did not,
+  // do. A positive control for the release guard was once written just below a
+  // drain for exactly this reason and could not fail. Assert ledger size only
+  // in a test that never calls this function.
   ledger.clear();
   return { drained: entries.length, expired };
 }
