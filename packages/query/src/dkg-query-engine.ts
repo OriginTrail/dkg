@@ -7,6 +7,7 @@ import type {
 import {
   ExactGraphReadError,
   GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   readExactGraphPaged,
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
@@ -940,9 +941,11 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       `SELECT DISTINCT ?graph WHERE {
         VALUES ?metaGraph { ${[...metaGraphs].map((graph) => `<${assertSafeIri(graph)}>`).join(' ')} }
         GRAPH ?metaGraph {
-          ?head <${DKG_SWM_FINALIZED_PREDICATE}>
-            "true"^^<http://www.w3.org/2001/XMLSchema#boolean> ;
-            <http://dkg.io/ontology/assertionGraph> ?graph .
+          ?head <http://dkg.io/ontology/assertionGraph> ?graph ;
+            <http://dkg.io/ontology/assertionVersion> ?assertionVersion .
+        }
+        GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+          ?graph <${DKG_SWM_FINALIZED_PREDICATE}> ?assertionVersion .
         }
       }`,
     );

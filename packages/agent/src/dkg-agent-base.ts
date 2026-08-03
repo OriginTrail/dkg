@@ -1008,18 +1008,6 @@ export class DKGAgentBase {
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
   /**
-   * Exact registration provenance observed by the live chain poller. The
-   * ordinal sweep can recover a KA id and root from contract views, but those
-   * views do not expose the transaction hash needed to persist confirmed VM
-   * metadata. Retain the bounded event hint until the sweep has resolved and
-   * revalidated its canonical receipt.
-   */
-  protected readonly vmReconcileRegistrationHints = new Map<string, {
-    txHash: string;
-    blockNumber: number;
-    txIndex?: number;
-  }>();
-  /**
    * In-flight core-hosted recordings launched from the synchronous StorageACK
    * pre-sign hook. Tracked so rejections are logged and graceful stop() can
    * flush the host-only `coreHosted` flag before teardown.

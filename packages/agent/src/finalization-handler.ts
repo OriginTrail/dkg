@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteGenSource,
@@ -32,11 +33,7 @@ import {
   type TripleStore,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import {
-  type CanonicalFinalizationReceipt,
-  type ChainAdapter,
-  type EventFilter,
-} from '@origintrail-official/dkg-chain';
+import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generatedPrivateCatalogFloorQuads,
@@ -302,7 +299,7 @@ export interface FinalizationHandlerOptions {
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
-  /** Shared with every per-KA SWM writer owned by the agent. */
+  /** Shared with every per-KA SWM writer; omission disables SWM retirement markers. */
   writeLocks?: Map<string, Promise<void>>;
 }
 
@@ -350,7 +347,6 @@ interface ChainReconciledKCInput {
   authorAddress?: string;
   subGraphName?: string;
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
-  canonicalReceipt?: CanonicalFinalizationReceipt;
 }
 
 interface PreparedGraphScopedMaterialization
@@ -385,7 +381,7 @@ export class FinalizationHandler {
   // track write generations — the memo is then DISABLED and every reconcile
   // scans (fail-open), matching pre-memo behavior.
   private readonly graphWriteGen: GraphWriteGenSource | null;
-  private readonly writeLocks: Map<string, Promise<void>>;
+  private readonly writeLocks: Map<string, Promise<void>> | undefined;
   // Negative memo for `findSwmSnapshotForMerkleRoot`: "this (cg, namespace,
   // root) had NO matching local SWM snapshot at write generation G". Unlike
   // `chainCgIdByLookupId` above, caching the negative here is sound BECAUSE it
@@ -426,7 +422,7 @@ export class FinalizationHandler {
       legacyLifecycleLogOptions,
     );
     this.store = store;
-    this.writeLocks = options.writeLocks ?? new Map();
+    this.writeLocks = options.writeLocks;
     this.graphWriteGen = asGraphWriteGenSource(store);
     this.chain = chain;
     this.eventBus = options.eventBus;
@@ -1461,7 +1457,6 @@ export class FinalizationHandler {
     authorAddress?: string;
     subGraphName?: string;
     trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
-    canonicalReceipt?: CanonicalFinalizationReceipt;
   }, ctx: OperationContext): Promise<
     | 'promoted'
     | 'already-confirmed'
@@ -1479,8 +1474,7 @@ export class FinalizationHandler {
       versionBlock,
       authorAddress,
       subGraphName,
-      trustedAssertionEvidence: suppliedTrustedAssertionEvidence,
-      canonicalReceipt,
+      trustedAssertionEvidence,
     } = input;
     // Historical UAL shapes can be valid inputs to the legacy root-scoped
     // recovery code but cannot name a V2 per-KA graph. Do not let the strict
@@ -1506,11 +1500,11 @@ export class FinalizationHandler {
         ctx,
         `Chain-reconcile: corrupt graph-scoped SWM head for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      if (!suppliedTrustedAssertionEvidence) return 'no-swm';
+      if (!trustedAssertionEvidence) return 'no-swm';
       // Named recovery carries receipt/seal-validated immutable evidence. A
       // torn mutable head must not block exact recovery of that assertion.
     }
-    if (!workspaceHead && !suppliedTrustedAssertionEvidence) {
+    if (!workspaceHead && !trustedAssertionEvidence) {
       return this.reconcileConfirmedGraphScopedVmWithoutWorkspaceHead({
         contextGraphId,
         ual,
@@ -1519,48 +1513,6 @@ export class FinalizationHandler {
         versionBlock,
         ...(subGraphName ? { subGraphName } : {}),
       }, ctx);
-    }
-
-    let trustedAssertionEvidence = suppliedTrustedAssertionEvidence;
-    if (!trustedAssertionEvidence && workspaceHead && canonicalReceipt) {
-      const canonicalReceiptMatches = canonicalReceipt.kaId === kaId
-        && equalBytes(canonicalReceipt.merkleRoot, merkleRoot)
-        && canonicalReceipt.publisherAddress.toLowerCase() === publisherAddress.toLowerCase()
-        && ethers.isHexString(canonicalReceipt.txHash, 32)
-        && ethers.isHexString(canonicalReceipt.blockHash, 32)
-        && Number.isSafeInteger(canonicalReceipt.blockNumber)
-        && canonicalReceipt.blockNumber > 0
-        && Number.isSafeInteger(canonicalReceipt.txIndex)
-        && canonicalReceipt.txIndex >= 0;
-      if (!canonicalReceiptMatches) {
-        this.log.warn(ctx, `Chain-reconcile: canonical receipt does not match ${ual}`);
-        return 'no-swm';
-      }
-      trustedAssertionEvidence = {
-        assertionVersion: workspaceHead.assertionVersion,
-        publicTripleCount: workspaceHead.publicTripleCount,
-        ...(workspaceHead.privateMerkleRoot
-          ? { privateMerkleRoot: workspaceHead.privateMerkleRoot }
-          : {}),
-        privateTripleCount: workspaceHead.privateTripleCount,
-        publicQuadsDigest: workspaceHead.publicQuadsDigest,
-        publisherPeerId: workspaceHead.publisherPeerId,
-        publisherAddress: canonicalReceipt.publisherAddress,
-        transactionHash: canonicalReceipt.txHash,
-        blockNumber: canonicalReceipt.blockNumber,
-        blockHash: canonicalReceipt.blockHash,
-        txIndex: canonicalReceipt.txIndex,
-        ...(canonicalReceipt.authorAddress ?? authorAddress
-          ? { authorAddress: canonicalReceipt.authorAddress ?? authorAddress }
-          : {}),
-        // A registration receipt proves chain identity, content root and
-        // ordering, not a peer-supplied SWM access envelope. Preserve the
-        // pre-existing chain-reconcile fail-closed policy; authenticated named
-        // finalization recovery remains the lane that can carry allowList.
-        accessPolicy: 'ownerOnly',
-        allowedPeers: [],
-        ...(subGraphName ? { subGraphName } : {}),
-      };
     }
 
     let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
@@ -2030,9 +1982,8 @@ export class FinalizationHandler {
    * and content are re-read and re-verified while that lock is held, so a newer
    * unpublished assertion is preserved even when it arrived after the first
    * finalization verification. The physical snapshot stays in place for
-   * receipt/reorg recovery; the strict SWM query view consumes this marker and
-   * omits finalized heads. A newer writer replaces the whole head subject and
-   * therefore removes the marker automatically.
+   * receipt/reorg recovery; the strict SWM query view joins the local marker's
+   * assertion version against the current durable head before hiding it.
    */
   private async markMatchingGraphScopedSwmFinalized(input: {
     contextGraphId: string;
@@ -2042,8 +1993,10 @@ export class FinalizationHandler {
     ctx: OperationContext;
   }): Promise<boolean> {
     const { contextGraphId, scope, merkleRoot, subGraphName, ctx } = input;
+    const writeLocks = this.writeLocks;
+    if (!writeLocks) return false;
     return withKeyedLocks(
-      this.writeLocks,
+      writeLocks,
       [swmKaWriteLockKey(contextGraphId, subGraphName, scope.ual)],
       async () => {
         const graphManager = new GraphManager(this.store);
@@ -2076,18 +2029,23 @@ export class FinalizationHandler {
         });
         if (verification.status !== 'verified') return false;
 
-        const metaGraph = graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-        const headSubject = assertSafeIri(`${scope.ual}#dkg-swm-head`);
+        const swmGraph = knowledgeAssetLayerGraphUri(
+          contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          scope,
+          subGraphName,
+        );
+        const assertionVersion = `"${scope.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
         await this.store.deleteByPattern({
-          graph: metaGraph,
-          subject: headSubject,
+          graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+          subject: swmGraph,
           predicate: DKG_SWM_FINALIZED_PREDICATE,
         });
         await this.store.insert([{
-          graph: metaGraph,
-          subject: headSubject,
+          graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+          subject: swmGraph,
           predicate: DKG_SWM_FINALIZED_PREDICATE,
-          object: '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>',
+          object: assertionVersion,
         }]);
         this.log.info(
           ctx,
@@ -2105,23 +2063,23 @@ export class FinalizationHandler {
     subGraphName?: string;
   }): Promise<void> {
     const { contextGraphId, scope, subGraphName } = input;
+    const writeLocks = this.writeLocks;
+    if (!writeLocks) return;
     await withKeyedLocks(
-      this.writeLocks,
+      writeLocks,
       [swmKaWriteLockKey(contextGraphId, subGraphName, scope.ual)],
       async () => {
-        const graphManager = new GraphManager(this.store);
-        const head = await resolveKnowledgeAssetWorkspaceHead({
-          store: this.store,
-          graphManager,
+        const swmGraph = knowledgeAssetLayerGraphUri(
           contextGraphId,
-          kaUal: scope.ual,
+          MemoryLayer.SharedWorkingMemory,
+          scope,
           subGraphName,
-        });
-        if (!head || head.assertionVersion !== scope.assertionVersion) return;
+        );
         await this.store.deleteByPattern({
-          graph: graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName),
-          subject: assertSafeIri(`${scope.ual}#dkg-swm-head`),
+          graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+          subject: swmGraph,
           predicate: DKG_SWM_FINALIZED_PREDICATE,
+          object: `"${scope.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
         });
       },
     );
@@ -2885,7 +2843,6 @@ export class FinalizationHandler {
       authorAddress,
       subGraphName,
       trustedAssertionEvidence,
-      ...(input.canonicalReceipt ? { canonicalReceipt: input.canonicalReceipt } : {}),
     }, ctx);
     if (graphScopedOutcome !== undefined) return graphScopedOutcome;
     if (await this.hasGraphScopedMetadata(contextGraphId, ual)) {

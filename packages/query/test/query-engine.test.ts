@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
 import {
   GraphSetIndexStore,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
   type Quad,
   type QueryOptions as StoreQueryOptions,
@@ -1280,7 +1281,7 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings).toHaveLength(0);
   });
 
-  it('view=shared-working-memory hides finalized recovery snapshots and re-exposes a newer head', async () => {
+  it('hides only a locally finalized current SWM head and ignores peer markers', async () => {
     const finalizedGraph = `${GRAPH}/_shared_memory/0x1111111111111111111111111111111111111111/1`;
     const activeGraph = `${GRAPH}/_shared_memory/0x2222222222222222222222222222222222222222/2`;
     const swmMeta = `${GRAPH}/_shared_memory_meta`;
@@ -1289,6 +1290,7 @@ describe('DKGQueryEngine', () => {
       q('urn:swm:finalized', SCHEMA_NAME, '"finalized-recovery"', finalizedGraph),
       q('urn:swm:active', SCHEMA_NAME, '"active-draft"', activeGraph),
       q(head, `${DKG}assertionGraph`, finalizedGraph, swmMeta),
+      q(head, `${DKG}assertionVersion`, `"1"^^<${XSD_INTEGER}>`, swmMeta),
       q(
         head,
         DKG_SWM_FINALIZED_PREDICATE,
@@ -1297,18 +1299,40 @@ describe('DKGQueryEngine', () => {
       ),
     ]);
 
+    const peerMarkerIgnored = await engine.query(
+      `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name } ORDER BY ?name`,
+      { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
+    );
+    expect(peerMarkerIgnored.bindings.map((row) => row['name'])).toEqual([
+      '"active-draft"',
+      '"finalized-recovery"',
+    ]);
+
+    await store.insert([q(
+      finalizedGraph,
+      DKG_SWM_FINALIZED_PREDICATE,
+      `"1"^^<${XSD_INTEGER}>`,
+      LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+    )]);
     const hidden = await engine.query(
       `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name } ORDER BY ?name`,
       { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },
     );
     expect(hidden.bindings.map((row) => row['name'])).toEqual(['"active-draft"']);
 
-    // A newer SWM head replaces the complete head subject, clearing the marker.
+    // A newer head reuses the same SWM graph but does not inherit the older
+    // assertion's local retirement authority.
     await store.deleteByPattern({
       graph: swmMeta,
       subject: head,
-      predicate: DKG_SWM_FINALIZED_PREDICATE,
+      predicate: `${DKG}assertionVersion`,
     });
+    await store.insert([q(
+      head,
+      `${DKG}assertionVersion`,
+      `"2"^^<${XSD_INTEGER}>`,
+      swmMeta,
+    )]);
     const visibleAgain = await engine.query(
       `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name } ORDER BY ?name`,
       { contextGraphId: CONTEXT_GRAPH, view: 'shared-working-memory' },

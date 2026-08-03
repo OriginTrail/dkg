@@ -28,13 +28,7 @@ interface AgentInternals {
     sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
     targetOnChainId?: bigint,
   ): Promise<string | null>;
-  handleKARegisteredNudge(
-    onChainId: string,
-    kaId: bigint,
-    ctx: unknown,
-    registration?: { txHash: string; blockNumber: number; txIndex?: number },
-  ): Promise<string | null>;
-  vmReconcileRegistrationHints: Map<string, { txHash: string; blockNumber: number; txIndex?: number }>;
+  handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: {
     dispatch: (cg: string, reason: 'live' | 'periodic') => Promise<boolean>;
@@ -208,19 +202,12 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       tryTriggerPeriodic: () => true,
     };
 
-    const registration = {
-      txHash: `0x${'80'.repeat(32)}`,
-      blockNumber: 808,
-      txIndex: 3,
-    };
     const reconciled = await internals.handleKARegisteredNudge(
       ON_BOUND,
       1n,
       createOperationContext('system'),
-      registration,
     );
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
-    expect(internals.vmReconcileRegistrationHints.get(`${ON_BOUND}:1`)).toEqual(registration);
   });
 });

@@ -95,11 +95,6 @@ interface AgentInternals {
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   gossipRegistered: Set<string>;
-  vmReconcileRegistrationHints: Map<string, {
-    txHash: string;
-    blockNumber: number;
-    txIndex?: number;
-  }>;
   vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
@@ -823,52 +818,6 @@ describe('Phase D - VM reconcile damping', () => {
       kaId,
       ual: buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId),
     });
-  });
-
-  it('revalidates a live registration hint and forwards canonical receipt provenance', async () => {
-    const internals = await boot();
-    const onChainCgId = 68n;
-    const authorAddress = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
-    const kaNumber = 409n;
-    const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: authorAddress, kaNumber });
-    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
-    const merkleRoot = await internals.chain.getLatestMerkleRoot(kaId);
-    const publisherAddress = await internals.chain.getLatestMerkleRootPublisher(kaId);
-    const txHash = `0x${'68'.repeat(32)}`;
-    const receipt = {
-      txHash,
-      blockNumber: 321,
-      blockHash: `0x${'86'.repeat(32)}`,
-      txIndex: 7,
-      merkleRoot,
-      publisherAddress,
-      authorAddress,
-      batchId: kaId,
-      kaId,
-      startKAId: kaId,
-      endKAId: kaId,
-    };
-    const resolveReceipt = recorder(async () => ({
-      status: 'confirmed' as const,
-      receipt,
-    }));
-    internals.chain.resolveCanonicalFinalizationReceipt = resolveReceipt;
-    internals.vmReconcileRegistrationHints.set(`${onChainCgId}:${kaId}`, {
-      txHash,
-      blockNumber: 321,
-      txIndex: 7,
-    });
-
-    const reconcile = recorder(async () => 'already-confirmed' as const);
-    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
-      handleChainReconciledKC: reconcile,
-    }));
-
-    await expect(internals.reconcileChainOrdinal('68', onChainCgId, 0, 400))
-      .resolves.toEqual({ status: 'already', blockNumber: 400 });
-    expect(resolveReceipt.calls).toEqual([[txHash, { expectedBlockNumber: 321 }]]);
-    expect(reconcile.calls[0]?.[0]).toMatchObject({ canonicalReceipt: receipt });
-    expect(internals.vmReconcileRegistrationHints.has(`${onChainCgId}:${kaId}`)).toBe(false);
   });
 
   it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {

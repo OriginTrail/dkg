@@ -324,10 +324,10 @@ export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraph
 }
 
 /**
- * Boolean marker on a graph-scoped SWM head whose exact assertion has reached
- * confirmed VM. The physical SWM snapshot remains available to receipt/reorg
- * recovery, while strict shared-working-memory queries omit it. A newer SWM
- * writer replaces the complete head subject and therefore clears the marker.
+ * Node-local marker for a graph-scoped SWM assertion that reached confirmed
+ * VM. The physical SWM snapshot remains available to receipt/reorg recovery;
+ * strict SWM queries hide it only when the marker version matches the current
+ * durable head. Markers live outside every syncable context-graph namespace.
  */
 export const DKG_SWM_FINALIZED_PREDICATE =
   'http://dkg.io/ontology/sharedMemoryFinalized';

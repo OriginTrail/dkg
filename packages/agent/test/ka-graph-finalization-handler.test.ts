@@ -14,11 +14,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
   StoreSchedulerBusyError,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import {
   computeFlatKCRootV10,
   computePrivateRootV10,
@@ -1992,7 +1994,7 @@ describe('graph-scoped finalization handler', () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-rejected-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
-      const { message, vmGraph } = await stageGraph();
+      const { message, swmGraph, vmGraph } = await stageGraph();
       let rejected = false;
       const chain = {
         chainId: 'base:84532',
@@ -2006,7 +2008,7 @@ describe('graph-scoped finalization handler', () => {
       const recoveryHandler = new FinalizationHandler(
         store,
         chain,
-        recoveryOptions(inbox),
+        { ...recoveryOptions(inbox), writeLocks: new Map() },
       );
 
       await recoveryHandler.handleFinalizationMessage(
@@ -2016,6 +2018,16 @@ describe('graph-scoped finalization handler', () => {
       );
       expect(await inbox.list()).toMatchObject([{ state: 'SETTLED' }]);
       expect(await store.countQuads(vmGraph)).toBe(2);
+      await expect(store.query(
+        `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+          <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}>
+            "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(new DKGQueryEngine(store).query(
+        'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
+        { contextGraphId: CG, view: 'shared-working-memory' },
+      )).resolves.toEqual({ bindings: [] });
 
       rejected = true;
       const persistedWatermarks: number[] = [];
@@ -2041,6 +2053,17 @@ describe('graph-scoped finalization handler', () => {
       }]);
       expect(await store.countQuads(vmGraph)).toBe(0);
       expect(persistedWatermarks).toEqual([]);
+      await expect(store.query(
+        `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+          <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}>
+            "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+      const visibleAgain = await new DKGQueryEngine(store).query(
+        'SELECT ?value WHERE { ?s <urn:predicate:value> ?value } ORDER BY ?value',
+        { contextGraphId: CG, view: 'shared-working-memory' },
+      );
+      expect(visibleAgain.bindings.map((row) => row['value'])).toEqual(['"one"', '"two"']);
       await expect(store.query(
         `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> `
           + '<http://dkg.io/ontology/status> "confirmed" . } }',
@@ -2173,7 +2196,7 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
-  it('uses canonical registration provenance to materialize VM and retire the matching SWM head', async () => {
+  it('does not treat canonical registration provenance as assertion-bound evidence', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
@@ -2194,23 +2217,22 @@ describe('graph-scoped finalization handler', () => {
       versionBlock: 123,
       authorAddress: AUTHOR,
       canonicalReceipt: canonicalReceipt(message).receipt,
-    }, createOperationContext('system'))).resolves.toBe('promoted');
+    } as Parameters<FinalizationHandler['handleChainReconciledKC']>[0], createOperationContext('system')))
+      .resolves.toBe('verified-vm-metadata-pending');
 
-    expect(await store.countQuads(vmGraph)).toBe(2);
-    // Kept physically as bounded reorg evidence, but retired from the SWM view.
+    expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
     await expect(store.query(
-      `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> {
-        <${UAL}#dkg-swm-head> <${DKG_SWM_FINALIZED_PREDICATE}>
-          "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+      `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+        <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}>
+          "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
       } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
     await expect(store.query(
       `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}>
-        <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
-        <http://dkg.io/ontology/materializedVersion> "123:4" .
+        <http://dkg.io/ontology/transactionHash> "${message.txHash}" .
       } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
@@ -2694,7 +2716,8 @@ describe('graph-scoped finalization handler', () => {
       kaId: PACKED_KA_ID,
       versionBlock: 124,
       authorAddress: AUTHOR,
-    }, createOperationContext('system'));
+      canonicalReceipt: canonicalReceipt(message).receipt,
+    } as Parameters<FinalizationHandler['handleChainReconciledKC']>[0], createOperationContext('system'));
 
     expect(outcome).toBe('verified-vm-metadata-pending');
     expect(await store.countQuads(vmGraph)).toBe(2);

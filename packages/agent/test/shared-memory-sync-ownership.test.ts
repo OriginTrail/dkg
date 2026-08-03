@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { createOperationContext, contextGraphSharedMemoryMetaUri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
+import {
+  DKG_SWM_FINALIZED_PREDICATE,
+  createOperationContext,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphSharedMemoryUri,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
@@ -70,6 +76,72 @@ async function registeredSubGraphNamesFromStore(store: OxigraphStore, contextGra
 }
 
 describe('runSharedMemorySync ownership hydration', () => {
+  it('keeps peer-imported finalized metadata visible without local VM confirmation', async () => {
+    const store = new OxigraphStore();
+    const assertionGraph = `${ROOT_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+    const head = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/1#dkg-swm-head';
+    const dataQuads: Quad[] = [{
+      graph: assertionGraph,
+      subject: 'urn:swm:peer-imported',
+      predicate: SCHEMA_NAME,
+      object: '"peer-imported"',
+    }];
+    const metaQuads: Quad[] = [{
+      graph: ROOT_META_GRAPH,
+      subject: head,
+      predicate: `${DKG}assertionGraph`,
+      object: assertionGraph,
+    }, {
+      graph: ROOT_META_GRAPH,
+      subject: head,
+      predicate: `${DKG}assertionVersion`,
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    }, {
+      graph: ROOT_META_GRAPH,
+      subject: head,
+      predicate: DKG_SWM_FINALIZED_PREDICATE,
+      object: '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>',
+    }];
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWPeerFinalizedMarker',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: async () => ({
+          verifiedData: dataQuads,
+          verifiedMeta: metaQuads,
+          totalFetchedDataQuads: dataQuads.length,
+          totalFetchedMetaQuads: metaQuads.length,
+          droppedDataTriples: 0,
+          emptyResponses: 0,
+          entityCreators: [],
+        }),
+        ensureContextGraph: async () => {},
+        storeInsert: (quads) => store.insert(quads),
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map<string, string>(),
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      const visible = await new DKGQueryEngine(store).query(
+        `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+        { contextGraphId: CG_ID, view: 'shared-working-memory' },
+      );
+      expect(visible.bindings.map((row) => row['name'])).toEqual(['"peer-imported"']);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('hydrates root and sub-graph SWM ownership under separate keys', async () => {
     const ownedMaps = new Map<string, Map<string, string>>();
     const inserted: Quad[] = [];
