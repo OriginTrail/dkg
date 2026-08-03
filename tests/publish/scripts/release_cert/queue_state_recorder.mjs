@@ -195,6 +195,10 @@ async function main() {
             try {
                 await insertRows(client, rows);
             } catch (err) {
+                if (err.code === '42P01' || /does not exist/.test(err.message)) {
+                    console.error('❌ queue_snapshots table missing — apply schema.sql once (DB owner), exiting early instead of looping');
+                    process.exit(1);
+                }
                 console.error(`❌ insert failed: ${err.message}`);
             }
         }
