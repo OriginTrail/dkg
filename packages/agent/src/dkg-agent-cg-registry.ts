@@ -446,9 +446,16 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       || localSubscription.coreHosted === true
     );
     if (locallyAdmitted && typeof resolveHistorical === 'function') {
+      // A direct subscription key is the original local identifier, including
+      // its spelling/case when a legitimate cleartext id happens to look like
+      // a bytes32 wire hash. Only use mappedLocalId when admission was found
+      // through the reverse wire-id index.
+      const localIdForCommitment = directSubscription !== undefined
+        ? contextGraphId
+        : mappedLocalId;
       const wireId = localSubscription.onChainHash
         ? this.contextGraphWireId(localSubscription.onChainHash)
-        : this.contextGraphNameCommitment(mappedLocalId);
+        : this.contextGraphNameCommitment(localIdForCommitment);
       const resolved = options.signal === undefined
         ? await resolveHistorical.call(this.chain, wireId)
         : await resolveHistorical.call(this.chain, wireId, { signal: options.signal });

@@ -89,15 +89,13 @@ describe('ContextGraphCreated name-hash reverse resolution', () => {
     ]);
     expect(adapter.getContextGraphNameHash).toHaveBeenCalledWith(42n);
 
-    // Positive bindings are immutable for this storage deployment.
-    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
     expect(queryEventLogsPage).toHaveBeenCalledTimes(3);
   });
 
   it('single-flights concurrent callers and lets one caller stop waiting', async () => {
-    const { adapter } = fixture();
-    const pending = deferred<bigint | null>();
-    adapter.scanContextGraphIdByNameHash = vi.fn(() => pending.promise);
+    const { adapter, queryEventLogsPage } = fixture();
+    const pending = deferred<{ logs: Array<{ topics: string[]; data: string }>; provider: object }>();
+    queryEventLogsPage.mockImplementation(() => pending.promise);
     const controller = new AbortController();
 
     const aborted = adapter.resolveContextGraphIdByNameHash(NAME_HASH, {
@@ -107,9 +105,28 @@ describe('ContextGraphCreated name-hash reverse resolution', () => {
     controller.abort(new Error('caller stopped'));
 
     await expect(aborted).rejects.toThrow('caller stopped');
-    pending.resolve(42n);
+    pending.resolve({
+      logs: [{ topics: [], data: '42' }],
+      provider: {},
+    });
     await expect(survivor).resolves.toBe(42n);
-    expect(adapter.scanContextGraphIdByNameHash).toHaveBeenCalledTimes(1);
+    expect(queryEventLogsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('rescans a positive result so a later duplicate fails closed', async () => {
+    const { adapter, queryEventLogsPage } = fixture([[42n]]);
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
+
+    queryEventLogsPage.mockResolvedValue({
+      logs: [
+        { topics: [], data: '42' },
+        { topics: [], data: '43' },
+      ],
+      provider: {},
+    });
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /ambiguous.*2 numeric ids/i,
+    );
   });
 
   it('fails closed when one name hash was committed to multiple numeric slots', async () => {
@@ -128,11 +145,24 @@ describe('ContextGraphCreated name-hash reverse resolution', () => {
     );
   });
 
-  it('short-caches an exact-topic miss without making it permanent', async () => {
-    const { adapter, queryEventLogsPage } = fixture([[]]);
-    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
-    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
-    expect(queryEventLogsPage).toHaveBeenCalledTimes(1);
+  it('short-caches an exact-topic miss and retries after the TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    try {
+      const { adapter, queryEventLogsPage } = fixture([[]]);
+      await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+      await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+      expect(queryEventLogsPage).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(30_001);
+      queryEventLogsPage.mockResolvedValueOnce({
+        logs: [{ topics: [], data: '42' }],
+        provider: {},
+      });
+      await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
+      expect(queryEventLogsPage).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects malformed inputs before chain initialisation and treats zero as opt-out', async () => {

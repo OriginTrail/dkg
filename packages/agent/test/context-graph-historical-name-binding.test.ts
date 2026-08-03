@@ -96,6 +96,47 @@ describe('cold historical Context Graph name binding', () => {
     expect(fixture.query).toHaveBeenCalledTimes(1);
   });
 
+  it('allows a host-only Core record to recover its historical binding', async () => {
+    const fixture = selectedFixture();
+    const subscription = fixture.agent.subscribedContextGraphs.get(LOCAL_ID)!;
+    subscription.subscribed = false;
+    subscription.syncAdmission = 'none';
+    subscription.coreHosted = true;
+
+    await expect(
+      ContextGraphRegistryMethods.prototype.getContextGraphOnChainId.call(
+        fixture.agent as never,
+        LOCAL_ID,
+      ),
+    ).resolves.toBe('42');
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(NAME_HASH);
+  });
+
+  it('hashes the original spelling of a hash-shaped cleartext subscription id', async () => {
+    const fixture = selectedFixture();
+    const localId = `0x${'AB'.repeat(32)}`;
+    const committedHash = `0x${'cd'.repeat(32)}`;
+    const subscription = fixture.agent.subscribedContextGraphs.get(LOCAL_ID)!;
+    fixture.agent.subscribedContextGraphs = new Map([[
+      localId,
+      { ...subscription, onChainHash: undefined },
+    ]]);
+    fixture.agent.contextGraphWireId = (id: string) => id.toLowerCase();
+    fixture.agent.localCgIdForWireId = (id: string) => id.toLowerCase();
+    fixture.agent.contextGraphNameCommitment = vi.fn((id: string) =>
+      id === localId ? committedHash : NAME_HASH);
+    fixture.bindOnChainContextGraphIdFromNameHash.mockReturnValue(localId);
+
+    await expect(
+      ContextGraphRegistryMethods.prototype.getContextGraphOnChainId.call(
+        fixture.agent as never,
+        localId,
+      ),
+    ).resolves.toBe('42');
+    expect(fixture.agent.contextGraphNameCommitment).toHaveBeenCalledWith(localId);
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledWith(committedHash);
+  });
+
   it('retains the legacy ontology fallback for a selected pre-name-hash miss', async () => {
     const fixture = selectedFixture(null);
     fixture.query.mockResolvedValueOnce({
