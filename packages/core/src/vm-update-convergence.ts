@@ -22,6 +22,12 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import {
+  MAX_KA_ID_V1,
+  MAX_ROOTLESS_KA_NUMBER_V1,
+  assertCanonicalUalChainIdV1,
+  buildKnowledgeAssetUalFromOnChainIdV1,
+} from './ka-ual-identity.js';
+import {
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   assertCanonicalHexBytes,
@@ -53,10 +59,9 @@ function adapt<T>(label: string, assertion: () => T, code: VmUpdateErrorCodeV1 =
   }
 }
 
-/** `(1 << 96) - 1` — the rootless KA-number field width. */
-export const MAX_ROOTLESS_KA_NUMBER = (1n << 96n) - 1n;
-/** Upper bound of the on-chain id domain. */
-const MAX_UINT256 = (1n << 256n) - 1n;
+/** `(1 << 96) - 1` — the rootless KA-number field width. Re-exported from the owner. */
+export const MAX_ROOTLESS_KA_NUMBER = MAX_ROOTLESS_KA_NUMBER_V1;
+const MAX_UINT256 = MAX_KA_ID_V1;
 /**
  * Bound on an IDENTITY scalar — chain id, deployment id, UAL, origin.
  *
@@ -290,17 +295,9 @@ export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 
  */
 export function canonicalUalChainId(value: unknown, label = 'chainId'): string {
   const text = boundedString(value, label);
-  const separator = text.lastIndexOf(':');
-  const namespace = separator === -1 ? '' : text.slice(0, separator);
-  const decimal = separator === -1 ? text : text.slice(separator + 1);
-  if (separator !== -1 && !/^[a-z][a-z0-9-]*(?::[a-z0-9-]+)*$/.test(namespace)) {
-    fail('noncanonical-scalar', `${label} namespace must be lowercase alphanumeric`);
-  }
-  // `parseCanonicalDecimalU256` already rejects leading-zero aliases and
-  // out-of-range values; restating that rule here as a regex is the drift this
-  // module refuses to introduce.
-  adapt(label, () => parseCanonicalDecimalU256(decimal, label));
-  return text;
+  // The rule itself is owned by `ka-ual-identity.ts`; this adapts its error into
+  // W2's typed code rather than restating the rule.
+  return adapt(label, () => assertCanonicalUalChainIdV1(text, label));
 }
 
 /** A canonical unsigned decimal with no leading-zero alias. */
@@ -831,36 +828,29 @@ export interface CanonicalScopedKaCandidateSetV1 {
 const UAL_PATTERN = /^did:dkg:([^/]+)\/([^/]+)\/([^/]+)$/;
 
 /**
- * Build the canonical UAL for a resolved on-chain KA id.
+ * Build the canonical UAL for a resolved on-chain KA id, as a W2-typed wrapper.
  *
- * Mirrors `buildReconciledKnowledgeAssetUal` in `packages/agent/src/ka-identity.ts`.
- * It cannot import it — `agent` depends on `core`, not the reverse — so
- * `packages/agent/test/w2-ual-parity.test.ts` asserts the two produce
- * byte-identical output across the legacy/rootless boundary. That parity test is
- * the external anchor: without it this is a transcription that can drift
- * silently, and the drift would make W2's fence select the wrong KA.
+ * The rule has ONE owner: `ka-ual-identity.ts`. `buildReconciledKnowledgeAssetUal`
+ * in the agent package delegates to the same function, so there is no second
+ * production implementation to keep in step — an earlier revision restated the
+ * rule here and guarded the copy with a cross-package parity test, which detects
+ * drift only after it exists.
  */
 export function buildScopedKnowledgeAssetUal(
   chainId: string,
   legacyStorageAddress: string,
   kaId: bigint,
 ): string {
-  // Validate before formatting. An exported builder that accepts a negative
-  // kaId, a value above uint256, a noncanonical chain id, or an arbitrary
-  // address string emits a syntactically well-formed UAL that denotes nothing —
-  // and silently lowercasing the address would make two spellings one identity.
-  const canonicalChain = canonicalUalChainId(chainId, 'ual chainId');
-  const canonicalStorage = canonicalEvmAddress(legacyStorageAddress, 'ual storage address');
-  if (typeof kaId !== 'bigint') fail('noncanonical-scalar', 'kaId must be a bigint');
-  if (kaId < 0n) fail('noncanonical-scalar', 'kaId must not be negative');
-  if (kaId > MAX_UINT256) fail('ka-number-overflow', 'kaId exceeds uint256');
-
-  if (kaId >> 96n === 0n) {
-    return `did:dkg:${canonicalChain}/${canonicalStorage}/${kaId.toString()}`;
+  // Delegates: `ka-ual-identity.ts` is the single owner of this rule, and
+  // `buildReconciledKnowledgeAssetUal` in the agent package delegates to the
+  // same function. This wrapper only re-raises as a W2 typed error.
+  try {
+    return buildKnowledgeAssetUalFromOnChainIdV1(chainId, legacyStorageAddress, kaId);
+  } catch (cause) {
+    const message = (cause as Error)?.message ?? String(cause);
+    if (message.includes('exceeds uint256')) fail('ka-number-overflow', message, cause);
+    fail('noncanonical-scalar', message, cause);
   }
-  const agentAddress = `0x${(kaId >> 96n).toString(16).padStart(40, '0')}`;
-  const kaNumber = kaId & MAX_ROOTLESS_KA_NUMBER;
-  return `did:dkg:${canonicalChain}/${agentAddress}/${kaNumber.toString()}`;
 }
 
 /**

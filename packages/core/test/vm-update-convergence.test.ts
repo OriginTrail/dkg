@@ -423,10 +423,24 @@ describe('the exported UAL builder validates its inputs (review P2-2)', () => {
     );
   });
 
-  it('rejects a mixed-case storage address rather than silently lowercasing it', () => {
-    expect(codeOf(() => buildScopedKnowledgeAssetUal('84532', `0x${'A1'.repeat(20)}`, 7n))).toBe(
-      'noncanonical-scalar',
+  it('NORMALIZES a mixed-case storage address, and that is deliberate', () => {
+    // Reversing an earlier choice of mine. A BUILDER's job is to emit canonical
+    // output; the sole production caller passes the checksummed address returned
+    // by `getDKGKnowledgeAssetsAddress()`, and the shipped `buildKnowledgeAssetUal`
+    // has always lowercased it. Rejecting case here would have broken that path
+    // for no gain.
+    //
+    // The strictness belongs on the PARSE side, where accepting a mixed-case
+    // address really would let two spellings denote one KA — and it is still
+    // enforced there (see the candidate-parser suite).
+    expect(buildScopedKnowledgeAssetUal('84532', `0x${'A1'.repeat(20)}`, 7n)).toBe(
+      `did:dkg:84532/0x${'a1'.repeat(20)}/7`,
     );
+    expect(
+      codeOf(() =>
+        canonicalScopedKaCandidatesFromVerifiedUal(scope(), `did:dkg:84532/0x${'A1'.repeat(20)}/7`),
+      ),
+    ).toBe('noncanonical-ual');
   });
 
   it('still builds both canonical forms', () => {
