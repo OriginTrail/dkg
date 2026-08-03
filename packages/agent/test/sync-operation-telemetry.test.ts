@@ -231,30 +231,107 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
     await blocking;
   });
 
-  it('separates a failed operation from a cancelled one, and clamps a non-requester lane', async () => {
+  it('separates a failed operation from a cancelled one CAUSALLY, and clamps a non-requester lane', async () => {
+    // `cancelled` means something cancelled the operation — not that the error
+    // happened to be shaped like an abort.
+    //
+    // The previous version of this test hand-built `Error{name:'AbortError'}`
+    // labelled "caller gave up", supplied no caller signal, and aborted nothing.
+    // It therefore pinned the CLASSIFIER'S MECHANISM rather than cancellation,
+    // and locked in the bug below: `ProtocolRouter` coerces a deadline
+    // `TimeoutError` into exactly that shape, so a router timeout was reported
+    // as a cancelled operation. A test written from the implementation instead
+    // of the contract will happily hold the implementation still.
     harness.install();
     const agent = await createAgent();
 
+    // 1. A plain failure is an error. (Retained.)
     await expect(admit(agent, { source: 'reconcile' }, async () => {
       throw new Error('store commit failed');
     })).rejects.toThrow(/store commit/);
 
-    const abortError = new Error('caller gave up');
-    abortError.name = 'AbortError';
+    // 2. NEGATIVE CAUSAL CASE — the router's real deadline shape, with nothing
+    //    aborted. This is the one the old assertion got backwards.
+    const routerDeadline = Object.assign(
+      new Error('The operation was aborted due to timeout'),
+      {
+        name: 'AbortError',
+        cause: Object.assign(new Error('The operation was aborted due to timeout'), {
+          name: 'TimeoutError',
+        }),
+      },
+    );
     await expect(admit(agent, { source: 'on-connect' }, async () => {
-      throw abortError;
-    })).rejects.toBe(abortError);
+      throw routerDeadline;
+    })).rejects.toBe(routerDeadline);
 
-    // `responder` is a real SyncSchedulerLane member but not a requester lane;
-    // it must clamp rather than widen the I4 label space.
+    // 3. POSITIVE CAUSAL CASE — a caller signal genuinely aborted after the
+    //    work started. Without this the fix is indistinguishable from deleting
+    //    the `cancelled` branch entirely.
+    const caller = new AbortController();
+    const cancelled = new Error('caller gave up');
+    cancelled.name = 'AbortError';
+    await expect(admit(agent, { source: 'catchup-foreground', operationSignal: caller.signal }, async () => {
+      caller.abort();
+      throw cancelled;
+    })).rejects.toBe(cancelled);
+
+    // 4. `responder` is a real SyncSchedulerLane member but not a requester
+    //    lane; it must clamp rather than widen the I4 label space. (Retained.)
     await admit(agent, { source: 'reconcile', lane: 'responder' }, async () => undefined);
 
     const samples = await harness.histogram(I4);
+    const outcomeFor = (source: string) =>
+      samples.find((p) => p.attributes.source === source)!.attributes.outcome;
+
     expect(samples.find((p) => p.attributes.source === 'reconcile' && p.attributes.lane === 'durable')!
       .attributes.outcome).toBe('error');
-    expect(samples.find((p) => p.attributes.source === 'on-connect')!.attributes.outcome).toBe('cancelled');
+    // The deadline is transport strain, not anybody's decision.
+    expect(outcomeFor('on-connect')).toBe('error');
+    // …and a real abort still reads as a cancellation.
+    expect(outcomeFor('catchup-foreground')).toBe('cancelled');
     expect(samples.some((p) => p.attributes.lane === 'unspecified')).toBe(true);
     expect(samples.some((p) => p.attributes.lane === 'responder')).toBe(false);
+  });
+
+  it('the REAL swm_recovery lane reports a router deadline as `error`, not `cancelled`', async () => {
+    // Anti-vacuity witness for the causal classifier above. The `admit()` cases
+    // drive `runContextGraphSyncWithBackpressure` directly, which proves the
+    // classifier but NOT that any production lane reaches it with an abort-
+    // shaped error and nothing cancelled.
+    //
+    // This one goes through the real `recoverContextGraphSwmFromPeer`, which
+    // admits on the `swm_recovery` lane and — unlike the durable driver — does
+    // not fold a router rejection into a diagnostic result. Only the network
+    // fetch seam is replaced, so the real admission path, lane and I4 record
+    // site all execute.
+    harness.install();
+    const agent = await createAgent();
+    const routerDeadline = Object.assign(
+      new Error('The operation was aborted due to timeout'),
+      {
+        name: 'AbortError',
+        cause: Object.assign(new Error('The operation was aborted due to timeout'), {
+          name: 'TimeoutError',
+        }),
+      },
+    );
+    stubLifecycleFetch(agent, async () => { throw routerDeadline; });
+
+    // Precondition: nothing is cancelling anything. That is the whole point.
+    expect((agent as any).node.stopSignal?.aborted ?? false).toBe(false);
+
+    await expect(
+      (agent as any).recoverContextGraphSwmFromPeer(PEER_A, CG),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    const samples = await harness.histogram(I4);
+    const swm = samples.filter((p) => p.attributes.lane === 'swm_recovery');
+    // Anti-vacuity: the lane must actually have produced a point, or the
+    // outcome assertion below is unreachable rather than satisfied.
+    expect(swm.length).toBeGreaterThanOrEqual(1);
+    expect(swm.every((p) => p.attributes.outcome === 'error')).toBe(true);
+    expect(swm.some((p) => p.attributes.outcome === 'cancelled')).toBe(false);
   });
 
   it('A7: operation points carry only bounded labels — no CG id, no peer id', async () => {

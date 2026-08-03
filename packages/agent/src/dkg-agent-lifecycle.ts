@@ -322,7 +322,6 @@ import {
 } from './sync/policy.js';
 import {
   activeSyncAdmissionSource,
-  isSyncOperationCancellation,
   monotonicNowMs,
   recordSyncAttempt,
   recordSyncAttemptRequestBytes,
@@ -1344,23 +1343,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // parameter, so it can never reach a coalescing key.
         return await withSyncAdmissionSource(source, work);
       } catch (error) {
-        // NOTE — deliberately error-class based here, unlike the attempt-level
-        // classifier in the changelog bracket, which uses its captured signal.
-        // The two levels are governed differently and the difference is not an
-        // oversight: I1 has an explicit written rule ("any pre-response
-        // rejection that is not caller cancellation is `transport_error`",
-        // `attempt-telemetry.ts`) because it measures PHYSICAL SENDS, where a
-        // router deadline is transport strain rather than anybody's decision.
-        // I4 measures a whole logical operation, has no such rule, and the
-        // suite below deliberately pins this shape — an inner component
-        // throwing `AbortError` counts as a cancelled operation even when no
-        // admission signal aborted.
+        // Causal, exactly like the attempt-level classifier: an operation is
+        // `cancelled` only when something actually cancelled it.
         //
-        // Switching this to `admissionBoundary.signal?.aborted` was tried and
-        // reverted: it is a defensible reading, it fails that existing test,
-        // and it is a semantic change to an instrument no reviewer has flagged.
-        // Raised for a decision rather than changed unilaterally.
-        outcome = isSyncOperationCancellation(error) ? 'cancelled' : 'error';
+        // `admissionBoundary.signal` combines the node stop signal and the
+        // caller's `operationSignal`, which is the whole of the cancellation
+        // evidence that exists at this level, and it is read before `dispose()`
+        // runs in the outer `finally`. Being the CAPTURED signal it stays
+        // aborted for its lifetime, so a shutdown completing between the
+        // rejection and this line cannot downgrade a real cancellation.
+        //
+        // An error-class predicate cannot work here for the same reason it
+        // could not at I1: `ProtocolRouter` coerces a deadline `TimeoutError`
+        // into an `AbortError`, and this boundary has a production path that
+        // reaches it — `recoverContextGraphSwmFromPeer` runs its recovery fetch
+        // inside this admission and does NOT fold a router rejection into a
+        // diagnostic result, so a `swm_recovery` deadline escapes with nothing
+        // aborted. Classifying that as `cancelled` exports network strain as
+        // shutdown activity.
+        //
+        // `signal` is optional: with neither a node stop signal nor a caller
+        // signal, no cancellation evidence can exist, so every failure is an
+        // `error`. That is the correct reading rather than a fallback.
+        outcome = Boolean(admissionBoundary.signal?.aborted) ? 'cancelled' : 'error';
         throw error;
       } finally {
         recordSyncOperationDuration({
