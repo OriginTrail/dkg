@@ -13,10 +13,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent, runCatchupPlaneWithPolicy } from '../src/index.js';
 import { getSyncBackpressureSnapshot } from '../src/sync/backpressure.js';
-import {
-  hasSyncAdmissionSource,
-  withSyncAdmissionSource,
-} from '../src/sync/attempt-telemetry.js';
+import { withSyncAdmissionSource } from '../src/sync/attempt-telemetry.js';
 import { runCuratorMetaRefresh } from '../src/curator-meta-refresh.js';
 import { encodeChangelogResponse } from '../src/sync/changelog/wire.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -652,7 +649,7 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
   // ── assertion 3 (responder auth lookup) is DELIBERATELY ABSENT ────────────
   //
   // The plan's five-assertion set reserves this slot for the responder path
-  // (`authorizeSyncRequest` in `sync/auth/request-authorize.ts`, the third
+  // (`authorizePrivateSyncRequest` in `sync/auth/request-authorize.ts`, the third
   // enumerated caller of `refreshMetaFromCurator`). The numbering below keeps
   // its gap rather than closing it, so this file and the plan's table stay in
   // correspondence.
@@ -670,7 +667,7 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
   // pinned when it is not is worse than an acknowledged gap: a gap gets
   // revisited, a green test does not.**
   //
-  // What would close it: drive the real `authorizeSyncRequest` with a dependency
+  // What would close it: drive the real `authorizePrivateSyncRequest` with a dependency
   // object whose `refreshMetaFromCurator` records `hasSyncAdmissionSource()`.
   // That is an integration harness rather than a line, and is a tracked
   // follow-up.
