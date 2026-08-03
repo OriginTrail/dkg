@@ -81,15 +81,6 @@ interface SharedMemorySyncContext {
    * Absent entirely => materialization is skipped (never half-applied).
    */
   snapshotMaterializer?: SharedMemorySnapshotMaterializer;
-  /**
-   * Runs after a graph-scoped snapshot and its verified head metadata are in
-   * the store, but before phase checkpoints advance. Used to retire an exact
-   * finalized SWM recovery copy from the user-facing view.
-   */
-  onGraphScopedSnapshotSettled?: (
-    contextGraphId: string,
-    descriptor: GraphScopedSwmRecoveryDescriptor,
-  ) => Promise<void>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -128,7 +119,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     ensureContextGraph,
     storeInsert,
     snapshotMaterializer,
-    onGraphScopedSnapshotSettled,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -478,14 +468,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      if (onGraphScopedSnapshotSettled) {
-        // Deliberately outside the per-KA snapshot lock above: the finalizer
-        // acquires the same lock before stamping the local retirement marker.
-        // Running it inside the materializer critical section would deadlock.
-        for (const descriptor of settledDescriptors.values()) {
-          await onGraphScopedSnapshotSettled(pid, descriptor);
-        }
-      }
+      // Deliberately outside the per-KA snapshot lock above: the finalizer
+      // acquires the same lock before stamping the local retirement marker.
+      // Running settlement inside the materializer critical section would
+      // deadlock. The handoff remains part of the ONE required materializer
+      // contract, so production cannot wire materialization without it.
+      await snapshotMaterializer?.settleCommittedSnapshots(
+        pid,
+        [...settledDescriptors.values()],
+      );
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {

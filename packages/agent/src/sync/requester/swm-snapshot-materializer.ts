@@ -103,6 +103,19 @@ export interface SharedMemorySnapshotMaterializer {
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<void>;
+  /**
+   * Complete the graph-scoped snapshot transaction after the caller has
+   * inserted the verified head metadata. Keeping this handoff on the same
+   * required abstraction prevents a caller from materializing snapshots while
+   * silently omitting post-commit finalization settlement.
+   *
+   * This MUST be invoked outside `withKaWriteLock`: the finalization owner
+   * takes that same per-KA lock while revalidating the current SWM head.
+   */
+  settleCommittedSnapshots(
+    contextGraphId: string,
+    descriptors: readonly GraphScopedSwmRecoveryDescriptor[],
+  ): Promise<void>;
 }
 
 /**
@@ -117,6 +130,10 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
+  settleGraphScopedSnapshot: (
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ) => Promise<void>;
 }): SharedMemorySnapshotMaterializer {
   return {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
@@ -229,6 +246,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { graph: descriptor.metaGraph, subject: operationSubject },
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
+      }
+    },
+
+    settleCommittedSnapshots: async (contextGraphId, descriptors) => {
+      for (const descriptor of descriptors) {
+        await deps.settleGraphScopedSnapshot(contextGraphId, descriptor);
       }
     },
   };

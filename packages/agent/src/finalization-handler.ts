@@ -56,6 +56,7 @@ import {
   workspacePublicQuadsDigest,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
+  type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -214,6 +215,24 @@ type GraphScopedMaterializationEnvelope = Pick<
   | 'accessPolicy'
   | 'allowedPeers'
 >;
+
+type ConfirmedGraphScopedVmEvidence = {
+  envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope;
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  kaId: bigint;
+  chainId: string;
+};
+
+type ConfirmedGraphScopedVmEvidenceRead =
+  | { state: 'verified'; evidence: ConfirmedGraphScopedVmEvidence }
+  | { state: 'absent' | 'invalid' | 'content-mismatch' };
+
+type CurrentGraphScopedKaCommitment = {
+  contextGraphId: string;
+  kaId: bigint;
+  assertionVersion: string;
+  merkleRoot: Uint8Array;
+};
 
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
 type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
@@ -1373,46 +1392,30 @@ export class FinalizationHandler {
     return { status: 'verified', graphUri, quads, merkleRoot };
   }
 
-  /** Recognize exact confirmed VM state from surviving immutable metadata. */
-  private async reconcileConfirmedGraphScopedVmWithoutWorkspaceHead(input: {
+  /**
+   * Load the canonical local proof that one graph-scoped assertion is already
+   * confirmed VM. Receipt `batchId` is provenance, not KA identity: adapters
+   * may use a separate batch identifier while the deterministic UAL still
+   * supplies the packed KA id used for chain reads.
+   */
+  private async loadConfirmedGraphScopedVmEvidence(input: {
     contextGraphId: string;
     ual: string;
-    merkleRoot: Uint8Array;
-    kaId: bigint;
-    versionBlock: number;
-    subGraphName?: string;
-  }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
-    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
-      contextGraphId: input.contextGraphId,
-      ual: input.ual,
-    });
-    if (stored.state === 'absent') return undefined;
-    if (stored.state === 'invalid') {
-      this.log.warn(ctx, `Chain-reconcile: invalid confirmed graph-scoped metadata for ${input.ual}`);
-      return 'no-swm';
-    }
+  }): Promise<ConfirmedGraphScopedVmEvidenceRead> {
+    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, input);
+    if (stored.state === 'absent') return { state: 'absent' };
+    if (stored.state === 'invalid') return { state: 'invalid' };
 
     const { envelope } = stored;
     let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    let identity: ReturnType<typeof parseDeterministicKnowledgeAssetUal>;
     try {
       scope = createGraphKnowledgeAssetScope(input.ual, envelope.assertionVersion);
+      identity = parseDeterministicKnowledgeAssetUal(input.ual);
     } catch {
-      return 'no-swm';
+      return { state: 'invalid' };
     }
-    const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-    if (
-      scope.ual !== input.ual
-      || packedKaId !== input.kaId
-      || envelope.batchId !== input.kaId
-      || !equalBytes(envelope.merkleRoot, input.merkleRoot)
-      || (input.subGraphName !== undefined && input.subGraphName !== envelope.subGraphName)
-    ) {
-      this.log.warn(
-        ctx,
-        `Chain-reconcile: confirmed graph-scoped metadata does not match chain identity for ${input.ual}`,
-      );
-      return 'no-swm';
-    }
+    if (scope.ual !== input.ual) return { state: 'invalid' };
 
     const verification = await this.verifyExactGraphScopedLayer({
       contextGraphId: input.contextGraphId,
@@ -1422,13 +1425,82 @@ export class FinalizationHandler {
       ...(envelope.privateMerkleRoot
         ? { privateMerkleRoot: envelope.privateMerkleRoot }
         : {}),
-      expectedMerkleRoot: input.merkleRoot,
+      expectedMerkleRoot: envelope.merkleRoot,
       ...(envelope.subGraphName ? { subGraphName: envelope.subGraphName } : {}),
     });
-    if (verification.status !== 'verified') {
+    if (verification.status !== 'verified') return { state: 'content-mismatch' };
+
+    return {
+      state: 'verified',
+      evidence: {
+        envelope,
+        scope,
+        kaId: packKnowledgeAssetIdFromIdentity(identity),
+        chainId: identity.chainId,
+      },
+    };
+  }
+
+  /** Re-read the exact current chain commitment while the SWM writer lock is held. */
+  private async verifyCurrentGraphScopedKaCommitment(
+    commitment: CurrentGraphScopedKaCommitment,
+  ): Promise<boolean> {
+    const chain = this.chain;
+    if (
+      !chain
+      || chain.chainId === 'none'
+      || typeof chain.getLatestMerkleRoot !== 'function'
+      || typeof chain.getMerkleRootCount !== 'function'
+      || typeof chain.getKAContextGraphId !== 'function'
+    ) {
+      return false;
+    }
+    const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
+      chain.getLatestMerkleRoot(commitment.kaId),
+      chain.getMerkleRootCount(commitment.kaId),
+      chain.getKAContextGraphId(commitment.kaId),
+    ]);
+    return latestRoot.length === 32
+      && equalBytes(latestRoot, commitment.merkleRoot)
+      && BigInt(rootCount) === BigInt(commitment.assertionVersion)
+      && BigInt(boundContextGraphId) > 0n
+      && await this.onChainContextGraphMatchesLocalId(
+        commitment.contextGraphId,
+        BigInt(boundContextGraphId),
+      );
+  }
+
+  /** Recognize exact confirmed VM state from surviving immutable metadata. */
+  private async reconcileConfirmedGraphScopedVmWithoutWorkspaceHead(input: {
+    contextGraphId: string;
+    ual: string;
+    merkleRoot: Uint8Array;
+    kaId: bigint;
+    versionBlock: number;
+    subGraphName?: string;
+  }, ctx: OperationContext): Promise<'already-confirmed' | 'no-swm' | undefined> {
+    const stored = await this.loadConfirmedGraphScopedVmEvidence({
+      contextGraphId: input.contextGraphId,
+      ual: input.ual,
+    });
+    if (stored.state === 'absent') return undefined;
+    if (stored.state !== 'verified') {
       this.log.warn(
         ctx,
-        `Chain-reconcile: confirmed metadata exists but exact VM content is invalid for ${input.ual}`,
+        `Chain-reconcile: ${stored.state} confirmed graph-scoped VM evidence for ${input.ual}`,
+      );
+      return 'no-swm';
+    }
+
+    const { envelope, scope, kaId } = stored.evidence;
+    if (
+      kaId !== input.kaId
+      || !equalBytes(envelope.merkleRoot, input.merkleRoot)
+      || (input.subGraphName !== undefined && input.subGraphName !== envelope.subGraphName)
+    ) {
+      this.log.warn(
+        ctx,
+        `Chain-reconcile: confirmed graph-scoped metadata does not match chain identity for ${input.ual}`,
       );
       return 'no-swm';
     }
@@ -2000,8 +2072,8 @@ export class FinalizationHandler {
     merkleRoot: Uint8Array;
     subGraphName?: string;
     ctx: OperationContext;
-    /** Optional current-chain proof, re-run while the per-KA SWM lock is held. */
-    revalidate?: () => Promise<boolean>;
+    /** Optional typed current-chain proof, re-run while the SWM lock is held. */
+    currentChainCommitment?: CurrentGraphScopedKaCommitment;
   }): Promise<boolean> {
     const {
       contextGraphId,
@@ -2009,7 +2081,7 @@ export class FinalizationHandler {
       merkleRoot,
       subGraphName,
       ctx,
-      revalidate,
+      currentChainCommitment,
     } = input;
     const writeLocks = this.writeLocks;
     if (!writeLocks) return false;
@@ -2026,7 +2098,10 @@ export class FinalizationHandler {
           subGraphName,
         });
         if (!head || head.assertionVersion !== scope.assertionVersion) return false;
-        if (revalidate && !(await revalidate())) return false;
+        if (
+          currentChainCommitment
+          && !(await this.verifyCurrentGraphScopedKaCommitment(currentChainCommitment))
+        ) return false;
 
         let privateMerkleRoot: Uint8Array | undefined;
         try {
@@ -2086,7 +2161,7 @@ export class FinalizationHandler {
     subGraphName?: string;
   }, ctx: OperationContext): Promise<'retired' | 'not-finalized'> {
     const { contextGraphId, ual, assertionVersion, subGraphName } = input;
-    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+    const stored = await this.loadConfirmedGraphScopedVmEvidence({
       contextGraphId,
       ual,
     });
@@ -2094,65 +2169,17 @@ export class FinalizationHandler {
     if (stored.state === 'invalid') {
       throw new Error(`Cannot reconcile synced SWM for ${ual}: confirmed VM metadata is invalid`);
     }
+    if (stored.state !== 'verified') return 'not-finalized';
 
-    const { envelope } = stored;
+    const { envelope, scope, kaId, chainId } = stored.evidence;
     if (
       envelope.assertionVersion !== assertionVersion
       || (envelope.subGraphName ?? undefined) !== (subGraphName ?? undefined)
+      || !this.chain
+      || chainId !== this.chain.chainId
     ) {
       return 'not-finalized';
     }
-
-    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    let kaId: bigint;
-    try {
-      scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
-      const identity = parseDeterministicKnowledgeAssetUal(ual);
-      if (!this.chain || identity.chainId !== this.chain.chainId) return 'not-finalized';
-      kaId = packKnowledgeAssetIdFromIdentity(identity);
-    } catch {
-      return 'not-finalized';
-    }
-    if (envelope.batchId !== kaId) return 'not-finalized';
-
-    const vmVerification = await this.verifyExactGraphScopedLayer({
-      contextGraphId,
-      scope,
-      layer: MemoryLayer.VerifiableMemory,
-      publicTripleCount: envelope.publicTripleCount,
-      ...(envelope.privateMerkleRoot
-        ? { privateMerkleRoot: envelope.privateMerkleRoot }
-        : {}),
-      expectedMerkleRoot: envelope.merkleRoot,
-      ...(subGraphName ? { subGraphName } : {}),
-    });
-    if (vmVerification.status !== 'verified') return 'not-finalized';
-
-    const chain = this.chain;
-    if (
-      !chain
-      || chain.chainId === 'none'
-      || typeof chain.getLatestMerkleRoot !== 'function'
-      || typeof chain.getMerkleRootCount !== 'function'
-      || typeof chain.getKAContextGraphId !== 'function'
-    ) {
-      return 'not-finalized';
-    }
-    const revalidate = async (): Promise<boolean> => {
-      const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-        chain.getLatestMerkleRoot!(kaId),
-        chain.getMerkleRootCount!(kaId),
-        chain.getKAContextGraphId!(kaId),
-      ]);
-      return latestRoot.length === 32
-        && equalBytes(latestRoot, envelope.merkleRoot)
-        && BigInt(rootCount) === BigInt(assertionVersion)
-        && BigInt(boundContextGraphId) > 0n
-        && await this.onChainContextGraphMatchesLocalId(
-          contextGraphId,
-          BigInt(boundContextGraphId),
-        );
-    };
 
     const retired = await this.markMatchingGraphScopedSwmFinalized({
       contextGraphId,
@@ -2160,7 +2187,12 @@ export class FinalizationHandler {
       merkleRoot: envelope.merkleRoot,
       ...(subGraphName ? { subGraphName } : {}),
       ctx,
-      revalidate,
+      currentChainCommitment: {
+        contextGraphId,
+        kaId,
+        assertionVersion,
+        merkleRoot: envelope.merkleRoot,
+      },
     });
     return retired ? 'retired' : 'not-finalized';
   }

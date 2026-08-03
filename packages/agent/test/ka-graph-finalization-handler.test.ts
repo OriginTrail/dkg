@@ -2288,8 +2288,12 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
-  it('retires a synced SWM copy only after revalidating exact VM state against chain', async () => {
-    const { message, swmGraph } = await stageGraph();
+  it('retires a synced SWM copy with separate batch provenance after exact chain revalidation', async () => {
+    const staged = await stageGraph();
+    // `batchId` is adapter provenance and need not equal the UAL-derived packed
+    // KA id. Chain identity/binding must continue to use PACKED_KA_ID.
+    const message = { ...staged.message, batchId: 42n };
+    const { swmGraph } = staged;
     const chain = legacyFinalizationChain(4, {
       chainId: 'otp:20430',
       getLatestMerkleRoot: async () => message.kcMerkleRoot,
@@ -2329,6 +2333,89 @@ describe('graph-scoped finalization handler', () => {
       'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
       { contextGraphId: CG, view: 'shared-working-memory' },
     )).resolves.toEqual({ bindings: [] });
+  });
+
+  it('keeps synced SWM visible when any current-chain retirement proof is missing or stale', async () => {
+    const cases: Array<{
+      name: string;
+      chain: (root: Uint8Array) => Partial<ChainAdapter>;
+    }> = [
+      {
+        name: 'latest root mismatch',
+        chain: () => ({
+          getLatestMerkleRoot: async () => new Uint8Array(32),
+          getMerkleRootCount: async () => 1n,
+          getKAContextGraphId: async () => 42n,
+        }),
+      },
+      {
+        name: 'version/root-count mismatch',
+        chain: (root) => ({
+          getLatestMerkleRoot: async () => root,
+          getMerkleRootCount: async () => 2n,
+          getKAContextGraphId: async () => 42n,
+        }),
+      },
+      {
+        name: 'zero context graph binding',
+        chain: (root) => ({
+          getLatestMerkleRoot: async () => root,
+          getMerkleRootCount: async () => 1n,
+          getKAContextGraphId: async () => 0n,
+        }),
+      },
+      {
+        name: 'mismatched context graph binding',
+        chain: (root) => ({
+          getLatestMerkleRoot: async () => root,
+          getMerkleRootCount: async () => 1n,
+          getKAContextGraphId: async () => 43n,
+        }),
+      },
+      {
+        name: 'missing chain support',
+        chain: () => ({}),
+      },
+    ];
+
+    for (const scenario of cases) {
+      store = new OxigraphStore();
+      graphManager = new GraphManager(store);
+      const { message, swmGraph } = await stageGraph();
+      const chain = legacyFinalizationChain(4, {
+        chainId: 'otp:20430',
+        ...scenario.chain(message.kcMerkleRoot),
+      });
+      const recoveryHandler = new FinalizationHandler(store, chain, {
+        writeLocks: new Map(),
+        resolveContextGraphOnChainId: async () => '42',
+      });
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+      await store.deleteByPattern({
+        graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+        subject: swmGraph,
+      });
+
+      await expect(recoveryHandler.retireSyncedGraphScopedSwmIfFinalized({
+        contextGraphId: CG,
+        ual: UAL,
+        assertionVersion: VERSION,
+      }, createOperationContext('sync')), scenario.name).resolves.toBe('not-finalized');
+      await expect(store.query(
+        `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+          <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}> ?version .
+        } }`,
+      ), scenario.name).resolves.toMatchObject({ type: 'boolean', value: false });
+      const visible = await new DKGQueryEngine(store).query(
+        'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
+        { contextGraphId: CG, view: 'shared-working-memory' },
+      );
+      expect(visible.bindings, scenario.name).toHaveLength(2);
+    }
   });
 
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {

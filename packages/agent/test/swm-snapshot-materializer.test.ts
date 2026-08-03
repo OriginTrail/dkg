@@ -116,6 +116,7 @@ function materializerFor(store: TripleStore) {
     store,
     writeLocks: new Map<string, Promise<void>>(),
     invalidateListContextGraphsCache: () => { invalidations += 1; },
+    settleGraphScopedSnapshot: async () => {},
   });
   return { materializer, invalidations: () => invalidations };
 }

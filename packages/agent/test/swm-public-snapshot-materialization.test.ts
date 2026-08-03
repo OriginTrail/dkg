@@ -202,12 +202,14 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('head-swapped');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
         },
-      },
-      onGraphScopedSnapshotSettled: async (contextGraphId, descriptor) => {
-        expect(contextGraphId).toBe(CG);
-        expect(descriptor.kaUal).toBe(UAL);
-        events.push('snapshot-settled');
-        await overrides.onGraphScopedSnapshotSettled?.();
+        settleCommittedSnapshots: async (contextGraphId, descriptors) => {
+          for (const descriptor of descriptors) {
+            expect(contextGraphId).toBe(CG);
+            expect(descriptor.kaUal).toBe(UAL);
+            events.push('snapshot-settled');
+            await overrides.onGraphScopedSnapshotSettled?.();
+          }
+        },
       },
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
@@ -336,9 +338,25 @@ describe('public SWM snapshot materialization', () => {
     const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => true });
     const summary = await h.run();
     expect(h.events).toContain('content-checked');
+    expect(h.events).toContain('snapshot-settled');
+    expect(h.events.indexOf('snapshot-settled')).toBeGreaterThan(h.events.indexOf('meta-inserted'));
     expect(h.events).not.toContain('replaced');
     expect(h.events).not.toContain('head-swapped');
     expect(summary.failedPhases).toBe(0);
+  });
+
+  it('holds an already-materialized snapshot incomplete when settlement fails', async () => {
+    const h = harness({
+      storedHead: () => ({ version: '1', needsRepair: false }),
+      contentPresent: () => true,
+      onGraphScopedSnapshotSettled: async () => { throw new Error('chain unavailable'); },
+    });
+    const summary = await h.run();
+    expect(h.events).toContain('content-checked');
+    expect(h.events).toContain('snapshot-settled');
+    expect(h.events).not.toContain('replaced');
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.completedPhases).toBe(0);
   });
 
   it('collapses union-insert residue on the skip path when the head needs repair', async () => {
