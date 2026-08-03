@@ -649,23 +649,36 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
     expect(await harness.matching(I1, { source: 'control-plane' })).toEqual([]);
   });
 
-  it('3: the responder auth-lookup call site carries no ambient scope', async () => {
-    // SCOPE: this asserts the PRECONDITION that makes the responder path land
-    // on `control-plane` — that `authorizeSyncRequest` invokes
-    // `refreshMetaFromCurator` with no scope established. It does NOT re-prove
-    // the guard: the responder shares assertion 1's branch exactly, and
-    // presenting it as an independent proof would be the "four hats" error.
-    // What is genuinely responder-specific is only this precondition.
-    expect(hasSyncAdmissionSource()).toBe(false);
-
-    let observedInsideResponder: boolean | undefined;
-    const injectedRefresh = async () => {
-      observedInsideResponder = hasSyncAdmissionSource();
-      return false;
-    };
-    await injectedRefresh();
-    expect(observedInsideResponder).toBe(false);
-  });
+  // ── assertion 3 (responder auth lookup) is DELIBERATELY ABSENT ────────────
+  //
+  // The plan's five-assertion set reserves this slot for the responder path
+  // (`authorizeSyncRequest` in `sync/auth/request-authorize.ts`, the third
+  // enumerated caller of `refreshMetaFromCurator`). The numbering below keeps
+  // its gap rather than closing it, so this file and the plan's table stay in
+  // correspondence.
+  //
+  // Why not a metrics-level responder test: the responder shares assertion 1's
+  // guard branch exactly — both reach the refresh with no ambient scope — so it
+  // would prove the same fact twice while reading as independent coverage.
+  //
+  // Why not the precondition test that briefly stood here: it executed NO
+  // responder code. It defined a local closure, invoked it from the test body,
+  // and asserted that the test body had no ambient scope — a result determined
+  // entirely by its own setup. Wrapping the real responder path in
+  // `withSyncAdmissionSource(...)`, which is precisely the regression its name
+  // promised to catch, would have left it green. **A test that claims a path is
+  // pinned when it is not is worse than an acknowledged gap: a gap gets
+  // revisited, a green test does not.**
+  //
+  // What would close it: drive the real `authorizeSyncRequest` with a dependency
+  // object whose `refreshMetaFromCurator` records `hasSyncAdmissionSource()`.
+  // That is an integration harness rather than a line, and is a tracked
+  // follow-up.
+  //
+  // Until then the responder half is REASONED FROM SOURCE, not asserted — one
+  // guard covers all three callers because this is the only fetch in that file
+  // and every route funnels through it. Recorded in the plan's §12 next to the
+  // A24 wiring residual.
 
   it('4: an admitted operation with NO source stays `unspecified`, never `control-plane`', async () => {
     harness.install();
