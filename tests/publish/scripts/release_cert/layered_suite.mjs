@@ -111,7 +111,8 @@ function pickSizeKb() {
 const rows = [];
 function record(runId, nodeName, layer, cgKind, sizeKb, success, clientMs, error, version, details) {
     rows.push({
-        run_id: runId, node_name: nodeName, blockchain_name: BLOCKCHAIN, layer, cg_kind: cgKind,
+        run_id: runId, node_name: process.env.RC_NODE_LABEL ? `${process.env.RC_NODE_LABEL}/${nodeName}` : nodeName,
+        blockchain_name: BLOCKCHAIN, layer, cg_kind: cgKind,
         payload_size_kb: sizeKb, success, client_ms: success ? Math.round(clientMs) : null,
         server_ms: null, error: error ? String(error).slice(0, 300) : null, node_version: version,
         details: details ?? null,
