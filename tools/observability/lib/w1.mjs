@@ -607,7 +607,7 @@ const renderRules = ({ windows }) => [
 ].join('\n');
 
 // Promtool cannot parse Grafana interpolation tokens. This fixture carries the
-// exact dashboard expressions after replacing only the five runtime macros
+// exact dashboard expressions after replacing only the six runtime macros
 // with representative safe values. verify-profile-render.mjs independently
 // performs the same substitution and compares the complete expression set,
 // so this parser target cannot drift away from the dashboard it certifies.

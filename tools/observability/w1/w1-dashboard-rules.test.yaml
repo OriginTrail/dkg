@@ -1,0 +1,214 @@
+# promtool result tests for the generated DKG Nodes — Sync Cost dashboard.
+#
+# `w1-dashboard-rules.yaml` contains the exact dashboard expressions after
+# substituting representative Grafana variables. `promtool check rules` proves
+# those expressions parse; these tests additionally prove the main panels
+# return the expected numbers from realistic counters and histogram buckets.
+# This prevents a syntactically valid grouping, unit conversion, zero-fill, or
+# histogram change from silently turning into a plausible but wrong graph.
+rule_files:
+  - w1-dashboard-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: flame hierarchy rates worker equivalents and evidence totals preserve their units and labels
+    input_series:
+      # Foreground occupies one full worker-equivalent: 60,000 ms per minute.
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_sum{lane="durable", source="catchup-foreground", outcome="resolved", instance="node-a"}'
+        values: '0+60000x120'
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_count{lane="durable", source="catchup-foreground", outcome="resolved", instance="node-a"}'
+        values: '0+10x120'
+      # Recurring occupies half a worker-equivalent: 30,000 ms per minute.
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_sum{lane="changelog", source="reconcile", outcome="error", instance="node-a"}'
+        values: '0+30000x120'
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_count{lane="changelog", source="reconcile", outcome="error", instance="node-a"}'
+        values: '0+5x120'
+      - series: 'dkg_sync_attempt_total{transport="libp2p", plane="durable", phase="data", source="catchup-foreground", outcome="response", instance="node-a"}'
+        values: '0+60x120'
+      - series: 'dkg_sync_attempt_request_bytes_total{plane="durable", phase="data", source="catchup-foreground", instance="node-a"}'
+        values: '0+600x120'
+      - series: 'dkg_sync_attempt_response_bytes_total{plane="durable", phase="data", source="catchup-foreground", outcome="response", instance="node-a"}'
+        values: '0+300x120'
+      - series: 'dkg_sync_attempt_request_bytes_total{plane="durable", phase="delta", source="reconcile", instance="node-a"}'
+        values: '0+1200x120'
+      - series: 'dkg_sync_attempt_response_bytes_total{plane="durable", phase="delta", source="reconcile", outcome="response", instance="node-a"}'
+        values: '0+600x120'
+    promql_expr_test:
+      - expr: w1_dashboard_flame_root
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_flame_root"}'
+            value: 10800000
+      - expr: w1_dashboard_flame_source_lane_outcome
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_flame_source_lane_outcome", lane="durable", outcome="resolved", source="catchup-foreground"}'
+            value: 7200000
+          - labels: '{__name__="w1_dashboard_flame_source_lane_outcome", lane="changelog", outcome="error", source="reconcile"}'
+            value: 3600000
+      - expr: w1_dashboard_active_worker_equivalents
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_active_worker_equivalents", lane="durable", outcome="resolved", source="catchup-foreground"}'
+            value: 1
+          - labels: '{__name__="w1_dashboard_active_worker_equivalents", lane="changelog", outcome="error", source="reconcile"}'
+            value: 0.5
+      - expr: w1_dashboard_attempts_rate
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_attempts_rate", outcome="response", phase="data", plane="durable", source="catchup-foreground", transport="libp2p"}'
+            value: 1
+      - expr: w1_dashboard_request_bytes_rate
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_request_bytes_rate", source="catchup-foreground"}'
+            value: 10
+          - labels: '{__name__="w1_dashboard_request_bytes_rate", source="reconcile"}'
+            value: 20
+      - expr: w1_dashboard_response_bytes_rate
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_response_bytes_rate", outcome="response", source="catchup-foreground"}'
+            value: 5
+          - labels: '{__name__="w1_dashboard_response_bytes_rate", outcome="response", source="reconcile"}'
+            value: 10
+      - expr: w1_dashboard_gate_completed_operations
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_gate_completed_operations"}'
+            value: 1800
+      - expr: w1_dashboard_gate_payload_bytes
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_gate_payload_bytes"}'
+            value: 324000
+      - expr: w1_dashboard_all_source_active_ms_per_hour
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_all_source_active_ms_per_hour"}'
+            value: 5399999.999999999
+      - expr: w1_dashboard_all_source_bytes_per_hour
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_all_source_bytes_per_hour"}'
+            value: 162000
+      - expr: w1_dashboard_eligible_active_share
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_eligible_active_share"}'
+            value: 1
+      - expr: w1_dashboard_foreground_bytes_share
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_foreground_bytes_share"}'
+            value: 0.3333333333333333
+      - expr: w1_dashboard_recurring_bytes_share
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_recurring_bytes_share"}'
+            value: 0.6666666666666666
+      - expr: w1_dashboard_foreground_active_share
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_foreground_active_share"}'
+            value: 0.6666666666666667
+      - expr: w1_dashboard_recurring_active_share
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_recurring_active_share"}'
+            value: 0.33333333333333337
+
+  - interval: 1m
+    name: request-only failure windows keep their real byte totals instead of going blank
+    input_series:
+      - series: 'dkg_sync_attempt_request_bytes_total{plane="durable", phase="data", source="reconcile", instance="node-a"}'
+        values: '0+600x120'
+    promql_expr_test:
+      - expr: w1_dashboard_gate_payload_bytes
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_gate_payload_bytes"}'
+            value: 72000
+      - expr: w1_dashboard_all_source_bytes_per_hour
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_all_source_bytes_per_hour"}'
+            value: 36000
+
+  - interval: 1m
+    name: histogram heatmaps and catchup p95 use cumulative server-side buckets
+    input_series:
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_bucket{lane="durable", source="reconcile", outcome="resolved", le="100", instance="node-a"}'
+        values: '0+30x120'
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_bucket{lane="durable", source="reconcile", outcome="resolved", le="200", instance="node-a"}'
+        values: '0+60x120'
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_bucket{lane="durable", source="reconcile", outcome="resolved", le="+Inf", instance="node-a"}'
+        values: '0+60x120'
+      - series: 'dkg_sync_scheduler_queue_wait_ms_milliseconds_bucket{scheduler="sync-global", lane="durable", priority_class="normal", le="100", instance="node-a"}'
+        values: '0+15x120'
+      - series: 'dkg_sync_scheduler_queue_wait_ms_milliseconds_bucket{scheduler="sync-global", lane="durable", priority_class="normal", le="+Inf", instance="node-a"}'
+        values: '0+30x120'
+      - series: 'dkg_context_graph_catchup_job_duration_ms_milliseconds_bucket{admission="walk", le="100", instance="node-a"}'
+        values: '0+30x120'
+      - series: 'dkg_context_graph_catchup_job_duration_ms_milliseconds_bucket{admission="walk", le="200", instance="node-a"}'
+        values: '0+60x120'
+      - series: 'dkg_context_graph_catchup_job_duration_ms_milliseconds_bucket{admission="walk", le="+Inf", instance="node-a"}'
+        values: '0+60x120'
+    promql_expr_test:
+      - expr: w1_dashboard_sync_operation_duration_buckets
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_sync_operation_duration_buckets", le="100"}'
+            value: 0.5
+          - labels: '{__name__="w1_dashboard_sync_operation_duration_buckets", le="200"}'
+            value: 1
+          - labels: '{__name__="w1_dashboard_sync_operation_duration_buckets", le="+Inf"}'
+            value: 1
+      - expr: w1_dashboard_queue_wait_buckets
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_queue_wait_buckets", le="100"}'
+            value: 0.25
+          - labels: '{__name__="w1_dashboard_queue_wait_buckets", le="+Inf"}'
+            value: 0.5
+      - expr: w1_dashboard_catchup_duration_buckets
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_catchup_duration_buckets", le="100"}'
+            value: 0.5
+          - labels: '{__name__="w1_dashboard_catchup_duration_buckets", le="200"}'
+            value: 1
+          - labels: '{__name__="w1_dashboard_catchup_duration_buckets", le="+Inf"}'
+            value: 1
+      - expr: w1_dashboard_catchup_duration_p95
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_catchup_duration_p95"}'
+            value: 190
+
+  - interval: 1m
+    name: cross-family joins are counted once per event and unclassified sources fail the gate
+    input_series:
+      - series: 'dkg_sync_singleflight_joins_total{scope="cg-a", owner_source="catchup-foreground", joiner_source="reconcile", instance="node-a"}'
+        values: '0+1x120'
+      - series: 'dkg_sync_singleflight_joins_total{scope="cg-a", owner_source="unspecified", joiner_source="catchup-foreground", instance="node-a"}'
+        values: '0+1x120'
+      - series: 'dkg_sync_attempt_total{transport="libp2p", plane="durable", phase="data", source="unspecified", outcome="response", instance="node-a"}'
+        values: '0+2x120'
+      - series: 'dkg_sync_operation_duration_ms_milliseconds_count{lane="durable", source="unspecified", outcome="resolved", instance="node-a"}'
+        values: '0+3x120'
+      - series: 'dkg_sync_operation_rejected_total{lane="durable", source="unspecified", reason="queue-full", instance="node-a"}'
+        values: '0+4x120'
+    promql_expr_test:
+      - expr: w1_dashboard_gate_cross_family_joins
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_gate_cross_family_joins"}'
+            value: 240
+      - expr: w1_dashboard_gate_invalidating_sources
+        eval_time: 2h
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_gate_invalidating_sources"}'
+            value: 1080
