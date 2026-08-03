@@ -398,3 +398,5 @@ export {
 } from './canonical-graph-scoped-author-seal.js';
 export * from './catalog-seal-binding.js';
 export * from './transferred-catalog-bundle.js';
+export * from './vm-update-convergence.js';
+export * from './ka-ual-identity.js';

@@ -20,6 +20,7 @@ import {
 } from './current-finalized-evm-read-model.js';
 import { snapshotCurrentFinalizedEvmReadRequestV1 } from './current-finalized-evm-read-validation.js';
 import { executeStrictFinalizedEvmBatchV1 } from './strict-current-finalized-evm-batch-executor.js';
+import { createLocalNonqueueingAdmissionV1 } from './nonqueueing-admission.js';
 import { snapshotStrictCurrentFinalizedEvmConfigV1 } from './strict-current-finalized-evm-config.js';
 import {
   readStrictCurrentFinalizedEvmRevertDataV1,
@@ -98,7 +99,9 @@ export function createStrictCurrentFinalizedEvmReadV1(
   const runEndpoint = createStrictFinalizedEndpointRunnerV1({
     chainId: config.chainId,
     endpoints: config.endpoints,
-    maxConcurrentPerChain: CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+    admission: createLocalNonqueueingAdmissionV1<ChainIdV1>(
+      CURRENT_FINALIZED_EVM_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+    ),
     totalDeadlineMs: CURRENT_FINALIZED_EVM_READ_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
     messages: createReadEndpointRunnerMessagesV1(config.chainId),

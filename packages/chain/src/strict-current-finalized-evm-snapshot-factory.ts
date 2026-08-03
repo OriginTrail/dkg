@@ -1,6 +1,6 @@
 import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
-import type { StrictCurrentFinalizedEvmRpcConfigV1 } from './strict-current-finalized-evm-types.js';
-import { snapshotStrictCurrentFinalizedEvmConfigV1 } from './strict-current-finalized-evm-config.js';
+import type { StrictFinalizedSnapshotRpcConfigV1 } from './strict-current-finalized-evm-types.js';
+import { snapshotStrictFinalizedSnapshotConfigV1 } from './strict-current-finalized-evm-config.js';
 import { createStrictFinalizedSnapshotRpcRuntimeV1 } from './strict-current-finalized-evm-snapshot-rpc.js';
 
 /**
@@ -9,9 +9,9 @@ import { createStrictFinalizedSnapshotRpcRuntimeV1 } from './strict-current-fina
  * the callback begins it is never replayed on another endpoint.
  */
 export function createStrictCurrentFinalizedEvmSnapshotScopeV1(
-  input: StrictCurrentFinalizedEvmRpcConfigV1,
+  input: StrictFinalizedSnapshotRpcConfigV1,
 ): StrictCurrentFinalizedEvmSnapshotScopeV1 {
   return createStrictFinalizedSnapshotRpcRuntimeV1(
-    snapshotStrictCurrentFinalizedEvmConfigV1(input),
+    snapshotStrictFinalizedSnapshotConfigV1(input),
   );
 }

@@ -12,8 +12,8 @@ import {
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
+import { createSharedFinalizedReadAdmissionV1 } from './finalized-chain-read-admission.js';
 import {
-  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
   CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
   type StrictCurrentFinalizedEvmSnapshotRequestV1,
 } from './current-finalized-evm-snapshot.js';
@@ -48,7 +48,7 @@ import {
 } from './strict-current-finalized-evm-read-operations.js';
 import type {
   DeadlineScopeV1,
-  StrictRpcConfigSnapshotV1,
+  StrictFinalizedSnapshotConfigSnapshotV1,
 } from './strict-current-finalized-evm-types.js';
 
 interface SnapshotEndpointPreflightV1 {
@@ -86,12 +86,14 @@ const SNAPSHOT_PREFLIGHT_PROBE_ADDRESS_V1 =
  * internals never leak into the snapshot materialization layer.
  */
 export function createStrictFinalizedSnapshotTransportV1(
-  config: StrictRpcConfigSnapshotV1,
+  config: StrictFinalizedSnapshotConfigSnapshotV1,
 ): StrictFinalizedSnapshotTransportV1 {
   const runEndpoint = createStrictFinalizedEndpointRunnerV1({
     chainId: config.chainId,
     endpoints: config.endpoints,
-    maxConcurrentPerChain: CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
+    // Process-wide: the invariant is one pinned scan per CHAIN, across RFC64,
+    // W2 and any future owner — not one per transport instance.
+    admission: createSharedFinalizedReadAdmissionV1(config.owner),
     totalDeadlineMs: CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
     messages: createSnapshotEndpointRunnerMessagesV1(config.chainId),
@@ -134,13 +136,14 @@ function createSnapshotEndpointRunnerMessagesV1(
       `Current-finalized snapshot preflight exceeded ${timeoutMs}ms`,
     attemptFailure: 'Current-finalized snapshot preflight failed closed',
     noEndpoint: 'No configured endpoint completed finalized snapshot preflight',
-    saturated: (active: number) =>
-      `Chain ${chainId} already has ${active} finalized snapshot in flight`,
+    saturated: (active: number, holder?: string) =>
+      `Chain ${chainId} already has ${active} finalized snapshot in flight`
+      + (holder === undefined ? '' : ` (held by ${holder})`),
   });
 }
 
 async function preflightSnapshotEndpoint(
-  config: StrictRpcConfigSnapshotV1,
+  config: StrictFinalizedSnapshotConfigSnapshotV1,
   endpoint: string,
   signal: AbortSignal,
 ): Promise<SnapshotEndpointPreflightV1> {
@@ -222,7 +225,7 @@ async function probeSnapshotReadProfile(
 }
 
 async function executePinnedSnapshotScope<T>(
-  config: StrictRpcConfigSnapshotV1,
+  config: StrictFinalizedSnapshotConfigSnapshotV1,
   endpoint: string,
   preflight: SnapshotEndpointPreflightV1,
   request: StrictCurrentFinalizedEvmSnapshotRequestV1,
