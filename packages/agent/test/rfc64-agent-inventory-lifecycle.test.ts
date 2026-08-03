@@ -167,7 +167,10 @@ function minimalStartedAgent(
     randomSamplingHandle: null,
     inFlightSubstrateFanOutCount: () => 0,
     router: { closePooling: vi.fn(async () => {}) },
-    node: { stop: vi.fn(async () => { order.push('node'); }) },
+    node: {
+      beginStop: vi.fn(),
+      stop: vi.fn(async () => { order.push('node'); }),
+    },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
     rfc64PersistenceV1: {
       close: () => {
