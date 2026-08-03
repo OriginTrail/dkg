@@ -935,13 +935,13 @@ type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'defe
 interface LifecycleSyncScopePlan {
   readonly effectiveBatchSize: number;
   readonly automaticContextGraphIds: readonly string[];
+  readonly initialBootstrapContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
   contextGraphIdsAfterDiscovery(): string[];
 }
 
 interface LifecycleSyncInvocationPolicy {
   readonly canStart: boolean;
-  readonly includeSystemContextGraphs: boolean;
   readonly syncSharedMemory: boolean;
   buildScopePlan(defaultPlan: LifecycleSyncScopePlan): LifecycleSyncScopePlan;
   requestedSharedMemoryContextGraphIds(
@@ -964,19 +964,19 @@ function createLifecycleSyncInvocationPolicy(input: {
   readonly trigger: SyncCoverageEvidenceTrigger | undefined;
   getLiveRehydratedAlwaysOnContextGraphIds(): string[];
 }): LifecycleSyncInvocationPolicy {
-  const periodicEdgeRehydration = input.nodeRole === 'edge'
-    && input.trigger === 'periodic-reconciler';
-  if (periodicEdgeRehydration) {
+  const periodicEdgeScopedResume = input.nodeRole === 'edge'
+    && input.trigger === 'periodic-reconciler'
+    && !input.syncOnConnect;
+  if (periodicEdgeScopedResume) {
     return {
-      canStart: input.syncOnConnect
-        || input.initialRehydratedAlwaysOnContextGraphIds.length > 0,
-      includeSystemContextGraphs: false,
+      canStart: input.initialRehydratedAlwaysOnContextGraphIds.length > 0,
       syncSharedMemory: true,
       buildScopePlan: (defaultPlan) => {
         const live = input.getLiveRehydratedAlwaysOnContextGraphIds();
         return {
           effectiveBatchSize: Math.min(defaultPlan.effectiveBatchSize, live.length),
           automaticContextGraphIds: [],
+          initialBootstrapContextGraphIds: [],
           initialDurableContextGraphIds: [...live],
           contextGraphIdsAfterDiscovery: input.getLiveRehydratedAlwaysOnContextGraphIds,
         };
@@ -996,7 +996,6 @@ function createLifecycleSyncInvocationPolicy(input: {
   }
   return {
     canStart: input.syncOnConnect,
-    includeSystemContextGraphs: true,
     syncSharedMemory: input.syncOnConnect && input.syncSharedMemoryOnConnect,
     buildScopePlan: (defaultPlan) => defaultPlan,
     requestedSharedMemoryContextGraphIds: (contextGraphIdsAfterDiscovery) =>
@@ -4092,7 +4091,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return result;
         },
         syncSharedMemoryOnConnect: invocationPolicy.syncSharedMemory,
-        includeSystemContextGraphs: invocationPolicy.includeSystemContextGraphs,
         logInfo: (ctx, message) => this.log.info(ctx, message),
         onPeerSkippedNoSync: (peerId) => {
           this.skippedNoSyncPeers.add(peerId);

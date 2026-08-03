@@ -437,6 +437,7 @@ type ContextGraphDiscoveryDisposition =
 interface PeerSyncScope {
   readonly effectiveBatchSize: number;
   readonly automaticContextGraphIds: readonly string[];
+  readonly initialBootstrapContextGraphIds: readonly string[];
   readonly initialDurableContextGraphIds: readonly string[];
   contextGraphIdsAfterDiscovery(): string[];
 }
@@ -1758,6 +1759,10 @@ export class DKGAgentBase {
     return {
       effectiveBatchSize,
       automaticContextGraphIds,
+      initialBootstrapContextGraphIds: [
+        SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      ],
       initialDurableContextGraphIds,
       contextGraphIdsAfterDiscovery: () => [...new Set([
         ...(this.config.syncContextGraphs ?? []),

@@ -117,10 +117,10 @@ describe('runSyncOnConnect callbacks', () => {
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       knownCorePeerIds: new Set(),
       contextGraphScope: {
+        initialBootstrapContextGraphIds: [],
         initialDurableContextGraphIds: ['cg-saved-always-on'],
         contextGraphIdsAfterDiscovery: () => ['cg-saved-always-on'],
       },
-      includeSystemContextGraphs: false,
       syncFromPeer: async (_peerId, contextGraphIds) => {
         durableScopes.push([...(contextGraphIds ?? [])]);
         return 1;
