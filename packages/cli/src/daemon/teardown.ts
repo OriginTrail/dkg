@@ -111,6 +111,40 @@ export interface ProducerQuiescentTeardownSteps {
 
 export type TeardownStepName = keyof ProducerQuiescentTeardownSteps;
 
+/**
+ * The order, and the ONLY place it is written down.
+ *
+ * Exhaustiveness is enforced at compile time by `_TEARDOWN_ORDER_IS_EXHAUSTIVE`
+ * below, because the failure mode otherwise is silent in the worst way: adding
+ * a step to {@link ProducerQuiescentTeardownSteps} and forgetting it here
+ * type-checks, ships, and simply never runs that teardown. Nothing throws, no
+ * test fails, and the resource just leaks on every shutdown. A sequencer whose
+ * whole purpose is "no step is skipped" must not be able to skip a step by
+ * omission.
+ */
+const TEARDOWN_ORDER = [
+  'closeServer',
+  'drainCatchupJobs',
+  'flushTelemetry',
+  'stopPublisherRuntime',
+  'stopPromoteWorker',
+  'closeCatchupRunner',
+  'stopAgent',
+  'stopTelemetry',
+] as const satisfies readonly TeardownStepName[];
+
+/**
+ * Compile-time guard. If a step is missing from {@link TEARDOWN_ORDER} this
+ * resolves to a tuple naming the omission instead of `true`, and the assignment
+ * below fails to compile with the missing key in the error text.
+ */
+type _TeardownOrderExhaustive =
+  Exclude<TeardownStepName, (typeof TEARDOWN_ORDER)[number]> extends never
+    ? true
+    : ['TEARDOWN_ORDER is missing steps:', Exclude<TeardownStepName, (typeof TEARDOWN_ORDER)[number]>];
+const _TEARDOWN_ORDER_IS_EXHAUSTIVE: _TeardownOrderExhaustive = true;
+void _TEARDOWN_ORDER_IS_EXHAUSTIVE;
+
 export interface TeardownStepFailure {
   step: TeardownStepName;
   error: unknown;
@@ -179,17 +213,7 @@ export async function runProducerQuiescentTeardown(
   log: (message: string) => void = () => {},
 ): Promise<TeardownOutcome> {
   const failures: TeardownStepFailure[] = [];
-  const order: TeardownStepName[] = [
-    'closeServer',
-    'drainCatchupJobs',
-    'flushTelemetry',
-    'stopPublisherRuntime',
-    'stopPromoteWorker',
-    'closeCatchupRunner',
-    'stopAgent',
-    'stopTelemetry',
-  ];
-  for (const step of order) {
+  for (const step of TEARDOWN_ORDER) {
     try {
       await steps[step]();
     } catch (error) {

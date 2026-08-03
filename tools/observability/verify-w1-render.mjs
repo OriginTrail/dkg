@@ -325,6 +325,44 @@ for (const rule of allRules) {
   }
 }
 
+// ── the SOURCE-VOCABULARY binding ─────────────────────────────────────────
+// The metric-name binding above has an exact twin problem, and leaving it
+// unbound was worse than never having claimed coverage: the observability
+// workflow now triggers on `sync/policy.ts` precisely BECAUSE this verifier
+// mirrors the source union — so a green run on a source-only change reads as
+// "W1 classification checked" when nothing compared the two sets.
+//
+// `EXPECTED_FAMILIES` partitions the union into eligible / excluded /
+// invalidating. That partition is a DECISION per source, so the binding is
+// exhaustive in both directions: a source added to production but missing from
+// the table would silently go unclassified, and a source in the table that no
+// longer exists would keep a dead family alive in the queries.
+{
+  const policyRel = 'packages/agent/src/sync/policy.ts';
+  const policyPath = path.join(REPO_ROOT, policyRel);
+  if (!fs.existsSync(policyPath)) {
+    fail('source vocabulary', `${policyRel} not found from repo root ${REPO_ROOT} — the source binding cannot run`);
+  } else {
+    const src = fs.readFileSync(policyPath, 'utf8');
+    const block = src.match(/export const SYNC_ADMISSION_SOURCES\s*=\s*\[([\s\S]*?)\]\s*as const/);
+    if (!block) {
+      fail('source vocabulary', `could not locate \`export const SYNC_ADMISSION_SOURCES = [...] as const\` in ${policyRel} — the binding would pass vacuously`);
+    } else {
+      const real = new Set([...block[1].matchAll(/'([^']+)'/g)].map((m) => m[1]));
+      if (real.size === 0) {
+        fail('source vocabulary', `SYNC_ADMISSION_SOURCES in ${policyRel} parsed to an EMPTY set — the binding would pass vacuously`);
+      }
+      const mapped = new Set(ALL_SOURCES);
+      for (const s of real) {
+        if (!mapped.has(s)) fail('source vocabulary', `"${s}" is a real SYNC_ADMISSION_SOURCES member but has NO family in this verifier's table — it would be silently unclassified by every W1 query`);
+      }
+      for (const s of mapped) {
+        if (real.size > 0 && !real.has(s)) fail('source vocabulary', `"${s}" is classified by this verifier but is NOT in SYNC_ADMISSION_SOURCES in ${policyRel} — a dead family kept alive in the queries`);
+      }
+    }
+  }
+}
+
 // ── inventory and surface floors ──────────────────────────────────────────
 for (const inst of EXPECTED_INSTRUMENTS) {
   if (!covered.has(inst.id)) fail('metric inventory', `${inst.id} (${inst.name}) is never read — every W1 instrument must appear in the decision queries`);

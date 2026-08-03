@@ -218,24 +218,32 @@ const buildWindowQueries = ({ nodeProfile, range }) => {
   const i4count = (src) => selector(I.I4, { series: '_count', matchers: [...LANE, src, SEL] });
   const i5 = (src) => selector(I.I5, { matchers: [...LANE, src, SEL] });
 
-  const bytesRate = (src) => `(sum(rate(${i2(src)}${W})) + sum(rate(${i3(src)}${W})))`;
+  // `a + b` is EMPTY in PromQL whenever either operand is empty. Every term
+  // below is an UNLABELLED aggregate (`sum(...)` with no `by`), so `or
+  // vector(0)` substitutes a genuine zero without inventing label sets.
+  const zeroFilled = (term) => `(${term} or vector(0))`;
+
+  // Both byte legs are zero-filled INDEPENDENTLY. An absent I3 series is not
+  // "cannot compute" — it is a meaningful zero: §6.2 records I3 only when the
+  // send RESOLVED, so a window in which every send timed out has real I2 bytes
+  // and no I3 series at all. Adding them un-filled returned empty, which made
+  // the byte gates read `inconclusive` exactly when sync was failing — the one
+  // window an operator most needs the number for, and the one where the answer
+  // is perfectly well known (it is the I2 sum).
+  //
+  // This cannot mask a dead pipeline: "nothing exported at all" is caught by
+  // the separate `completed_durable_operations` and `export_coverage_min_samples`
+  // gates, which is what makes zero-filling safe here rather than merely
+  // convenient.
+  const bytesRate = (src) => `(${zeroFilled(`sum(rate(${i2(src)}${W}))`)} + ${zeroFilled(`sum(rate(${i3(src)}${W}))`)})`;
   const bytesPerHour = (src) => `3600 * ${bytesRate(src)}`;
-  const bytesInWindow = (src) => `sum(increase(${i2(src)}${W})) + sum(increase(${i3(src)}${W}))`;
+  const bytesInWindow = (src) => `${zeroFilled(`sum(increase(${i2(src)}${W}))`)} + ${zeroFilled(`sum(increase(${i3(src)}${W}))`)}`;
   const attemptsPerHour = (src) => `3600 * sum(rate(${i1(src)}${W}))`;
   const activeMsRate = (src) => `sum(rate(${i4sum(src)}${W}))`;
   const activeMsPerHour = (src) => `3600 * ${activeMsRate(src)}`;
   const opsInWindow = (src) => `sum(increase(${i4count(src)}${W}))`;
 
-  // `a + b` is EMPTY in PromQL whenever either operand is empty, so a
-  // multi-term gate whose passing value is 0 would go blank the moment one of
-  // its instruments has no series — hiding a non-zero term in another. The two
-  // zero-gates therefore zero-fill each term. This deliberately does NOT apply
-  // to the byte/active-ms totals: there an empty operand genuinely means the
-  // total cannot be computed, and §7.3 reads that as `inconclusive`, never as
-  // a smaller confident number. "Nothing exported at all" is caught by the
-  // separate `completed_durable_operations` and `export_coverage_min_samples`
-  // gates, which is why zero-filling here cannot mask a dead pipeline.
-  const zeroFilled = (term) => `(${term} or vector(0))`;
+  // (`zeroFilled` is defined above, next to the byte legs that motivated it.)
 
   const gates = [
     { id: 'completed_durable_operations', title: 'Completed durable/changelog sync operations (I4 count)',

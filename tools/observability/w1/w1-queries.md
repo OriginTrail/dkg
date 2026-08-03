@@ -133,7 +133,7 @@ sum(increase({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_count", 
 Evidence gate ≥ 50 MB. Encoded application-protocol payload at the router boundary — never called wire bandwidth.
 
 ```promql
-sum(increase({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])) + sum(increase({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h]))
+(sum(increase({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])) or vector(0))
 ```
 
 **`cross_family_singleflight_joins`** — Cross-family single-flight joins (I6)
@@ -183,7 +183,7 @@ Strain denominator. Source-attributed active wall-clock occupancy — occupancy,
 Volume denominator.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`all_source_durable_attempts_per_hour`** — ALL-SOURCE durable attempts/hour (I1, no family filter)
@@ -207,7 +207,7 @@ Strain numerator for the 30 % floor.
 Volume numerator for the per-family shares.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`eligible_durable_operations`** — Eligible completed durable operations (I4 count)
@@ -233,7 +233,7 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 Sources: catchup-foreground. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`foreground_durable_attempts_per_hour`** — user-triggered catch-up — durable attempts/hour (I1)
@@ -257,7 +257,7 @@ Sources: catchup-foreground. Absolute floor for a winning family is ≥ 90 000 m
 Materiality gate ≥ 0.60 (volume axis).
 
 ```promql
-(sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h]))) / (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])))
+((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[2h])) or vector(0))) / ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`foreground_share_of_eligible_durable_active_ms`** — user-triggered catch-up — share of eligible durable active ms
@@ -273,7 +273,7 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 Sources: on-connect, reconcile. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`recurring_durable_attempts_per_hour`** — recurring peer contact — durable attempts/hour (I1)
@@ -297,7 +297,7 @@ Sources: on-connect, reconcile. Absolute floor for a winning family is ≥ 90 00
 Materiality gate ≥ 0.60 (volume axis).
 
 ```promql
-(sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h]))) / (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])))
+((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0))) / ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`recurring_share_of_eligible_durable_active_ms`** — recurring peer contact — share of eligible durable active ms
@@ -313,7 +313,7 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 Sources: catchup-background, vm-recovery, swm-recovery, control-plane. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0)))
 ```
 
 **`excluded_durable_attempts_per_hour`** — excluded / reported separately — durable attempts/hour (I1)
@@ -412,7 +412,7 @@ sum(increase({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_count", 
 Evidence gate ≥ 50 MB. Encoded application-protocol payload at the router boundary — never called wire bandwidth.
 
 ```promql
-sum(increase({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])) + sum(increase({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h]))
+(sum(increase({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])) or vector(0))
 ```
 
 **`cross_family_singleflight_joins`** — Cross-family single-flight joins (I6)
@@ -462,7 +462,7 @@ Strain denominator. Source-attributed active wall-clock occupancy — occupancy,
 Volume denominator.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`all_source_durable_attempts_per_hour`** — ALL-SOURCE durable attempts/hour (I1, no family filter)
@@ -486,7 +486,7 @@ Strain numerator for the 30 % floor.
 Volume numerator for the per-family shares.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`eligible_durable_operations`** — Eligible completed durable operations (I4 count)
@@ -512,7 +512,7 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 Sources: catchup-foreground. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`foreground_durable_attempts_per_hour`** — user-triggered catch-up — durable attempts/hour (I1)
@@ -536,7 +536,7 @@ Sources: catchup-foreground. Absolute floor for a winning family is ≥ 90 000 m
 Materiality gate ≥ 0.60 (volume axis).
 
 ```promql
-(sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h]))) / (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])))
+((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground", instance=~"${node:regex}"}[1h])) or vector(0))) / ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`foreground_share_of_eligible_durable_active_ms`** — user-triggered catch-up — share of eligible durable active ms
@@ -552,7 +552,7 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 Sources: on-connect, reconcile. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`recurring_durable_attempts_per_hour`** — recurring peer contact — durable attempts/hour (I1)
@@ -576,7 +576,7 @@ Sources: on-connect, reconcile. Absolute floor for a winning family is ≥ 90 00
 Materiality gate ≥ 0.60 (volume axis).
 
 ```promql
-(sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h]))) / (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])))
+((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0))) / ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-foreground|on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`recurring_share_of_eligible_durable_active_ms`** — recurring peer contact — share of eligible durable active ms
@@ -592,7 +592,7 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 Sources: catchup-background, vm-recovery, swm-recovery, control-plane. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])))
+3600 * ((sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0)))
 ```
 
 **`excluded_durable_attempts_per_hour`** — excluded / reported separately — durable attempts/hour (I1)
