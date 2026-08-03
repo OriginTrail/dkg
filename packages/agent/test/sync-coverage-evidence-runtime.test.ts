@@ -553,7 +553,7 @@ describe('automatic sync coverage runtime evidence', () => {
     });
   });
 
-  it('records only startup-rehydrated always-on Edge selections on periodic work', async () => {
+  it('records only durable always-on Edge selections on periodic work', async () => {
     const rehydrated = 'cg-rehydrated';
     const runtimeSelected = 'cg-runtime-selected';
     const persisted = new Map<string, ContextGraphSubscriptionRecord>([[rehydrated, {
@@ -596,6 +596,8 @@ describe('automatic sync coverage runtime evidence', () => {
       expect.arrayContaining([rehydrated, runtimeSelected]),
     );
     expect(agent.getContextGraphSubscriptionRehydrationStatus()?.rehydratedAlwaysOnIds)
+      .toEqual([rehydrated]);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.durableAlwaysOnEdgeIds)
       .toEqual([rehydrated]);
 
     // Edge's broad sync-on-connect switch remains off. Only the internal
@@ -665,7 +667,7 @@ describe('automatic sync coverage runtime evidence', () => {
       source: 'reconciler',
       trigger: 'periodic-reconciler',
       syncMode: 'always-on',
-      rehydratedSelectionCount: 1,
+      durableSelectionCount: 1,
       evidenceTruncated: false,
       state: 'running',
     });

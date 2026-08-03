@@ -809,12 +809,14 @@ export interface ContextGraphSubscriptionRehydrationStatus {
   systemExcluded: number;
   hostedActivated: number;
   hostedActivatedIds: string[];
-  /**
-   * Edge always-on selections backed by durable subscription intent in this
-   * process. This includes rows restored during startup and selections whose
-   * first durable write completes after startup.
-   */
+  /** Explicit Edge always-on selections restored during startup rehydration. */
   rehydratedAlwaysOnIds?: string[];
+  /**
+   * Live periodic-admission set backed by committed durable explicit Edge
+   * always-on intent. Includes startup-restored rows and successful post-boot
+   * writes; excludes on-demand, deactivated, and cleared selections.
+   */
+  durableAlwaysOnEdgeIds?: string[];
   activated: number;
   dormant: number;
   activationCap: number;

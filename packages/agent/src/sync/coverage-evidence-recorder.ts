@@ -22,7 +22,7 @@ export interface SyncCoverageEvidenceRoundInput {
   effectiveBatchSize: number;
   selectedContextGraphIds: readonly string[];
   automaticContextGraphIds: readonly string[];
-  rehydratedAlwaysOnContextGraphIds: readonly string[];
+  durableAlwaysOnEdgeContextGraphIds: readonly string[];
   startedAt?: number;
 }
 
@@ -64,11 +64,11 @@ export class SyncCoverageEvidenceRecorder {
       });
     }
     if (this.options.nodeRole === 'edge' && trigger === 'periodic-reconciler') {
-      for (const contextGraphId of input.rehydratedAlwaysOnContextGraphIds) {
+      for (const contextGraphId of input.durableAlwaysOnEdgeContextGraphIds) {
         this.evidenceContextGraphs.add(contextGraphId);
       }
       this.edgeRunning = this.options.journal.startEdgeReconcilerJobs({
-        contextGraphIds: input.rehydratedAlwaysOnContextGraphIds,
+        contextGraphIds: input.durableAlwaysOnEdgeContextGraphIds,
         startedAt,
       });
     }

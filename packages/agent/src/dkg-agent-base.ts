@@ -1574,6 +1574,12 @@ export class DKGAgentBase {
    * `SYNC_BACKOFF_BASE_MS`.
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();
+  /**
+   * Edge periodic-sync admission derived only from committed durable explicit
+   * always-on member intent. Kept separate from startup rehydration diagnostics
+   * so post-boot persistence cannot redefine rehydration bookkeeping.
+   */
+  protected readonly durableAlwaysOnEdgeIds = new Set<string>();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;

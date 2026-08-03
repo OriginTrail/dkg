@@ -65,26 +65,41 @@ function cleanSharedMemorySyncResult() {
   };
 }
 
-async function createRehydratedEdgeEvidenceAgent(contextGraphId: string): Promise<DKGAgent> {
-  const persisted = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
-    id: contextGraphId,
-    subscribed: true,
-    synced: false,
-    sharedMemorySynced: false,
-    metaSynced: false,
-    syncAdmission: 'explicit',
-    syncScoped: true,
-  }]]);
+interface EdgeEvidenceFixtureOptions {
+  name: string;
+  persistedRows?: ContextGraphSubscriptionRecord[];
+  syncContextGraphs?: string[];
+  syncOnConnectEnabled?: boolean;
+  syncSharedMemoryOnConnect?: boolean;
+  failDeletes?: ReadonlySet<string>;
+  afterRehydrate?: (
+    agent: DKGAgent,
+    persisted: Map<string, ContextGraphSubscriptionRecord>,
+  ) => void | Promise<void>;
+}
+
+async function createEdgeEvidenceAgent(options: EdgeEvidenceFixtureOptions): Promise<{
+  agent: DKGAgent;
+  persisted: Map<string, ContextGraphSubscriptionRecord>;
+}> {
+  const persisted = new Map<string, ContextGraphSubscriptionRecord>(
+    (options.persistedRows ?? []).map((row) => [row.id, { ...row }]),
+  );
   const contextGraphSubscriptionStore: ContextGraphSubscriptionStore = {
     loadAll: async () => [...persisted.values()],
     save: async (record) => { persisted.set(record.id, { ...record }); },
-    delete: async (id) => { persisted.delete(id); },
+    delete: async (id) => {
+      if (options.failDeletes?.has(id)) throw new Error(`delete failed for ${id}`);
+      persisted.delete(id);
+    },
   };
   const agent = await DKGAgent.create({
-    name: 'SyncEvidenceEdgePeriodic',
+    name: options.name,
     listenHost: '127.0.0.1',
     nodeRole: 'edge',
-    syncContextGraphs: [],
+    syncContextGraphs: options.syncContextGraphs ?? [],
+    syncOnConnectEnabled: options.syncOnConnectEnabled,
+    syncSharedMemoryOnConnect: options.syncSharedMemoryOnConnect,
     chainAdapter: new MockChainAdapter(),
     contextGraphSubscriptionStore,
   });
@@ -112,6 +127,7 @@ async function createRehydratedEdgeEvidenceAgent(contextGraphId: string): Promis
     peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
   };
   await (agent as any).rehydrateContextGraphSubscriptions();
+  await options.afterRehydrate?.(agent, persisted);
   (agent.node as any).node = {
     getPeers: () => [{ toString: () => PEER }],
     getConnections: () => [],
@@ -119,72 +135,48 @@ async function createRehydratedEdgeEvidenceAgent(contextGraphId: string): Promis
   (agent as any).getSyncReconcilerProbe = async () => ({
     protocolsKey: PROTOCOL_SYNC,
     connectionKey: PEER,
+  });
+  return { agent, persisted };
+}
+
+async function createRehydratedEdgeEvidenceAgent(contextGraphId: string): Promise<DKGAgent> {
+  const { agent } = await createEdgeEvidenceAgent({
+    name: 'SyncEvidenceEdgePeriodic',
+    persistedRows: [{
+      id: contextGraphId,
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      syncAdmission: 'explicit',
+      syncScoped: true,
+    }],
   });
   return agent;
 }
 
 async function createFreshConfiguredEdgeEvidenceAgent(contextGraphId: string): Promise<DKGAgent> {
-  const persisted = new Map<string, ContextGraphSubscriptionRecord>();
-  const contextGraphSubscriptionStore: ContextGraphSubscriptionStore = {
-    loadAll: async () => [...persisted.values()],
-    save: async (record) => { persisted.set(record.id, { ...record }); },
-    delete: async (id) => { persisted.delete(id); },
-  };
-  const agent = await DKGAgent.create({
+  const { agent, persisted } = await createEdgeEvidenceAgent({
     name: 'SyncEvidenceFreshConfiguredEdgePeriodic',
-    listenHost: '127.0.0.1',
-    nodeRole: 'edge',
     syncContextGraphs: [contextGraphId],
     syncOnConnectEnabled: false,
     syncSharedMemoryOnConnect: false,
-    chainAdapter: new MockChainAdapter(),
-    contextGraphSubscriptionStore,
-  });
-  (agent as any).started = true;
-  (agent as any).networkAdmissionCoordinator.isAcceptedPeer = () => true;
-  (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-  (agent as any).discoverContextGraphsFromStore = async () => 0;
-  (agent as any).planSharedMemorySyncContextGraphs = async (
-    _peerId: string,
-    contextGraphIds: string[],
-  ) => ({
-    publicContextGraphIds: [...contextGraphIds],
-    privateRecoverFromCurator: [],
-    eligibleContextGraphIds: [...contextGraphIds],
-  });
-  (agent as any).refreshMetaSyncedFlags = async () => new Set<string>();
-  (agent as any).hasConfirmedMetaState = async () => true;
-  (agent as any).gossip = {
-    subscribe: () => undefined,
-    unsubscribe: () => undefined,
-    onMessage: () => undefined,
-    offMessage: () => undefined,
-  };
-  (agent.node as any).node = {
-    peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
-  };
-  await (agent as any).rehydrateContextGraphSubscriptions();
-  (agent as any).setContextGraphSubscription(contextGraphId, {
-    subscribed: true,
-    synced: false,
-    sharedMemorySynced: false,
-    metaSynced: false,
-    syncMode: 'always-on',
-    syncAdmission: 'explicit',
+    afterRehydrate: (freshAgent) => {
+      (freshAgent as any).setContextGraphSubscription(contextGraphId, {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        syncMode: 'always-on',
+        syncAdmission: 'explicit',
+      });
+    },
   });
   await waitFor(() => (
     persisted.has(contextGraphId)
     && agent.getContextGraphSubscriptionRehydrationStatus()
-      ?.rehydratedAlwaysOnIds?.includes(contextGraphId) === true
+      ?.durableAlwaysOnEdgeIds?.includes(contextGraphId) === true
   ));
-  (agent.node as any).node = {
-    getPeers: () => [{ toString: () => PEER }],
-    getConnections: () => [],
-  };
-  (agent as any).getSyncReconcilerProbe = async () => ({
-    protocolsKey: PROTOCOL_SYNC,
-    connectionKey: PEER,
-  });
   return agent;
 }
 
@@ -225,6 +217,58 @@ describe('Edge periodic sync scope evidence', () => {
     expect(sharedMemoryScopes).toEqual([[configured]]);
     expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+  });
+
+  it.each([
+    { label: 'cleared', failDelete: false },
+    { label: 'deactivated after a failed delete', failDelete: true },
+  ])('removes a $label durable Edge selection from periodic admission', async ({ failDelete }) => {
+    const contextGraphId = `cg-periodic-cleanup-${failDelete ? 'deactivated' : 'cleared'}`;
+    const { agent } = await createEdgeEvidenceAgent({
+      name: 'SyncEvidenceEdgePeriodicCleanup',
+      persistedRows: [{
+        id: contextGraphId,
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        syncAdmission: 'explicit',
+        syncScoped: true,
+      }],
+      syncContextGraphs: [contextGraphId],
+      syncOnConnectEnabled: false,
+      syncSharedMemoryOnConnect: false,
+      failDeletes: failDelete ? new Set([contextGraphId]) : undefined,
+    });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.durableAlwaysOnEdgeIds)
+      .toEqual([contextGraphId]);
+
+    const cleared = await agent.clearContextGraphSubscriptions();
+    expect(cleared).toBe(failDelete ? 0 : 1);
+    const status = agent.getContextGraphSubscriptionRehydrationStatus();
+    expect(status?.durableAlwaysOnEdgeIds).toEqual([]);
+    expect(status?.dormantIds.includes(contextGraphId)).toBe(failDelete);
+
+    const durableScopes: string[][] = [];
+    const sharedMemoryScopes: string[][] = [];
+    (agent as any).syncFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      durableScopes.push([...contextGraphIds]);
+      return cleanDurableSyncResult();
+    };
+    (agent as any).syncSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      sharedMemoryScopes.push([...contextGraphIds]);
+      return cleanSharedMemorySyncResult();
+    };
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    expect(durableScopes).toEqual([]);
+    expect(sharedMemoryScopes).toEqual([]);
   });
 
   it('keeps the normal Edge periodic scope when broad sync-on-connect is enabled', async () => {

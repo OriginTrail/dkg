@@ -957,34 +957,34 @@ interface LifecycleSyncInvocationPolicy {
 }
 
 function createLifecycleSyncInvocationPolicy(input: {
-  readonly initialRehydratedAlwaysOnContextGraphIds: readonly string[];
+  readonly initialDurableAlwaysOnEdgeContextGraphIds: readonly string[];
   readonly nodeRole: 'core' | 'edge';
   readonly syncOnConnect: boolean;
   readonly syncSharedMemoryOnConnect: boolean;
   readonly trigger: SyncCoverageEvidenceTrigger | undefined;
-  getLiveRehydratedAlwaysOnContextGraphIds(): string[];
+  getLiveDurableAlwaysOnEdgeContextGraphIds(): string[];
 }): LifecycleSyncInvocationPolicy {
   const periodicEdgeScopedResume = input.nodeRole === 'edge'
     && input.trigger === 'periodic-reconciler'
     && !input.syncOnConnect;
   if (periodicEdgeScopedResume) {
     return {
-      canStart: input.initialRehydratedAlwaysOnContextGraphIds.length > 0,
+      canStart: input.initialDurableAlwaysOnEdgeContextGraphIds.length > 0,
       syncSharedMemory: true,
       buildScopePlan: (defaultPlan) => {
-        const live = input.getLiveRehydratedAlwaysOnContextGraphIds();
+        const live = input.getLiveDurableAlwaysOnEdgeContextGraphIds();
         return {
           effectiveBatchSize: Math.min(defaultPlan.effectiveBatchSize, live.length),
           automaticContextGraphIds: [],
           initialBootstrapContextGraphIds: [],
           initialDurableContextGraphIds: [...live],
-          contextGraphIdsAfterDiscovery: input.getLiveRehydratedAlwaysOnContextGraphIds,
+          contextGraphIdsAfterDiscovery: input.getLiveDurableAlwaysOnEdgeContextGraphIds,
         };
       },
       requestedSharedMemoryContextGraphIds: () =>
-        input.getLiveRehydratedAlwaysOnContextGraphIds(),
+        input.getLiveDurableAlwaysOnEdgeContextGraphIds(),
       filterSharedMemoryPlan: (plan) => {
-        const live = new Set(input.getLiveRehydratedAlwaysOnContextGraphIds());
+        const live = new Set(input.getLiveDurableAlwaysOnEdgeContextGraphIds());
         return {
           ...plan,
           eligibleContextGraphIds: plan.eligibleContextGraphIds.filter((id) => live.has(id)),
@@ -3939,17 +3939,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
-  /** Canonical live subset of this process's startup-rehydrated Edge intent. */
-  protected getRehydratedAlwaysOnEvidenceContextGraphIds(
+  /** Canonical live subset of committed durable explicit Edge intent. */
+  protected getDurableAlwaysOnEdgeContextGraphIds(
     this: DKGAgent,
     selectedContextGraphIds: readonly string[],
   ): string[] {
-    const startupRehydrated = new Set(
-      this.contextGraphSubscriptionRehydrationStatus?.rehydratedAlwaysOnIds ?? [],
-    );
     return [...new Set(selectedContextGraphIds)].filter((contextGraphId) => {
       const subscription = this.subscribedContextGraphs.get(contextGraphId);
-      return startupRehydrated.has(contextGraphId)
+      return this.durableAlwaysOnEdgeIds.has(contextGraphId)
         && subscription?.subscribed === true
         && subscription.syncAdmission === 'explicit'
         && subscription.syncMode === 'always-on';
@@ -3974,19 +3971,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const trigger = invocation?.[automaticSyncInvocationBrand] === true
       ? invocation.trigger
       : undefined;
-    const getLiveRehydratedAlwaysOnContextGraphIds = () => {
+    const getLiveDurableAlwaysOnEdgeContextGraphIds = () => {
       const configured = [...new Set(this.config.syncContextGraphs ?? [])];
-      return this.getRehydratedAlwaysOnEvidenceContextGraphIds(configured);
+      return this.getDurableAlwaysOnEdgeContextGraphIds(configured);
     };
-    const initialRehydratedAlwaysOnContextGraphIds =
-      getLiveRehydratedAlwaysOnContextGraphIds();
+    const initialDurableAlwaysOnEdgeContextGraphIds =
+      getLiveDurableAlwaysOnEdgeContextGraphIds();
     const invocationPolicy = createLifecycleSyncInvocationPolicy({
-      initialRehydratedAlwaysOnContextGraphIds,
+      initialDurableAlwaysOnEdgeContextGraphIds,
       nodeRole: this.config.nodeRole ?? 'edge',
       syncOnConnect: syncOnConnectEnabled(this.config),
       syncSharedMemoryOnConnect: this.config.syncSharedMemoryOnConnect ?? true,
       trigger,
-      getLiveRehydratedAlwaysOnContextGraphIds,
+      getLiveDurableAlwaysOnEdgeContextGraphIds,
     });
     if (!invocationPolicy.canStart) {
       return 'not-started';
@@ -4007,15 +4004,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     const createScopePlan = () => {
       const configuredContextGraphIds = [...new Set(this.config.syncContextGraphs ?? [])];
-      const rehydratedAlwaysOnContextGraphIds =
-        getLiveRehydratedAlwaysOnContextGraphIds();
+      const durableAlwaysOnEdgeContextGraphIds =
+        getLiveDurableAlwaysOnEdgeContextGraphIds();
       const defaultScopePlan = this.planCorePublicSyncPeerRound(remotePeer);
       const scopePlan = invocationPolicy.buildScopePlan(defaultScopePlan);
       evidence.beginRound({
         effectiveBatchSize: scopePlan.effectiveBatchSize,
         selectedContextGraphIds: configuredContextGraphIds,
         automaticContextGraphIds: scopePlan.automaticContextGraphIds,
-        rehydratedAlwaysOnContextGraphIds,
+        durableAlwaysOnEdgeContextGraphIds,
       });
       return scopePlan;
     };
@@ -4344,7 +4341,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!syncReconcilerEnabled(this.config)) return;
     if (!syncOnConnectEnabled(this.config)) {
       const hasScopedEdgeResume = (this.config.nodeRole ?? 'edge') === 'edge'
-        && this.getRehydratedAlwaysOnEvidenceContextGraphIds(
+        && this.getDurableAlwaysOnEdgeContextGraphIds(
           this.config.syncContextGraphs ?? [],
         ).length > 0;
       if (!hasScopedEdgeResume) return;
@@ -6974,9 +6971,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphSubscriptionPersistCanceledRevisions.delete(contextGraphId);
   }
 
-  updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
+  updateDurableAlwaysOnEdgeAdmissionAfterPersist(this: DKGAgent,
     contextGraphId: string,
     next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted' | 'syncAdmission'>,
+  ): void {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
+    this.durableAlwaysOnEdgeIds.delete(contextGraphId);
+    // The persistence projection is the canonical boundary: on-demand member
+    // intent is projected to `skip` and can never reach this committed-write
+    // callback. Only an authoritative successful Edge save may enter the
+    // periodic lane.
+    if (
+      (this.config.nodeRole ?? 'edge') === 'edge'
+      && next?.subscribed === true
+      && next.syncAdmission === 'explicit'
+    ) {
+      this.durableAlwaysOnEdgeIds.add(contextGraphId);
+    }
+  }
+
+  removeDurableAlwaysOnEdgeAdmission(this: DKGAgent, contextGraphIds: Iterable<string>): void {
+    for (const contextGraphId of contextGraphIds) {
+      this.durableAlwaysOnEdgeIds.delete(contextGraphId);
+    }
+  }
+
+  updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
+    contextGraphId: string,
+    next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>,
   ): void {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
@@ -6992,26 +7014,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let activated = status.activated;
     let dormantIds = status.dormantIds.filter((id) => id !== contextGraphId);
     let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
-    let nextRehydratedAlwaysOnIds = (status.rehydratedAlwaysOnIds ?? [])
-      .filter((id) => id !== contextGraphId);
     if (next?.coreHosted === true) {
       nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
-    }
-    // A freshly configured Edge selection is just as durable as one loaded
-    // from a previous process once this save commits. Admit it to the bounded
-    // periodic lane now so a first cold boot with broad sync-on-connect
-    // disabled does not require an otherwise pointless restart. On-demand
-    // subscriptions never reach this branch because their persistence
-    // projection is `skip`.
-    if (
-      (this.config.nodeRole ?? 'edge') === 'edge'
-      && next?.subscribed === true
-      && next.syncAdmission === 'explicit'
-    ) {
-      nextRehydratedAlwaysOnIds = sortIds([
-        ...nextRehydratedAlwaysOnIds,
-        contextGraphId,
-      ]);
     }
 
     if (isPersisted) {
@@ -7035,7 +7039,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       persistedTotal,
       hostedActivated: nextHostedActivatedIds.length,
       hostedActivatedIds: nextHostedActivatedIds,
-      rehydratedAlwaysOnIds: nextRehydratedAlwaysOnIds,
       activated,
       dormant: dormantIds.length,
       dormantIds,
@@ -7052,7 +7055,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     const dormantIds = [...status.dormantIds];
     const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
-    const rehydratedAlwaysOnIds = [...(status.rehydratedAlwaysOnIds ?? [])];
     const removeFrom = (ids: string[], id: string): boolean => {
       const index = ids.indexOf(id);
       if (index < 0) return false;
@@ -7068,7 +7070,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
       const wasDormant = removeFrom(dormantIds, id);
       removeFrom(hostedActivatedIds, id);
-      removeFrom(rehydratedAlwaysOnIds, id);
       if (!wasAccounted) continue;
       persistedTotal = Math.max(0, persistedTotal - 1);
       if (!wasDormant) {
@@ -7079,7 +7080,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
-      removeFrom(rehydratedAlwaysOnIds, id);
       if (!dormantIds.includes(id)) {
         activated = Math.max(0, activated - 1);
         dormantIds.push(id);
@@ -7092,7 +7092,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       persistedTotal,
       hostedActivated: hostedActivatedIds.length,
       hostedActivatedIds,
-      rehydratedAlwaysOnIds,
       activated,
       dormant: dormantIds.length,
       dormantIds,
@@ -7156,10 +7155,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (persistence.action === 'delete') {
       void this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.delete(contextGraphId))
         .then(() => {
-          if (
-            options?.updateRehydrationStatus === true &&
-            this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
-          ) {
+          if (!this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision)) return;
+          this.updateDurableAlwaysOnEdgeAdmissionAfterPersist(contextGraphId, undefined);
+          if (options?.updateRehydrationStatus === true) {
             this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, undefined);
           }
         })
@@ -7177,10 +7175,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const record = persistence.record;
     void this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
       .then(() => {
-        if (
-          options?.updateRehydrationStatus === true &&
-          this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
-        ) {
+        if (!this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision)) return;
+        this.updateDurableAlwaysOnEdgeAdmissionAfterPersist(contextGraphId, record);
+        if (options?.updateRehydrationStatus === true) {
           this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, record);
         }
       }).catch((err) => {
@@ -7493,6 +7490,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...status,
       hostedActivatedIds: [...(status.hostedActivatedIds ?? [])],
       rehydratedAlwaysOnIds: [...(status.rehydratedAlwaysOnIds ?? [])],
+      durableAlwaysOnEdgeIds: [...this.durableAlwaysOnEdgeIds]
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
       dormantIds: [...status.dormantIds],
     };
   }
@@ -7500,6 +7499,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
+    this.durableAlwaysOnEdgeIds.clear();
     const ctx = createOperationContext('init');
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
@@ -7710,6 +7710,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           && syncAdmission === 'explicit'
         ) {
           rehydratedAlwaysOnIds.push(row.id);
+          this.durableAlwaysOnEdgeIds.add(row.id);
         }
         if (row.subscribed) {
           this.subscribeToContextGraph(row.id, {
@@ -7793,6 +7794,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       }
     } catch (err) {
+      // Rehydration is an all-or-nothing admission boundary. A partially
+      // visited durable row set must not become eligible after startup failed.
+      this.durableAlwaysOnEdgeIds.clear();
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -7914,6 +7918,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     if (cleared > 0 || deactivatedIds.length > 0) {
+      this.removeDurableAlwaysOnEdgeAdmission([...clearedIds, ...deactivatedIds]);
       this.updateContextGraphSubscriptionRehydrationStatusAfterClear(clearedIds, deactivatedIds);
     }
 

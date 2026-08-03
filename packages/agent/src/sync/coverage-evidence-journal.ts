@@ -32,7 +32,7 @@ export interface EdgeReconcilerSyncCoverageEvidence extends SyncCoverageEvidence
   source: 'reconciler';
   trigger: 'periodic-reconciler';
   syncMode: 'always-on';
-  rehydratedSelectionCount: number;
+  durableSelectionCount: number;
   evidenceTruncated: boolean;
   verified: SyncCoverageVerifiedPlanes;
 }
@@ -283,7 +283,7 @@ export class SyncCoverageEvidenceJournal {
         source: 'reconciler',
         trigger: 'periodic-reconciler',
         syncMode: 'always-on',
-        rehydratedSelectionCount: bounded.count,
+        durableSelectionCount: bounded.count,
         evidenceTruncated: bounded.truncated,
         state: 'running',
         verified: { metadata: false, durable: false, sharedMemory: false },
@@ -319,7 +319,7 @@ export class SyncCoverageEvidenceJournal {
       source: 'reconciler',
       trigger: 'periodic-reconciler',
       syncMode: 'always-on',
-      rehydratedSelectionCount: running.rehydratedSelectionCount,
+      durableSelectionCount: running.durableSelectionCount,
       evidenceTruncated: running.evidenceTruncated,
       state: input.operationCompleted
         && !running.evidenceTruncated

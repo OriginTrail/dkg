@@ -50,7 +50,7 @@ export function assertEdgeReconcilerJournalV1(
     || entry['source'] !== 'reconciler'
     || entry['trigger'] !== 'periodic-reconciler'
     || entry['syncMode'] !== 'always-on'
-    || !positiveInteger(entry['rehydratedSelectionCount'])
+    || !positiveInteger(entry['durableSelectionCount'])
     || !verifiedPlanes(entry['verified'])) {
     throw new Error('Edge automatic completion lacks exact reconciler journal provenance');
   }

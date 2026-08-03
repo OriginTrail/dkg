@@ -311,7 +311,7 @@ class ScriptedRuntime implements SelectiveCoverageRuntimeV1 {
       source: 'reconciler',
       trigger: 'periodic-reconciler',
       syncMode: 'always-on',
-      rehydratedSelectionCount: 1,
+      durableSelectionCount: 1,
       evidenceTruncated: false,
       state: 'complete',
       verified: { metadata: true, durable: true, sharedMemory: true },
