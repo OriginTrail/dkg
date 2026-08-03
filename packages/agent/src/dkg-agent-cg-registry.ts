@@ -418,7 +418,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal; source?: string } = {},
   ): Promise<string | null> {
-    const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+    const directSubscription = this.subscribedContextGraphs.get(contextGraphId);
+    const subscribed = directSubscription?.onChainId;
     if (subscribed) return subscribed;
 
     // Registered CG events carry only the curator-committed name hash. Resolve
@@ -428,8 +429,37 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const mappedLocalId = this.localCgIdForWireId(
       this.contextGraphWireId(contextGraphId),
     );
-    const mapped = this.subscribedContextGraphs.get(mappedLocalId)?.onChainId;
+    const mappedSubscription = this.subscribedContextGraphs.get(mappedLocalId);
+    const mapped = mappedSubscription?.onChainId;
     if (mapped) return mapped;
+
+    // A cold node may select a CG long after ContextGraphCreated fell outside
+    // the live event poller's bounded lookback. Resolve the exact indexed
+    // nameHash from chain before consulting the legacy ontology projection.
+    // Scope this expensive historical operation to a locally admitted
+    // subscription (explicit Edge selection or Core-hosted record): an
+    // arbitrary remote id must never trigger a chain crawl.
+    const localSubscription = directSubscription ?? mappedSubscription;
+    const resolveHistorical = this.chain?.resolveContextGraphIdByNameHash;
+    const locallyAdmitted = localSubscription !== undefined && (
+      localSubscription.subscribed === true
+      || localSubscription.coreHosted === true
+    );
+    if (locallyAdmitted && typeof resolveHistorical === 'function') {
+      const wireId = localSubscription.onChainHash
+        ? this.contextGraphWireId(localSubscription.onChainHash)
+        : this.contextGraphNameCommitment(mappedLocalId);
+      const resolved = options.signal === undefined
+        ? await resolveHistorical.call(this.chain, wireId)
+        : await resolveHistorical.call(this.chain, wireId, { signal: options.signal });
+      if (resolved !== null) {
+        const boundLocalId = this.bindOnChainContextGraphIdFromNameHash(
+          wireId,
+          resolved.toString(),
+        );
+        if (boundLocalId !== null) return resolved.toString();
+      }
+    }
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;

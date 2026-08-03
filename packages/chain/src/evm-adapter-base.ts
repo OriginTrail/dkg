@@ -914,6 +914,23 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
+  /**
+   * Deployment-scoped reverse bindings recovered from indexed
+   * ContextGraphCreated.nameHash logs. Positive results are immutable for a
+   * contract address. Negative results use a short TTL so a configured CG that
+   * is registered later becomes visible without restarting the adapter.
+   */
+  protected readonly contextGraphIdsByNameHash = new Map<
+    string,
+    { value: bigint | null; cachedAt: number }
+  >();
+
+  /** One bounded historical scan per deployment + name hash at a time. */
+  protected readonly contextGraphIdByNameHashInflight = new Map<
+    string,
+    Promise<bigint | null>
+  >();
+
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /**
@@ -939,6 +956,8 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
+    this.contextGraphIdsByNameHash.clear();
+    this.contextGraphIdByNameHashInflight.clear();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
   }
 
