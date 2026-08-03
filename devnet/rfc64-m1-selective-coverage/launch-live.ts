@@ -19,6 +19,7 @@ import {
   readExpectedSelectiveCoverageProvenance,
   readSelectiveCoverageCorpus,
 } from './operator-input.ts';
+import { resolveLiveAdapterTimeoutMs } from './live-launcher-config.ts';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const corpusPath = resolveRequiredPath('DKG_RFC64_M1_CORPUS_FILE');
@@ -33,7 +34,9 @@ const adapterArgs = parseStringArray(
   'DKG_RFC64_M1_ADAPTER_ARGS_JSON',
 );
 const adapterCwd = resolve(process.env['DKG_RFC64_M1_ADAPTER_CWD'] ?? repoRoot);
-const timeoutMs = parseTimeout(process.env['DKG_RFC64_M1_ADAPTER_TIMEOUT_MS']);
+const timeoutMs = resolveLiveAdapterTimeoutMs(
+  process.env['DKG_RFC64_M1_ADAPTER_TIMEOUT_MS'],
+);
 
 const corpus = readSelectiveCoverageCorpus(corpusPath);
 const expectedProvenance = readExpectedSelectiveCoverageProvenance(trustAnchorPath);
@@ -92,15 +95,6 @@ function parseStringArray(value: string, label: string): string[] {
   }
   if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== 'string')) {
     throw new TypeError(`${label} must be a JSON string array`);
-  }
-  return parsed;
-}
-
-function parseTimeout(value: string | undefined): number | undefined {
-  if (value === undefined || value.trim() === '') return undefined;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new TypeError('DKG_RFC64_M1_ADAPTER_TIMEOUT_MS must be an integer');
   }
   return parsed;
 }

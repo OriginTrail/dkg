@@ -40,13 +40,6 @@ export const SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA =
 export const SELECTIVE_COVERAGE_RUNTIME_RESULT_PREFIX = 'DKG_RFC64_M1_RESULT ';
 const MAX_RESULT_LINE_BYTES = 1024 * 1024;
 const CLOSE_GRACE_MS = 5_000;
-// A real testnet command can include chain finality, five-peer durable/SWM
-// catch-up, and an exact store observation. Keep the outer process boundary
-// longer than the shipped operator adapter's 20-minute poll window; otherwise
-// a valid late result can race the outer timer before the inner operation can
-// produce its evidence. The extra five minutes covers the final exact store
-// observation and response framing without making the live boundary unbounded.
-export const DEFAULT_SELECTIVE_COVERAGE_ADAPTER_TIMEOUT_MS = 25 * 60_000;
 
 interface RuntimeSuccessResultEnvelopeV1 {
   readonly schema: typeof SELECTIVE_COVERAGE_RUNTIME_RESULT_SCHEMA;
@@ -119,7 +112,7 @@ export class ProcessSelectiveCoverageRuntimeV1 implements SelectiveCoverageRunti
     readonly timeoutMs?: number;
   }) {
     if (!input.command.trim()) throw new TypeError('M1 runtime adapter command is empty');
-    const timeoutMs = input.timeoutMs ?? DEFAULT_SELECTIVE_COVERAGE_ADAPTER_TIMEOUT_MS;
+    const timeoutMs = input.timeoutMs ?? 120_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 3_600_000) {
       throw new RangeError('M1 runtime adapter timeout is outside 1s..1h');
     }
