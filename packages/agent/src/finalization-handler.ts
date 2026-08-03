@@ -16,11 +16,12 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
   getMetrics,
-  DKG_SWM_FINALIZED_PREDICATE,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
-  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  localSwmRetirementMarker,
+  localSwmRetirementMarkerPattern,
+  localSwmRetirementMarkerSubjectPattern,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteGenSource,
@@ -2035,18 +2036,8 @@ export class FinalizationHandler {
           scope,
           subGraphName,
         );
-        const assertionVersion = `"${scope.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
-        await this.store.deleteByPattern({
-          graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-          subject: swmGraph,
-          predicate: DKG_SWM_FINALIZED_PREDICATE,
-        });
-        await this.store.insert([{
-          graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-          subject: swmGraph,
-          predicate: DKG_SWM_FINALIZED_PREDICATE,
-          object: assertionVersion,
-        }]);
+        await this.store.deleteByPattern(localSwmRetirementMarkerSubjectPattern(swmGraph));
+        await this.store.insert([localSwmRetirementMarker(swmGraph, scope.assertionVersion)]);
         this.log.info(
           ctx,
           `Marked finalized graph-scoped SWM assertion ${scope.ual} v${scope.assertionVersion}`,
@@ -2075,12 +2066,9 @@ export class FinalizationHandler {
           scope,
           subGraphName,
         );
-        await this.store.deleteByPattern({
-          graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-          subject: swmGraph,
-          predicate: DKG_SWM_FINALIZED_PREDICATE,
-          object: `"${scope.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
-        });
+        await this.store.deleteByPattern(
+          localSwmRetirementMarkerPattern(swmGraph, scope.assertionVersion),
+        );
       },
     );
   }

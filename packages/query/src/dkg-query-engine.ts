@@ -7,7 +7,7 @@ import type {
 import {
   ExactGraphReadError,
   GraphManager,
-  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  discoverLocallyRetiredSwmGraphs,
   readExactGraphPaged,
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
@@ -32,7 +32,6 @@ import {
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  DKG_SWM_FINALIZED_PREDICATE,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   buildLegacyKnowledgeAssetMetadataQuery,
@@ -935,24 +934,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const bucketEnd = markerIndex + marker.length;
       metaGraphs.add(`${graph.slice(0, bucketEnd)}_meta`);
     }
-    if (metaGraphs.size === 0) return new Set();
-
-    const result = await reads.query(
-      `SELECT DISTINCT ?graph WHERE {
-        VALUES ?metaGraph { ${[...metaGraphs].map((graph) => `<${assertSafeIri(graph)}>`).join(' ')} }
-        GRAPH ?metaGraph {
-          ?head <http://dkg.io/ontology/assertionGraph> ?graph ;
-            <http://dkg.io/ontology/assertionVersion> ?assertionVersion .
-        }
-        GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
-          ?graph <${DKG_SWM_FINALIZED_PREDICATE}> ?assertionVersion .
-        }
-      }`,
-    );
-    if (result.type !== 'bindings') return new Set();
-    return new Set(result.bindings
-      .map((binding) => binding['graph']?.replace(/^<|>$/g, ''))
-      .filter((graph): graph is string => Boolean(graph)));
+    return discoverLocallyRetiredSwmGraphs([...metaGraphs], reads);
   }
 
   /**

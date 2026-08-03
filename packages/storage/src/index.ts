@@ -143,6 +143,12 @@ export {
   type KnowledgeAssetPrivateReadOptions,
 } from './private-store.js';
 export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
+export {
+  discoverLocallyRetiredSwmGraphs,
+  localSwmRetirementMarker,
+  localSwmRetirementMarkerPattern,
+  localSwmRetirementMarkerSubjectPattern,
+} from './local-swm-retirement.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';
