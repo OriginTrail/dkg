@@ -2288,6 +2288,49 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('retires a synced SWM copy only after revalidating exact VM state against chain', async () => {
+    const { message, swmGraph } = await stageGraph();
+    const chain = legacyFinalizationChain(4, {
+      chainId: 'otp:20430',
+      getLatestMerkleRoot: async () => message.kcMerkleRoot,
+      getMerkleRootCount: async () => 1n,
+      getKAContextGraphId: async () => 42n,
+    });
+    const recoveryHandler = new FinalizationHandler(store, chain, {
+      writeLocks: new Map(),
+      resolveContextGraphOnChainId: async () => '42',
+    });
+    await recoveryHandler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+      '12D3KooWPublisher',
+    );
+    // Simulate the real cold-join order: durable VM is present, then a later
+    // SWM catch-up materializes the retained recovery copy without the live
+    // finalization message that originally stamped this local-only marker.
+    await store.deleteByPattern({
+      graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+      subject: swmGraph,
+    });
+
+    await expect(recoveryHandler.retireSyncedGraphScopedSwmIfFinalized({
+      contextGraphId: CG,
+      ual: UAL,
+      assertionVersion: VERSION,
+    }, createOperationContext('sync'))).resolves.toBe('retired');
+
+    await expect(store.query(
+      `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+        <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}>
+          "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(new DKGQueryEngine(store).query(
+      'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
+      { contextGraphId: CG, view: 'shared-working-memory' },
+    )).resolves.toEqual({ bindings: [] });
+  });
+
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);

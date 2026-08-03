@@ -123,6 +123,7 @@ interface HarnessOverrides {
   subGraphName?: string;
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
+  onGraphScopedSnapshotSettled?: () => Promise<void>;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -202,6 +203,12 @@ function harness(overrides: HarnessOverrides = {}) {
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
         },
       },
+      onGraphScopedSnapshotSettled: async (contextGraphId, descriptor) => {
+        expect(contextGraphId).toBe(CG);
+        expect(descriptor.kaUal).toBe(UAL);
+        events.push('snapshot-settled');
+        await overrides.onGraphScopedSnapshotSettled?.();
+      },
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
@@ -242,6 +249,33 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
     expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
     expect(h.headSwaps).toEqual([{ contextGraphId: CG, headSubject: `${UAL}#dkg-swm-head` }]);
+  });
+
+  it('runs post-sync finalization after verified head metadata lands and before completion', async () => {
+    const h = harness();
+    const summary = await h.run();
+    expect(h.events.indexOf('snapshot-settled')).toBeGreaterThan(
+      h.events.indexOf('meta-inserted'),
+    );
+    expect(summary.failedPhases).toBe(0);
+    // This fixture has one advancing meta page, an empty data page, and a
+    // cache-hit snapshot (no network page). Only the meta checkpoint counts as
+    // advancing completion, and it is recorded after the callback succeeds.
+    expect(summary.completedPhases).toBe(1);
+  });
+
+  it('holds the SWM phase incomplete when post-sync finalization cannot settle', async () => {
+    const h = harness({
+      onGraphScopedSnapshotSettled: async () => {
+        throw new Error('chain unavailable');
+      },
+    });
+    const summary = await h.run();
+    expect(h.events).toContain('snapshot-settled');
+    expect(summary.failedPhases).toBe(1);
+    // The cache-hit snapshot has no network checkpoint of its own, and the
+    // meta/data checkpoints did not advance past the failed handoff.
+    expect(summary.completedPhases).toBe(0);
   });
 
   it('closes the gossip race: in-lock version re-check skips a superseded snapshot', async () => {

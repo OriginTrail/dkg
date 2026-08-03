@@ -5685,6 +5685,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 writeLocks: this.writeLocks,
                 invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
               }),
+              onGraphScopedSnapshotSettled: async (contextGraphId, descriptor) => {
+                await this.getOrCreateFinalizationHandler()
+                  .retireSyncedGraphScopedSwmIfFinalized({
+                    contextGraphId,
+                    ual: descriptor.kaUal,
+                    assertionVersion: descriptor.assertionVersion,
+                    ...(descriptor.subGraphName
+                      ? { subGraphName: descriptor.subGraphName }
+                      : {}),
+                  }, ctx);
+              },
               storeInsert: async (quads) => {
                 // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
                 // literals BEFORE insert so the SWM page cursor advances instead

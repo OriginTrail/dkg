@@ -12,6 +12,7 @@ import {
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  parseDeterministicKnowledgeAssetUal,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
@@ -98,6 +99,7 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import { packKnowledgeAssetIdFromIdentity } from './ka-identity.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -1998,8 +2000,17 @@ export class FinalizationHandler {
     merkleRoot: Uint8Array;
     subGraphName?: string;
     ctx: OperationContext;
+    /** Optional current-chain proof, re-run while the per-KA SWM lock is held. */
+    revalidate?: () => Promise<boolean>;
   }): Promise<boolean> {
-    const { contextGraphId, scope, merkleRoot, subGraphName, ctx } = input;
+    const {
+      contextGraphId,
+      scope,
+      merkleRoot,
+      subGraphName,
+      ctx,
+      revalidate,
+    } = input;
     const writeLocks = this.writeLocks;
     if (!writeLocks) return false;
     return withKeyedLocks(
@@ -2015,6 +2026,7 @@ export class FinalizationHandler {
           subGraphName,
         });
         if (!head || head.assertionVersion !== scope.assertionVersion) return false;
+        if (revalidate && !(await revalidate())) return false;
 
         let privateMerkleRoot: Uint8Array | undefined;
         try {
@@ -2051,6 +2063,106 @@ export class FinalizationHandler {
         return true;
       },
     );
+  }
+
+  /**
+   * Close the foreground cold-join seam after a verified SWM snapshot lands.
+   *
+   * Durable VM catch-up runs before SWM catch-up. A receiver can therefore
+   * hold the exact, chain-authenticated VM assertion and later materialize the
+   * publisher's retained SWM recovery copy without ever seeing live
+   * finalization gossip. This method hides only that exact current SWM head.
+   *
+   * Peer metadata is never sufficient: the method first requires surviving
+   * local confirmed VM metadata, re-verifies the exact VM graph against that
+   * commitment, and then re-reads root/version/KA-to-CG binding from chain
+   * while the shared per-KA writer lock is held. Physical SWM data remains for
+   * recovery and a newer/unmatched workspace head remains visible.
+   */
+  async retireSyncedGraphScopedSwmIfFinalized(input: {
+    contextGraphId: string;
+    ual: string;
+    assertionVersion: string;
+    subGraphName?: string;
+  }, ctx: OperationContext): Promise<'retired' | 'not-finalized'> {
+    const { contextGraphId, ual, assertionVersion, subGraphName } = input;
+    const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+      contextGraphId,
+      ual,
+    });
+    if (stored.state === 'absent') return 'not-finalized';
+    if (stored.state === 'invalid') {
+      throw new Error(`Cannot reconcile synced SWM for ${ual}: confirmed VM metadata is invalid`);
+    }
+
+    const { envelope } = stored;
+    if (
+      envelope.assertionVersion !== assertionVersion
+      || (envelope.subGraphName ?? undefined) !== (subGraphName ?? undefined)
+    ) {
+      return 'not-finalized';
+    }
+
+    let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    let kaId: bigint;
+    try {
+      scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+      const identity = parseDeterministicKnowledgeAssetUal(ual);
+      if (!this.chain || identity.chainId !== this.chain.chainId) return 'not-finalized';
+      kaId = packKnowledgeAssetIdFromIdentity(identity);
+    } catch {
+      return 'not-finalized';
+    }
+    if (envelope.batchId !== kaId) return 'not-finalized';
+
+    const vmVerification = await this.verifyExactGraphScopedLayer({
+      contextGraphId,
+      scope,
+      layer: MemoryLayer.VerifiableMemory,
+      publicTripleCount: envelope.publicTripleCount,
+      ...(envelope.privateMerkleRoot
+        ? { privateMerkleRoot: envelope.privateMerkleRoot }
+        : {}),
+      expectedMerkleRoot: envelope.merkleRoot,
+      ...(subGraphName ? { subGraphName } : {}),
+    });
+    if (vmVerification.status !== 'verified') return 'not-finalized';
+
+    const chain = this.chain;
+    if (
+      !chain
+      || chain.chainId === 'none'
+      || typeof chain.getLatestMerkleRoot !== 'function'
+      || typeof chain.getMerkleRootCount !== 'function'
+      || typeof chain.getKAContextGraphId !== 'function'
+    ) {
+      return 'not-finalized';
+    }
+    const revalidate = async (): Promise<boolean> => {
+      const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
+        chain.getLatestMerkleRoot!(kaId),
+        chain.getMerkleRootCount!(kaId),
+        chain.getKAContextGraphId!(kaId),
+      ]);
+      return latestRoot.length === 32
+        && equalBytes(latestRoot, envelope.merkleRoot)
+        && BigInt(rootCount) === BigInt(assertionVersion)
+        && BigInt(boundContextGraphId) > 0n
+        && await this.onChainContextGraphMatchesLocalId(
+          contextGraphId,
+          BigInt(boundContextGraphId),
+        );
+    };
+
+    const retired = await this.markMatchingGraphScopedSwmFinalized({
+      contextGraphId,
+      scope,
+      merkleRoot: envelope.merkleRoot,
+      ...(subGraphName ? { subGraphName } : {}),
+      ctx,
+      revalidate,
+    });
+    return retired ? 'retired' : 'not-finalized';
   }
 
   /** Re-expose the same SWM assertion when its canonical receipt is invalidated. */
