@@ -108,7 +108,13 @@ export async function acquireFinalizedChainRead<T>(
 
   const lane = lanes.get(key);
   if (lane !== undefined && lane.active >= FINALIZED_CHAIN_READ_MAX_CONCURRENT_PER_CHAIN_V1) {
-    throw saturated(lane.active, lane.holder);
+    const refusal = saturated(lane.active, lane.holder);
+    // Marked HERE and only here: this is the one place that refuses because the
+    // process-wide lane is occupied.
+    if (typeof refusal === 'object' && refusal !== null) {
+      ADMISSION_CONTENTION_ERRORS.add(refusal as object);
+    }
+    throw refusal;
   }
   lanes.set(key, { active: (lane?.active ?? 0) + 1, holder: request.owner });
   try {
@@ -124,19 +130,38 @@ export async function acquireFinalizedChainRead<T>(
 }
 
 /**
- * Is this failure "the chain lane is busy" rather than "the work is bad"?
+ * Errors this module itself raised because the process-wide lane was busy.
  *
- * Owned HERE because `concurrency-saturated` is a chain-layer code. Consumers —
- * notably the RFC64 receiver, which must treat contention as a deferral rather
- * than a provider failure — should ask this instead of crawling error shapes
+ * Identity, not shape. `concurrency-saturated` is a SHARED code with at least
+ * two other emitters — the snapshot session's "only one dynamic batch at a
+ * time" reentrancy guard (`strict-current-finalized-evm-snapshot-rpc.ts:61-64`)
+ * and the one-shot read's own limit-of-4 gate (`current-finalized-evm-call.ts:100-103`).
+ * Matching the code alone would classify a genuine integration bug — two
+ * concurrent `session.read()` calls — as harmless lane contention, silently
+ * retry it for the whole deferral bound, and then report a misleading
+ * "gave up waiting for the lane" instead of surfacing the misuse.
+ *
+ * A `WeakSet` keyed on the thrown error object cannot be forged by a caller
+ * constructing a similar-looking error, and holds no reference once the error
+ * is collected.
+ */
+const ADMISSION_CONTENTION_ERRORS = new WeakSet<object>();
+
+/**
+ * Is this failure "the process-wide finalized chain lane is busy" rather than
+ * "the work is bad"?
+ *
+ * Owned HERE because only this module knows which refusals it issued. Consumers
+ * — notably the RFC64 receiver, which must treat contention as a deferral
+ * rather than a provider failure — ask this instead of crawling error shapes
  * they do not own.
  */
 export function isFinalizedChainAdmissionContention(error: unknown): boolean {
   for (let cause: unknown = error, depth = 0;
     cause !== undefined && cause !== null && depth < 8;
     depth += 1) {
-    if (typeof cause === 'object'
-      && (cause as { code?: unknown }).code === 'concurrency-saturated') {
+    // Walk the chain: callers wrap this refusal before it reaches the receiver.
+    if (typeof cause === 'object' && ADMISSION_CONTENTION_ERRORS.has(cause as object)) {
       return true;
     }
     cause = (cause as { cause?: unknown }).cause;

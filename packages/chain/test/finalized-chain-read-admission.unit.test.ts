@@ -4,9 +4,11 @@ import {
   FINALIZED_CHAIN_READ_OWNERS,
   acquireFinalizedChainRead,
   finalizedChainReadRegistryDepth,
+  isFinalizedChainAdmissionContention,
   resetFinalizedChainReadRegistryForTests,
   type FinalizedChainReadOwnerV1,
 } from '../src/finalized-chain-read-admission.js';
+import { CurrentFinalizedEvmCallErrorV1 } from '../src/current-finalized-evm-read-profile.js';
 
 const CHAIN = '84532';
 const OTHER_CHAIN = '31337';
@@ -21,6 +23,75 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   });
   return { promise, resolve };
 }
+
+describe('contention classification is by IDENTITY, not by error code', () => {
+  // `concurrency-saturated` is a SHARED code. Classifying on it would make the
+  // RFC64 receiver defer — and silently retry for the whole deferral bound —
+  // on failures that are real bugs or unrelated local overload.
+  it('classifies only the refusal this module actually threw', async () => {
+    resetFinalizedChainReadRegistryForTests();
+    const gate = deferred<void>();
+    const held = acquireFinalizedChainRead(
+      { chainId: CHAIN, owner: 'rfc64' },
+      () => gate.promise,
+      (active, holder) => new CurrentFinalizedEvmCallErrorV1(
+        'concurrency-saturated',
+        `Chain ${CHAIN} already has ${active} in flight (held by ${holder})`,
+      ),
+    );
+    await Promise.resolve();
+
+    let refusal: unknown;
+    try {
+      await acquireFinalizedChainRead(
+        { chainId: CHAIN, owner: 'w2-page' },
+        async () => 'x',
+        (active) => new CurrentFinalizedEvmCallErrorV1('concurrency-saturated', `busy:${active}`),
+      );
+    } catch (error) {
+      refusal = error;
+    }
+    expect(isFinalizedChainAdmissionContention(refusal)).toBe(true);
+    // …and through a wrapper, which is how it reaches the receiver.
+    expect(isFinalizedChainAdmissionContention(
+      Object.assign(new Error('precommit rejected'), { cause: refusal }),
+    )).toBe(true);
+
+    gate.resolve();
+    await held;
+  });
+
+  it('does NOT classify the snapshot session reentrancy guard', () => {
+    // `strict-current-finalized-evm-snapshot-rpc.ts` throws this when two
+    // `session.read()` calls overlap. That is an integration bug: deferring it
+    // would retry the misuse and then report a misleading lane-wait failure.
+    const reentrancy = new CurrentFinalizedEvmCallErrorV1(
+      'concurrency-saturated',
+      'Current-finalized snapshot permits only one dynamic batch at a time',
+    );
+    expect(reentrancy.code).toBe('concurrency-saturated');
+    expect(isFinalizedChainAdmissionContention(reentrancy)).toBe(false);
+  });
+
+  it('does NOT classify the one-shot read limit', () => {
+    // The one-shot read has its own local gate with limit 4. Its saturation is
+    // local overload, not the shared pinned-scan lane.
+    const localLimit = new CurrentFinalizedEvmCallErrorV1(
+      'concurrency-saturated',
+      `Chain ${CHAIN} already has 4 current-finalized calls in flight`,
+    );
+    expect(isFinalizedChainAdmissionContention(localLimit)).toBe(false);
+  });
+
+  it('cannot be forged by constructing a look-alike error', () => {
+    expect(isFinalizedChainAdmissionContention(
+      Object.assign(new Error('nice try'), { code: 'concurrency-saturated' }),
+    )).toBe(false);
+    expect(isFinalizedChainAdmissionContention(undefined)).toBe(false);
+    expect(isFinalizedChainAdmissionContention(null)).toBe(false);
+    expect(isFinalizedChainAdmissionContention('concurrency-saturated')).toBe(false);
+  });
+});
 
 describe('finalized chain-read admission registry', () => {
   it('is PROCESS-WIDE: two independently obtained handles share one permit', async () => {

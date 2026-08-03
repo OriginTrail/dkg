@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { acquireFinalizedChainRead } from '@origintrail-official/dkg-chain';
+
 import { Rfc64PublicCatalogReceiverV1 } from '../src/rfc64/public-catalog-receiver-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
 
@@ -20,15 +22,39 @@ import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-c
  * consume an attempt, must not hold the receiver slot or the per-scope semantic
  * lock while waiting, and must leave the task pending.
  */
-const CHAIN_SATURATED = 'concurrency-saturated';
+/**
+ * A stand-in refusal for the receiver's own unit tests.
+ *
+ * Deliberately NOT a hand-forged `concurrency-saturated` object: the chain
+ * layer classifies contention by IDENTITY (a `WeakSet` of refusals it actually
+ * threw), precisely so a look-alike error cannot be mistaken for lane
+ * contention. These tests therefore inject the deferral policy — which is the
+ * receiver's real contract, "defer when the policy says so" — and one test
+ * below exercises the DEFAULT chain classifier end to end so the default wiring
+ * is not left unproven.
+ */
+const FAKE_CONTENTION = Symbol('fake-contention');
 
 function saturationError(): Error {
-  // Shaped like the chain layer's typed refusal, including nesting: the
-  // classifier must walk `cause`, not match on message text.
   const inner = Object.assign(new Error('Chain 20430 already has 1 finalized snapshot in flight'), {
-    code: CHAIN_SATURATED,
+    [FAKE_CONTENTION]: true,
   });
+  // Nested: the receiver's policy must be asked about the whole chain, since a
+  // real refusal reaches it wrapped by the precommit.
   return Object.assign(new Error('RFC-64 finalized VM precommit rejected'), { cause: inner });
+}
+
+/** Mirrors how the default policy walks `cause`, over the test's own marker. */
+function isFakeContention(error: unknown): boolean {
+  for (let cause: unknown = error, depth = 0;
+    cause !== undefined && cause !== null && depth < 8;
+    depth += 1) {
+    if (typeof cause === 'object' && (cause as Record<symbol, unknown>)[FAKE_CONTENTION] === true) {
+      return true;
+    }
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 function announcement(headDigest: string): Rfc64PublicCatalogHeadAnnouncementV1 {
@@ -61,6 +87,14 @@ function contendingReconciler(saturateTimes: number) {
   };
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
+}
+
 async function settle(receiver: Rfc64PublicCatalogReceiverV1, ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
   await receiver.whenIdle?.();
@@ -70,6 +104,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
   it('does not fail the head, and applies it after the lane frees', async () => {
     const { reconciler, calls } = contendingReconciler(2);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      isDeferrableError: isFakeContention,
       admissionDeferralMs: 10,
       retryBackoffMs: 1,
     });
@@ -94,6 +129,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // converting one busy chain lane into a stalled receiver.
     const { reconciler } = contendingReconciler(3);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      isDeferrableError: isFakeContention,
       admissionDeferralMs: 40,
       maxConcurrent: 1,
     });
@@ -113,6 +149,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // A permanently busy lane must degrade into an ordinary failure, not spin.
     const { reconciler } = contendingReconciler(Number.MAX_SAFE_INTEGER);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      isDeferrableError: isFakeContention,
       admissionDeferralMs: 1,
       maxAdmissionDeferrals: 3,
     });
@@ -136,7 +173,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
           throw new Error('provider exploded');
         },
       } as never,
-      { admissionDeferralMs: 5, retryBackoffMs: 1 },
+      { isDeferrableError: isFakeContention, admissionDeferralMs: 5, retryBackoffMs: 1 },
     );
     receiver.schedule(announcement('0xdd'), 'peer-a');
     await settle(receiver, 300);
@@ -155,6 +192,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // had settled before the head was applied, staged, not-found or failed.
     const { reconciler } = contendingReconciler(1);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      isDeferrableError: isFakeContention,
       admissionDeferralMs: 300,
     });
     receiver.schedule(announcement('0xf1'), 'peer-a');
@@ -191,6 +229,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // the existing task and create a second semantic writer for one head.
     const { reconciler, calls } = contendingReconciler(1);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      isDeferrableError: isFakeContention,
       admissionDeferralMs: 250,
     });
     receiver.schedule(announcement('0xf2'), 'peer-a');
@@ -217,6 +256,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
   it('drops pending deferrals on close without leaking a timer', async () => {
     const { reconciler } = contendingReconciler(Number.MAX_SAFE_INTEGER);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      isDeferrableError: isFakeContention,
       admissionDeferralMs: 10_000,
     });
     receiver.schedule(announcement('0xee'), 'peer-a');
@@ -225,5 +265,73 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // Must resolve promptly; a retained 10s timer would hang this.
     await receiver.close();
     expect(receiver.stats().queued).toBe(0);
+  });
+  it('DEFAULT policy defers a REAL chain refusal, and only a real one', async () => {
+    // Proves the default wiring, which the injected-policy tests above cannot:
+    // the receiver with no `isDeferrableError` must defer on a refusal that
+    // genuinely came out of `acquireFinalizedChainRead`, and must NOT defer on
+    // a look-alike carrying the same `concurrency-saturated` code.
+    // No registry reset needed: this test acquires and releases the lane within
+    // itself, and `…ForTests` is deliberately not part of the package's public
+    // surface.
+    const gate = deferred<void>();
+    const held = acquireFinalizedChainRead(
+      { chainId: '20430', owner: 'rfc64' },
+      () => gate.promise,
+      (active, holder) => Object.assign(
+        new Error(`Chain 20430 already has ${active} in flight (held by ${holder})`),
+        { code: 'concurrency-saturated' },
+      ),
+    );
+    await Promise.resolve();
+
+    // Capture a genuine refusal, wrapped the way the precommit wraps it.
+    let realRefusal: unknown;
+    try {
+      await acquireFinalizedChainRead(
+        { chainId: '20430', owner: 'w2-page' },
+        async () => 'x',
+        (active) => Object.assign(new Error(`busy:${active}`), { code: 'concurrency-saturated' }),
+      );
+    } catch (error) {
+      realRefusal = Object.assign(new Error('precommit rejected'), { cause: error });
+    }
+    gate.resolve();
+    await held;
+
+    let thrown = 0;
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      {
+        isHeadApplied: async () => false,
+        reconcileHead: async () => {
+          thrown += 1;
+          if (thrown === 1) throw realRefusal;
+          return 'applied' as const;
+        },
+      } as never,
+      { admissionDeferralMs: 10 }, // no injected policy — the default is under test
+    );
+    receiver.schedule(announcement('0xf9'), 'peer-a');
+    await settle(receiver, 400);
+    expect(receiver.stats().applied).toBe(1);
+    expect(receiver.stats().admissionDeferred).toBe(1);
+    expect(receiver.stats().failed).toBe(0);
+    await receiver.close();
+
+    // The look-alike must fail fast under the same default policy.
+    const lookAlike = new Rfc64PublicCatalogReceiverV1(
+      {
+        isHeadApplied: async () => false,
+        reconcileHead: async () => {
+          throw Object.assign(new Error('nice try'), { code: 'concurrency-saturated' });
+        },
+      } as never,
+      { admissionDeferralMs: 10, retryBackoffMs: 1 },
+    );
+    lookAlike.schedule(announcement('0xfa'), 'peer-a');
+    await settle(lookAlike, 300);
+    expect(lookAlike.stats().failed).toBe(1);
+    expect(lookAlike.stats().admissionDeferred).toBe(0);
+    await lookAlike.close();
   });
 });
