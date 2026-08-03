@@ -20,10 +20,7 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-import {
-  ContextGraphNameHashResolver,
-  scanContextGraphIdByNameHash,
-} from './context-graph-name-hash-resolver.js';
+import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -885,60 +882,75 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<bigint | null> {
     this.contextGraphNameHashResolver ??= new ContextGraphNameHashResolver({
-      prepare: async (normalizedNameHash) => {
+      load: async (normalizedNameHash) => {
         await this.init();
         const cgs = this.requireContextGraphStorage();
         const storageAddress = (await cgs.getAddress()).toLowerCase();
-        return {
-          cacheKey: `${storageAddress}:${normalizedNameHash}`,
-          scan: async () => {
-            const { fromBlock, head, scanProviders } =
-              await this.resolveContractDeployBlock(
-                storageAddress,
-                'resolveContextGraphIdByNameHash',
-                'ContextGraphStorage',
+        const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(
+          storageAddress,
+          'resolveContextGraphIdByNameHash',
+          'ContextGraphStorage',
+        );
+        if (fromBlock > head) return null;
+
+        const pages = Math.ceil((head - fromBlock + 1) / this.cgRegistryScanPageSize);
+        if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+          throw new Error(
+            `resolveContextGraphIdByNameHash: historical ContextGraphCreated scan ` +
+            `would need ${pages} eth_getLogs calls over blocks ` +
+            `[${fromBlock}, ${head}] at a ${this.cgRegistryScanPageSize}-block window ` +
+            `(budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages).`,
+          );
+        }
+
+        const filter = cgs.filters.ContextGraphCreated(null, null, normalizedNameHash);
+        const connected = new Map<JsonRpcProvider, Contract>();
+        const ids = new Set<bigint>();
+        let preferred: JsonRpcProvider | undefined;
+        for (let lo = fromBlock; lo <= head; lo += this.cgRegistryScanPageSize) {
+          const hi = Math.min(lo + this.cgRegistryScanPageSize - 1, head);
+          const page = await this.queryEventLogsPage(
+            cgs,
+            filter,
+            lo,
+            hi,
+            scanProviders,
+            connected,
+            'resolveContextGraphIdByNameHash ContextGraphCreated',
+            preferred,
+          );
+          preferred = page.provider;
+          for (const log of page.logs) {
+            const parsed = cgs.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed?.name !== 'ContextGraphCreated') continue;
+            const id = BigInt(parsed.args.contextGraphId);
+            if (id <= 0n) {
+              throw new Error(
+                `resolveContextGraphIdByNameHash: invalid Context Graph id ` +
+                `${id.toString()} for ${normalizedNameHash}`,
               );
-            const filter = cgs.filters.ContextGraphCreated(
-              null,
-              null,
-              normalizedNameHash,
-            );
-            const connected = new Map<JsonRpcProvider, Contract>();
-            return scanContextGraphIdByNameHash<
-              JsonRpcProvider,
-              ethers.EventLog | ethers.Log
-            >({
-              nameHash: normalizedNameHash,
-              fromBlock,
-              head,
-              pageSize: this.cgRegistryScanPageSize,
-              maxPages: CG_REGISTRY_MAX_SCAN_PAGES,
-              queryPage: async (lo, hi, preferred) => {
-                const page = await this.queryEventLogsPage(
-                  cgs,
-                  filter,
-                  lo,
-                  hi,
-                  scanProviders,
-                  connected,
-                  'resolveContextGraphIdByNameHash ContextGraphCreated',
-                  preferred,
-                );
-                return { logs: page.logs, preferred: page.provider };
-              },
-              parseContextGraphId: (log) => {
-                const parsed = cgs.interface.parseLog({
-                  topics: [...log.topics],
-                  data: log.data,
-                });
-                return parsed?.name === 'ContextGraphCreated'
-                  ? BigInt(parsed.args.contextGraphId)
-                  : null;
-              },
-              readCurrentNameHash: (id) => this.getContextGraphNameHash(id),
-            });
-          },
-        };
+            }
+            ids.add(id);
+          }
+        }
+
+        if (ids.size === 0) return null;
+        if (ids.size !== 1) {
+          throw new Error(
+            `resolveContextGraphIdByNameHash: ambiguous ${normalizedNameHash}; ` +
+            `ContextGraphCreated committed it to ${ids.size} numeric ids`,
+          );
+        }
+
+        const id = ids.values().next().value as bigint;
+        const currentHash = await this.getContextGraphNameHash(id);
+        if (currentHash !== normalizedNameHash) {
+          throw new Error(
+            `resolveContextGraphIdByNameHash: slot ${id.toString()} currently commits ` +
+            `${currentHash ?? ethers.ZeroHash}, expected ${normalizedNameHash}`,
+          );
+        }
+        return id;
       },
     });
     return this.contextGraphNameHashResolver.resolve(nameHash, options.signal);

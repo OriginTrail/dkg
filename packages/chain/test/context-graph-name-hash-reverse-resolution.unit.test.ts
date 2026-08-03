@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { CG_REGISTRY_MAX_SCAN_PAGES } from '../src/evm-adapter-base.js';
 
 const PRIVATE_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -135,6 +136,20 @@ describe('ContextGraphCreated name-hash reverse resolution', () => {
       /ambiguous.*2 numeric ids/i,
     );
     expect(adapter.getContextGraphNameHash).not.toHaveBeenCalled();
+  });
+
+  it('rejects an over-budget historical span before issuing any page query', async () => {
+    const { adapter, queryEventLogsPage } = fixture();
+    adapter.resolveContractDeployBlock = vi.fn(async () => ({
+      fromBlock: 100,
+      head: 100 + (CG_REGISTRY_MAX_SCAN_PAGES * 2),
+      scanProviders: [{ provider: {}, backendHead: 100 + (CG_REGISTRY_MAX_SCAN_PAGES * 2) }],
+    }));
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      new RegExp(`budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages`),
+    );
+    expect(queryEventLogsPage).not.toHaveBeenCalled();
   });
 
   it('fails closed when the live slot no longer matches the indexed commitment', async () => {
