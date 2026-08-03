@@ -273,6 +273,20 @@ jobs:
       - name: Test repository scripts
         run: pnpm run test:scripts
 
+      # W1 §8.3 packet reachability. This job is the right home because it is
+      # the one lane that installs the full workspace without sharding, and the
+      # gate asks the REAL Vitest resolver (`vitest list --filesOnly`) which
+      # files each pinned config would run.
+      #
+      # It exists because a packet file can be present on disk, tracked, and
+      # still contribute nothing: Vitest treats positionals as FILTERS against
+      # `include`, never as additions, so a suite missing from the include array
+      # is silently skipped and the command still exits 0. Leaving the gate
+      # uninvoked would have reproduced that exact failure one level up — a
+      # check that cannot fire is not a check.
+      - name: Verify the W1 §8.3 test packet is reachable
+        run: pnpm run verify:w1-packet
+
       - name: Package build outputs
         run: |
           set -euo pipefail

@@ -335,6 +335,7 @@ import {
   syncPlaneFor,
   withSyncAdmissionSource,
   type SyncAttemptOutcome,
+  type SyncOperationLane,
   type SyncOperationOutcome,
   type SyncSingleFlightScope,
 } from './sync/attempt-telemetry.js';
@@ -1249,7 +1250,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
     ctx: OperationContext,
     contextGraphId: string,
-    lane: SyncSchedulerLane,
+    /**
+     * `SyncOperationLane`, NOT the wider `SyncSchedulerLane`. This is the
+     * requester-side admission path, and its I4/I5 points carry `lane`
+     * directly — so the two scheduler lanes it can never receive
+     * (`pre_authorization`, `responder`, both owned by the responder limiter in
+     * `sync/responder/sync-handler.ts`) must not be expressible here. They are
+     * absent from `OPERATION_LANES`, so passing one would clamp silently to
+     * `unspecified` and quietly drop that operation out of every per-lane
+     * denominator. Typing it narrowly makes the compiler prove what was
+     * previously only an unstated assumption.
+     */
+    lane: SyncOperationLane,
     label: string,
     work: () => Promise<T>,
     admission: {

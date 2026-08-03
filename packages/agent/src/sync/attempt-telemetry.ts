@@ -283,7 +283,7 @@ export function recordSyncAttemptRequestBytes(
 /** I1 — exactly one terminal point per physically invoked send. */
 export function recordSyncAttempt(
   attributes: SyncAttemptAttributes,
-  outcome: SyncAttemptOutcome | string,
+  outcome: SyncAttemptOutcome,
 ): void {
   try {
     getMetrics().syncAttemptTotal.add(1, {
@@ -302,7 +302,7 @@ export function recordSyncAttempt(
 export function recordSyncAttemptResponseBytes(
   attributes: SyncAttemptAttributes,
   byteLength: number,
-  outcome: SyncAttemptOutcome | string,
+  outcome: SyncAttemptOutcome,
 ): void {
   const bytes = usableByteLength(byteLength);
   if (bytes === undefined) return;
@@ -323,8 +323,8 @@ export function recordSyncAttemptResponseBytes(
  * {@link recordSyncOperationRejected}.
  */
 export function recordSyncOperationDuration(input: {
-  lane: SyncOperationLane | string;
-  source: SyncAdmissionSource | string;
+  lane: SyncOperationLane;
+  source: SyncAdmissionSource;
   outcome: SyncOperationOutcome;
   durationMs: number;
 }): void {
@@ -346,9 +346,9 @@ export function recordSyncOperationDuration(input: {
  * which would deflate the mean and inflate the denominator at once.
  */
 export function recordSyncOperationRejected(input: {
-  lane: SyncOperationLane | string;
-  source: SyncAdmissionSource | string;
-  reason: SyncOperationRejectionReason | string;
+  lane: SyncOperationLane;
+  source: SyncAdmissionSource;
+  reason: SyncOperationRejectionReason;
 }): void {
   try {
     getMetrics().syncOperationRejectedTotal.add(1, {
@@ -367,9 +367,9 @@ export function recordSyncOperationRejected(input: {
  * as metadata beside the shared promise; it is never part of the key.
  */
 export function recordSyncSingleFlightJoin(input: {
-  scope: SyncSingleFlightScope | string;
-  ownerSource: SyncAdmissionSource | string;
-  joinerSource: SyncAdmissionSource | string;
+  scope: SyncSingleFlightScope;
+  ownerSource: SyncAdmissionSource;
+  joinerSource: SyncAdmissionSource;
 }): void {
   try {
     getMetrics().syncSingleflightJoinsTotal.add(1, {

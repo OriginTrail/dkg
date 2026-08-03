@@ -25,6 +25,16 @@ on:
       - 'tools/observability/**'
       # the gate must also verify itself when the gate changes
       - '.github/workflows/observability-artifacts.yml'
+      # …and it must run when the SOURCES it mirrors change, not only when the
+      # mirror does. verify-w1-render.mjs holds its own copies of the W1
+      # instrument inventory (names + units) and the eight-member source
+      # vocabulary, so a rename of `dkg.sync.attempt.request_bytes` or a new
+      # SYNC_ADMISSION_SOURCES member in a PR that never touches
+      # tools/observability would leave every W1 query stale AND skip the only
+      # check that could say so. A verifier that mirrors a contract has to be
+      # triggered by that contract.
+      - 'packages/core/src/telemetry-api.ts'
+      - 'packages/agent/src/sync/policy.ts'
   workflow_dispatch:
 
 concurrency:

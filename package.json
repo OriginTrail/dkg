@@ -13,6 +13,7 @@
     "build:runtime": "pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui",
     "test": "turbo test && pnpm run test:scripts",
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs",
+    "verify:w1-packet": "node scripts/verify-w1-packet.mjs",
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "turbo test:coverage",
     "bench": "pnpm --filter @origintrail-official/dkg-storage build && esbench --config esbench.config.mjs",
