@@ -23,17 +23,35 @@ import { sha256 } from '@noble/hashes/sha2.js';
 
 import {
   assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertCanonicalHexBytes,
   parseCanonicalDecimalU256,
   type Digest32V1,
   type EvmAddressV1,
 } from './sync-wire-scalars.js';
 
-const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
-const CANONICAL_DIGEST_32 = /^0x[0-9a-f]{64}$/;
-const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
-const LOWER_HEX_BYTES = /^0x(?:[0-9a-f]{2})*$/;
+/**
+ * `sync-wire-scalars.ts` is the single source of truth for canonical EVM
+ * addresses, digests, unsigned decimals and hex bytes. This module deliberately
+ * holds NO copies of those regexes: a second transcription drifts silently, and
+ * the drift would be two different canonical-scalar policies inside one package.
+ * Everything below adapts those assertions into W2's typed error codes.
+ *
+ * The one constant that stays is the zero address, and only because W2 must
+ * ACCEPT it for `author` where every shipped helper rejects it — see
+ * {@link canonicalNullableAuthorAddress}. It is a literal, not a validator.
+ */
 const ZERO_EVM_ADDRESS = `0x${'00'.repeat(20)}`;
 const UTF8 = new TextEncoder();
+
+/** Run a shipped canonical-scalar assertion, re-raised as a W2 error code. */
+function adapt<T>(label: string, assertion: () => T, code: VmUpdateErrorCodeV1 = 'noncanonical-scalar'): T {
+  try {
+    return assertion();
+  } catch (cause) {
+    fail(code, `${label} is not canonical: ${(cause as Error)?.message ?? String(cause)}`, cause);
+  }
+}
 
 /** `(1 << 96) - 1` — the rootless KA-number field width. */
 export const MAX_ROOTLESS_KA_NUMBER = (1n << 96n) - 1n;
@@ -41,6 +59,13 @@ export const MAX_ROOTLESS_KA_NUMBER = (1n << 96n) - 1n;
 const MAX_SCALAR_BYTES = 4_096;
 /** Bound on one page's event count, mirroring the transport's own page bound. */
 export const MAX_UPDATE_PAGE_EVENTS = 4_096;
+/**
+ * A valid EVM log carries 0..4 topics (LOG0..LOG4). The page-count bound alone
+ * does not constrain this: ONE log with a million topics passes it, then
+ * allocates and hashes a million entries. Since these logs come straight off an
+ * untrusted RPC response, the per-log bound has to be here.
+ */
+export const MAX_LOG_TOPICS = 4;
 
 // ── closed outcome vocabularies ───────────────────────────────────────────
 // Closed unions, exported as value tuples so a consumer can iterate them and a
@@ -138,11 +163,10 @@ function boundedString(value: unknown, label: string): string {
 /** Canonical lowercase 20-byte address; the zero address is REJECTED. */
 export function canonicalEvmAddress(value: unknown, label = 'address'): EvmAddressV1 {
   const text = boundedString(value, label);
-  if (!EVM_ADDRESS.test(text)) {
-    fail('noncanonical-scalar', `${label} must be a lowercase 20-byte 0x EVM address`);
-  }
-  if (text === ZERO_EVM_ADDRESS) fail('noncanonical-scalar', `${label} must not be the zero address`);
-  return text as EvmAddressV1;
+  return adapt(label, () => {
+    assertCanonicalEvmAddress(text, label);
+    return text;
+  });
 }
 
 /**
@@ -165,18 +189,19 @@ export function canonicalNullableAuthorAddress(
 ): EvmAddressV1 | null {
   if (value === null) return null;
   const text = boundedString(value, label);
-  if (!EVM_ADDRESS.test(text)) {
-    fail('noncanonical-scalar', `${label} must be a lowercase 20-byte 0x EVM address or null`);
-  }
-  return text === ZERO_EVM_ADDRESS ? null : (text as EvmAddressV1);
+  // Only the CANONICAL zero spelling short-circuits. A noncanonical zero such as
+  // `0X00…` misses this equality and falls through to the shipped assertion,
+  // which rejects it — so permitting zero does not also permit sloppy zero.
+  if (text === ZERO_EVM_ADDRESS) return null;
+  return canonicalEvmAddress(text, label);
 }
 
 export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 {
   const text = boundedString(value, label);
-  if (!CANONICAL_DIGEST_32.test(text)) {
-    fail('noncanonical-scalar', `${label} must be a lowercase 32-byte 0x digest`);
-  }
-  return text as Digest32V1;
+  return adapt(label, () => {
+    assertCanonicalDigest(text, label);
+    return text;
+  });
 }
 
 /**
@@ -202,20 +227,17 @@ export function canonicalUalChainId(value: unknown, label = 'chainId'): string {
   if (separator !== -1 && !/^[a-z][a-z0-9-]*(?::[a-z0-9-]+)*$/.test(namespace)) {
     fail('noncanonical-scalar', `${label} namespace must be lowercase alphanumeric`);
   }
-  if (!CANONICAL_UNSIGNED_DECIMAL.test(decimal)) {
-    fail('noncanonical-scalar', `${label} must end in a canonical decimal chain number`);
-  }
-  parseCanonicalDecimalU256(decimal, label);
+  // `parseCanonicalDecimalU256` already rejects leading-zero aliases and
+  // out-of-range values; restating that rule here as a regex is the drift this
+  // module refuses to introduce.
+  adapt(label, () => parseCanonicalDecimalU256(decimal, label));
   return text;
 }
 
 /** A canonical unsigned decimal with no leading-zero alias. */
 export function canonicalUnsignedDecimal(value: unknown, label = 'value'): bigint {
   const text = boundedString(value, label);
-  if (!CANONICAL_UNSIGNED_DECIMAL.test(text)) {
-    fail('noncanonical-scalar', `${label} must be a canonical unsigned decimal`);
-  }
-  return parseCanonicalDecimalU256(text, label);
+  return adapt(label, () => parseCanonicalDecimalU256(text, label));
 }
 
 /** A non-negative safe integer; block numbers and log indices are numbers on this wire. */
@@ -443,7 +465,16 @@ export function orderedLogCommitment(logs: readonly RawLogV1[]): Digest32V1 {
     }
     previous = position;
     const data = boundedString(log.data, 'log.data');
-    if (!LOWER_HEX_BYTES.test(data)) fail('noncanonical-scalar', 'log.data must be lowercase 0x bytes');
+    adapt('log.data', () => assertCanonicalHexBytes(data, 'log.data', 0, MAX_SCALAR_BYTES));
+    // Bound BEFORE expanding: `topics.map` on an unbounded array is the
+    // allocation this guard exists to prevent, so it cannot come after.
+    if (!Array.isArray(log.topics)) fail('page-malformed', 'log.topics must be an array');
+    if (log.topics.length > MAX_LOG_TOPICS) {
+      fail(
+        'page-malformed',
+        `log carries ${log.topics.length} topics, above the EVM bound of ${MAX_LOG_TOPICS}`,
+      );
+    }
     parts.push(
       canonicalEvmAddress(log.address, 'log.address'),
       String(log.topics.length),
@@ -546,6 +577,23 @@ export function canonicalPageProof(
   // endpoint claimed.
   if (through.blockNumber > finalizedAnchor.blockNumber) {
     fail('page-malformed', 'proof.through is above the finalized anchor');
+  }
+  // One block cannot have two hashes. A single-block page has `from === through`,
+  // and a page that reaches the anchor has `through === finalizedAnchor`; without
+  // this, such a proof could claim three different hashes at one height and still
+  // be marked corroborated. Empty and sparse pages are exactly where no log
+  // position would expose the contradiction.
+  for (const [left, right] of [
+    [from, through],
+    [from, finalizedAnchor],
+    [through, finalizedAnchor],
+  ] as const) {
+    if (left.blockNumber === right.blockNumber && left.blockHash !== right.blockHash) {
+      fail(
+        'page-malformed',
+        `proof references block ${left.blockNumber} with two different hashes`,
+      );
+    }
   }
   return Object.freeze({
     assurance: input.assurance,
@@ -708,13 +756,18 @@ export function canonicalScopedKaCandidatesFromVerifiedUal(
   // Round-trip, not `toLowerCase()`: accepting a mixed-case address here and
   // normalizing it would make two distinct UAL spellings denote one KA, so a
   // caller could address the same fence row two ways.
-  if (!EVM_ADDRESS.test(addressSegment)) {
-    fail('noncanonical-ual', 'ual address segment is not a lowercase 20-byte 0x address');
-  }
-  if (!CANONICAL_UNSIGNED_DECIMAL.test(numberSegment)) {
-    fail('noncanonical-ual', 'ual number segment is not a canonical decimal (leading-zero alias?)');
-  }
-  const number = BigInt(numberSegment);
+  adapt(
+    'ual address segment',
+    () => assertCanonicalEvmAddress(addressSegment, 'ual address segment'),
+    'noncanonical-ual',
+  );
+  // The shipped decimal parser owns the leading-zero-alias rule; restating it
+  // here would be a second canonical-scalar policy.
+  const number = adapt(
+    'ual number segment',
+    () => parseCanonicalDecimalU256(numberSegment, 'ual number segment'),
+    'noncanonical-ual',
+  );
   if (number > MAX_ROOTLESS_KA_NUMBER) {
     fail('ka-number-overflow', 'ual number segment exceeds the uint96 KA-number field');
   }

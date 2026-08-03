@@ -1,11 +1,7 @@
 import type { ChainIdV1 } from '@origintrail-official/dkg-core';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
-import {
-  acquireFinalizedChainRead,
-  type FinalizedChainReadOwnerV1,
-} from './finalized-chain-read-admission.js';
-import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
+import type { FinalizedReadAdmissionV1 } from './finalized-chain-read-admission.js';
 import {
   cancelled,
   isAnchorDependentResourceLimit,
@@ -22,24 +18,21 @@ import type {
 export interface StrictFinalizedEndpointRunnerProfileV1 {
   readonly chainId: ChainIdV1;
   readonly endpoints: readonly string[];
-  readonly maxConcurrentPerChain: number;
   readonly totalDeadlineMs: number;
   readonly attemptTimeoutMs: number;
   readonly messages: StrictFinalizedEndpointRunnerMessagesV1;
   /**
-   * When set, admission comes from the PROCESS-WIDE per-chain registry in
-   * `finalized-chain-read-admission.ts` instead of a gate private to this
-   * runner instance, and `maxConcurrentPerChain` is ignored in favour of that
-   * registry's single permit.
+   * The admission policy to run under. The runner does not know, and must not
+   * know, whether this is a per-instance gate or the process-wide per-chain
+   * registry — that is the caller's decision, and keeping it here would put a
+   * feature-specific owner vocabulary inside a generic endpoint lifecycle.
    *
-   * Heavyweight pinned snapshots set it, because their invariant is "one per
-   * chain across every caller" and a per-instance gate cannot express that —
-   * RFC64 builds its scope per precommit invocation, so it previously
-   * contended with nothing. The one-shot read primitive deliberately does NOT
-   * set it: its limit is 4 and folding it into the snapshot's single lane
-   * would throttle an unrelated path.
+   * Heavyweight pinned snapshots inject the shared policy, because their
+   * invariant is "one per chain across every caller". The one-shot read
+   * primitive injects a local gate: its limit is 4, and folding it into the
+   * snapshot's single lane would throttle an unrelated path.
    */
-  readonly sharedOwner?: FinalizedChainReadOwnerV1;
+  readonly admission: FinalizedReadAdmissionV1;
 }
 
 export interface StrictFinalizedEndpointRunnerMessagesV1 {
@@ -52,7 +45,8 @@ export interface StrictFinalizedEndpointRunnerMessagesV1 {
   readonly attemptDeadline: (timeoutMs: number) => string;
   readonly attemptFailure: string;
   readonly noEndpoint: string;
-  readonly saturated: (active: number, holder?: FinalizedChainReadOwnerV1) => string;
+  /** `holder` is supplied by policies that track one; a local gate passes none. */
+  readonly saturated: (active: number, holder?: string) => string;
 }
 
 interface StrictFinalizedEndpointRunInputV1<AttemptResult, Result> {
@@ -86,12 +80,7 @@ export interface StrictFinalizedEndpointRunnerV1 {
 export function createStrictFinalizedEndpointRunnerV1(
   profile: StrictFinalizedEndpointRunnerProfileV1,
 ): StrictFinalizedEndpointRunnerV1 {
-  const { messages, sharedOwner } = profile;
-  // Built unconditionally so the local path keeps identical semantics, but left
-  // unused when `sharedOwner` routes admission to the process-wide registry.
-  const localAdmission = createNonqueueingAdmissionGateV1<ChainIdV1>(
-    profile.maxConcurrentPerChain,
-  );
+  const { messages, admission } = profile;
   const run: StrictFinalizedEndpointRunnerV1 = async <AttemptResult, Result>(
     input: StrictFinalizedEndpointRunInputV1<AttemptResult, Result>,
   ): Promise<Result> => {
@@ -182,18 +171,14 @@ export function createStrictFinalizedEndpointRunnerV1(
         totalDeadline.close();
       }
     };
-    const saturatedError = (active: number, holder?: FinalizedChainReadOwnerV1) =>
-      new CurrentFinalizedEvmCallErrorV1(
+    return admission.run(
+      input.chainId,
+      admitted,
+      (active, holder) => new CurrentFinalizedEvmCallErrorV1(
         'concurrency-saturated',
         messages.saturated(active, holder),
-      );
-    return sharedOwner === undefined
-      ? localAdmission.run(input.chainId, admitted, saturatedError)
-      : acquireFinalizedChainRead(
-        { chainId: input.chainId, owner: sharedOwner },
-        admitted,
-        saturatedError,
-      );
+      ),
+    );
   };
   return Object.freeze(run);
 }

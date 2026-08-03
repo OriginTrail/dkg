@@ -33,14 +33,16 @@ export interface StrictRpcConfigSnapshotV1 {
 }
 
 /**
- * Snapshot callers must declare an owner. It is REQUIRED, not optional: an
- * ownerless snapshot path cannot be attributed in the `owner` metric dimension
- * and cannot participate in the fairness rules W2 adds later, so leaving a
- * default would quietly recreate the unattributed lane this work removes.
+ * Snapshot callers MAY declare an owner; omitting it means `foreground`.
+ *
+ * This factory is published API, so the field is optional — see the rationale in
+ * `snapshotStrictFinalizedSnapshotConfigV1`. Callers that matter for fairness
+ * and for the `owner` metric dimension (RFC64, W2) pass it explicitly and must
+ * never rely on the default.
  */
 export interface StrictFinalizedSnapshotRpcConfigV1
   extends StrictCurrentFinalizedEvmRpcConfigV1 {
-  readonly owner: FinalizedChainReadOwnerV1;
+  readonly owner?: FinalizedChainReadOwnerV1;
 }
 
 export interface StrictFinalizedSnapshotConfigSnapshotV1 extends StrictRpcConfigSnapshotV1 {

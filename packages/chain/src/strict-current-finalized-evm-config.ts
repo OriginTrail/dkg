@@ -31,14 +31,23 @@ export function snapshotStrictFinalizedSnapshotConfigV1(
     throw new TypeError('Strict finalized snapshot RPC config must be a plain data record');
   }
   const { owner, ...rest } = input;
-  if (!FINALIZED_CHAIN_READ_OWNERS.includes(owner as FinalizedChainReadOwnerV1)) {
+  // `@origintrail-official/dkg-chain` is PUBLISHED (npm 10.0.11, not private),
+  // and this factory is part of its public surface. Requiring `owner` would
+  // break every external `{ chainId, endpoints }` caller at compile time and at
+  // runtime for no gain: `foreground` is a real, meaningful owner label — those
+  // callers genuinely ARE foreground — not an "unknown" bucket. The attribution
+  // this work exists to add is preserved, because the registry is process-wide
+  // regardless of who holds it, and RFC64/W2 pass their owner explicitly rather
+  // than relying on the default.
+  const resolved = owner ?? 'foreground';
+  if (!FINALIZED_CHAIN_READ_OWNERS.includes(resolved as FinalizedChainReadOwnerV1)) {
     throw new TypeError(
-      `Strict finalized snapshot RPC config requires a known owner, got "${String(owner)}"`,
+      `Strict finalized snapshot RPC config received an unknown owner "${String(owner)}"`,
     );
   }
   return Object.freeze({
     ...snapshotStrictCurrentFinalizedEvmConfigV1(rest as StrictCurrentFinalizedEvmRpcConfigV1),
-    owner: owner as FinalizedChainReadOwnerV1,
+    owner: resolved as FinalizedChainReadOwnerV1,
   });
 }
 

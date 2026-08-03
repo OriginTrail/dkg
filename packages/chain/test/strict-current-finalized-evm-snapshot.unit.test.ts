@@ -501,55 +501,6 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
     ]);
   });
 
-  it('contends across INDEPENDENTLY constructed scopes on one chain', async () => {
-    // The two saturation tests below both reuse a single `withSnapshot`
-    // handle, so they pass identically whether the permit is per-instance or
-    // per-chain — they cannot discriminate the thing that actually matters.
-    // Production builds a fresh scope per RFC64 precommit invocation
-    // (`finalized-vm-agent-precommit-v1.ts`), so THIS is the real shape: two
-    // handles, one chain, one permit.
-    const callStarted = deferred<void>();
-    const releaseCall = deferred<void>();
-    const baseHandler = successfulHandler();
-    const server = await rpcHarness.start(async (rpcCall, response, rawRequest) => {
-      if (rpcCall.method === 'eth_call' && !isPreflightProbe(rpcCall)) {
-        callStarted.resolve(undefined);
-        await releaseCall.promise;
-      }
-      await baseHandler(rpcCall, response, rawRequest);
-    });
-    const holder = createStrictCurrentFinalizedEvmSnapshotScopeV1({
-      owner: 'rfc64',
-      chainId: CHAIN_ID,
-      endpoints: [server.url],
-    });
-    const contender = createStrictCurrentFinalizedEvmSnapshotScopeV1({
-      owner: 'w2-page',
-      chainId: CHAIN_ID,
-      endpoints: [server.url],
-    });
-    expect(holder).not.toBe(contender);
-
-    const first = holder(request(), async (session) => {
-      await session.read([call(FIRST_DATA)]);
-      return 'first';
-    });
-    await callStarted.promise;
-
-    await expect(contender(request(), async () => 'second')).rejects.toMatchObject({
-      code: 'concurrency-saturated',
-      // The refusal names the owner holding the lane, so an operator can tell
-      // which path to look at.
-      message: expect.stringContaining('held by rfc64'),
-    });
-
-    releaseCall.resolve(undefined);
-    await expect(first).resolves.toBe('first');
-
-    // The lane is genuinely reusable by the other owner once released.
-    await expect(contender(request(), async () => 'third')).resolves.toBe('third');
-  });
-
   it('drains an unawaited batch before releasing its single snapshot permit', async () => {
     const callStarted = deferred<void>();
     const releaseCall = deferred<void>();

@@ -6,6 +6,31 @@ export interface NonqueueingAdmissionGateV1<K> {
   ): Promise<T>;
 }
 
+/**
+ * A per-instance policy, for callers whose limit is genuinely local.
+ *
+ * The one-shot finalized read is the only such caller today: its limit is 4 and
+ * folding it into the snapshot's single process-wide lane would throttle an
+ * unrelated path. Its saturation reports no holder, because a local gate has no
+ * owner concept to report.
+ */
+export function createLocalNonqueueingAdmissionV1<K>(limit: number): {
+  run<T>(
+    key: K,
+    operation: () => Promise<T>,
+    saturated: (active: number, holder?: string) => Error,
+  ): Promise<T>;
+} {
+  const gate = createNonqueueingAdmissionGateV1<K>(limit);
+  return Object.freeze({
+    run: <T>(
+      key: K,
+      operation: () => Promise<T>,
+      saturated: (active: number, holder?: string) => Error,
+    ) => gate.run(key, operation, (active) => saturated(active, undefined)),
+  });
+}
+
 /** Shared non-queueing permit state used by finalized routers and transports. */
 export function createNonqueueingAdmissionGateV1<K>(
   limit: number,

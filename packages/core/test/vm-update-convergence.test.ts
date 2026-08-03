@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_LOG_TOPICS,
   MAX_ROOTLESS_KA_NUMBER,
   MAX_UPDATE_PAGE_EVENTS,
   UPDATE_PAGE_ASSURANCES,
@@ -408,6 +409,28 @@ describe('ordered log commitment', () => {
     ).toBe('page-malformed');
   });
 
+  it('rejects a log with more topics than the EVM allows, BEFORE expanding them', () => {
+    // The page-count bound does not constrain this: one log with a million
+    // topics passes it, then allocates and hashes a million entries. These logs
+    // come straight off an untrusted RPC response.
+    expect(MAX_LOG_TOPICS).toBe(4);
+    expect(() => orderedLogCommitment([log({ topics: Array(4).fill(HASH_A) })])).not.toThrow();
+    expect(codeOf(() => orderedLogCommitment([log({ topics: Array(5).fill(HASH_A) })]))).toBe(
+      'page-malformed',
+    );
+
+    // A hostile page must be refused without the allocation. If the guard ran
+    // after `topics.map`, this call would build a million-entry array first.
+    const hostile = log({ topics: Array.from({ length: 1_000_000 }, () => HASH_A) });
+    expect(codeOf(() => orderedLogCommitment([hostile]))).toBe('page-malformed');
+  });
+
+  it('rejects a non-array topics field rather than throwing a TypeError', () => {
+    expect(codeOf(() => orderedLogCommitment([log({ topics: 'not-an-array' as never })]))).toBe(
+      'page-malformed',
+    );
+  });
+
   it('commits to an empty page distinctly from a one-log page', () => {
     expect(orderedLogCommitment([])).toMatch(/^0x[0-9a-f]{64}$/);
     expect(orderedLogCommitment([])).not.toBe(orderedLogCommitment([log()]));
@@ -455,10 +478,68 @@ describe('page assurance', () => {
     ).toBe('page-malformed');
   });
 
-  it('freezes the proof and its origin list', () => {
+  it('rejects one block number carrying two different hashes', () => {
+    // A single-block page has from === through; a page reaching the anchor has
+    // through === finalizedAnchor. Empty and sparse pages are exactly where no
+    // log position would expose the contradiction, so the proof must.
+    expect(
+      codeOf(() =>
+        canonicalPageProof(
+          proof({
+            from: { blockNumber: 100, blockHash: HASH_A },
+            through: { blockNumber: 100, blockHash: HASH_B },
+          }),
+        ),
+      ),
+    ).toBe('page-malformed');
+    expect(
+      codeOf(() =>
+        canonicalPageProof(
+          proof({
+            through: { blockNumber: 300, blockHash: HASH_B },
+            finalizedAnchor: { blockNumber: 300, blockHash: HASH_C },
+          }),
+        ),
+      ),
+    ).toBe('page-malformed');
+    expect(
+      codeOf(() =>
+        canonicalPageProof(
+          proof({
+            from: { blockNumber: 300, blockHash: HASH_A },
+            through: { blockNumber: 300, blockHash: HASH_A },
+            finalizedAnchor: { blockNumber: 300, blockHash: HASH_C },
+          }),
+        ),
+      ),
+    ).toBe('page-malformed');
+    // …and the consistent single-block page is still accepted.
+    expect(() =>
+      canonicalPageProof(
+        proof({
+          from: { blockNumber: 300, blockHash: HASH_A },
+          through: { blockNumber: 300, blockHash: HASH_A },
+          finalizedAnchor: { blockNumber: 300, blockHash: HASH_A },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('freezes the proof and EVERY nested record it returns', () => {
+    // Shallow freezing is not the contract. These values are handed across
+    // `await` boundaries into SQLite transactions; a caller that mutated
+    // `proof.from` after validation would persist evidence never checked.
     const frozen = canonicalPageProof(proof());
     expect(Object.isFrozen(frozen)).toBe(true);
     expect(Object.isFrozen(frozen.normalizedOrigins)).toBe(true);
+    for (const ref of [frozen.from, frozen.through, frozen.finalizedAnchor]) {
+      expect(Object.isFrozen(ref)).toBe(true);
+    }
+    // Behaviour, not just the flag: a write must not take effect.
+    expect(() => {
+      (frozen.from as { blockNumber: number }).blockNumber = 999;
+    }).toThrow();
+    expect(frozen.from.blockNumber).toBe(100);
   });
 });
 
@@ -498,6 +579,25 @@ describe('two-cursor model', () => {
     expect(isDiscardedByResume(position({ blockNumber: 101, transactionIndex: 2, logIndex: 4 }), resume)).toBe(false);
     expect(isDiscardedByResume(position({ blockNumber: 102, transactionIndex: 0, logIndex: 0 }), resume)).toBe(false);
     expect(isDiscardedByResume(position(), undefined)).toBe(false);
+  });
+
+  it('freezes every nested cursor record it returns', () => {
+    const frozen = canonicalCoverageCursor({
+      coveredThrough: { blockNumber: 100, blockHash: HASH_A },
+      resumeAfter: position({ blockNumber: 101 }),
+      scannedThroughUnattested: {
+        blockNumber: 900,
+        blockHash: HASH_B,
+        normalizedOrigin: 'https://a.example.com',
+      },
+    });
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen.coveredThrough)).toBe(true);
+    expect(Object.isFrozen(frozen.resumeAfter)).toBe(true);
+    expect(Object.isFrozen(frozen.scannedThroughUnattested)).toBe(true);
+    expect(() => {
+      (frozen.resumeAfter as { logIndex: number }).logIndex = 42;
+    }).toThrow();
   });
 
   it('rejects a resume point at or below covered coverage', () => {
@@ -642,5 +742,11 @@ describe('scoped KA candidate parser', () => {
     expect(set.scopeId).toBe(deriveVmUpdateScopeId(scope()));
     expect(Object.isFrozen(set)).toBe(true);
     expect(Object.isFrozen(set.candidates)).toBe(true);
+    // Each candidate object too — the array being frozen says nothing about
+    // whether a caller can rewrite the kaId inside one of them.
+    for (const candidate of set.candidates) expect(Object.isFrozen(candidate)).toBe(true);
+    expect(() => {
+      (set.candidates[0] as { kaId: string }).kaId = '1';
+    }).toThrow();
   });
 });

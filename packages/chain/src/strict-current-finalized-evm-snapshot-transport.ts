@@ -12,8 +12,8 @@ import {
   CurrentFinalizedEvmCallErrorV1,
 } from './current-finalized-evm-read-profile.js';
 import type { StrictCurrentFinalizedEvmReadCallV1 } from './current-finalized-evm-read-model.js';
+import { createSharedFinalizedReadAdmissionV1 } from './finalized-chain-read-admission.js';
 import {
-  CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
   CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
   type StrictCurrentFinalizedEvmSnapshotRequestV1,
 } from './current-finalized-evm-snapshot.js';
@@ -93,8 +93,7 @@ export function createStrictFinalizedSnapshotTransportV1(
     endpoints: config.endpoints,
     // Process-wide: the invariant is one pinned scan per CHAIN, across RFC64,
     // W2 and any future owner — not one per transport instance.
-    sharedOwner: config.owner,
-    maxConcurrentPerChain: CURRENT_FINALIZED_EVM_SNAPSHOT_MAX_CONCURRENT_PER_CHAIN_V1,
+    admission: createSharedFinalizedReadAdmissionV1(config.owner),
     totalDeadlineMs: CURRENT_FINALIZED_EVM_SNAPSHOT_TOTAL_DEADLINE_MS_V1,
     attemptTimeoutMs: CURRENT_FINALIZED_EVM_READ_ATTEMPT_TIMEOUT_MS_V1,
     messages: createSnapshotEndpointRunnerMessagesV1(config.chainId),

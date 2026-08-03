@@ -115,6 +115,36 @@ export async function acquireFinalizedChainRead<T>(
   }
 }
 
+/**
+ * An admission policy the endpoint runner can execute without knowing what kind
+ * of policy it is.
+ *
+ * The runner used to own endpoint lifecycle only. Giving it a `sharedOwner` mode
+ * flag made it also understand a snapshot-specific owner vocabulary — a boundary
+ * leak that would grow an enum in the generic lifecycle every time another
+ * shared caller appeared. It now runs whatever policy its factory supplies.
+ */
+export interface FinalizedReadAdmissionV1 {
+  run<T>(
+    chainId: ChainIdV1,
+    operation: () => Promise<T>,
+    saturated: (active: number, holder?: string) => Error,
+  ): Promise<T>;
+}
+
+/** The process-wide single-permit policy, bound to one owner label. */
+export function createSharedFinalizedReadAdmissionV1(
+  owner: FinalizedChainReadOwnerV1,
+): FinalizedReadAdmissionV1 {
+  return Object.freeze({
+    run: <T>(
+      chainId: ChainIdV1,
+      operation: () => Promise<T>,
+      saturated: (active: number, holder?: string) => Error,
+    ) => acquireFinalizedChainRead({ chainId, owner }, operation, saturated),
+  });
+}
+
 /** Active permit count for one chain. Diagnostics and tests only. */
 export function finalizedChainReadRegistryDepth(chainId: ChainIdV1 | string): number {
   return lanes.get(canonicalChainKey(chainId))?.active ?? 0;
