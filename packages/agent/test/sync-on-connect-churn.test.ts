@@ -362,7 +362,7 @@ describe('sync-on-connect churn gates', () => {
     });
   });
 
-  it('records progress before stopping post-durable sync-on-connect fanout after backoff-worthy durable pressure', async () => {
+  it('promotes committed discovery before stopping post-bootstrap fanout after durable pressure', async () => {
     const refreshMetaSyncedFlags = recorder(async () => undefined);
     const discoverContextGraphsFromStore = recorder(async () => 0);
     const syncSharedMemoryFromPeer = recorder(async () => 0);
@@ -393,7 +393,7 @@ describe('sync-on-connect churn gates', () => {
 
     expect(outcome).toBe('synced');
     expect(refreshMetaSyncedFlags.calls).toEqual([]);
-    expect(discoverContextGraphsFromStore.calls).toEqual([]);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
     expect(syncSharedMemoryFromPeer.calls).toEqual([]);
     expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: false, progress: true }]);
   });

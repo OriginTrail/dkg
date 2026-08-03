@@ -289,6 +289,13 @@ export async function runSyncOnConnectWithScopePlan(
     contextGraphIds: readonly string[];
     /** Preserve the legacy initial probe/accounting call even for an empty scope. */
     runWhenEmpty?: boolean;
+    /**
+     * Run a local commit-side step after the transport result is accounted,
+     * including when that result asks the peer fanout to stop. A durable
+     * prefix may already contain authoritative discovery records even when a
+     * later graph in the same phase timed out.
+     */
+    afterResult?: () => Promise<void>;
   }>;
   const runSyncPhase = async (
     phase: OrderedSyncPhase,
@@ -305,6 +312,7 @@ export async function runSyncOnConnectWithScopePlan(
       `Synced ${accounting.insertedTriples} ${phase.label} ${dataLabel} triples from peer ${shortPeer}`,
     );
     if (accounting.deferredByBackpressure) {
+      if (phase.afterResult) await runNonTransportStep(phase.afterResult);
       logInfo(
         ctx,
         `Stopping sync-on-connect fanout for peer ${shortPeer} after ${phase.label} ${phase.kind} admission deferral`,
@@ -312,6 +320,7 @@ export async function runSyncOnConnectWithScopePlan(
       return finishSyncAccounting();
     }
     if (accounting.backoffWorthyFailure) {
+      if (phase.afterResult) await runNonTransportStep(phase.afterResult);
       logInfo(
         ctx,
         `Stopping sync-on-connect fanout for peer ${shortPeer} after ${phase.label} ${phase.kind} sync hit backoff-worthy pressure`,
@@ -321,6 +330,7 @@ export async function runSyncOnConnectWithScopePlan(
     if (phase.kind === 'durable') {
       await runNonTransportStep(() => refreshMetaSyncedFlags(contextGraphIds));
     }
+    if (phase.afterResult) await runNonTransportStep(phase.afterResult);
     return undefined;
   };
 
@@ -401,10 +411,17 @@ export async function runSyncOnConnectWithScopePlan(
       label: 'bootstrap',
       contextGraphIds: bootstrapAndConfiguredContextGraphIds,
       runWhenEmpty: true,
+      // The durable requester returns one aggregate result for the whole
+      // bootstrap scope. Ontology can complete before a later large system
+      // graph times out, so promote its already-committed definitions before
+      // honoring the aggregate stop signal. Core coverage-epoch accounting
+      // then wakes a fresh bounded public round without continuing this
+      // pressured peer fanout.
+      afterResult: async () => {
+        await discoverContextGraphsFromStore();
+      },
     });
     if (bootstrapOutcome) return bootstrapOutcome;
-
-    await runNonTransportStep(() => discoverContextGraphsFromStore());
 
     const allCgsAfter = scopePlan.contextGraphIdsAfterDiscovery();
     const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));

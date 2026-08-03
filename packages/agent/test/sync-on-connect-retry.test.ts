@@ -164,6 +164,7 @@ describe('runSyncOnConnect callbacks', () => {
       'meta:public-a,public-b',
       'shared:public-a,public-b',
       `durable:${SYSTEM_CONTEXT_GRAPHS.AGENTS},${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`,
+      'discover',
     ]);
     expect(peerOutcomes).toEqual([{ fresh: false, progress: true }]);
   });
