@@ -1,0 +1,132 @@
+{
+  "uid": "dkg-release-cert",
+  "title": "DKG Release Certification",
+  "tags": ["dkg", "release-cert"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 0,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Releases",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+        "enable": true,
+        "iconColor": "purple",
+        "target": {
+          "format": "table",
+          "rawSql": "SELECT detected_at AS time, 'release ' || dist_tag || ' -> v' || version AS text, 'release' AS tags FROM releases WHERE dist_tag IN ('testnet','latest','mainnet','next') AND $__timeFilter(detected_at) ORDER BY 1"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "state-timeline",
+      "title": "Backpressure state — per node / scheduler",
+      "description": "From /api/status. 0=Healthy, 1=Elevated, 2=Degraded, 3=Other, 4=No data from node.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 70 },
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "Healthy", "color": "green" },
+              "1": { "text": "Elevated", "color": "yellow" },
+              "2": { "text": "Degraded", "color": "red" },
+              "3": { "text": "Other", "color": "orange" },
+              "4": { "text": "Unreachable", "color": "dark-red" }
+            } }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT time_stamp AS \"time\", node_name || ' · ' || source AS metric, CASE WHEN state = 'healthy' THEN 0 WHEN state IN ('elevated','warning','warn') THEN 1 WHEN state IN ('degraded','critical','overloaded') THEN 2 WHEN state IN ('unreachable','no-backpressure-field') THEN 4 ELSE 3 END AS value FROM queue_snapshots WHERE source IN ('store','sync-global','status') AND $__timeFilter(time_stamp) ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "HTTP admission — in-flight requests",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": { "custom": { "spanNulls": true } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT time_stamp AS \"time\", node_name AS metric, inflight AS value FROM queue_snapshots WHERE source = 'admission' AND inflight IS NOT NULL AND $__timeFilter(time_stamp) ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "HTTP admission — rejected total (counter)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": { "custom": { "spanNulls": true } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT time_stamp AS \"time\", node_name AS metric, (raw->>'rejectedTotal')::bigint AS value FROM queue_snapshots WHERE source = 'admission' AND raw ? 'rejectedTotal' AND $__timeFilter(time_stamp) ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Oldest queued age per lane (ms) — needs node diagnostics token",
+      "description": "Populates once the recorder has a node-admin token per node (Jenkins credentials). Empty = no lane-level data yet, not necessarily healthy queues.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "spanNulls": true } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT time_stamp AS \"time\", node_name || ' · ' || source || '/' || COALESCE(lane, '-') AS metric, oldest_age_ms AS value FROM queue_snapshots WHERE oldest_age_ms IS NOT NULL AND $__timeFilter(time_stamp) ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Queued work per lane — needs node diagnostics token",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": { "custom": { "spanNulls": true } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT time_stamp AS \"time\", node_name || ' · ' || source || '/' || COALESCE(lane, '-') AS metric, queued AS value FROM queue_snapshots WHERE queued IS NOT NULL AND $__timeFilter(time_stamp) ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Latest node state",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (node_name) node_name AS \"node\", node_version AS \"version\", state, time_stamp AS \"last seen\" FROM queue_snapshots WHERE source = 'status' ORDER BY node_name, time_stamp DESC"
+        }
+      ]
+    }
+  ]
+}

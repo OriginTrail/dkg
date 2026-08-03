@@ -20,7 +20,9 @@
     "test:base:testnode4:testnet": "NODE_TO_TEST=\"TestNode4\" mocha src/Base_Testnet.spec.js --reporter mochawesome --reporter-options reportFilename=testnet_base_node4 --exit",
     "insert-summary": "node scripts/insert_summary_to_db.js",
     "insert-errors": "node scripts/insert_errors_to_db.js",
-    "print-errors": "node scripts/print_aggregated_errors.js"
+    "print-errors": "node scripts/print_aggregated_errors.js",
+    "rc:recorder": "node scripts/release_cert/queue_state_recorder.mjs",
+    "rc:watcher": "node scripts/release_cert/release_watcher.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
