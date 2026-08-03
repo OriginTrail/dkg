@@ -10,7 +10,7 @@ type SyncFromPeerResult = number | SyncProgressSummary;
 
 export interface SyncOnConnectScopePlan {
   /** Bootstrap graphs frozen into the first durable request. */
-  initialBootstrapContextGraphIds?: readonly string[];
+  initialBootstrapContextGraphIds: readonly string[];
   /** Explicit plus automatic CGs frozen for the first durable request. */
   initialDurableContextGraphIds: readonly string[];
   /** Explicit intent re-read after discovery, merged with the frozen automatic tail. */
@@ -61,11 +61,27 @@ interface SyncOnConnectCommonContext {
   onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
 }
 
+interface LegacySyncOnConnectScopePlan {
+  /**
+   * New callers should make the bootstrap scope explicit. This stays optional
+   * only at the legacy adapter boundary so existing deep imports keep their
+   * historical system-graph default.
+   */
+  initialBootstrapContextGraphIds?: readonly string[];
+  initialDurableContextGraphIds: readonly string[];
+  contextGraphIdsAfterDiscovery: () => string[];
+}
+
 interface SyncOnConnectContext extends SyncOnConnectCommonContext {
   /** Legacy dynamic scope callback retained at the compatibility boundary. */
   getSyncContextGraphs?: () => string[];
   /** Legacy two-phase scope retained at the compatibility boundary. */
-  contextGraphScope?: SyncOnConnectScopePlan;
+  contextGraphScope?: LegacySyncOnConnectScopePlan;
+  /**
+   * @deprecated Use contextGraphScope.initialBootstrapContextGraphIds. Kept so
+   * existing deep-import callers can still opt out of Agents/Ontology.
+   */
+  includeSystemContextGraphs?: boolean;
 }
 
 interface PlannedSyncOnConnectContext extends SyncOnConnectCommonContext {
@@ -134,19 +150,25 @@ export function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnC
   const {
     getSyncContextGraphs = () => [],
     contextGraphScope,
+    includeSystemContextGraphs = true,
     syncFromPeer,
     ...common
   } = context;
+  const defaultBootstrapContextGraphIds = includeSystemContextGraphs
+    ? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]
+    : [];
   let initialCall = true;
   return runSyncOnConnectWithScopePlan({
     ...common,
-    createScopePlan: () => contextGraphScope ?? (() => {
+    createScopePlan: () => contextGraphScope ? {
+      initialBootstrapContextGraphIds: contextGraphScope.initialBootstrapContextGraphIds
+        ?? defaultBootstrapContextGraphIds,
+      initialDurableContextGraphIds: contextGraphScope.initialDurableContextGraphIds,
+      contextGraphIdsAfterDiscovery: contextGraphScope.contextGraphIdsAfterDiscovery,
+    } : (() => {
       const initialDurableContextGraphIds = [...(getSyncContextGraphs() ?? [])];
       return {
-        initialBootstrapContextGraphIds: [
-          SYSTEM_CONTEXT_GRAPHS.AGENTS,
-          SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
-        ],
+        initialBootstrapContextGraphIds: defaultBootstrapContextGraphIds,
         initialDurableContextGraphIds,
         contextGraphIdsAfterDiscovery: () => getSyncContextGraphs() ?? [],
       };
@@ -283,10 +305,7 @@ export async function runSyncOnConnectWithScopePlan(
     }
 
     const scopePlan = createScopePlan();
-    const bootstrapContextGraphIds = scopePlan.initialBootstrapContextGraphIds ?? [
-      SYSTEM_CONTEXT_GRAPHS.AGENTS,
-      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
-    ];
+    const bootstrapContextGraphIds = scopePlan.initialBootstrapContextGraphIds;
     const initialDurableContextGraphIds = [...scopePlan.initialDurableContextGraphIds];
     const initialSyncContextGraphIds = [...new Set([
       ...bootstrapContextGraphIds,

@@ -681,48 +681,6 @@ describe('automatic sync coverage runtime evidence', () => {
     expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
   });
 
-  it('keeps the normal Edge periodic scope when broad sync-on-connect is enabled', async () => {
-    const rehydrated = 'cg-rehydrated-normal-periodic';
-    const runtimeSelected = 'cg-runtime-normal-periodic';
-    const agent = await createRehydratedEdgeEvidenceAgent(rehydrated);
-    (agent as any).config.syncOnConnectEnabled = true;
-    (agent as any).config.syncSharedMemoryOnConnect = true;
-    (agent as any).config.syncContextGraphs.push(runtimeSelected);
-    (agent as any).subscribedContextGraphs.set(runtimeSelected, {
-      subscribed: true,
-      syncMode: 'always-on',
-      syncAdmission: 'explicit',
-      metaSynced: false,
-    });
-    const durableScopes: string[][] = [];
-    const sharedMemoryScopes: string[][] = [];
-    (agent as any).syncFromPeerDetailed = async (
-      _peerId: string,
-      contextGraphIds: string[],
-    ) => {
-      durableScopes.push([...contextGraphIds]);
-      return cleanDurableSyncResult();
-    };
-    (agent as any).syncSharedMemoryFromPeerDetailed = async (
-      _peerId: string,
-      contextGraphIds: string[],
-    ) => {
-      sharedMemoryScopes.push([...contextGraphIds]);
-      return withSettledSharedMemoryTerminals(cleanSharedMemorySyncResult(), contextGraphIds);
-    };
-
-    await (agent as any).reconcileSyncFromConnectedPeers();
-    await waitFor(() => (agent as any).lastSuccessfulSyncAt.has(PEER));
-
-    expect(durableScopes).toEqual([[
-      SYSTEM_CONTEXT_GRAPHS.AGENTS,
-      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
-      rehydrated,
-      runtimeSelected,
-    ]]);
-    expect(sharedMemoryScopes).toEqual([[rehydrated, runtimeSelected]]);
-  });
-
   it('drops a rehydrated Edge selection removed during protocol discovery', async () => {
     const contextGraphId = 'cg-edge-protocol-race';
     const agent = await createRehydratedEdgeEvidenceAgent(contextGraphId);

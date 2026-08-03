@@ -142,6 +142,38 @@ describe('runSyncOnConnect callbacks', () => {
     expect(sharedMemoryScopes).toEqual([['cg-saved-always-on']]);
   });
 
+  it('preserves the legacy scoped system-graph opt-out at the compatibility boundary', async () => {
+    const remotePeer = freshPeerIdString();
+    const durableScopes: string[][] = [];
+    const metadataScopes: string[][] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      includeSystemContextGraphs: false,
+      contextGraphScope: {
+        initialDurableContextGraphIds: ['cg-legacy-scoped'],
+        contextGraphIdsAfterDiscovery: () => ['cg-legacy-scoped'],
+      },
+      syncFromPeer: async (_peerId, contextGraphIds) => {
+        durableScopes.push([...(contextGraphIds ?? [])]);
+        return 1;
+      },
+      refreshMetaSyncedFlags: async (contextGraphIds) => {
+        metadataScopes.push([...contextGraphIds]);
+      },
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(durableScopes).toEqual([['cg-legacy-scoped']]);
+    expect(metadataScopes).toEqual([['cg-legacy-scoped']]);
+  });
+
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
     const remotePeer = freshPeerIdString();
     const synced: SyncOnConnectPeerOutcome[] = [];
