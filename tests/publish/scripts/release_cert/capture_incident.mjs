@@ -26,6 +26,15 @@ async function fetchJson(url, token) {
     } catch (e) { return { error: e.message }; }
 }
 
+async function postSlack(text) {
+    const hook = process.env.SLACK_WEBHOOK_INCIDENTS;
+    if (!hook) return false;
+    try {
+        const res = await fetch(hook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
+        return res.ok;
+    } catch { return false; }
+}
+
 function listenerBoiPrompt(node, windowStart, bundle) {
     return [
         `@ListenerBoi investigate store-queue pressure on ${node} (read-only investigation).`,
@@ -76,10 +85,22 @@ async function main() {
         await db.query(
             `INSERT INTO incidents (node_name, trigger, bundle) VALUES ($1, $2, $3)`,
             [node.name, process.env.RC_FORCE_NODE ? 'manual' : 'backpressure-unhealthy', JSON.stringify(bundle)]);
+        const prompt = listenerBoiPrompt(node.name, windowStart, bundle);
         console.log(`📦 incident bundle captured for ${node.name}`);
         console.log('--- ListenerBoi prompt (paste into #listenerboi-v0) ---');
-        console.log(listenerBoiPrompt(node.name, windowStart, bundle));
+        console.log(prompt);
         console.log('---');
+
+        const bp = bundle.status?.backpressure;
+        const digest = [
+            `📦 *Queue-incident evidence captured — ${node.name}*`,
+            `Window: ${windowStart} → now (UTC) · node v${bundle.status?.version ?? '?'}`,
+            `Backpressure at capture: ${JSON.stringify(bp?.state ?? bp ?? 'n/a')}`,
+            'Captured: backpressure diagnostics (all lanes, queued + active ops), publisher stats, node status — stored in the `incidents` table.',
+            'Next step: paste the prepared investigation prompt into #listenerboi-v0 (it is in this build\'s console output) — the standing question is *which admitted store operation occupied the backend*, not which ones were queued behind it.',
+        ].join('\n');
+        const posted = await postSlack(digest);
+        console.log(posted ? '• posted to Slack' : '• Slack webhook not configured — console only');
     }
     await db.end();
 }
