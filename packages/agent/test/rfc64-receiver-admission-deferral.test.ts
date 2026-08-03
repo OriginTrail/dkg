@@ -3,7 +3,18 @@ import { describe, expect, it } from 'vitest';
 import { acquireFinalizedChainRead } from '@origintrail-official/dkg-chain';
 
 import { Rfc64PublicCatalogReceiverV1 } from '../src/rfc64/public-catalog-receiver-v1.js';
-import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../src/rfc64/public-catalog-transport-v1.js';
+import type {
+  ContextGraphIdV1,
+  DecimalU64V1,
+  Digest32V1,
+  EvmAddressV1,
+  NetworkIdV1,
+} from '@origintrail-official/dkg-core';
+
+import {
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  type Rfc64PublicCatalogHeadAnnouncementV1,
+} from '../src/rfc64/public-catalog-transport-v1.js';
 
 /**
  * Regression suite for the contention lifecycle the merge-readiness review
@@ -57,15 +68,42 @@ function isFakeContention(error: unknown): boolean {
   return false;
 }
 
-function announcement(headDigest: string): Rfc64PublicCatalogHeadAnnouncementV1 {
+/**
+ * A TYPE-CORRECT announcement.
+ *
+ * An earlier version of this fixture was cast with `as unknown as` and set
+ * `headDigest`/`authorDid` — fields that do not exist on the wire type. Since
+ * `headKey()` is built from `catalogHeadObjectDigest`, `signatureVariantDigest`,
+ * `authorAddress`, `catalogEra` and `catalogVersion`, EVERY announcement
+ * collapsed to one identical key of `undefined`s. The dedupe test therefore
+ * passed no matter what the pending-key lifecycle did — two "different" heads
+ * were the same head.
+ */
+const NETWORK_ID = 'test-network' as NetworkIdV1;
+const CONTEXT_GRAPH_ID =
+  '0x1111111111111111111111111111111111111111/catalog' as ContextGraphIdV1;
+const AUTHOR = `0x${'22'.repeat(20)}` as EvmAddressV1;
+const POLICY_DIGEST = `0x${'33'.repeat(32)}` as Digest32V1;
+const SIGNATURE_VARIANT = `0x${'44'.repeat(32)}` as Digest32V1;
+
+function announcement(
+  headByte: string,
+  overrides: Partial<Rfc64PublicCatalogHeadAnnouncementV1> = {},
+): Rfc64PublicCatalogHeadAnnouncementV1 {
   return {
-    networkId: 'test-network',
-    contextGraphId: '0x1111111111111111111111111111111111111111/catalog',
-    subGraphName: 'catalog',
-    authorDid: 'did:dkg:agent:0x2222222222222222222222222222222222222222',
-    headDigest,
-    headSequence: '1',
-  } as unknown as Rfc64PublicCatalogHeadAnnouncementV1;
+    kind: RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    catalogEra: '0' as DecimalU64V1,
+    catalogVersion: '1' as DecimalU64V1,
+    policyDigest: POLICY_DIGEST,
+    // THE field `headKey()` actually varies on.
+    catalogHeadObjectDigest: `0x${headByte.repeat(32)}` as Digest32V1,
+    signatureVariantDigest: SIGNATURE_VARIANT,
+    ...overrides,
+  };
 }
 
 /** A reconciler that reports lane contention `saturateTimes` times, then applies. */
@@ -109,7 +147,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       retryBackoffMs: 1,
     });
 
-    receiver.schedule(announcement('0xaa'), 'peer-a');
+    receiver.schedule(announcement('aa'), 'peer-a');
     await settle(receiver, 300);
 
     const stats = receiver.stats();
@@ -133,7 +171,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       admissionDeferralMs: 40,
       maxConcurrent: 1,
     });
-    receiver.schedule(announcement('0xbb'), 'peer-a');
+    receiver.schedule(announcement('bb'), 'peer-a');
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     const midFlight = receiver.stats();
@@ -153,7 +191,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       admissionDeferralMs: 1,
       maxAdmissionDeferrals: 3,
     });
-    receiver.schedule(announcement('0xcc'), 'peer-a');
+    receiver.schedule(announcement('cc'), 'peer-a');
     await settle(receiver, 400);
 
     const stats = receiver.stats();
@@ -175,7 +213,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       } as never,
       { isDeferrableError: isFakeContention, admissionDeferralMs: 5, retryBackoffMs: 1 },
     );
-    receiver.schedule(announcement('0xdd'), 'peer-a');
+    receiver.schedule(announcement('dd'), 'peer-a');
     await settle(receiver, 300);
 
     const stats = receiver.stats();
@@ -195,7 +233,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       isDeferrableError: isFakeContention,
       admissionDeferralMs: 300,
     });
-    receiver.schedule(announcement('0xf1'), 'peer-a');
+    receiver.schedule(announcement('f1'), 'peer-a');
 
     // Wait until the task is genuinely in the deferred state.
     const deadline = Date.now() + 5_000;
@@ -222,6 +260,100 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     await receiver.close();
   });
 
+  it('distinct heads really do produce distinct keys (guards the fixture itself)', () => {
+    // The dedupe tests are only meaningful if two "different" announcements are
+    // actually different to the scheduler. An earlier casted fixture varied a
+    // field `headKey()` does not read, so every announcement collapsed to one
+    // key and dedupe passed vacuously. This asserts the premise directly.
+    const a = announcement('f2');
+    const b = announcement('f3');
+    expect(a.catalogHeadObjectDigest).not.toBe(b.catalogHeadObjectDigest);
+    for (const field of [
+      'networkId', 'contextGraphId', 'authorAddress', 'catalogEra',
+      'catalogVersion', 'catalogHeadObjectDigest', 'signatureVariantDigest',
+    ] as const) {
+      expect(a[field]).toBeDefined();
+    }
+    // Same scope, different head: the scope key matches, the head key does not.
+    expect(a.contextGraphId).toBe(b.contextGraphId);
+  });
+
+  it('releases the SCOPE lock while deferred, so another head in the same scope runs', async () => {
+    // The scope lock serializes semantic writers per catalog scope. A deferral
+    // must release it as well as the concurrency slot, or one busy chain lane
+    // stalls every other head for that context graph.
+    const seen: string[] = [];
+    let first = true;
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      {
+        isHeadApplied: async () => false,
+        reconcileHead: async (_peer: string, ann: Rfc64PublicCatalogHeadAnnouncementV1) => {
+          seen.push(ann.catalogHeadObjectDigest);
+          if (first) {
+            first = false;
+            throw saturationError();
+          }
+          return 'applied' as const;
+        },
+      } as never,
+      { isDeferrableError: isFakeContention, admissionDeferralMs: 400 },
+    );
+
+    receiver.schedule(announcement('f4'), 'peer-a');
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && receiver.stats().deferred === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    // Same scope, DIFFERENT head, scheduled during the deferral window.
+    receiver.schedule(announcement('f5'), 'peer-b');
+    // It must not be deduped — different head key — and must run before the
+    // first head's 400ms retry.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(seen.some((digest) => digest.includes('f5'))).toBe(true);
+    expect(receiver.stats().dedupedInFlight).toBe(0);
+
+    await settle(receiver, 800);
+    expect(receiver.stats().applied).toBe(2);
+    await receiver.close();
+  });
+
+  it('keeps `maxAttempts` a true per-provider bound across a deferral', async () => {
+    // Provider bookkeeping used to be local to `#runTask`, so requeuing after a
+    // deferral restarted it at zero: a provider could fail twice, hit a busy
+    // lane, and then receive a fresh full attempt budget.
+    let ordinaryFailures = 0;
+    let contentionUsed = false;
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      {
+        isHeadApplied: async () => false,
+        reconcileHead: async () => {
+          if (ordinaryFailures === 2 && !contentionUsed) {
+            contentionUsed = true;
+            throw saturationError();
+          }
+          ordinaryFailures += 1;
+          throw new Error('provider exploded');
+        },
+      } as never,
+      {
+        isDeferrableError: isFakeContention,
+        admissionDeferralMs: 5,
+        retryBackoffMs: 1,
+        maxAttempts: 3,
+      },
+    );
+    receiver.schedule(announcement('f6'), 'peer-a');
+    await settle(receiver, 600);
+
+    expect(receiver.stats().failed).toBe(1);
+    // Exactly the configured bound — contention gave one attempt back and took
+    // nothing else, so the total is still 3 rather than 2 + 3.
+    expect(ordinaryFailures).toBe(3);
+    expect(contentionUsed).toBe(true);
+    await receiver.close();
+  });
+
   it('keeps the pending key while deferred, so a duplicate does not fork a second writer', async () => {
     // The deferral moved `pendingByKey.delete` out of the `finally` path. If a
     // regression moved it back, the single-announcement tests above would still
@@ -232,7 +364,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       isDeferrableError: isFakeContention,
       admissionDeferralMs: 250,
     });
-    receiver.schedule(announcement('0xf2'), 'peer-a');
+    receiver.schedule(announcement('f2'), 'peer-a');
 
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && receiver.stats().deferred === 0) {
@@ -241,7 +373,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     expect(receiver.stats().inFlight).toBe(0);
 
     // Same head, different peer, while the retry timer is pending.
-    receiver.schedule(announcement('0xf2'), 'peer-b');
+    receiver.schedule(announcement('f2'), 'peer-b');
     expect(receiver.stats().dedupedInFlight).toBe(1);
 
     await settle(receiver, 600);
@@ -259,7 +391,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       isDeferrableError: isFakeContention,
       admissionDeferralMs: 10_000,
     });
-    receiver.schedule(announcement('0xee'), 'peer-a');
+    receiver.schedule(announcement('ee'), 'peer-a');
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(receiver.stats().admissionDeferred).toBeGreaterThanOrEqual(1);
     // Must resolve promptly; a retained 10s timer would hang this.
@@ -311,7 +443,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       } as never,
       { admissionDeferralMs: 10 }, // no injected policy — the default is under test
     );
-    receiver.schedule(announcement('0xf9'), 'peer-a');
+    receiver.schedule(announcement('f9'), 'peer-a');
     await settle(receiver, 400);
     expect(receiver.stats().applied).toBe(1);
     expect(receiver.stats().admissionDeferred).toBe(1);
@@ -328,7 +460,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
       } as never,
       { admissionDeferralMs: 10, retryBackoffMs: 1 },
     );
-    lookAlike.schedule(announcement('0xfa'), 'peer-a');
+    lookAlike.schedule(announcement('fa'), 'peer-a');
     await settle(lookAlike, 300);
     expect(lookAlike.stats().failed).toBe(1);
     expect(lookAlike.stats().admissionDeferred).toBe(0);

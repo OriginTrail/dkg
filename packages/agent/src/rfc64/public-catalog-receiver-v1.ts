@@ -108,6 +108,18 @@ interface ReceiverTaskV1 {
    * about the head or the peer.
    */
   admissionDeferrals?: number;
+  /**
+   * Provider retry bookkeeping, carried ACROSS admission deferrals.
+   *
+   * These were locals in `#runTask`. Because a deferral exits and requeues the
+   * task, the next run restarted them at zero — so `maxAttempts` stopped being a
+   * per-provider bound whenever contention landed between ordinary failures: a
+   * provider could fail twice, hit a busy lane, and then get a fresh three
+   * attempts. Repeated contention multiplied retries without limit.
+   */
+  attemptsByProvider?: Map<string, number>;
+  notFoundProviders?: Set<string>;
+  providerCursor?: number;
 }
 
 interface ReceiverProviderV1 {
@@ -373,9 +385,10 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   async #runTask(task: ReceiverTaskV1): Promise<'done' | 'defer-admission'> {
     let lastError: unknown;
-    const notFoundProviders = new Set<string>();
-    const attemptsByProvider = new Map<string, number>();
-    let providerCursor = 0;
+    // Resumed, not reset: see `ReceiverTaskV1.attemptsByProvider`.
+    const notFoundProviders = (task.notFoundProviders ??= new Set<string>());
+    const attemptsByProvider = (task.attemptsByProvider ??= new Map<string, number>());
+    let providerCursor = task.providerCursor ?? 0;
     while (true) {
       if (this.#closing.signal.aborted) return 'done';
       const selection = nextEligibleProvider(
@@ -399,6 +412,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }
       const { provider, nextCursor } = selection;
       providerCursor = nextCursor;
+      task.providerCursor = nextCursor;
       const providerAttempt = (attemptsByProvider.get(provider.key) ?? 0) + 1;
       attemptsByProvider.set(provider.key, providerAttempt);
       try {
@@ -424,9 +438,12 @@ export class Rfc64PublicCatalogReceiverV1 {
         return 'done';
       } catch (error) {
         if (this.#isDeferrableError(error)) {
-          // Not this head's fault and not this provider's fault: give the
-          // attempt back and let the task wait for the lane outside the slot.
-          attemptsByProvider.set(provider.key, providerAttempt - 1);
+          // Not this head's fault and not this provider's fault: roll back ONLY
+          // this attempt and let the task wait for the lane outside the slot.
+          // Every other provider's tally survives on the task, so contention
+          // cannot launder a provider back to a full attempt budget.
+          if (providerAttempt <= 1) attemptsByProvider.delete(provider.key);
+          else attemptsByProvider.set(provider.key, providerAttempt - 1);
           return 'defer-admission';
         }
         lastError = error;
