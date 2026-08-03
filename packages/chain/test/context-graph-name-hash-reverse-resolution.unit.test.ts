@@ -180,6 +180,22 @@ describe('ContextGraphCreated name-hash reverse resolution', () => {
     }
   });
 
+  it('invalidates a cached miss immediately with the adapter-wide cache reset', async () => {
+    const { adapter, queryEventLogsPage } = fixture([[]]);
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+    expect(queryEventLogsPage).toHaveBeenCalledTimes(1);
+
+    queryEventLogsPage.mockResolvedValue({
+      logs: [{ topics: [], data: '42' }],
+      provider: {},
+    });
+    adapter.invalidatePublishPreflightCache();
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
+    expect(queryEventLogsPage).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects malformed inputs before chain initialisation and treats zero as opt-out', async () => {
     const { adapter } = fixture();
     await expect(adapter.resolveContextGraphIdByNameHash('not-a-hash')).rejects.toThrow(

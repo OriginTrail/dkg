@@ -535,6 +535,35 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     })).resolves.toMatchObject({ contextGraphId: 3n });
   });
 
+  it('mirrors exact name-hash reverse-resolution behavior', async () => {
+    const mock = new MockChainAdapter();
+    const nameHash = `0x${'ab'.repeat(32)}`;
+    const upperCaseHash = `0x${nameHash.slice(2).toUpperCase()}`;
+    const unknownHash = `0x${'cd'.repeat(32)}`;
+
+    await expect(mock.resolveContextGraphIdByNameHash('not-a-hash')).rejects.toThrow(
+      /bytes32 nameHash/,
+    );
+    await expect(mock.resolveContextGraphIdByNameHash(ethers.ZeroHash)).resolves.toBeNull();
+    await expect(mock.resolveContextGraphIdByNameHash(unknownHash)).resolves.toBeNull();
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash,
+    })).resolves.toMatchObject({ contextGraphId: 1n });
+    await expect(mock.resolveContextGraphIdByNameHash(upperCaseHash)).resolves.toBe(1n);
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash: upperCaseHash,
+    })).resolves.toMatchObject({ contextGraphId: 2n });
+    await expect(mock.resolveContextGraphIdByNameHash(nameHash)).rejects.toThrow(
+      /ambiguous.*2 numeric ids/i,
+    );
+  });
+
   it('requires explicit mock support for address-specific V10 publishing', async () => {
     const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
     mock.minimumRequiredSignatures = 0;
