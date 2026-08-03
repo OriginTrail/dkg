@@ -17,6 +17,11 @@ bench/results/
 # Test output files
 tests/publish/summary_*.json
 tests/publish/errors_*.json
+# release-certification runtime dirs (created inside the Jenkins workspace)
+rc-fleet/
+bb-run/
+rc-coldstart-*/
+tests/publish/mochawesome-report/
 .dkg/
 .cache/
 data/
