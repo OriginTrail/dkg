@@ -23,6 +23,8 @@ on:
   pull_request:
     paths:
       - 'tools/observability/**'
+      # The pinned real-Loki result test mounts this exact single-binary config.
+      - 'tools/log-collection-poc/loki-config.yaml'
       # the gate must also verify itself when the gate changes
       - '.github/workflows/observability-artifacts.yml'
       # …and it must run when the SOURCES it mirrors change, not only when the
@@ -88,6 +90,43 @@ jobs:
             --vm-uid test-vm-uid --loki-uid test-loki-uid --prom-node-label service_instance_id
           node tools/observability/verify-profile-render.mjs /tmp/render \
             --prom-node-label service_instance_id --vm-uid test-vm-uid --loki-uid test-loki-uid
+
+      # The Loki queries are valid even when a nested JSON field is misspelled;
+      # they simply return no rows. Run the generated dashboard expressions
+      # against the repository's Loki 3.3.2 configuration to pin actual
+      # scheduler/lane/phase/operation labels, moved-slot peaks, empty-slot
+      # handling, and the fixed-window resource bound. The multi-arch digest is
+      # the reproducibility contract; the tag is deliberately not used.
+      - name: Evaluate worker-pressure LogQL against pinned Loki
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --rm -d \
+            -p 127.0.0.1:13100:3100 \
+            -v "${PWD}/tools/log-collection-poc/loki-config.yaml:/etc/loki/loki-config.yaml:ro" \
+            grafana/loki@sha256:8af2de1abbdd7aa92b27c9bcc96f0f4140c9096b507c77921ffddf1c6ad6c48f \
+            -config.file=/etc/loki/loki-config.yaml)"
+          cleanup() {
+            status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ]; then docker logs "$container_id"; fi
+            docker stop "$container_id" >/dev/null || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:13100/ready >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo 'Loki did not become ready' >&2
+            exit 1
+          fi
+          LOKI_URL=http://127.0.0.1:13100 \
+            node tools/observability/verify-backpressure-logql.mjs
 
       # W1 decision queries: the semantic contract behind the numbers, checked
       # per selector rather than by sampling. Run against BOTH renders so the

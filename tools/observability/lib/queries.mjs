@@ -24,12 +24,20 @@ export const severityMatches = (regex) => ` | severity_text=~\`${regex}\``;
  *  callers append the range selector directly: `...${RPC_USAGE_PIPELINE}[1h]`. */
 export const RPC_USAGE_PIPELINE = ' |= `rpc_usage` | logfmt | method != `` | unwrap count ';
 
+// Loki 3 internally splits long-lookback instant metric queries and can spend
+// tens of seconds of aggregate queue time on this fixed-slot expansion even
+// for a handful of records. The flamegraph is therefore an explicitly recent
+// pressure snapshot. Selected-range history remains available in the range-
+// query heatmaps below; do not replace this with Grafana's `$__range` without
+// a measured query/transform redesign.
+export const BACKPRESSURE_FLAME_LOOKBACK = '1h';
+
 /**
  * Build a Loki expression for the peak sampled age of every bounded
  * backpressure operation in a phase. PR #2003 keeps at most eight operation
  * summaries per lane, so the query expands those fixed indexes and collapses
  * them back by source. `slot` prevents LogQL's `or` from dropping an operation
- * that moved between array positions during the selected time range.
+ * that moved between array positions during the fixed recent lookback.
  *
  * The returned value is an elapsed age in milliseconds from the diagnostic
  * sample. It is not CPU time, request count, or a completed-job duration.
@@ -46,7 +54,7 @@ export const backpressurePeakAgeByOperation = (stream, phase) => {
     + ` | json scheduler, lane, operation="${field}[${index}].operation", age="${field}[${index}].oldestAgeMs"`
     + ' | operation != ``'
     + ` | label_format phase=\`${phase}\`, slot=\`${index}\``
-    + ' | unwrap age | __error__ = `` [$__range])');
+    + ` | unwrap age | __error__ = \`\` [${BACKPRESSURE_FLAME_LOOKBACK}])`);
   return `max by (scheduler, lane, phase, operation) (${entries.map((entry) => `(${entry})`).join(' or ')})`;
 };
 

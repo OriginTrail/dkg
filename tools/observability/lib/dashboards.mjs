@@ -7,6 +7,7 @@
 import {
   backpressurePeakAgeOverTime,
   backpressurePeakAgeByOperation,
+  BACKPRESSURE_FLAME_LOOKBACK,
   dkgLogStream,
   severityIs,
   severityMatches,
@@ -105,8 +106,8 @@ const BACKPRESSURE_FLAME = (stream) => {
     def: {
       datasource: LOKI,
       type: 'flamegraph',
-      title: 'Worker queue pressure flame graph — $node',
-      description: 'Each leaf is a PR #2003 worker source. Width is its peak sampled oldest elapsed age in the selected range (milliseconds), split between admitted/active work and queued work. This is pressure age, not CPU utilization, request share, or exact completed-job runtime.',
+      title: 'Worker queue pressure flame graph (last 1 hour) — $node',
+      description: `Each leaf is a PR #2003 worker source. Width is its peak sampled oldest elapsed age in the fixed last ${BACKPRESSURE_FLAME_LOOKBACK} (milliseconds), split between admitted/active work and queued work. The fixed short lookback protects Loki from expensive long-range instant queries; the heatmaps below retain selected-range history. This is pressure age, not CPU utilization, request share, or exact completed-job runtime.`,
       options: { showFlameGraphOnly: false },
       fieldConfig: { defaults: { unit: 'ms' }, overrides: [] },
       targets: [
@@ -402,7 +403,7 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
         targets: [{ datasource: LOKI, refId: 'A', expr: `sum(sum_over_time(${NB}${RPCPIPE}[$__auto]))` }] } },
     ],
     [ ROW('Scheduler pressure') ],
-    [ TEXT('**Worker queue diagnostics (PR #2003).** The flame graph answers **which scheduler/lane/operation produced the pressure**; the two heatmaps show **when active and queued pressure accumulated and how old it became**. All three views read the same bounded structured `[backpressure]` records from Loki. These sparse transition/summary samples describe elapsed pressure age; they are not CPU profiles, invocation counts, or exact end-to-end job durations.') ],
+    [ TEXT('**Worker queue diagnostics (PR #2003).** The flame graph answers **which scheduler/lane/operation produced recent pressure** using a fixed **last 1 hour** snapshot; the two heatmaps keep the full Grafana-selected range and show **when active and queued pressure accumulated and how old it became**. All three views read the same bounded structured `[backpressure]` records from Loki. These sparse transition/summary samples describe elapsed pressure age; they are not CPU profiles, invocation counts, or exact end-to-end job durations.') ],
     [ BACKPRESSURE_FLAME(NB) ],
     [ BACKPRESSURE_HEATMAP(NB, 'active'), BACKPRESSURE_HEATMAP(NB, 'queued') ],
     [ LOGSP(24, 10, 'Backpressure transitions and summaries — $node', `${NB} |= \`[backpressure]\``) ],

@@ -27,6 +27,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertPromLabel, parseCliArgs } from './lib/cli.mjs';
+import { BACKPRESSURE_FLAME_LOOKBACK } from './lib/queries.mjs';
 
 const usage = 'usage: node verify-profile-render.mjs <dir> --prom-node-label <label> [--vm-uid <uid>] [--loki-uid <uid>]';
 const opts = parseCliArgs({
@@ -290,7 +291,7 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   if (!flame) {
     fail('logs dashboard', 'worker-pressure flamegraph panel is missing');
   } else {
-    if (!flame.title?.includes('Worker queue pressure')) {
+    if (!flame.title?.includes('Worker queue pressure') || !flame.title?.includes('last 1 hour')) {
       fail('logs dashboard flamegraph', `unexpected title: ${JSON.stringify(flame.title)}`);
     }
     if ((flame.targets ?? []).length !== 5) {
@@ -306,6 +307,19 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
     }
     if (!exprs.includes('|= `[backpressure]`')) {
       fail('logs dashboard flamegraph', 'queries do not select PR #2003 backpressure records');
+    }
+    if (exprs.includes('$__range')) {
+      fail('logs dashboard flamegraph', 'instant queries must not inherit the arbitrary Grafana-selected range');
+    }
+    const fixedLookback = `[${BACKPRESSURE_FLAME_LOOKBACK}]`;
+    for (const target of flame.targets ?? []) {
+      if (!(target.expr ?? '').includes(fixedLookback)) {
+        fail('logs dashboard flamegraph', `target ${target.refId} does not use the fixed ${fixedLookback} Loki lookback`);
+      }
+    }
+    if (!flame.description?.includes(`fixed last ${BACKPRESSURE_FLAME_LOOKBACK}`)
+      || !flame.description?.includes('heatmaps below retain selected-range history')) {
+      fail('logs dashboard flamegraph', 'description must explain the fixed snapshot and selected-range heatmap split');
     }
     for (const phase of ['activeOperations', 'queuedOperations']) {
       for (let index = 0; index < 8; index++) {

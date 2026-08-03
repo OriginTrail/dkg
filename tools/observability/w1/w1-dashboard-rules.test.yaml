@@ -212,3 +212,44 @@ tests:
         exp_samples:
           - labels: '{__name__="w1_dashboard_gate_invalidating_sources"}'
             value: 1080
+
+  - interval: 1m
+    name: rejected operations and catchup panels preserve every decision label
+    input_series:
+      # Each pair shares every other grouping label and differs only in the
+      # label under test. Dropping that label merges 1 + 2 into one sample and
+      # makes this fixture fail instead of leaving a plausible-looking rate.
+      - series: 'dkg_sync_operation_rejected_total{lane="durable", source="reconcile", reason="queue-full", instance="node-a"}'
+        values: '0+60x10'
+      - series: 'dkg_sync_operation_rejected_total{lane="durable", source="reconcile", reason="timeout", instance="node-a"}'
+        values: '0+120x10'
+      - series: 'dkg_context_graph_catchup_requests_total{result="ready", include_shared_memory="true", instance="node-a"}'
+        values: '0+60x10'
+      - series: 'dkg_context_graph_catchup_requests_total{result="ready", include_shared_memory="false", instance="node-a"}'
+        values: '0+120x10'
+      - series: 'dkg_context_graph_catchup_jobs_total{status="completed", admission="walk", instance="node-a"}'
+        values: '0+60x10'
+      - series: 'dkg_context_graph_catchup_jobs_total{status="completed", admission="synthetic", instance="node-a"}'
+        values: '0+120x10'
+    promql_expr_test:
+      - expr: w1_dashboard_rejected_rate
+        eval_time: 10m
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_rejected_rate", lane="durable", reason="queue-full", source="reconcile"}'
+            value: 1
+          - labels: '{__name__="w1_dashboard_rejected_rate", lane="durable", reason="timeout", source="reconcile"}'
+            value: 2
+      - expr: w1_dashboard_catchup_requests_rate
+        eval_time: 10m
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_catchup_requests_rate", include_shared_memory="false", result="ready"}'
+            value: 2
+          - labels: '{__name__="w1_dashboard_catchup_requests_rate", include_shared_memory="true", result="ready"}'
+            value: 1
+      - expr: w1_dashboard_catchup_jobs_rate
+        eval_time: 10m
+        exp_samples:
+          - labels: '{__name__="w1_dashboard_catchup_jobs_rate", admission="synthetic", status="completed"}'
+            value: 2
+          - labels: '{__name__="w1_dashboard_catchup_jobs_rate", admission="walk", status="completed"}'
+            value: 1

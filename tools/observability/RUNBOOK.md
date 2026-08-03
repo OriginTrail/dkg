@@ -35,6 +35,8 @@ channels): `example-alerts.md` (importable payloads: `alert-rules.provisioning.j
   split internally and fail with `maximum of series (500) reached` even at tiny
   stream counts. Use **range queries** + a Grafana reduce (`sum`/`last`) for
   totals; keep instant queries to short fixed windows (e.g. `[10m]`).
+  The worker-pressure flamegraph follows this rule with a fixed `[1h]`
+  snapshot; its adjacent heatmaps are the selected-range historical view.
 
 **To light up metrics + traces** (node side, per node): set
 `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318` (one env var

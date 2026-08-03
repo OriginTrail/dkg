@@ -187,7 +187,11 @@ OTLP exporters, so the records reach the Loki-backed Grafana dashboards.
 The **DKG Node — Logs** dashboard includes a **Scheduler pressure** row. Its
 flame graph expands the bounded `activeOperations` and `queuedOperations`
 arrays, groups them by scheduler, lane, and operation source, and shows the
-largest sampled `oldestAgeMs` in the selected time range.
+largest sampled `oldestAgeMs` in a fixed most-recent one-hour window. The
+lookback is intentionally independent of the Grafana-selected range: Loki 3
+splits long-range instant metric queries internally, so letting an incident
+range of 6 or 24 hours flow into all five flamegraph targets can make the
+dashboard itself create backend pressure.
 
 The two top-level branches have distinct meanings:
 
@@ -202,7 +206,8 @@ instead of a per-item event stream, so Grafana must not claim more precision
 than the log contract provides.
 
 Two heatmaps below the flame graph keep the active and queued meanings
-separate. Each heatmap groups samples by scheduler/lane and shows the
+separate and retain the full Grafana-selected historical range. Each heatmap
+groups samples by scheduler/lane and shows the
 distribution over time of the peak sampled age in each Grafana resolution
 bucket:
 
