@@ -222,7 +222,10 @@ pnpm test:m1:rfc64-selective-coverage
 For the shipped TypeScript adapter, set the command to `node`, pass
 `["--import","tsx","devnet/rfc64-m1-selective-coverage/testnet-operator-adapter.ts"]`
 as `DKG_RFC64_M1_ADAPTER_ARGS_JSON`, and provide the closed operator file via
-`DKG_RFC64_M1_OPERATOR_CONFIG`. `prepare-testnet-corpus.ts` creates and seals
+`DKG_RFC64_M1_OPERATOR_CONFIG`. The outer adapter command timeout defaults to
+25 minutes so it does not preempt the shipped adapter's 20-minute live-operation
+window; `DKG_RFC64_M1_ADAPTER_TIMEOUT_MS` may set an explicit bounded override.
+`prepare-testnet-corpus.ts` creates and seals
 exactly four KAs in each of the five policy/selection cells (one VM and one SWM
 asset per wave), then writes both the
 immutable corpus and the adapter graph plan. After probing stable identities for

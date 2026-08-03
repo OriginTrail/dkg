@@ -6,8 +6,15 @@ import {
   createSelectiveCoverageCorpus,
   type ExpectedSelectiveCoverageProvenanceV1,
 } from './manifest.ts';
-import { ProcessSelectiveCoverageRuntimeV1 } from './process-runtime.ts';
+import {
+  DEFAULT_SELECTIVE_COVERAGE_ADAPTER_TIMEOUT_MS,
+  ProcessSelectiveCoverageRuntimeV1,
+} from './process-runtime.ts';
 import { SELECTIVE_COVERAGE_RUNTIME_PROTOCOL } from './runtime.ts';
+
+test('default adapter timeout covers the shipped testnet operation window', () => {
+  assert.equal(DEFAULT_SELECTIVE_COVERAGE_ADAPTER_TIMEOUT_MS, 25 * 60_000);
+});
 
 test('exchanges sequence-bound JSON without sending the trust anchor to the adapter', async () => {
   const runtime = new ProcessSelectiveCoverageRuntimeV1({
