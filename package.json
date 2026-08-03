@@ -14,6 +14,7 @@
     "test": "turbo test && pnpm run test:scripts",
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs",
     "verify:w1-packet": "node scripts/verify-w1-packet.mjs",
+    "bench:w1-sync-telemetry:smoke": "node packages/agent/scripts/bench-sync-telemetry.mjs --ci --json --pages 20 --warmup 5 --rounds 2",
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "turbo test:coverage",
     "bench": "pnpm --filter @origintrail-official/dkg-storage build && esbench --config esbench.config.mjs",

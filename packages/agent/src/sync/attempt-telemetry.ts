@@ -51,10 +51,25 @@ import { getSyncBackpressureBusyError } from './backpressure.js';
 /** The clamp target for every vocabulary here, including `source`. */
 const UNSPECIFIED = 'unspecified';
 
-export type SyncAttemptTransport = 'legacy' | 'changelog';
-export type SyncAttemptPlane = 'durable' | 'shared-memory';
+/**
+ * Each closed vocabulary is declared ONCE, as an `as const` array, with both the
+ * union type and the runtime clamp set derived from it.
+ *
+ * Declaring the two separately let them drift silently in the one direction
+ * that matters: adding a member to the union but not to the `Set` type-checks
+ * at every call site and then records `unspecified`, so the label space stays
+ * correct while the data quietly stops meaning what the type says it means.
+ * Deriving both from one array makes that state unrepresentable.
+ */
+export const SYNC_ATTEMPT_TRANSPORTS = ['legacy', 'changelog'] as const;
+export type SyncAttemptTransport = (typeof SYNC_ATTEMPT_TRANSPORTS)[number];
+
+export const SYNC_ATTEMPT_PLANES = ['durable', 'shared-memory'] as const;
+export type SyncAttemptPlane = (typeof SYNC_ATTEMPT_PLANES)[number];
+
 /** `delta` is the changelog lane's only phase; the rest mirror `SyncPhase`. */
-export type SyncAttemptPhase = 'data' | 'meta' | 'snapshot' | 'catalog' | 'delta';
+export const SYNC_ATTEMPT_PHASES = ['data', 'meta', 'snapshot', 'catalog', 'delta'] as const;
+export type SyncAttemptPhase = (typeof SYNC_ATTEMPT_PHASES)[number];
 /**
  * Terminal state of one physically invoked send.
  *
@@ -64,48 +79,50 @@ export type SyncAttemptPhase = 'data' | 'meta' | 'snapshot' | 'catalog' | 'delta
  * and the only classifiers available are `.message.includes(...)`. Any
  * pre-response rejection that is not caller cancellation is `transport_error`.
  */
-export type SyncAttemptOutcome =
-  | 'response'
-  | 'validation_rejected'
-  | 'cancelled'
-  | 'transport_error';
+export const SYNC_ATTEMPT_OUTCOMES = [
+  'response',
+  'validation_rejected',
+  'cancelled',
+  'transport_error',
+] as const;
+export type SyncAttemptOutcome = (typeof SYNC_ATTEMPT_OUTCOMES)[number];
 
 /**
  * Requester lanes accepted at the I4/I5 seam. Narrower than `SyncSchedulerLane`
  * on purpose: that union also carries responder and pre-authorization lanes,
  * which are not logical sync operations and must not enter the denominator.
  */
-export type SyncOperationLane = 'durable' | 'changelog' | 'shared_memory' | 'swm_recovery';
+export const SYNC_OPERATION_LANES = ['durable', 'changelog', 'shared_memory', 'swm_recovery'] as const;
+export type SyncOperationLane = (typeof SYNC_OPERATION_LANES)[number];
 /**
  * `resolved`, not `success`: some orchestration paths deliberately catch a
  * per-Context-Graph failure and resolve with fallback diagnostics, so `success`
  * would overclaim domain success.
  */
-export type SyncOperationOutcome = 'resolved' | 'error' | 'cancelled';
-export type SyncOperationRejectionReason = 'queue_full' | 'displaced' | 'aborted_before_start';
-/** One-to-one with the instrumented coalescing maps. */
-export type SyncSingleFlightScope = 'context-graph' | 'durable' | 'shared-memory' | 'page';
+export const SYNC_OPERATION_OUTCOMES = ['resolved', 'error', 'cancelled'] as const;
+export type SyncOperationOutcome = (typeof SYNC_OPERATION_OUTCOMES)[number];
 
-const TRANSPORTS: ReadonlySet<string> = new Set<SyncAttemptTransport>(['legacy', 'changelog']);
-const PLANES: ReadonlySet<string> = new Set<SyncAttemptPlane>(['durable', 'shared-memory']);
-const PHASES: ReadonlySet<string> = new Set<SyncAttemptPhase>([
-  'data', 'meta', 'snapshot', 'catalog', 'delta',
-]);
-const ATTEMPT_OUTCOMES: ReadonlySet<string> = new Set<SyncAttemptOutcome>([
-  'response', 'validation_rejected', 'cancelled', 'transport_error',
-]);
-const OPERATION_LANES: ReadonlySet<string> = new Set<SyncOperationLane>([
-  'durable', 'changelog', 'shared_memory', 'swm_recovery',
-]);
-const OPERATION_OUTCOMES: ReadonlySet<string> = new Set<SyncOperationOutcome>([
-  'resolved', 'error', 'cancelled',
-]);
-const REJECTION_REASONS: ReadonlySet<string> = new Set<SyncOperationRejectionReason>([
-  'queue_full', 'displaced', 'aborted_before_start',
-]);
-const SINGLE_FLIGHT_SCOPES: ReadonlySet<string> = new Set<SyncSingleFlightScope>([
-  'context-graph', 'durable', 'shared-memory', 'page',
-]);
+export const SYNC_OPERATION_REJECTION_REASONS = [
+  'queue_full',
+  'displaced',
+  'aborted_before_start',
+] as const;
+export type SyncOperationRejectionReason = (typeof SYNC_OPERATION_REJECTION_REASONS)[number];
+
+/** One-to-one with the instrumented coalescing maps. */
+export const SYNC_SINGLE_FLIGHT_SCOPES = ['context-graph', 'durable', 'shared-memory', 'page'] as const;
+export type SyncSingleFlightScope = (typeof SYNC_SINGLE_FLIGHT_SCOPES)[number];
+
+// Every clamp set is BUILT from its vocabulary array above — never re-listed.
+// A re-listed member is the drift this file previously allowed.
+const TRANSPORTS: ReadonlySet<string> = new Set<string>(SYNC_ATTEMPT_TRANSPORTS);
+const PLANES: ReadonlySet<string> = new Set<string>(SYNC_ATTEMPT_PLANES);
+const PHASES: ReadonlySet<string> = new Set<string>(SYNC_ATTEMPT_PHASES);
+const ATTEMPT_OUTCOMES: ReadonlySet<string> = new Set<string>(SYNC_ATTEMPT_OUTCOMES);
+const OPERATION_LANES: ReadonlySet<string> = new Set<string>(SYNC_OPERATION_LANES);
+const OPERATION_OUTCOMES: ReadonlySet<string> = new Set<string>(SYNC_OPERATION_OUTCOMES);
+const REJECTION_REASONS: ReadonlySet<string> = new Set<string>(SYNC_OPERATION_REJECTION_REASONS);
+const SINGLE_FLIGHT_SCOPES: ReadonlySet<string> = new Set<string>(SYNC_SINGLE_FLIGHT_SCOPES);
 
 /**
  * Clamp a value to its closed vocabulary. "Closed vocabulary" means CLAMP: a

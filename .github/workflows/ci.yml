@@ -287,6 +287,19 @@ jobs:
       - name: Verify the W1 §8.3 test packet is reachable
         run: pnpm run verify:w1-packet
 
+      # A18's benchmark was previously only syntax-checked, which proves nothing
+      # about the thing it exists to measure: it loads the REAL record helpers
+      # out of `packages/agent/dist`, so a missing build output, a renamed
+      # export or a changed OTel constructor shape would leave A18 with no
+      # usable benchmark and `node --check` would still pass.
+      #
+      # `--ci` records the verdict WITHOUT gating on it, deliberately: a shared
+      # runner's timing variance must never fail a build. What is gated here is
+      # the mechanism — real seam loads, both arms run, JSON report is produced.
+      # Tiny page/round counts keep it a smoke test, not a measurement.
+      - name: Smoke the W1 A18 benchmark (real seam, non-gating budget)
+        run: pnpm run bench:w1-sync-telemetry:smoke
+
       - name: Package build outputs
         run: |
           set -euo pipefail
