@@ -2344,6 +2344,65 @@ describe('graph-scoped finalization handler', () => {
     expect(visible.bindings).toHaveLength(2);
   });
 
+  it('keeps exact SWM visible when matching VM version advancement fails', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+      '12D3KooWPublisher',
+    );
+    // Simulate a cold receiver materializing the retained recovery copy after
+    // the exact VM and its confirmed metadata have already landed.
+    await store.deleteByPattern({
+      graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+      subject: swmGraph,
+    });
+
+    const recoveryHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      { writeLocks: new Map() },
+    );
+    const internals = recoveryHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    const insert = store.insert.bind(store);
+    store.insert = async (quads, options) => {
+      if (quads.some((quad) => quad.predicate === 'http://dkg.io/ontology/materializedVersion')) {
+        throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.insert');
+      }
+      return insert(quads, options);
+    };
+
+    try {
+      await expect(recoveryHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 124,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    } finally {
+      store.insert = insert;
+    }
+
+    await expect(store.query(
+      `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+        <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}> ?version .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    const visible = await new DKGQueryEngine(store).query(
+      'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
+      { contextGraphId: CG, view: 'shared-working-memory' },
+    );
+    expect(visible.bindings).toHaveLength(2);
+  });
+
   it('retires a synced SWM copy with separate batch provenance after exact chain revalidation', async () => {
     const staged = await stageGraph();
     // `batchId` is adapter provenance and need not equal the UAL-derived packed

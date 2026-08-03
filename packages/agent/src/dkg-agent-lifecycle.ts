@@ -264,7 +264,6 @@ import {
 } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
-import { createSharedMemorySnapshotCommitter } from './sync/requester/swm-snapshot-committer.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -5724,34 +5723,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const graphManager = new GraphManager(this.store);
                 await graphManager.ensureContextGraph(contextGraphId);
               },
-              // Everything needed to commit verified public SWM snapshots as
-              // ONE dependency. Graph-scoped (contentScopeVersion 2) KAs
-              // carry no dkg:rootEntity, so the aggregate data phase returns 0
-              // data quads for them by design — their content arrives as
-              // immutable snapshots, and without this the catch-up lane cached
-              // every verified snapshot and never wrote one to the store.
-              // The store adapter owns materialization policy; the higher-level
-              // committer separately owns post-commit finalization settlement.
-              // Settlement runs after verified metadata insertion and outside
-              // the shared per-KA lock, preventing a lock recursion deadlock.
-              snapshotCommitter: createSharedMemorySnapshotCommitter({
-                materializer: createSharedMemorySnapshotMaterializer({
-                  store: this.store,
-                  writeLocks: this.writeLocks,
-                  invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-                }),
-                settleGraphScopedSnapshot: async (contextGraphId, descriptor) => {
-                  await this.getOrCreateFinalizationHandler()
-                    .retireSyncedGraphScopedSwmIfFinalized({
-                      contextGraphId,
-                      ual: descriptor.kaUal,
-                      assertionVersion: descriptor.assertionVersion,
-                      ...(descriptor.subGraphName
-                        ? { subGraphName: descriptor.subGraphName }
-                        : {}),
-                    }, ctx);
-                },
+              // Graph-scoped (contentScopeVersion 2) KAs carry no
+              // dkg:rootEntity, so their content arrives as immutable
+              // snapshots rather than aggregate data quads. Materialization
+              // and post-commit retirement remain explicit dependencies so the
+              // sync coordinator owns their required ordering.
+              snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
               }),
+              settleGraphScopedSnapshot: async (contextGraphId, descriptor) => {
+                await this.getOrCreateFinalizationHandler()
+                  .retireSyncedGraphScopedSwmIfFinalized({
+                    contextGraphId,
+                    ual: descriptor.kaUal,
+                    assertionVersion: descriptor.assertionVersion,
+                    ...(descriptor.subGraphName
+                      ? { subGraphName: descriptor.subGraphName }
+                      : {}),
+                  }, ctx);
+              },
               storeInsert: async (quads) => {
                 // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
                 // literals BEFORE insert so the SWM page cursor advances instead

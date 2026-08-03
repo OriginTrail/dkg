@@ -1202,6 +1202,7 @@ export class FinalizationHandler {
       blockNumber: verifiedBlockNumber,
       txIndex: verifiedTxIndex,
     };
+    let outcome: 'already-confirmed' | 'applied' | 'preserved-metadata' | 'stale' | undefined;
     if (vmVerification.status === 'verified') {
       const metadataState = await this.graphScopedMetadataState({
         contextGraphId,
@@ -1217,46 +1218,50 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
-        await this.markMatchingGraphScopedSwmFinalized({
-          contextGraphId,
-          scope,
-          merkleRoot: msg.kcMerkleRoot,
-          subGraphName,
-          ctx,
-        });
-        this.markProcessed(dedupeKey);
-        this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
-        return 'already-confirmed';
+        outcome = 'already-confirmed';
       }
     }
-
-    const outcome = await this.applyVerifiedGraphScopedFinalization({
-      contextGraphId,
-      scope,
-      verifiedQuads: layerVerification.quads,
-      head,
-      privateMerkleRoot,
-      computedMerkleRoot: layerVerification.merkleRoot,
-      publisherAddress: msg.publisherAddress,
-      txHash: msg.txHash,
-      blockNumber: verifiedBlockNumber,
-      batchId,
-      authorAddress: verifiedAuthorAddress,
-      materializedVersion,
-      accessPolicy,
-      allowedPeers,
-      subGraphName,
-      source: 'finalization',
-      contentAlreadyMaterialized: vmVerification.status === 'verified',
-      ctx,
-    });
+    if (!outcome) {
+      outcome = await this.applyVerifiedGraphScopedFinalization({
+        contextGraphId,
+        scope,
+        verifiedQuads: layerVerification.quads,
+        head,
+        privateMerkleRoot,
+        computedMerkleRoot: layerVerification.merkleRoot,
+        publisherAddress: msg.publisherAddress,
+        txHash: msg.txHash,
+        blockNumber: verifiedBlockNumber,
+        batchId,
+        authorAddress: verifiedAuthorAddress,
+        materializedVersion,
+        accessPolicy,
+        allowedPeers,
+        subGraphName,
+        source: 'finalization',
+        contentAlreadyMaterialized: vmVerification.status === 'verified',
+        ctx,
+      });
+    }
     if (outcome === 'stale') {
       this.markProcessed(dedupeKey);
       this.log.info(ctx, `Finalization: newer graph-scoped assertion already materialized for ${scope.ual}`);
       return 'already-confirmed';
     }
 
+    await this.markMatchingGraphScopedSwmFinalized({
+      contextGraphId,
+      scope,
+      merkleRoot: msg.kcMerkleRoot,
+      subGraphName,
+      ctx,
+    });
+
     this.markProcessed(dedupeKey);
+    if (outcome === 'already-confirmed') {
+      this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
+      return 'already-confirmed';
+    }
     this.log.info(
       ctx,
       `Finalization: promoted graph-scoped KA ${scope.ual} (${publicTripleCount} public, ${privateTripleCount} private)`,
@@ -1660,6 +1665,10 @@ export class FinalizationHandler {
       subGraphName,
     });
     if (vmVerification.status === 'verified') {
+      let acceptedOutcome:
+        | 'stale-target'
+        | 'already-confirmed'
+        | 'verified-vm-metadata-pending';
       const access = resolveGraphScopedAccessEnvelope(
         head,
         trustedAssertionEvidence?.accessPolicy,
@@ -1683,17 +1692,9 @@ export class FinalizationHandler {
           scope,
           materializedVersion,
         });
-        await this.markMatchingGraphScopedSwmFinalized({
-          contextGraphId,
-          scope,
-          merkleRoot,
-          subGraphName,
-          ctx,
-        });
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
-        return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
-      }
-      if (!trustedAssertionEvidence && access.accessPolicy !== 'ownerOnly') {
+        acceptedOutcome = preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
+      } else if (!trustedAssertionEvidence && access.accessPolicy !== 'ownerOnly') {
         const failClosedMetadataState = await this.graphScopedMetadataState({
           contextGraphId,
           scope,
@@ -1711,74 +1712,81 @@ export class FinalizationHandler {
             scope,
             materializedVersion,
           });
-          await this.markMatchingGraphScopedSwmFinalized({
-            contextGraphId,
-            scope,
-            merkleRoot,
-            subGraphName,
-            ctx,
-          });
           this.log.info(
             ctx,
             `Chain-reconcile: ${ual} retains fail-closed access without assertion evidence`,
           );
-          return 'already-confirmed';
+          acceptedOutcome = 'already-confirmed';
+        } else {
+          // No exact metadata is accepted. Without assertion-bound provenance
+          // the receiver may retire only the matching SWM recovery copy; it
+          // must leave confirmed metadata explicitly pending.
+          this.log.info(
+            ctx,
+            `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
+              + 'transaction provenance; deferring',
+          );
+          acceptedOutcome = 'verified-vm-metadata-pending';
         }
-      }
-      if (!trustedAssertionEvidence) {
+      } else if (!trustedAssertionEvidence) {
         // A cold join can receive the durable VM snapshot and its still-present
         // SWM recovery snapshot from different catch-up planes without ever
         // seeing the live finalization envelope. Exact VM content plus the
         // chain-resolved root retires only the matching current SWM head while
         // transaction provenance remains explicitly pending.
-        await this.markMatchingGraphScopedSwmFinalized({
-          contextGraphId,
-          scope,
-          merkleRoot,
-          subGraphName,
-          ctx,
-        });
         this.log.info(
           ctx,
           `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
             + 'transaction provenance; deferring',
         );
-        return 'verified-vm-metadata-pending';
+        acceptedOutcome = 'verified-vm-metadata-pending';
+      } else {
+        // A confirmed publish may have committed the exact VM graph before its
+        // graph-scoped metadata survived a crash. Reapply only the metadata
+        // tail. A failed write throws before the single retirement guard below,
+        // so the SWM recovery copy stays visible.
+        const outcome = await this.applyVerifiedGraphScopedFinalization({
+          contextGraphId,
+          scope,
+          verifiedQuads: vmVerification.quads,
+          head,
+          privateMerkleRoot,
+          computedMerkleRoot: vmVerification.merkleRoot,
+          publisherAddress: evidencePublisherAddress,
+          txHash: trustedAssertionEvidence.transactionHash,
+          blockNumber: evidenceBlockNumber,
+          batchId: kaId,
+          authorAddress: evidenceAuthorAddress,
+          materializedVersion,
+          accessPolicy: trustedAssertionEvidence.accessPolicy,
+          allowedPeers: trustedAssertionEvidence.allowedPeers,
+          subGraphName,
+          source: 'chain-reconcile',
+          contentAlreadyMaterialized: true,
+          ctx,
+        });
+        if (outcome === 'stale') return 'stale-target';
+        if (outcome === 'preserved-metadata') {
+          this.log.info(
+            ctx,
+            `Chain-reconcile: retained confirmed metadata for an older same-root assertion ${ual}`,
+          );
+        } else {
+          this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
+        }
+        acceptedOutcome = preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
-      // A confirmed publish may have committed the exact VM graph before its
-      // graph-scoped metadata survived a crash. Reapply only the metadata tail:
-      // SWM writers use a different lock, so this recovery path must not delete
-      // a potentially newer staged assertion.
-      const outcome = await this.applyVerifiedGraphScopedFinalization({
+
+      // One policy guard for every accepted exact-VM branch. Any metadata or
+      // ordering write above must succeed before the SWM copy can be hidden.
+      await this.markMatchingGraphScopedSwmFinalized({
         contextGraphId,
         scope,
-        verifiedQuads: vmVerification.quads,
-        head,
-        privateMerkleRoot,
-        computedMerkleRoot: vmVerification.merkleRoot,
-        publisherAddress: evidencePublisherAddress,
-        txHash: trustedAssertionEvidence.transactionHash,
-        blockNumber: evidenceBlockNumber,
-        batchId: kaId,
-        authorAddress: evidenceAuthorAddress,
-        materializedVersion,
-        accessPolicy: trustedAssertionEvidence?.accessPolicy,
-        allowedPeers: trustedAssertionEvidence?.allowedPeers,
+        merkleRoot,
         subGraphName,
-        source: 'chain-reconcile',
-        contentAlreadyMaterialized: true,
         ctx,
       });
-      if (outcome === 'stale') return 'stale-target';
-      if (outcome === 'preserved-metadata') {
-        this.log.info(
-          ctx,
-          `Chain-reconcile: retained confirmed metadata for an older same-root assertion ${ual}`,
-        );
-        return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
-      }
-      this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
-      return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
+      return acceptedOutcome;
     }
 
     const swmVerification = await this.verifyExactGraphScopedLayer({
@@ -1849,6 +1857,13 @@ export class FinalizationHandler {
       ctx,
     });
     if (outcome === 'stale') return 'stale-target';
+    await this.markMatchingGraphScopedSwmFinalized({
+      contextGraphId,
+      scope,
+      merkleRoot,
+      subGraphName,
+      ctx,
+    });
     if (outcome === 'preserved-metadata') {
       this.log.info(
         ctx,
@@ -2048,17 +2063,7 @@ export class FinalizationHandler {
       }
       return 'applied' as const;
     });
-    if (outcome === 'stale') return outcome;
-
-    await this.markMatchingGraphScopedSwmFinalized({
-      contextGraphId,
-      scope,
-      merkleRoot: computedMerkleRoot,
-      subGraphName,
-      ctx,
-    });
-
-    if (outcome === 'preserved-metadata') return outcome;
+    if (outcome === 'stale' || outcome === 'preserved-metadata') return outcome;
 
     this.eventBus?.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
       contextGraphId,

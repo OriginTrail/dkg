@@ -39,7 +39,6 @@ import {
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import { createSharedMemorySnapshotCommitter } from '../src/sync/requester/swm-snapshot-committer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
@@ -134,27 +133,6 @@ async function distinctObjects(store: TripleStore, graph: string, subject: strin
 }
 
 describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', () => {
-  it('keeps post-commit settlement in the real higher-level committer', async () => {
-    const store = new OxigraphStore();
-    const { materializer } = materializerFor(store);
-    const forwarded: Array<{ contextGraphId: string; kaUal: string }> = [];
-    const committer = createSharedMemorySnapshotCommitter({
-      materializer,
-      settleGraphScopedSnapshot: async (contextGraphId, descriptor) => {
-        forwarded.push({ contextGraphId, kaUal: descriptor.kaUal });
-      },
-    });
-    const descriptors = [descriptorFor(v1), descriptorFor(v2)];
-
-    await committer.settleCommittedSnapshots(CG, descriptors);
-
-    expect(committer.materializer).toBe(materializer);
-    expect(forwarded).toEqual([
-      { contextGraphId: CG, kaUal: UAL },
-      { contextGraphId: CG, kaUal: UAL },
-    ]);
-  });
-
   it('shares one assertion graph across versions (the premise of the digest guard)', () => {
     expect(v1.assertionGraph).toBe(v2.assertionGraph);
     expect(v1.payload).toHaveLength(v2.payload.length);
@@ -306,16 +284,14 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
           }),
           ensureContextGraph: async () => {},
           storeInsert: async (quads) => { await store.insert(quads); },
-          snapshotCommitter: {
-            materializer: {
-              ...materializer,
-              replaceGraph: async (graphUri, quads) => {
-                replaceCalls += 1;
-                return materializer.replaceGraph(graphUri, quads);
-              },
+          snapshotMaterializer: {
+            ...materializer,
+            replaceGraph: async (graphUri, quads) => {
+              replaceCalls += 1;
+              return materializer.replaceGraph(graphUri, quads);
             },
-            settleCommittedSnapshots: async () => {},
           },
+          settleGraphScopedSnapshot: async () => {},
           publicSnapshotStore: snapshotStore,
           deleteCheckpoint: () => {},
           setCheckpoint: () => {},
