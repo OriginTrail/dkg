@@ -108,20 +108,33 @@ const W1_CORROBORATING_INSTRUMENTS = [
 const I = Object.fromEntries([...W1_INSTRUMENTS, ...W1_CORROBORATING_INSTRUMENTS].map((x) => [x.id, x]));
 
 // ── source families (plan §5.5) ───────────────────────────────────────────
-// SYNC_ADMISSION_SOURCES has exactly seven members (packages/agent/src/sync/
-// policy.ts) and the classification below is exhaustive over them. The
-// `invalidating` family is expressed as the NEGATION of the six classified
+// SYNC_ADMISSION_SOURCES has exactly eight members (packages/agent/src/sync/
+// policy.ts:38-56) and the classification below is exhaustive over them. The
+// `invalidating` family is expressed as the NEGATION of the seven classified
 // sources, so `unspecified` AND any future member added to the union without
 // updating this table both land in it — a new source cannot silently vanish
 // from the accounting.
+//
+// `control-plane` is the eighth member and is `excluded`. Curator meta refresh
+// fetches `plane=durable`/`phase=meta` — inside §7.2's decision filter — from
+// outside any admission boundary, so before it was named every such fetch
+// clamped to `unspecified` and invalidated the window on any node that had
+// joined a private CG. Naming it keeps §7.3's zero-`unspecified` gate reachable
+// rather than weakening the gate.
+//
+// NOTE the coupling this creates: a member added to the union but NOT to a
+// family here lands in `invalidating` by construction and invalidates every
+// window. That is the correct fail-loud direction — it is why the omission is
+// impossible to miss — but it does mean the union and this table must move
+// together, in the same PR.
 const W1_SOURCE_FAMILIES = [
   { id: 'foreground', title: 'user-triggered catch-up', role: 'eligible', sources: ['catchup-foreground'] },
   { id: 'recurring', title: 'recurring peer contact', role: 'eligible', sources: ['on-connect', 'reconcile'] },
-  { id: 'excluded', title: 'excluded / reported separately', role: 'excluded', sources: ['catchup-background', 'vm-recovery', 'swm-recovery'] },
+  { id: 'excluded', title: 'excluded / reported separately', role: 'excluded', sources: ['catchup-background', 'vm-recovery', 'swm-recovery', 'control-plane'] },
   { id: 'invalidating', title: 'invalidates the window', role: 'invalidating', sources: ['unspecified'] },
 ];
 
-/** The six sources the classification names explicitly; the invalidating
+/** The seven sources the classification names explicitly; the invalidating
  *  family is everything else. */
 const W1_CLASSIFIED_SOURCES = W1_SOURCE_FAMILIES
   .filter((f) => f.role !== 'invalidating')
@@ -229,7 +242,7 @@ const buildWindowQueries = ({ nodeProfile, range }) => {
     // may be removed on the grounds that "the other one covers it" — a
     // join-free unlisted source would then go unreported entirely.
     { id: 'invalidating_source_samples', title: 'Samples carrying an unclassified source',
-      purpose: 'Evidence gate = 0. Negation of the six classified sources, so `unspecified` and any future unlisted member both surface here instead of vanishing. Terms are zero-filled: a healthy node has no series on any of the three, and an unfilled sum would go blank and hide a sample on one of them.',
+      purpose: 'Evidence gate = 0. Negation of the seven classified sources, so `unspecified` and any future unlisted member both surface here instead of vanishing. Terms are zero-filled: a healthy node has no series on any of the three, and an unfilled sum would go blank and hide a sample on one of them.',
       expr: [zeroFilled(`sum(increase(${i1(SOURCE_INVALIDATING)}${W}))`),
         zeroFilled(`sum(increase(${i4count(SOURCE_INVALIDATING)}${W}))`),
         zeroFilled(`sum(increase(${i5(SOURCE_INVALIDATING)}${W}))`)].join(' + ') },
@@ -399,12 +412,17 @@ metrics dashboard already writes \`dkg_publish_duration(_milliseconds)?_bucket\`
 
 ## Source families (§5.5)
 
-\`SYNC_ADMISSION_SOURCES\` has exactly seven members and this table is
-exhaustive over them. The \`invalidating\` family is the **negation** of the six
-classified sources, so \`unspecified\` and any future member added without
+\`SYNC_ADMISSION_SOURCES\` has exactly eight members and this table is
+exhaustive over them. The \`invalidating\` family is the **negation** of the
+seven classified sources, so \`unspecified\` and any future member added without
 updating this table both surface in the gate instead of vanishing.
 
 ${familyTable()}
+
+\`control-plane\` is reported separately rather than counted as eligible cost:
+curator meta refresh issues \`plane=durable\`/\`phase=meta\` fetches from outside
+any admission boundary, so it is real durable traffic that no trigger the
+decision rule reasons about is responsible for.
 
 Eligible (materiality numerator): \`${SOURCE_ELIGIBLE}\`
 

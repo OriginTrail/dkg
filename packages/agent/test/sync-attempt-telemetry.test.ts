@@ -4,8 +4,14 @@
  * `sendSyncRequest`, plus the clamping and never-throws guarantees of the
  * shared record helpers.
  *
- * Acceptance covered here: A2, A3, A7 (attempt instruments), A11, A14, A19.
- * Mutants these assertions are written to kill: M1, M2, M3.
+ * Acceptance covered here: A2, A3, A7 (attempt instruments), A10, A11, A14, A19.
+ * Mutants these assertions are written to kill: M1, M2, M3, M9.
+ *
+ * A10/M9 is an INSTRUMENT-DECLARATION contract rather than a per-attempt one.
+ * It lives here because this is the agent package's home for cross-cutting
+ * instrument guarantees (clamping, never-throws) and because this file is named
+ * in the §8.3 packet — a bucket assertion outside the packet would not be run
+ * by the gate, which is the whole reason the property went unprotected.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { getMetrics } from '@origintrail-official/dkg-core';
@@ -32,7 +38,7 @@ import {
   withSyncAdmissionSource,
 } from '../src/sync/attempt-telemetry.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
-import { W1MetricsHarness, I1, I2, I3 } from './_helpers/w1-metrics.js';
+import { W1MetricsHarness, I1, I2, I3, I9 } from './_helpers/w1-metrics.js';
 
 const PROTO = '/dkg/10.0.2/sync';
 const REQUEST_BYTES = new Uint8Array([1, 2, 3, 4]);
@@ -296,6 +302,37 @@ describe('W1 A11 — closed vocabularies clamp, and instrumentation never throws
     // The hot path itself must be unaffected.
     const result = await sendSyncRequest(attemptParams());
     expect(Array.from(result)).toEqual(Array.from(RESPONSE_BYTES));
+  });
+
+  it('A10/M9: the catch-up buckets resolve the longest observed job, not +Inf', async () => {
+    harness.install();
+    // §6.1 gave I9 its own `CATCHUP_DURATION_BUCKETS` because `OP_DURATION_BUCKETS`
+    // stops at 120 s while observed foreground catch-up jobs ran 305 s and 382 s —
+    // both would land in the `+Inf` overflow and become unresolvable.
+    //
+    // Nothing asserted that until now. The only 305 s sample in the repo is in
+    // node-ui's attribute-allow-list test, which reads attribute KEYS only, so it
+    // passes identically whether the sample resolves or overflows — and reusing
+    // `OP_DURATION_BUCKETS` here survived every suite in the repo.
+    const OBSERVED_CATCHUP_JOB_MS = [305_000, 382_000];
+    for (const ms of OBSERVED_CATCHUP_JOB_MS) {
+      getMetrics().contextGraphCatchupJobDurationMs.record(ms, { admission: 'walk' });
+    }
+
+    const [point] = await harness.buckets(I9);
+    expect(point).toBeDefined();
+    // Precondition, not decoration: an empty histogram would satisfy the overflow
+    // assertion below for the wrong reason.
+    expect(point!.counts.reduce((sum, n) => sum + n, 0)).toBe(OBSERVED_CATCHUP_JOB_MS.length);
+
+    // Asserted against the TOP FINITE BOUNDARY, never a bucket index: a legitimate
+    // retune of the boundary list must keep passing, and only a list that stops
+    // too low may fail.
+    const { boundaries, counts } = point!;
+    expect(boundaries[boundaries.length - 1]!).toBeGreaterThanOrEqual(Math.max(...OBSERVED_CATCHUP_JOB_MS));
+    // `counts` carries one entry more than `boundaries` — the trailing `+Inf`
+    // overflow. Every observed job must be resolvable, so it must be empty.
+    expect(counts[counts.length - 1]!).toBe(0);
   });
 
   it('drops non-finite byte counts rather than poisoning a counter', async () => {

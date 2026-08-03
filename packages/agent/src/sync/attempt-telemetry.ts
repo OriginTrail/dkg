@@ -176,6 +176,30 @@ export function activeSyncAdmissionSource(): SyncAdmissionSource {
 }
 
 /**
+ * Is a scope established at all? Tests STORE PRESENCE, deliberately.
+ *
+ * **The sentinel is not a proxy for absence.** {@link activeSyncAdmissionSource}
+ * returns `'unspecified'` for two different states: no scope established, and a
+ * scope legitimately HOLDING `'unspecified'`. The second is reachable —
+ * `runContextGraphSyncWithBackpressure` normalizes an ABSENT `admission.source`
+ * to `'unspecified'` and then establishes the context with that value, so an
+ * admitted operation whose caller omitted `source` runs inside a real scope
+ * holding the sentinel. (Reachable via `syncFromPeer` → `syncFromPeerDetailed`'s
+ * optional `source`; not confirmed observed in production — which is reason
+ * enough to be exact rather than lucky, since being exact costs one accessor.)
+ *
+ * A caller asking "is this work unattributed?" must therefore ask THIS, never
+ * `activeSyncAdmissionSource() === 'unspecified'`. Comparing the value would
+ * relabel a genuinely unattributed admitted operation as though its trigger
+ * were known — laundering "we do not know" into a confident answer, which is
+ * exactly what §7.3's gate exists to catch. **Do not simplify this back into a
+ * value comparison.**
+ */
+export function hasSyncAdmissionSource(): boolean {
+  return syncAdmissionSourceContext.getStore() !== undefined;
+}
+
+/**
  * The `{transport, plane, phase, source}` labels shared by I1–I3 for one
  * attempt. Resolved once so all three points of a single attempt agree, and so
  * the ambient read happens exactly once per attempt rather than three times.

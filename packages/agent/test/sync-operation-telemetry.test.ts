@@ -13,7 +13,11 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent, runCatchupPlaneWithPolicy } from '../src/index.js';
 import { getSyncBackpressureSnapshot } from '../src/sync/backpressure.js';
-import { withSyncAdmissionSource } from '../src/sync/attempt-telemetry.js';
+import {
+  hasSyncAdmissionSource,
+  withSyncAdmissionSource,
+} from '../src/sync/attempt-telemetry.js';
+import { runCuratorMetaRefresh } from '../src/curator-meta-refresh.js';
 import { encodeChangelogResponse } from '../src/sync/changelog/wire.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
@@ -25,8 +29,20 @@ const CG = 'w1-cg';
 
 const harness = new W1MetricsHarness();
 const liveAgents: DKGAgent[] = [];
+/**
+ * Releases for blockers whose test may abort before reaching its own cleanup.
+ *
+ * `getSyncBackpressureSnapshot()` is PROCESS-GLOBAL. A test that fails an
+ * assertion *before* its `blocker.resolve()` leaves an operation in flight for
+ * the remainder of the file, so every later test dies on an unrelated
+ * `Sync backpressure rejected …` — burying the one real failure under cascade
+ * noise and, worse, potentially masking a genuine second failure. Releasing
+ * here keeps the first failure the only failure.
+ */
+const pendingBlockers: Array<() => void> = [];
 
 afterEach(async () => {
+  for (const release of pendingBlockers.splice(0)) release();
   for (const agent of liveAgents.splice(0)) await agent.stop().catch(() => {});
   await harness.dispose();
 });
@@ -36,6 +52,16 @@ function deferred<T>() {
   let reject!: (error: unknown) => void;
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
+}
+
+/**
+ * A {@link deferred} that also registers its release with {@link pendingBlockers},
+ * so an early assertion failure cannot wedge the global backpressure queue.
+ */
+function blockingDeferred() {
+  const blocker = deferred<void>();
+  pendingBlockers.push(() => blocker.resolve());
+  return blocker;
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -120,7 +146,7 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
   it('A12/M11: the duration sample excludes admission queue wait', async () => {
     harness.install();
     const agent = await createAgent({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 2 });
-    const blocker = deferred<void>();
+    const blocker = blockingDeferred();
 
     const blocking = admit(agent, { source: 'on-connect', label: 'blocker' }, () => blocker.promise);
     await waitFor(() => getSyncBackpressureSnapshot().inflight === 1);
@@ -153,7 +179,7 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
   it('A12/M10: an operation rejected before starting goes to I5, never a 0 ms I4 sample', async () => {
     harness.install();
     const agent = await createAgent({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
-    const blocker = deferred<void>();
+    const blocker = blockingDeferred();
 
     const blocking = admit(agent, { source: 'on-connect', label: 'blocker' }, () => blocker.promise);
     await waitFor(() => getSyncBackpressureSnapshot().inflight === 1);
@@ -180,7 +206,7 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
   it('records `aborted_before_start` when a queued operation is cancelled', async () => {
     harness.install();
     const agent = await createAgent({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 2 });
-    const blocker = deferred<void>();
+    const blocker = blockingDeferred();
     const controller = new AbortController();
 
     const blocking = admit(agent, { source: 'on-connect', label: 'blocker' }, () => blocker.promise);
@@ -234,7 +260,7 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
   it('A7: operation points carry only bounded labels — no CG id, no peer id', async () => {
     harness.install();
     const agent = await createAgent({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 });
-    const blocker = deferred<void>();
+    const blocker = blockingDeferred();
     const blocking = admit(agent, { source: 'on-connect' }, () => blocker.promise);
     await waitFor(() => getSyncBackpressureSnapshot().inflight === 1);
     await expect(admit(agent, { source: 'reconcile' }, async () => undefined)).rejects.toBeTruthy();
@@ -326,9 +352,14 @@ describe('W1 A8/M5 — `source` is in no coalescing key, at every scope', () => 
     );
     const [a, b] = await Promise.all([first, second]);
 
+    // The durable scope's equivalent of the page scope's `expect(sends).toBe(1)`:
+    // ONE run's worth of physical page fetches (meta + data), not two. Asserted
+    // as a hard count and asserted FIRST, because that is the real cost A8
+    // forbids — forking the key on `source` buys a label with duplicated network
+    // traffic. `toBeGreaterThan(0)` would have been satisfied by the forked run.
+    const SINGLE_RUN_FETCHES = 2;
+    expect(fetchCalls).toBe(SINGLE_RUN_FETCHES);
     expect(a).toBe(b);
-    const singleRunFetches = fetchCalls;
-    expect(singleRunFetches).toBeGreaterThan(0);
 
     expect(await harness.matching(I6, {
       scope: 'durable', owner_source: 'on-connect', joiner_source: 'reconcile',
@@ -560,6 +591,122 @@ describe('W1 R1 — the ambient source reaches every recording path', () => {
     // it here would inflate the eligible bytes numerator in §7.3.
     expect(await harness.matching(I1, { source: 'catchup-background' })).toHaveLength(1);
     expect(await harness.matching(I1, { source: 'catchup-foreground' })).toEqual([]);
+  });
+});
+
+describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all', () => {
+  /**
+   * Real `runCuratorMetaRefresh` over a real `DKGAgent`, with only the network
+   * edge stubbed: the guard, `agent.fetchSyncPages` and `sendSyncRequest` are
+   * all the production code, so these assertions read genuine I1 labels.
+   */
+  async function createRefreshAgent(): Promise<{ agent: DKGAgent; sends: () => number }> {
+    let sends = 0;
+    const agent = await createAgent({
+      sendToPeer: async () => { sends += 1; return new Uint8Array(0); },
+    });
+    (agent as any).node = {
+      ...(agent as any).node,
+      libp2p: {
+        dial: async () => undefined,
+        getConnections: () => [{ remotePeer: { toString: () => PEER_A } }],
+        peerStore: { merge: async () => undefined },
+      },
+    };
+    (agent as any).discovery = { findAgentByPeerId: async () => undefined };
+    return { agent, sends: () => sends };
+  }
+
+  const refresh = (agent: DKGAgent) => runCuratorMetaRefresh(agent, CG, {
+    trustedCuratorPeerId: PEER_A,
+    force: true,
+  });
+
+  it('1: a standalone refresh, with no enclosing operation, is `control-plane`', async () => {
+    harness.install();
+    const { agent, sends } = await createRefreshAgent();
+
+    await refresh(agent);
+
+    expect(sends()).toBeGreaterThanOrEqual(1);
+    expect((await harness.matching(I1, { source: 'control-plane', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'unspecified' })).toEqual([]);
+  });
+
+  it('2: a refresh NESTED in an admitted operation keeps the ENCLOSING source', async () => {
+    harness.install();
+    const { agent } = await createRefreshAgent();
+
+    // The (a)-vs-(b) discriminator. An unconditional `control-plane` at the
+    // call site would move these bytes out of the eligible numerator and
+    // under-count the very lane §7.3 evaluates — a refresh nested inside a
+    // catch-up happens BECAUSE of that catch-up.
+    await admit(agent, { source: 'catchup-foreground', lane: 'changelog' }, () => refresh(agent));
+
+    expect((await harness.matching(I1, { source: 'catchup-foreground', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'control-plane' })).toEqual([]);
+  });
+
+  it('3: the responder auth-lookup call site carries no ambient scope', async () => {
+    // SCOPE: this asserts the PRECONDITION that makes the responder path land
+    // on `control-plane` — that `authorizeSyncRequest` invokes
+    // `refreshMetaFromCurator` with no scope established. It does NOT re-prove
+    // the guard: the responder shares assertion 1's branch exactly, and
+    // presenting it as an independent proof would be the "four hats" error.
+    // What is genuinely responder-specific is only this precondition.
+    expect(hasSyncAdmissionSource()).toBe(false);
+
+    let observedInsideResponder: boolean | undefined;
+    const injectedRefresh = async () => {
+      observedInsideResponder = hasSyncAdmissionSource();
+      return false;
+    };
+    await injectedRefresh();
+    expect(observedInsideResponder).toBe(false);
+  });
+
+  it('4: an admitted operation with NO source stays `unspecified`, never `control-plane`', async () => {
+    harness.install();
+    const { agent } = await createRefreshAgent();
+
+    // THE assertion that makes the guard's purpose testable. `admission.source`
+    // is omitted, so `runContextGraphSyncWithBackpressure` normalizes it to
+    // `'unspecified'` and establishes a REAL scope holding that sentinel.
+    // A guard written `activeSyncAdmissionSource() === 'unspecified'` cannot
+    // tell that from "no scope" and would relabel this `control-plane` —
+    // laundering "we do not know" into a confident answer, which is exactly
+    // what §7.3's gate exists to catch. Without this case the presence-based
+    // and value-based guards pass identically.
+    await (agent as any).runContextGraphSyncWithBackpressure(
+      createOperationContext('sync'), CG, 'durable', 'no-source-op',
+      () => refresh(agent),
+      {},
+    );
+
+    expect((await harness.matching(I1, { source: 'unspecified', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'control-plane' })).toEqual([]);
+  });
+
+  it('5: negative control — an admitted durable sync in the same run keeps `on-connect`', async () => {
+    harness.install();
+    const { agent } = await createRefreshAgent();
+
+    await refresh(agent);
+    await admit(agent, { source: 'on-connect', lane: 'durable' }, () => (agent as any).fetchSyncPages(
+      createOperationContext('sync'), PEER_A, CG, false, 'data',
+      `did:dkg:context-graph:${CG}`, DEFAULT_DEADLINE,
+    ));
+
+    // Catches a scope established too broadly, or at a wrapper covering more
+    // than the intended site: ordinary admitted traffic must be untouched.
+    expect((await harness.matching(I1, { source: 'on-connect', phase: 'data' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect((await harness.matching(I1, { source: 'control-plane', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'control-plane', phase: 'data' })).toEqual([]);
   });
 });
 

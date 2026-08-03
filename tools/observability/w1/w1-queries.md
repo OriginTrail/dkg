@@ -56,17 +56,22 @@ metrics dashboard already writes `dkg_publish_duration(_milliseconds)?_bucket`.
 
 ## Source families (§5.5)
 
-`SYNC_ADMISSION_SOURCES` has exactly seven members and this table is
-exhaustive over them. The `invalidating` family is the **negation** of the six
-classified sources, so `unspecified` and any future member added without
+`SYNC_ADMISSION_SOURCES` has exactly eight members and this table is
+exhaustive over them. The `invalidating` family is the **negation** of the
+seven classified sources, so `unspecified` and any future member added without
 updating this table both surface in the gate instead of vanishing.
 
 | Family | Classification | Sources | Runnable predicate |
 |---|---|---|---|
 | `foreground` | user-triggered catch-up | `catchup-foreground` | `source=~"catchup-foreground"` |
 | `recurring` | recurring peer contact | `on-connect`, `reconcile` | `source=~"on-connect\|reconcile"` |
-| `excluded` | excluded / reported separately | `catchup-background`, `vm-recovery`, `swm-recovery` | `source=~"catchup-background\|vm-recovery\|swm-recovery"` |
-| `invalidating` | invalidates the window | `unspecified` | `source!~"catchup-foreground\|on-connect\|reconcile\|catchup-background\|vm-recovery\|swm-recovery"` |
+| `excluded` | excluded / reported separately | `catchup-background`, `vm-recovery`, `swm-recovery`, `control-plane` | `source=~"catchup-background\|vm-recovery\|swm-recovery\|control-plane"` |
+| `invalidating` | invalidates the window | `unspecified` | `source!~"catchup-foreground\|on-connect\|reconcile\|catchup-background\|vm-recovery\|swm-recovery\|control-plane"` |
+
+`control-plane` is reported separately rather than counted as eligible cost:
+curator meta refresh issues `plane=durable`/`phase=meta` fetches from outside
+any admission boundary, so it is real durable traffic that no trigger the
+decision rule reasons about is responsible for.
 
 Eligible (materiality numerator): `source=~"catchup-foreground|on-connect|reconcile"`
 
@@ -136,15 +141,15 @@ sum(increase({__name__=~"dkg_sync_attempt_request_bytes(_bytes_total)?", plane="
 Evidence gate = 0. PromQL cannot compare two labels, so the predicate is enumerated per family: owner in F and joiner not in F. Each sample's owner is in exactly one family, so the terms partition and cannot double-count. Each term is zero-filled so an absent family cannot blank out a real join in another.
 
 ```promql
-(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-foreground", joiner_source!~"catchup-foreground", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"on-connect|reconcile", joiner_source!~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-background|vm-recovery|swm-recovery", joiner_source!~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", joiner_source=~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])) or vector(0))
+(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-foreground", joiner_source!~"catchup-foreground", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"on-connect|reconcile", joiner_source!~"on-connect|reconcile", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-background|vm-recovery|swm-recovery|control-plane", joiner_source!~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", joiner_source=~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0))
 ```
 
 **`invalidating_source_samples`** — Samples carrying an unclassified source
 
-Evidence gate = 0. Negation of the six classified sources, so `unspecified` and any future unlisted member both surface here instead of vanishing. Terms are zero-filled: a healthy node has no series on any of the three, and an unfilled sum would go blank and hide a sample on one of them.
+Evidence gate = 0. Negation of the seven classified sources, so `unspecified` and any future unlisted member both surface here instead of vanishing. Terms are zero-filled: a healthy node has no series on any of the three, and an unfilled sum would go blank and hide a sample on one of them.
 
 ```promql
-(sum(increase(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_count", lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])) or vector(0))
+(sum(increase(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_count", lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) or vector(0))
 ```
 
 **`counter_resets`** — Counter resets inside the window
@@ -305,26 +310,26 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 
 **`excluded_durable_bytes_per_hour`** — excluded / reported separately — durable bytes/hour (I2 + I3)
 
-Sources: catchup-background, vm-recovery, swm-recovery. Absolute floor for a winning family is ≥ 25 MB/h.
+Sources: catchup-background, vm-recovery, swm-recovery, control-plane. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h])))
+3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h])))
 ```
 
 **`excluded_durable_attempts_per_hour`** — excluded / reported separately — durable attempts/hour (I1)
 
-Sources: catchup-background, vm-recovery, swm-recovery.
+Sources: catchup-background, vm-recovery, swm-recovery, control-plane.
 
 ```promql
-3600 * sum(rate(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h]))
+3600 * sum(rate(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h]))
 ```
 
 **`excluded_durable_active_ms_per_hour`** — excluded / reported separately — durable active ms/hour (I4 sum)
 
-Sources: catchup-background, vm-recovery, swm-recovery. Absolute floor for a winning family is ≥ 90 000 ms/h.
+Sources: catchup-background, vm-recovery, swm-recovery, control-plane. Absolute floor for a winning family is ≥ 90 000 ms/h.
 
 ```promql
-3600 * sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~"durable|changelog", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[2h]))
+3600 * sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~"durable|changelog", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[2h]))
 ```
 
 ### Corroborating pressure (§7.2)
@@ -415,15 +420,15 @@ sum(increase({__name__=~"dkg_sync_attempt_request_bytes(_bytes_total)?", plane="
 Evidence gate = 0. PromQL cannot compare two labels, so the predicate is enumerated per family: owner in F and joiner not in F. Each sample's owner is in exactly one family, so the terms partition and cannot double-count. Each term is zero-filled so an absent family cannot blank out a real join in another.
 
 ```promql
-(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-foreground", joiner_source!~"catchup-foreground", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"on-connect|reconcile", joiner_source!~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-background|vm-recovery|swm-recovery", joiner_source!~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", joiner_source=~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])) or vector(0))
+(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-foreground", joiner_source!~"catchup-foreground", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"on-connect|reconcile", joiner_source!~"on-connect|reconcile", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~"catchup-background|vm-recovery|swm-recovery|control-plane", joiner_source!~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", joiner_source=~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0))
 ```
 
 **`invalidating_source_samples`** — Samples carrying an unclassified source
 
-Evidence gate = 0. Negation of the six classified sources, so `unspecified` and any future unlisted member both surface here instead of vanishing. Terms are zero-filled: a healthy node has no series on any of the three, and an unfilled sum would go blank and hide a sample on one of them.
+Evidence gate = 0. Negation of the seven classified sources, so `unspecified` and any future unlisted member both surface here instead of vanishing. Terms are zero-filled: a healthy node has no series on any of the three, and an unfilled sum would go blank and hide a sample on one of them.
 
 ```promql
-(sum(increase(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_count", lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])) or vector(0))
+(sum(increase(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_count", lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~"durable|changelog", source!~"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) or vector(0))
 ```
 
 **`counter_resets`** — Counter resets inside the window
@@ -584,26 +589,26 @@ sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~
 
 **`excluded_durable_bytes_per_hour`** — excluded / reported separately — durable bytes/hour (I2 + I3)
 
-Sources: catchup-background, vm-recovery, swm-recovery. Absolute floor for a winning family is ≥ 25 MB/h.
+Sources: catchup-background, vm-recovery, swm-recovery, control-plane. Absolute floor for a winning family is ≥ 25 MB/h.
 
 ```promql
-3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h])))
+3600 * (sum(rate({__name__=~"dkg_sync_attempt_request_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])) + sum(rate({__name__=~"dkg_sync_attempt_response_bytes(_bytes_total)?", plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h])))
 ```
 
 **`excluded_durable_attempts_per_hour`** — excluded / reported separately — durable attempts/hour (I1)
 
-Sources: catchup-background, vm-recovery, swm-recovery.
+Sources: catchup-background, vm-recovery, swm-recovery, control-plane.
 
 ```promql
-3600 * sum(rate(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h]))
+3600 * sum(rate(dkg_sync_attempt_total{plane="durable", phase=~"data|meta|delta", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h]))
 ```
 
 **`excluded_durable_active_ms_per_hour`** — excluded / reported separately — durable active ms/hour (I4 sum)
 
-Sources: catchup-background, vm-recovery, swm-recovery. Absolute floor for a winning family is ≥ 90 000 ms/h.
+Sources: catchup-background, vm-recovery, swm-recovery, control-plane. Absolute floor for a winning family is ≥ 90 000 ms/h.
 
 ```promql
-3600 * sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~"durable|changelog", source=~"catchup-background|vm-recovery|swm-recovery", instance=~"${node:regex}"}[1h]))
+3600 * sum(rate({__name__=~"dkg_sync_operation_duration_ms(_milliseconds)?_sum", lane=~"durable|changelog", source=~"catchup-background|vm-recovery|swm-recovery|control-plane", instance=~"${node:regex}"}[1h]))
 ```
 
 ### Corroborating pressure (§7.2)

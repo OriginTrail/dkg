@@ -15,7 +15,7 @@
 //     indistinguishable from "no traffic" and silently invalidates a window;
 //   - the §5.5 source-family mapping, including the invalidating family as the
 //     NEGATION of the classified sources, and no source value outside the
-//     closed seven-member vocabulary;
+//     closed eight-member vocabulary;
 //   - the ALL-SOURCE (no family filter) bytes AND active-ms denominators —
 //     the two-axis materiality rule is uncomputable without them;
 //   - the profiled node filter inside EVERY selector, checked per selector
@@ -71,7 +71,12 @@ const EXPECTED_CORROBORATING = [
 const EXPECTED_FAMILIES = [
   { id: 'foreground', role: 'eligible', sources: ['catchup-foreground'] },
   { id: 'recurring', role: 'eligible', sources: ['on-connect', 'reconcile'] },
-  { id: 'excluded', role: 'excluded', sources: ['catchup-background', 'vm-recovery', 'swm-recovery'] },
+  // `control-plane` (the eighth union member) is EXCLUDED, not invalidating:
+  // curator meta refresh fetches plane=durable/phase=meta from outside any
+  // admission boundary, so leaving it unclassified would clamp it to
+  // `unspecified` and make §7.3's zero-unspecified gate unreachable on any node
+  // that had joined a private CG.
+  { id: 'excluded', role: 'excluded', sources: ['catchup-background', 'vm-recovery', 'swm-recovery', 'control-plane'] },
   { id: 'invalidating', role: 'invalidating', sources: ['unspecified'] },
 ];
 const CLASSIFIED_SOURCES = EXPECTED_FAMILIES.filter((f) => f.role !== 'invalidating').flatMap((f) => f.sources);
@@ -270,7 +275,7 @@ if (dualSpelledSelectors < 1) fail('w1-rules.yaml', 'no selector exercises a dua
   for (const [, key, op, value] of sourceMatchers) {
     for (const token of value.split('|')) {
       if (!ALL_SOURCES.includes(token)) {
-        fail('source vocabulary', `${key}${op}"${value}" names "${token}", which is not one of the seven SYNC_ADMISSION_SOURCES ${JSON.stringify(ALL_SOURCES)}`);
+        fail('source vocabulary', `${key}${op}"${value}" names "${token}", which is not one of the eight SYNC_ADMISSION_SOURCES ${JSON.stringify(ALL_SOURCES)}`);
       }
     }
   }
@@ -302,7 +307,7 @@ if (dualSpelledSelectors < 1) fail('w1-rules.yaml', 'no selector exercises a dua
   need(`joiner_source=~"${CLASSIFIED_SOURCES.join('|')}"`, 'the invalidating-family cross-join joiner predicate');
   need(`source=~"${ELIGIBLE_SOURCES.join('|')}"`, 'the eligible (foreground + recurring) predicate');
   for (const s of ALL_SOURCES) {
-    if (!report.includes(s)) fail('w1-queries.md', `source "${s}" is absent from the report — the family table must be exhaustive over the seven-member vocabulary`);
+    if (!report.includes(s)) fail('w1-queries.md', `source "${s}" is absent from the report — the family table must be exhaustive over the eight-member vocabulary`);
   }
 }
 

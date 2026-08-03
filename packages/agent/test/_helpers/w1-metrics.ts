@@ -21,6 +21,7 @@ export const I3 = 'dkg.sync.attempt.response_bytes';
 export const I4 = 'dkg.sync.operation.duration_ms';
 export const I5 = 'dkg.sync.operation.rejected_total';
 export const I6 = 'dkg.sync.singleflight.joins_total';
+export const I9 = 'dkg.context_graph.catchup.job_duration_ms';
 
 export interface CounterPoint {
   attributes: Record<string, unknown>;
@@ -32,6 +33,14 @@ export interface HistogramPoint {
   count: number;
   sum: number;
   max: number;
+}
+
+export interface HistogramBucketPoint {
+  attributes: Record<string, unknown>;
+  /** Finite upper bounds, ascending. */
+  boundaries: number[];
+  /** One entry MORE than `boundaries`: the trailing element is the `+Inf` overflow. */
+  counts: number[];
 }
 
 export class W1MetricsHarness {
@@ -96,6 +105,27 @@ export class W1MetricsHarness {
         count: value.count,
         sum: value.sum ?? 0,
         max: value.max ?? 0,
+      };
+    });
+  }
+
+  /**
+   * Explicit bucket boundaries and per-bucket counts of a histogram.
+   *
+   * `count`/`sum`/`max` cannot see WHICH bucket a sample landed in, so no
+   * assertion built on them can notice a boundary list that stops too low: a
+   * 305 s catch-up job then falls silently into the `+Inf` overflow and becomes
+   * unresolvable. That is the A10 property, and reading the boundaries is the
+   * only way to hold it.
+   */
+  async buckets(name: string): Promise<HistogramBucketPoint[]> {
+    const points = await this.rawPoints(name);
+    return points.map((point) => {
+      const value = point.value as { buckets?: { boundaries?: number[]; counts?: number[] } };
+      return {
+        attributes: point.attributes,
+        boundaries: value.buckets?.boundaries ?? [],
+        counts: value.buckets?.counts ?? [],
       };
     });
   }
