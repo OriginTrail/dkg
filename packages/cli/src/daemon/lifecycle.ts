@@ -151,6 +151,7 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { createDaemonLogSink } from './log-sink.js';
+import { createBackpressureLogEmitter } from './backpressure-log.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
@@ -1179,7 +1180,10 @@ export async function runDaemonInner(
     appendFile(logFile, line + "\n").catch(() => {});
   }
   const backpressureMonitor = new BackpressureMonitor({
-    emit: (level, message) => log(`[${level}] ${message}`),
+    emit: createBackpressureLogEmitter(
+      new Logger('backpressure'),
+      createOperationContext('system'),
+    ),
   });
 
   configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Source of truth for the DKG observability Grafana artifacts.
 //
-// Emits the four dashboard JSONs, alert-rules.provisioning.json,
+// Emits the five dashboard JSONs, alert-rules.provisioning.json,
 // example-alerts.md and the W1 sync-measurement artifacts (w1/) in this
 // directory. Edit the lib/ sources, regenerate, commit both — never hand-edit
 // a rendered artifact.
@@ -53,7 +53,7 @@ assertPromLabel(PROM_NODE_LABEL, usage);
 const nodeProfile = promNodeProfile(PROM_NODE_LABEL);
 
 
-const { fleet, nodeLogs, metrics, traces } = buildDashboards({ nodeProfile });
+const { fleet, nodeLogs, metrics, syncCost, traces } = buildDashboards({ nodeProfile });
 const { alerts, specs, routes } = buildAlerts({ nodeProfile, VM_UID, LOKI_UID });
 const docs = buildDocs({ specs, routes });
 // W1 sync-measurement decision queries (lib/w1.mjs) render into a NESTED key
@@ -70,6 +70,7 @@ const rendered = new Map([
   ['grafana-dashboard-dkg-fleet-logs.json', JSON.stringify(fleet, null, 2) + '\n'],
   ['grafana-dashboard-dkg-node-logs.json', JSON.stringify(nodeLogs, null, 2) + '\n'],
   ['grafana-dashboard-dkg-node-metrics.json', JSON.stringify(metrics, null, 2) + '\n'],
+  ['grafana-dashboard-dkg-sync-cost.json', JSON.stringify(syncCost, null, 2) + '\n'],
   ['grafana-dashboard-dkg-node-traces.json', JSON.stringify(traces, null, 2) + '\n'],
   ['alert-rules.provisioning.json', JSON.stringify(alerts, null, 2) + '\n'],
   ...Object.entries(docs),

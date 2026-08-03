@@ -27,6 +27,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertPromLabel, parseCliArgs } from './lib/cli.mjs';
+import { BACKPRESSURE_FLAME_LOOKBACK } from './lib/queries.mjs';
 
 const usage = 'usage: node verify-profile-render.mjs <dir> --prom-node-label <label> [--vm-uid <uid>] [--loki-uid <uid>]';
 const opts = parseCliArgs({
@@ -141,6 +142,236 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
     for (const v of dash.templating?.list ?? []) {
       const q = typeof v.query === 'string' ? v.query : JSON.stringify(v.query ?? '');
       if (usesUnprofiledLabel(q)) fail(`metrics dashboard variable $${v.name}`, `unprofiled '${DEFAULT_LABEL}' in query: ${q}`);
+    }
+  }
+}
+
+// ── W1 sync-cost dashboard: complete I1–I9 surface + parser fixture ───────
+{
+  const dash = load('grafana-dashboard-dkg-sync-cost.json');
+  const nodeVar = (dash.templating?.list ?? []).find((v) => v.name === 'node');
+  const wantVarQuery = `label_values({__name__=~"dkg_.+"}, ${LABEL})`;
+  if (!nodeVar) fail('sync-cost dashboard', 'no $node template variable');
+  else if (nodeVar.query !== wantVarQuery) fail('sync-cost dashboard $node variable', `query is ${JSON.stringify(nodeVar.query)}, want ${JSON.stringify(wantVarQuery)}`);
+
+  const expectedVariables = {
+    sync_source: 'catchup-foreground,on-connect,reconcile,catchup-background,vm-recovery,swm-recovery,control-plane,unspecified',
+    sync_lane: 'durable,changelog,shared_memory,swm_recovery',
+    sync_outcome: 'resolved,error,cancelled',
+  };
+  for (const [name, query] of Object.entries(expectedVariables)) {
+    const variable = (dash.templating?.list ?? []).find((v) => v.name === name);
+    if (!variable) fail('sync-cost dashboard', `missing $${name} variable`);
+    else {
+      if (variable.query !== query) fail(`sync-cost dashboard $${name}`, `query is ${JSON.stringify(variable.query)}, want ${JSON.stringify(query)}`);
+      if (!variable.includeAll || !variable.multi || variable.allValue !== '.+') {
+        fail(`sync-cost dashboard $${name}`, 'must be multi-select with an explicit .+ All value');
+      }
+    }
+  }
+
+  const allPanels = (dash.panels ?? []).flatMap((panel) => [panel, ...(panel.panels ?? [])]);
+  const allTargets = allPanels.flatMap((panel) => (panel.targets ?? []).map((target) => ({ panel, target })));
+  const nodeFilter = `${LABEL}=~"\${node:regex}"`;
+  const dashboardExprs = [];
+  for (const { panel, target } of allTargets) {
+    const expr = target.expr ?? '';
+    if (!/dkg_/.test(expr)) continue;
+    dashboardExprs.push(expr);
+    const where = `sync-cost panel "${panel.title}" target ${target.refId}`;
+    for (const sel of dkgSelectorViolations(expr, nodeFilter)) {
+      fail(where, `dkg_* selector lacks the profiled node filter ${nodeFilter}: ${sel}`);
+    }
+    if (profiled) {
+      if (usesUnprofiledLabel(expr)) fail(where, `unprofiled '${DEFAULT_LABEL}' label survived in expr: ${expr}`);
+      if (target.legendFormat && legendRe(DEFAULT_LABEL).test(target.legendFormat)) fail(where, `unprofiled legend: ${target.legendFormat}`);
+    }
+  }
+  if (profiled) {
+    for (const variable of dash.templating?.list ?? []) {
+      const query = typeof variable.query === 'string' ? variable.query : JSON.stringify(variable.query ?? '');
+      if (usesUnprofiledLabel(query)) fail(`sync-cost dashboard variable $${variable.name}`, `unprofiled '${DEFAULT_LABEL}' in query: ${query}`);
+    }
+  }
+
+  const expressionText = dashboardExprs.join('\n');
+  const expectedInstruments = [
+    'dkg_sync_attempt_total',
+    'dkg_sync_attempt_request_bytes',
+    'dkg_sync_attempt_response_bytes',
+    'dkg_sync_operation_duration_ms',
+    'dkg_sync_operation_rejected_total',
+    'dkg_sync_singleflight_joins_total',
+    'dkg_context_graph_catchup_requests_total',
+    'dkg_context_graph_catchup_jobs_total',
+    'dkg_context_graph_catchup_job_duration_ms',
+  ];
+  for (const instrument of expectedInstruments) {
+    if (!expressionText.includes(instrument)) fail('sync-cost dashboard', `W1 instrument ${instrument} is not read by any panel`);
+  }
+
+  const flame = allPanels.find((panel) => panel.type === 'flamegraph');
+  if (!flame) fail('sync-cost dashboard', 'source-attributed flamegraph is missing');
+  else {
+    const refs = (flame.targets ?? []).map((target) => target.refId).join('');
+    if (refs !== 'ABCD') fail('sync-cost dashboard flamegraph', `target order is ${JSON.stringify(refs)}, want ABCD`);
+    const transforms = (flame.transformations ?? []).map((transform) => transform.id);
+    const wanted = ['seriesToRows', 'extractFields', 'convertFieldType', 'calculateField', 'organize'];
+    if (JSON.stringify(transforms) !== JSON.stringify(wanted)) {
+      fail('sync-cost dashboard flamegraph', `transform chain is ${JSON.stringify(transforms)}, want ${JSON.stringify(wanted)}`);
+    }
+    const exprs = (flame.targets ?? []).map((target) => target.expr ?? '').join('\n');
+    for (const label of ['source', 'lane', 'outcome']) {
+      if (!exprs.includes(label)) fail('sync-cost dashboard flamegraph', `hierarchy does not include ${label}`);
+    }
+    if (!exprs.includes('$__range')) fail('sync-cost dashboard flamegraph', 'width is not evaluated over the selected Grafana range');
+  }
+
+  const heatmaps = allPanels.filter((panel) => panel.type === 'heatmap');
+  const expectedHeatmaps = [
+    ['Logical sync operation duration heatmap', 'dkg_sync_operation_duration_ms'],
+    ['Sync scheduler queue-wait heatmap', 'dkg_sync_scheduler_queue_wait_ms'],
+    ['Walk catch-up job duration heatmap', 'dkg_context_graph_catchup_job_duration_ms'],
+  ];
+  if (heatmaps.length !== expectedHeatmaps.length) {
+    fail('sync-cost dashboard', `expected ${expectedHeatmaps.length} histogram heatmaps, got ${heatmaps.length}`);
+  }
+  for (const [title, metric] of expectedHeatmaps) {
+    const panel = heatmaps.find((candidate) => candidate.title?.startsWith(title));
+    const where = `sync-cost dashboard ${title}`;
+    if (!panel) { fail(where, 'panel is missing'); continue; }
+    if (panel.options?.calculate !== false) fail(where, 'must consume server-side Prometheus histogram buckets');
+    if (panel.fieldConfig?.defaults?.unit !== 'ms' || panel.options?.yAxis?.unit !== 'ms') fail(where, 'must render duration in milliseconds');
+    const [target, ...extra] = panel.targets ?? [];
+    if (!target || extra.length) { fail(where, `expected exactly one target, got ${(panel.targets ?? []).length}`); continue; }
+    if (target.format !== 'heatmap' || target.queryType !== 'range') fail(where, 'target must be a Prometheus range heatmap');
+    if (!target.expr?.includes(metric) || !target.expr?.includes('_bucket') || !target.expr?.includes('sum by (le)')) {
+      fail(where, `target is not a bucket aggregation for ${metric}`);
+    }
+  }
+
+  for (const title of [
+    'Completed durable operations',
+    'Attributed durable payload',
+    'Cross-family joins',
+    'Unclassified source samples',
+    'Counter resets',
+    'Minimum export samples',
+  ]) {
+    if (!allPanels.some((panel) => panel.type === 'stat' && panel.title === title)) {
+      fail('sync-cost dashboard evidence gates', `stat panel "${title}" is missing`);
+    }
+  }
+
+  // The generated promtool fixture must be expression-identical to the
+  // dashboard after substituting only Grafana runtime variables. That makes
+  // the CI parser check certify every panel query, rather than a nearby copy.
+  const substituteGrafana = (expr) => expr
+    .replaceAll('${node:regex}', '.*')
+    .replaceAll('${sync_source:regex}', '.*')
+    .replaceAll('${sync_lane:regex}', '.*')
+    .replaceAll('${sync_outcome:regex}', '.*')
+    .replaceAll('$__rate_interval', '5m')
+    .replaceAll('$__range', '2h');
+  const fixtureText = fs.readFileSync(path.join(DIR, 'w1/w1-dashboard-rules.yaml'), 'utf8').replace(/\r\n/g, '\n');
+  const fixtureExprs = [...fixtureText.matchAll(/^ {8}expr: "((?:[^"\\]|\\.)*)"$/gm)]
+    .map((match) => match[1].replace(/\\(["\\])/g, '$1'));
+  const sorted = (values) => [...values].sort();
+  const rendered = sorted(dashboardExprs.map(substituteGrafana));
+  const fixture = sorted(fixtureExprs);
+  if (rendered.length !== fixture.length || rendered.some((expr, index) => expr !== fixture[index])) {
+    fail('sync-cost dashboard ↔ w1-dashboard-rules.yaml', `expression sets differ (${rendered.length} dashboard targets vs ${fixture.length} fixture rules)`);
+  }
+}
+
+// ── logs dashboard: PR #2003 worker-pressure surface ──────────────────────
+{
+  const dash = load('grafana-dashboard-dkg-node-logs.json');
+  const flame = (dash.panels ?? []).find((panel) => panel.type === 'flamegraph');
+  if (!flame) {
+    fail('logs dashboard', 'worker-pressure flamegraph panel is missing');
+  } else {
+    if (!flame.title?.includes('Worker queue pressure') || !flame.title?.includes('last 1 hour')) {
+      fail('logs dashboard flamegraph', `unexpected title: ${JSON.stringify(flame.title)}`);
+    }
+    if ((flame.targets ?? []).length !== 5) {
+      fail('logs dashboard flamegraph', `expected 5 ordered profile targets, got ${(flame.targets ?? []).length}`);
+    }
+    const refs = (flame.targets ?? []).map((target) => target.refId).join('');
+    if (refs !== 'ABCDE') {
+      fail('logs dashboard flamegraph', `target order is ${JSON.stringify(refs)}, want ABCDE`);
+    }
+    const exprs = (flame.targets ?? []).map((target) => target.expr ?? '').join('\n');
+    if (!exprs.includes('service_instance_id="$node"')) {
+      fail('logs dashboard flamegraph', 'queries are not scoped to the selected node');
+    }
+    if (!exprs.includes('|= `[backpressure]`')) {
+      fail('logs dashboard flamegraph', 'queries do not select PR #2003 backpressure records');
+    }
+    if (exprs.includes('$__range')) {
+      fail('logs dashboard flamegraph', 'instant queries must not inherit the arbitrary Grafana-selected range');
+    }
+    const fixedLookback = `[${BACKPRESSURE_FLAME_LOOKBACK}]`;
+    for (const target of flame.targets ?? []) {
+      if (!(target.expr ?? '').includes(fixedLookback)) {
+        fail('logs dashboard flamegraph', `target ${target.refId} does not use the fixed ${fixedLookback} Loki lookback`);
+      }
+    }
+    if (!flame.description?.includes(`fixed last ${BACKPRESSURE_FLAME_LOOKBACK}`)
+      || !flame.description?.includes('heatmaps below retain selected-range history')) {
+      fail('logs dashboard flamegraph', 'description must explain the fixed snapshot and selected-range heatmap split');
+    }
+    for (const phase of ['activeOperations', 'queuedOperations']) {
+      for (let index = 0; index < 8; index++) {
+        if (!exprs.includes(`${phase}[${index}].operation`)) {
+          fail('logs dashboard flamegraph', `missing bounded ${phase}[${index}] extraction`);
+        }
+      }
+    }
+    const transforms = (flame.transformations ?? []).map((transform) => transform.id);
+    const wanted = ['seriesToRows', 'extractFields', 'convertFieldType', 'calculateField', 'organize'];
+    if (JSON.stringify(transforms) !== JSON.stringify(wanted)) {
+      fail('logs dashboard flamegraph', `transform chain is ${JSON.stringify(transforms)}, want ${JSON.stringify(wanted)}`);
+    }
+  }
+  const raw = (dash.panels ?? []).find((panel) => panel.title?.startsWith('Backpressure transitions'));
+  if (!raw?.targets?.some((target) => target.expr?.includes('|= `[backpressure]`'))) {
+    fail('logs dashboard', 'raw backpressure evidence panel is missing');
+  }
+
+  const heatmaps = (dash.panels ?? []).filter((panel) => panel.type === 'heatmap');
+  if (heatmaps.length !== 2) {
+    fail('logs dashboard', `expected 2 worker-pressure heatmaps, got ${heatmaps.length}`);
+  }
+  for (const phase of ['Active / admitted', 'Queued / waiting']) {
+    const heatmap = heatmaps.find((panel) => panel.title?.startsWith(phase));
+    const field = phase.startsWith('Active') ? 'oldestActiveAgeMs' : 'oldestQueuedAgeMs';
+    const where = `logs dashboard ${phase.toLowerCase()} heatmap`;
+    if (!heatmap) {
+      fail(where, 'panel is missing');
+      continue;
+    }
+    if (heatmap.options?.calculate !== true) {
+      fail(where, 'must calculate heatmap buckets from the Loki time series');
+    }
+    if (heatmap.fieldConfig?.defaults?.unit !== 'ms' || heatmap.options?.yAxis?.unit !== 'ms') {
+      fail(where, 'sampled pressure age must be rendered in milliseconds');
+    }
+    if ((heatmap.targets ?? []).length !== 1) {
+      fail(where, `expected one range target, got ${(heatmap.targets ?? []).length}`);
+      continue;
+    }
+    const [target] = heatmap.targets;
+    const expr = target.expr ?? '';
+    if (target.queryType !== 'range') fail(where, `queryType is ${JSON.stringify(target.queryType)}, want range`);
+    if (!expr.includes('service_instance_id="$node"')) fail(where, 'query is not scoped to the selected node');
+    if (!expr.includes('|= `[backpressure]`')) fail(where, 'query does not select PR #2003 backpressure records');
+    if (!expr.includes(`age="${field}"`)) fail(where, `query does not extract ${field}`);
+    if (!expr.includes('max_over_time(') || !expr.includes('[$__auto]')) {
+      fail(where, 'query must retain the peak sparse sample in each Grafana resolution bucket');
+    }
+    if (target.legendFormat !== '{{scheduler}}/{{lane}}') {
+      fail(where, `legend is ${JSON.stringify(target.legendFormat)}, want scheduler/lane`);
     }
   }
 }

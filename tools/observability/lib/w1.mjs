@@ -360,6 +360,94 @@ const buildWindowQueries = ({ nodeProfile, range }) => {
   ];
 };
 
+// ── Grafana dashboard model ──────────────────────────────────────────────
+// The W1 report above answers a fixed measurement decision over 1 h / 2 h
+// windows. The Grafana dashboard is the interactive companion: it exposes all
+// nine instruments, retains the same spelling/profile contract, and lets an
+// operator filter the source-attributed operation views without forking the
+// metric vocabulary or hand-writing a second set of selectors.
+const W1_OPERATION_LANES = ['durable', 'changelog', 'shared_memory', 'swm_recovery'];
+const W1_OPERATION_OUTCOMES = ['resolved', 'error', 'cancelled'];
+
+export const buildW1GrafanaModel = ({ nodeProfile }) => {
+  const SEL = nodeProfile.selector;
+  const RATE = '[$__rate_interval]';
+  const RANGE = '[$__range]';
+  const sourceFilter = 'source=~"${sync_source:regex}"';
+  const laneFilter = 'lane=~"${sync_lane:regex}"';
+  const outcomeFilter = 'outcome=~"${sync_outcome:regex}"';
+
+  const i1 = selector(I.I1, { matchers: [sourceFilter, SEL] });
+  const i2 = selector(I.I2, { matchers: [sourceFilter, SEL] });
+  const i3 = selector(I.I3, { matchers: [sourceFilter, SEL] });
+  const i4sum = selector(I.I4, { series: '_sum', matchers: [laneFilter, sourceFilter, outcomeFilter, SEL] });
+  const i4bucket = selector(I.I4, { series: '_bucket', matchers: [laneFilter, sourceFilter, outcomeFilter, SEL] });
+  const i5 = selector(I.I5, { matchers: [laneFilter, sourceFilter, SEL] });
+  const i6 = selector(I.I6, { matchers: [SEL] });
+  const i7 = selector(I.I7, { matchers: [SEL] });
+  const i8 = selector(I.I8, { matchers: [SEL] });
+  const i9bucket = selector(I.I9, { series: '_bucket', matchers: ['admission="walk"', SEL] });
+  const p1bucket = selector(I.P1, { series: '_bucket', matchers: ['scheduler="sync-global"', laneFilter, SEL] });
+  const p2 = selector(I.P2, { matchers: ['scheduler="sync-global"', laneFilter, SEL] });
+
+  const activeInRange = `increase(${i4sum}${RANGE})`;
+  const windowSections = buildWindowQueries({ nodeProfile, range: '$__range' });
+  const decision = Object.fromEntries(windowSections
+    .flatMap((section) => section.queries)
+    .map((query) => [query.id, query.expr]));
+  const requiredDecision = (id) => {
+    const expr = decision[id];
+    if (!expr) throw new Error(`w1 Grafana model: missing decision query ${id}`);
+    return expr;
+  };
+
+  const targets = {
+    flame_root: `sum(${activeInRange})`,
+    flame_source: `sum by (source) (${activeInRange})`,
+    flame_source_lane: `sum by (source, lane) (${activeInRange})`,
+    flame_source_lane_outcome: `sum by (source, lane, outcome) (${activeInRange})`,
+    attempts_rate: `sum by (source, outcome, transport, plane, phase) (rate(${i1}${RATE}))`,
+    request_bytes_rate: `sum by (source) (rate(${i2}${RATE}))`,
+    response_bytes_rate: `sum by (source, outcome) (rate(${i3}${RATE}))`,
+    active_worker_equivalents: `sum by (source, lane, outcome) (rate(${i4sum}${RATE})) / 1000`,
+    sync_operation_duration_buckets: `sum by (le) (rate(${i4bucket}${RATE}))`,
+    rejected_rate: `sum by (lane, source, reason) (rate(${i5}${RATE}))`,
+    singleflight_joins_rate: `sum by (scope, owner_source, joiner_source) (rate(${i6}${RATE}))`,
+    queue_wait_buckets: `sum by (le) (rate(${p1bucket}${RATE}))`,
+    oldest_queued_age: `max by (lane) (${p2})`,
+    catchup_requests_rate: `sum by (result, include_shared_memory) (rate(${i7}${RATE}))`,
+    catchup_jobs_rate: `sum by (status, admission) (rate(${i8}${RATE}))`,
+    catchup_duration_buckets: `sum by (le) (rate(${i9bucket}${RATE}))`,
+    catchup_duration_p95: `histogram_quantile(0.95, sum by (le) (rate(${i9bucket}${RATE})))`,
+
+    gate_completed_operations: requiredDecision('completed_durable_operations'),
+    gate_payload_bytes: requiredDecision('attributed_durable_payload_bytes'),
+    gate_cross_family_joins: requiredDecision('cross_family_singleflight_joins'),
+    gate_invalidating_sources: requiredDecision('invalidating_source_samples'),
+    gate_counter_resets: requiredDecision('counter_resets'),
+    gate_export_samples: requiredDecision('export_coverage_min_samples'),
+
+    all_source_active_ms_per_hour: requiredDecision('all_source_durable_active_ms_per_hour'),
+    all_source_bytes_per_hour: requiredDecision('all_source_durable_bytes_per_hour'),
+    eligible_active_share: requiredDecision('eligible_active_share_of_all_source'),
+    foreground_bytes_share: requiredDecision('foreground_share_of_eligible_durable_bytes'),
+    foreground_active_share: requiredDecision('foreground_share_of_eligible_durable_active_ms'),
+    recurring_bytes_share: requiredDecision('recurring_share_of_eligible_durable_bytes'),
+    recurring_active_share: requiredDecision('recurring_share_of_eligible_durable_active_ms'),
+    excluded_bytes_per_hour: requiredDecision('excluded_durable_bytes_per_hour'),
+    excluded_active_ms_per_hour: requiredDecision('excluded_durable_active_ms_per_hour'),
+  };
+
+  return {
+    variables: {
+      sources: W1_SOURCE_FAMILIES.flatMap((family) => family.sources),
+      lanes: W1_OPERATION_LANES,
+      outcomes: W1_OPERATION_OUTCOMES,
+    },
+    targets,
+  };
+};
+
 // ── rendering ─────────────────────────────────────────────────────────────
 const GENERATED_MD = `<!-- GENERATED FILE — do not edit. Source: tools/observability/lib/w1.mjs
      Regenerate with: node tools/observability/generate-observability.mjs
@@ -518,11 +606,40 @@ const renderRules = ({ windows }) => [
   '',
 ].join('\n');
 
+// Promtool cannot parse Grafana interpolation tokens. This fixture carries the
+// exact dashboard expressions after replacing only the six runtime macros
+// with representative safe values. verify-profile-render.mjs independently
+// performs the same substitution and compares the complete expression set,
+// so this parser target cannot drift away from the dashboard it certifies.
+const dashboardExprForPromtool = (expr) => expr
+  .replaceAll('${node:regex}', '.*')
+  .replaceAll('${sync_source:regex}', '.*')
+  .replaceAll('${sync_lane:regex}', '.*')
+  .replaceAll('${sync_outcome:regex}', '.*')
+  .replaceAll('$__rate_interval', '5m')
+  .replaceAll('$__range', '2h');
+
+const renderDashboardRules = ({ targets }) => [
+  '# GENERATED FILE — do not edit. Source: tools/observability/lib/w1.mjs',
+  '# Exact parser fixture for grafana-dashboard-dkg-sync-cost.json.',
+  '# Grafana variables use representative values solely for promtool parsing.',
+  'groups:',
+  '  - name: w1-grafana-dashboard',
+  '    rules:',
+  ...Object.entries(targets).flatMap(([id, expr]) => [
+    `      - record: w1_dashboard_${id.replaceAll(/[^A-Za-z0-9_]/g, '_')}`,
+    `        expr: ${yamlQuote(dashboardExprForPromtool(expr))}`,
+  ]),
+  '',
+].join('\n');
+
 /** The rendered W1 artifact set, keyed by path relative to the output dir. */
 export const buildW1Artifacts = ({ nodeProfile }) => {
   const windows = W1_WINDOWS.map((w) => ({ ...w, sections: buildWindowQueries({ nodeProfile, range: w.range }) }));
+  const dashboard = buildW1GrafanaModel({ nodeProfile });
   return {
     'w1/w1-queries.md': renderReport({ nodeProfile, windows }),
     'w1/w1-rules.yaml': renderRules({ windows }),
+    'w1/w1-dashboard-rules.yaml': renderDashboardRules(dashboard),
   };
 };

@@ -178,6 +178,92 @@ Per-item enqueue/start logs are deliberately avoided. Transition and periodic
 summary logging make sustained pressure visible without creating a log storm
 that competes with the overloaded scheduler.
 
+The daemon routes these records through its structured log sink. That keeps a
+full local copy and forwards the same redacted record to enabled syslog and
+OTLP exporters, so the records reach the Loki-backed Grafana dashboards.
+
+## Grafana worker-pressure flame graph and heatmaps
+
+The **DKG Node — Logs** dashboard includes a **Scheduler pressure** row. Its
+flame graph expands the bounded `activeOperations` and `queuedOperations`
+arrays, groups them by scheduler, lane, and operation source, and shows the
+largest sampled `oldestAgeMs` in a fixed most-recent one-hour window. The
+lookback is intentionally independent of the Grafana-selected range: Loki 3
+splits long-range instant metric queries internally, so letting an incident
+range of 6 or 24 hours flow into all five flamegraph targets can make the
+dashboard itself create backend pressure.
+
+The two top-level branches have distinct meanings:
+
+- **active / admitted**: work occupying a worker slot;
+- **queued / waiting**: work still waiting for admission.
+
+Block width is elapsed pressure age in milliseconds. It answers which source
+was present and how old its oldest observed work became. It is not CPU time,
+request share, invocation count, or an exact completed-job duration. The
+monitor intentionally emits transition, periodic summary, and recovery records
+instead of a per-item event stream, so Grafana must not claim more precision
+than the log contract provides.
+
+Two heatmaps below the flame graph keep the active and queued meanings
+separate and retain the full Grafana-selected historical range. Each heatmap
+groups samples by scheduler/lane and shows the
+distribution over time of the peak sampled age in each Grafana resolution
+bucket:
+
+- **Active / admitted pressure age** shows how old the oldest work occupying a
+  worker slot became;
+- **Queued / waiting pressure age** shows how old the oldest work waiting for
+  admission became.
+
+The heatmaps retain the maximum observed age in each time bucket because the
+source is a sparse transition/summary stream. A darker cell means more samples
+fell into that time/age bucket; it does not mean more CPU was consumed. Empty
+periods mean Loki received no matching diagnostic sample, not necessarily that
+the scheduler was idle.
+
+## Grafana source-attributed sync cost
+
+The **DKG Nodes — Sync Cost** dashboard is the interactive Grafana companion
+to the W1 measurement contract introduced by PR #2033. It reads OpenTelemetry
+metrics from VictoriaMetrics and keeps the existing Loki pressure dashboard
+intact: logs answer what was present in a bounded pressure snapshot, while the
+metrics dashboard measures completed work, transferred payload, admission
+pressure, and catch-up outcomes over time.
+
+The dashboard covers every W1 instrument:
+
+| Instrument | Dashboard view |
+| --- | --- |
+| I1 physical sync attempts | Rate by source, outcome, transport, plane, and phase |
+| I2/I3 request and response payload bytes | Throughput by source and response outcome |
+| I4 logical operation duration | Source/lane/outcome flame graph, active-worker equivalents, and duration heatmap |
+| I5 rejected operations | Rate by source, lane, and bounded reason |
+| I6 single-flight joins | Rate by scope, owner source, and joining source |
+| I7 catch-up requests | Rate by route result and shared-memory request flag |
+| I8 catch-up jobs | Rate by terminal status and admission path |
+| I9 catch-up job duration | Walk-job p95 and duration heatmap |
+
+The flame-graph width is accumulated **active wall-clock occupancy** for
+completed logical sync operations in the selected Grafana range. It is not CPU
+time. Operations rejected before they start never receive a zero-duration I4
+sample; they appear in I5 instead.
+
+The two Prometheus heatmaps read real histogram buckets rather than estimating
+a distribution from log samples:
+
+- logical sync operation duration uses I4 and follows the selected
+  source/lane/outcome filters;
+- walk catch-up duration uses I9 and deliberately excludes synthetic
+  already-ready jobs, which perform no work.
+
+The dashboard also renders the W1 evidence gates and source-family shares over
+the selected Grafana range. Those interactive panels are for investigation;
+the generated `tools/observability/w1/w1-queries.md` packet remains the fixed
+1-hour/2-hour decision contract. Any failed evidence gate makes the window
+**inconclusive** rather than healthy, and the byte counters describe encoded
+application payload rather than network-wire bandwidth.
+
 ## Metrics
 
 The common OpenTelemetry instruments use bounded `scheduler` and `lane`

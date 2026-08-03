@@ -1,0 +1,70 @@
+# GENERATED FILE — do not edit. Source: tools/observability/lib/w1.mjs
+# Exact parser fixture for grafana-dashboard-dkg-sync-cost.json.
+# Grafana variables use representative values solely for promtool parsing.
+groups:
+  - name: w1-grafana-dashboard
+    rules:
+      - record: w1_dashboard_flame_root
+        expr: "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\".*\", source=~\".*\", outcome=~\".*\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_flame_source
+        expr: "sum by (source) (increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\".*\", source=~\".*\", outcome=~\".*\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_flame_source_lane
+        expr: "sum by (source, lane) (increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\".*\", source=~\".*\", outcome=~\".*\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_flame_source_lane_outcome
+        expr: "sum by (source, lane, outcome) (increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\".*\", source=~\".*\", outcome=~\".*\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_attempts_rate
+        expr: "sum by (source, outcome, transport, plane, phase) (rate(dkg_sync_attempt_total{source=~\".*\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_request_bytes_rate
+        expr: "sum by (source) (rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", source=~\".*\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_response_bytes_rate
+        expr: "sum by (source, outcome) (rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", source=~\".*\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_active_worker_equivalents
+        expr: "sum by (source, lane, outcome) (rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\".*\", source=~\".*\", outcome=~\".*\", instance=~\".*\"}[5m])) / 1000"
+      - record: w1_dashboard_sync_operation_duration_buckets
+        expr: "sum by (le) (rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_bucket\", lane=~\".*\", source=~\".*\", outcome=~\".*\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_rejected_rate
+        expr: "sum by (lane, source, reason) (rate(dkg_sync_operation_rejected_total{lane=~\".*\", source=~\".*\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_singleflight_joins_rate
+        expr: "sum by (scope, owner_source, joiner_source) (rate(dkg_sync_singleflight_joins_total{instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_queue_wait_buckets
+        expr: "sum by (le) (rate({__name__=~\"dkg_sync_scheduler_queue_wait_ms(_milliseconds)?_bucket\", scheduler=\"sync-global\", lane=~\".*\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_oldest_queued_age
+        expr: "max by (lane) ({__name__=~\"dkg_backpressure_oldest_queued_age_ms(_milliseconds)?\", scheduler=\"sync-global\", lane=~\".*\", instance=~\".*\"})"
+      - record: w1_dashboard_catchup_requests_rate
+        expr: "sum by (result, include_shared_memory) (rate(dkg_context_graph_catchup_requests_total{instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_catchup_jobs_rate
+        expr: "sum by (status, admission) (rate(dkg_context_graph_catchup_jobs_total{instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_catchup_duration_buckets
+        expr: "sum by (le) (rate({__name__=~\"dkg_context_graph_catchup_job_duration_ms(_milliseconds)?_bucket\", admission=\"walk\", instance=~\".*\"}[5m]))"
+      - record: w1_dashboard_catchup_duration_p95
+        expr: "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"dkg_context_graph_catchup_job_duration_ms(_milliseconds)?_bucket\", admission=\"walk\", instance=~\".*\"}[5m])))"
+      - record: w1_dashboard_gate_completed_operations
+        expr: "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_gate_payload_bytes
+        expr: "(sum(increase({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\".*\"}[2h])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\".*\"}[2h])) or vector(0))"
+      - record: w1_dashboard_gate_cross_family_joins
+        expr: "(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-foreground\", joiner_source!~\"catchup-foreground\", instance=~\".*\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"on-connect|reconcile\", joiner_source!~\"on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source!~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source=~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0))"
+      - record: w1_dashboard_gate_invalidating_sources
+        expr: "(sum(increase(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0))"
+      - record: w1_dashboard_gate_counter_resets
+        expr: "max(resets(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_gate_export_samples
+        expr: "min(count_over_time(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_all_source_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_all_source_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\".*\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\".*\"}[2h])) or vector(0)))"
+      - record: w1_dashboard_eligible_active_share
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_foreground_bytes_share
+        expr: "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\".*\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\".*\"}[2h])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0)))"
+      - record: w1_dashboard_foreground_active_share
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground\", instance=~\".*\"}[2h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_recurring_bytes_share
+        expr: "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h])) or vector(0)))"
+      - record: w1_dashboard_recurring_active_share
+        expr: "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"on-connect|reconcile\", instance=~\".*\"}[2h])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\".*\"}[2h]))"
+      - record: w1_dashboard_excluded_bytes_per_hour
+        expr: "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h])) or vector(0)))"
+      - record: w1_dashboard_excluded_active_ms_per_hour
+        expr: "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\".*\"}[2h]))"

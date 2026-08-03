@@ -1,0 +1,1671 @@
+{
+  "uid": "dkg-sync-cost",
+  "title": "DKG Nodes — Sync Cost",
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "tags": [
+    "dkg",
+    "metrics",
+    "sync"
+  ],
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "dkg"
+      ],
+      "asDropdown": true,
+      "title": "DKG dashboards",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "description": "PR #2033 W1 source-attributed sync telemetry (I1–I9). Node label profile: instance. The dashboard is an interactive operational view; the generated w1/w1-queries.md remains the fixed 1 h / 2 h decision contract.",
+  "templating": {
+    "list": [
+      {
+        "name": "vm",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Metrics DS",
+        "hide": 2,
+        "current": {}
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${vm}"
+        },
+        "query": "label_values({__name__=~\"dkg_.+\"}, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "allowCustomValue": true,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "sync_source",
+        "label": "Sync source",
+        "type": "custom",
+        "query": "catchup-foreground,on-connect,reconcile,catchup-background,vm-recovery,swm-recovery,control-plane,unspecified",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "sync_lane",
+        "label": "Operation lane",
+        "type": "custom",
+        "query": "durable,changelog,shared_memory,swm_recovery",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "sync_outcome",
+        "label": "Operation outcome",
+        "type": "custom",
+        "query": "resolved,error,cancelled",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "type": "text",
+      "options": {
+        "mode": "markdown",
+        "content": "**Requires the extended sync diagnostics from PR #2033 and node metric export.** The flame graph and duration heatmaps use real OpenTelemetry counters/histograms, while the existing **DKG Node — Logs** pressure views continue to use Loki transition/summary records. Filter the interactive operation views with the source/lane/outcome controls above. The evidence and materiality panels intentionally retain W1's fixed durable filters and source-family rules; a failed gate means **inconclusive**, not healthy."
+      },
+      "transparent": true
+    },
+    {
+      "title": "Source-attributed sync cost (I1–I4)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Source-attributed sync active occupancy — $node",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "flamegraph",
+      "description": "Hierarchy is source → requester lane → terminal outcome. Width is completed logical-sync active wall-clock occupancy accumulated over the selected Grafana range. It is admitted occupancy, not CPU time, and excludes rejected-before-start operations (shown separately).",
+      "options": {
+        "showFlameGraphOnly": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", outcome=~\"${sync_outcome:regex}\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "0|0|all selected sync occupancy",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum by (source) (increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", outcome=~\"${sync_outcome:regex}\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "1|0|{{source}}",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "C",
+          "expr": "sum by (source, lane) (increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", outcome=~\"${sync_outcome:regex}\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "2|0|{{source}}/{{lane}}",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "D",
+          "expr": "sum by (source, lane, outcome) (increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", outcome=~\"${sync_outcome:regex}\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "3|1|{{source}}/{{lane}}/{{outcome}}",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Metric",
+            "format": "regexp",
+            "regexp": "(?<level>\\d+)\\|(?<leaf>[01])\\|(?<label>.*)",
+            "replace": false
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "level",
+                "destinationType": "number"
+              },
+              {
+                "targetField": "leaf",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "binary": {
+              "left": {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value"
+                }
+              },
+              "operator": "*",
+              "right": {
+                "matcher": {
+                  "id": "byName",
+                  "options": "leaf"
+                }
+              }
+            },
+            "alias": "self",
+            "replaceFields": false
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Metric": true,
+              "leaf": true
+            },
+            "indexByName": {
+              "level": 0,
+              "label": 1,
+              "Value": 2,
+              "self": 3
+            },
+            "renameByName": {
+              "Value": "value"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Physical sync attempts by source/outcome (I1)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (source, outcome, transport, plane, phase) (rate(dkg_sync_attempt_total{source=~\"${sync_source:regex}\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{source}} · {{outcome}} · {{transport}}/{{plane}}/{{phase}}"
+        }
+      ]
+    },
+    {
+      "title": "Encoded payload throughput by source (I2 + I3)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (source) (rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", source=~\"${sync_source:regex}\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "request · {{source}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum by (source, outcome) (rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", source=~\"${sync_source:regex}\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "response · {{source}} · {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Average active worker equivalents (I4 sum)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (source, lane, outcome) (rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", outcome=~\"${sync_outcome:regex}\", instance=~\"${node:regex}\"}[$__rate_interval])) / 1000",
+          "legendFormat": "{{source}} · {{lane}} · {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Logical sync operation duration heatmap (I4)",
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "heatmap",
+      "description": "Completed logical-sync duration distribution for the selected source/lane/outcome filters. Rejected-before-start work is excluded by contract and appears in I5.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Reds",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": true
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (le) (rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_bucket\", lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", outcome=~\"${sync_outcome:regex}\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Sync scheduler queue-wait heatmap (corroborating P1)",
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "heatmap",
+      "description": "Queue-wait distribution for the sync-global scheduler and selected operation lanes. This corroborates W1 cost; it is not one of I1–I9.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": true
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (le) (rate({__name__=~\"dkg_sync_scheduler_queue_wait_ms(_milliseconds)?_bucket\", scheduler=\"sync-global\", lane=~\"${sync_lane:regex}\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Oldest queued sync item age by lane (corroborating P2)",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "max by (lane) ({__name__=~\"dkg_backpressure_oldest_queued_age_ms(_milliseconds)?\", scheduler=\"sync-global\", lane=~\"${sync_lane:regex}\", instance=~\"${node:regex}\"})",
+          "legendFormat": "{{lane}}"
+        }
+      ]
+    },
+    {
+      "title": "Admission and coalescing (I5–I6)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Operations rejected before starting (I5)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (lane, source, reason) (rate(dkg_sync_operation_rejected_total{lane=~\"${sync_lane:regex}\", source=~\"${sync_source:regex}\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{source}} · {{lane}} · {{reason}}"
+        }
+      ]
+    },
+    {
+      "title": "Single-flight joins (I6)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (scope, owner_source, joiner_source) (rate(dkg_sync_singleflight_joins_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{scope}} · {{owner_source}} ← {{joiner_source}}"
+        }
+      ]
+    },
+    {
+      "title": "Catch-up request and job accounting (I7–I9)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Catch-up requests by route result (I7)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (result, include_shared_memory) (rate(dkg_context_graph_catchup_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{result}} · swm={{include_shared_memory}}"
+        }
+      ]
+    },
+    {
+      "title": "Catch-up jobs by terminal state (I8)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (status, admission) (rate(dkg_context_graph_catchup_jobs_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{status}} · {{admission}}"
+        }
+      ]
+    },
+    {
+      "title": "Walk catch-up duration p95 (I9)",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"dkg_context_graph_catchup_job_duration_ms(_milliseconds)?_bucket\", admission=\"walk\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "walk p95"
+        }
+      ]
+    },
+    {
+      "title": "Walk catch-up job duration heatmap (I9)",
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "heatmap",
+      "description": "Wall-clock duration distribution for real walk jobs. Synthetic already-ready jobs deliberately produce no zero-duration sample.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Blues",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": true
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (le) (rate({__name__=~\"dkg_context_graph_catchup_job_duration_ms(_milliseconds)?_bucket\", admission=\"walk\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "W1 evidence gates — selected Grafana range",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 78
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      },
+      "type": "text",
+      "options": {
+        "mode": "markdown",
+        "content": "These six panels are the same gate expressions as the generated W1 decision packet, evaluated over the selected Grafana range. Threshold colors encode the fixed contract where a numeric threshold exists. **All gates must pass** before interpreting the source-family shares; low export coverage must be compared with selected-range length ÷ scrape interval."
+      },
+      "transparent": true
+    },
+    {
+      "title": "Completed durable operations",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "I4 count; must be at least 200.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Attributed durable payload",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 4,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "I2 + I3; must be at least 50 MB.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 50000000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "(sum(increase({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[$__range])) or vector(0))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Cross-family joins",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "I6; must remain zero.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "(sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-foreground\", joiner_source!~\"catchup-foreground\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"on-connect|reconcile\", joiner_source!~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source!~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(increase(dkg_sync_singleflight_joins_total{owner_source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", joiner_source=~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Unclassified source samples",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "I1/I4/I5; must remain zero.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "(sum(increase(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(increase({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_count\", lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(increase(dkg_sync_operation_rejected_total{lane=~\"durable|changelog\", source!~\"catchup-foreground|on-connect|reconcile|catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Counter resets",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 16,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "Must remain zero inside the selected range.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "max(resets(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Minimum export samples",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 82
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "Compare with selected-range length divided by scrape interval.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "min(count_over_time(dkg_sync_attempt_total{plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "W1 materiality and source-family decision",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 88
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "All-source durable active ms/hour",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "I4 strain denominator; occupancy, not CPU.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "All-source durable bytes/hour",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "I2 + I3 volume denominator.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", instance=~\"${node:regex}\"}[$__range])) or vector(0)))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Excluded-family bytes/hour",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "Background, VM/SWM recovery, and control-plane traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "3600 * ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range])) or vector(0)))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Excluded-family active ms/hour",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 89
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "Reported separately; never eligible for the shadow decision.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "3600 * sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-background|vm-recovery|swm-recovery|control-plane\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Eligible active share",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 95
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "Foreground + recurring share of all-source active occupancy; must reach 30%.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Foreground share — bytes",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 4,
+        "y": 95
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "A candidate family must reach 60% on both axes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[$__range])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0)))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Foreground share — active ms",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 9,
+        "y": 95
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "A candidate family must reach 60% on both axes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground\", instance=~\"${node:regex}\"}[$__range])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Recurring share — bytes",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 14,
+        "y": 95
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "A candidate family must reach 60% on both axes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0))) / ((sum(rate({__name__=~\"dkg_sync_attempt_request_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0)) + (sum(rate({__name__=~\"dkg_sync_attempt_response_bytes(_total)?\", plane=\"durable\", phase=~\"data|meta|delta\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) or vector(0)))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    },
+    {
+      "title": "Recurring share — active ms",
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 19,
+        "y": 95
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "stat",
+      "description": "A candidate family must reach 60% on both axes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range])) / sum(rate({__name__=~\"dkg_sync_operation_duration_ms(_milliseconds)?_sum\", lane=~\"durable|changelog\", source=~\"catchup-foreground|on-connect|reconcile\", instance=~\"${node:regex}\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "queryType": "instant",
+          "editorMode": "code"
+        }
+      ]
+    }
+  ]
+}

@@ -204,6 +204,371 @@
           "expr": "sum(sum_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [$__auto]))"
         }
       ]
+    },
+    {
+      "title": "Scheduler pressure",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "type": "text",
+      "options": {
+        "mode": "markdown",
+        "content": "**Worker queue diagnostics (PR #2003).** The flame graph answers **which scheduler/lane/operation produced recent pressure** using a fixed **last 1 hour** snapshot; the two heatmaps keep the full Grafana-selected range and show **when active and queued pressure accumulated and how old it became**. All three views read the same bounded structured `[backpressure]` records from Loki. These sparse transition/summary samples describe elapsed pressure age; they are not CPU profiles, invocation counts, or exact end-to-end job durations."
+      },
+      "transparent": true
+    },
+    {
+      "title": "Worker queue pressure flame graph (last 1 hour) — $node",
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "flamegraph",
+      "description": "Each leaf is a PR #2003 worker source. Width is its peak sampled oldest elapsed age in the fixed last 1h (milliseconds), split between admitted/active work and queued work. The fixed short lookback protects Loki from expensive long-range instant queries; the heatmaps below retain selected-range history. This is pressure age, not CPU utilization, request share, or exact completed-job runtime.",
+      "options": {
+        "showFlameGraphOnly": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "sum((max by (scheduler, lane, phase, operation) ((max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[0].operation\", age=\"activeOperations[0].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`0` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[1].operation\", age=\"activeOperations[1].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`1` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[2].operation\", age=\"activeOperations[2].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`2` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[3].operation\", age=\"activeOperations[3].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`3` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[4].operation\", age=\"activeOperations[4].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`4` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[5].operation\", age=\"activeOperations[5].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`5` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[6].operation\", age=\"activeOperations[6].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`6` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[7].operation\", age=\"activeOperations[7].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`7` | unwrap age | __error__ = `` [1h])))) or (max by (scheduler, lane, phase, operation) ((max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[0].operation\", age=\"queuedOperations[0].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`0` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[1].operation\", age=\"queuedOperations[1].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`1` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[2].operation\", age=\"queuedOperations[2].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`2` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[3].operation\", age=\"queuedOperations[3].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`3` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[4].operation\", age=\"queuedOperations[4].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`4` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[5].operation\", age=\"queuedOperations[5].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`5` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[6].operation\", age=\"queuedOperations[6].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`6` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[7].operation\", age=\"queuedOperations[7].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`7` | unwrap age | __error__ = `` [1h])))))",
+          "legendFormat": "0|0|all sampled worker pressure",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "B",
+          "expr": "sum(max by (scheduler, lane, phase, operation) ((max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[0].operation\", age=\"activeOperations[0].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`0` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[1].operation\", age=\"activeOperations[1].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`1` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[2].operation\", age=\"activeOperations[2].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`2` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[3].operation\", age=\"activeOperations[3].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`3` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[4].operation\", age=\"activeOperations[4].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`4` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[5].operation\", age=\"activeOperations[5].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`5` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[6].operation\", age=\"activeOperations[6].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`6` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[7].operation\", age=\"activeOperations[7].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`7` | unwrap age | __error__ = `` [1h]))))",
+          "legendFormat": "1|0|active / admitted",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "C",
+          "expr": "max by (scheduler, lane, phase, operation) ((max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[0].operation\", age=\"activeOperations[0].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`0` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[1].operation\", age=\"activeOperations[1].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`1` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[2].operation\", age=\"activeOperations[2].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`2` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[3].operation\", age=\"activeOperations[3].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`3` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[4].operation\", age=\"activeOperations[4].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`4` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[5].operation\", age=\"activeOperations[5].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`5` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[6].operation\", age=\"activeOperations[6].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`6` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"activeOperations[7].operation\", age=\"activeOperations[7].oldestAgeMs\" | operation != `` | label_format phase=`active`, slot=`7` | unwrap age | __error__ = `` [1h])))",
+          "legendFormat": "2|1|{{scheduler}}/{{lane}}/{{operation}}",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "D",
+          "expr": "sum(max by (scheduler, lane, phase, operation) ((max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[0].operation\", age=\"queuedOperations[0].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`0` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[1].operation\", age=\"queuedOperations[1].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`1` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[2].operation\", age=\"queuedOperations[2].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`2` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[3].operation\", age=\"queuedOperations[3].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`3` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[4].operation\", age=\"queuedOperations[4].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`4` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[5].operation\", age=\"queuedOperations[5].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`5` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[6].operation\", age=\"queuedOperations[6].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`6` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[7].operation\", age=\"queuedOperations[7].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`7` | unwrap age | __error__ = `` [1h]))))",
+          "legendFormat": "1|0|queued / waiting",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "E",
+          "expr": "max by (scheduler, lane, phase, operation) ((max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[0].operation\", age=\"queuedOperations[0].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`0` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[1].operation\", age=\"queuedOperations[1].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`1` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[2].operation\", age=\"queuedOperations[2].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`2` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[3].operation\", age=\"queuedOperations[3].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`3` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[4].operation\", age=\"queuedOperations[4].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`4` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[5].operation\", age=\"queuedOperations[5].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`5` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[6].operation\", age=\"queuedOperations[6].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`6` | unwrap age | __error__ = `` [1h])) or (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, operation=\"queuedOperations[7].operation\", age=\"queuedOperations[7].oldestAgeMs\" | operation != `` | label_format phase=`queued`, slot=`7` | unwrap age | __error__ = `` [1h])))",
+          "legendFormat": "2|1|{{scheduler}}/{{lane}}/{{operation}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "seriesToRows",
+          "options": {}
+        },
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "Metric",
+            "format": "regexp",
+            "regexp": "(?<level>\\d+)\\|(?<leaf>[01])\\|(?<label>.*)",
+            "replace": false
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "level",
+                "destinationType": "number"
+              },
+              {
+                "targetField": "leaf",
+                "destinationType": "number"
+              }
+            ]
+          }
+        },
+        {
+          "id": "calculateField",
+          "options": {
+            "mode": "binary",
+            "binary": {
+              "left": {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Value"
+                }
+              },
+              "operator": "*",
+              "right": {
+                "matcher": {
+                  "id": "byName",
+                  "options": "leaf"
+                }
+              }
+            },
+            "alias": "self",
+            "replaceFields": false
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Metric": true,
+              "leaf": true
+            },
+            "indexByName": {
+              "level": 0,
+              "label": 1,
+              "Value": 2,
+              "self": 3
+            },
+            "renameByName": {
+              "Value": "value"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Active / admitted pressure age heatmap — $node",
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "heatmap",
+      "description": "Distribution over time of the peak sampled age of the oldest work occupying a worker slot, grouped by scheduler/lane. Values come from sparse PR #2003 transition and summary records; they are sampled pressure age in milliseconds, not CPU time or exact job duration.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "count",
+            "value": "60"
+          },
+          "yBuckets": {
+            "mode": "count",
+            "value": "20",
+            "scale": {
+              "type": "linear"
+            }
+          }
+        },
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Reds",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "max by (scheduler, lane) (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, age=\"oldestActiveAgeMs\" | unwrap age | __error__ = `` [$__auto]))",
+          "legendFormat": "{{scheduler}}/{{lane}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "title": "Queued / waiting pressure age heatmap — $node",
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "heatmap",
+      "description": "Distribution over time of the peak sampled age of the oldest work waiting for admission, grouped by scheduler/lane. Values come from sparse PR #2003 transition and summary records; they are sampled pressure age in milliseconds, not CPU time or exact job duration.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "count",
+            "value": "60"
+          },
+          "yBuckets": {
+            "mode": "count",
+            "value": "20",
+            "scale": {
+              "type": "linear"
+            }
+          }
+        },
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "max by (scheduler, lane) (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, age=\"oldestQueuedAgeMs\" | unwrap age | __error__ = `` [$__auto]))",
+          "legendFormat": "{{scheduler}}/{{lane}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "title": "Backpressure transitions and summaries — $node",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "logs",
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "{service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]`"
+        }
+      ]
     }
   ]
 }
