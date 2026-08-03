@@ -16,6 +16,7 @@ import {
 
 const CONFIG_REQUIRED_KEYS = Object.freeze(['chainId', 'endpoints'] as const);
 const CONFIG_OPTIONAL_KEYS = Object.freeze(['blockReferenceProfile'] as const);
+const SNAPSHOT_CONFIG_OPTIONAL_KEYS = Object.freeze([...CONFIG_OPTIONAL_KEYS, 'owner'] as const);
 
 /**
  * Snapshot-path config: identical validation plus a REQUIRED owner.
@@ -30,7 +31,14 @@ export function snapshotStrictFinalizedSnapshotConfigV1(
   if (!isPlainRecord(input)) {
     throw new TypeError('Strict finalized snapshot RPC config must be a plain data record');
   }
-  const { owner, ...rest } = input;
+  // DESCRIPTORS FIRST — before `owner`, before object rest, before any read.
+  // An earlier revision destructured `{ owner, ...rest }` up front. That both
+  // executed enumerable getters on the caller's object AND converted them into
+  // plain data properties, so the descriptor check downstream saw a clean object
+  // and ACCEPTED a config the base validator rejects untouched. Object rest is a
+  // read; it cannot precede the check that decides whether reading is allowed.
+  assertConfigDataProperties(input, SNAPSHOT_CONFIG_OPTIONAL_KEYS);
+
   // `@origintrail-official/dkg-chain` is PUBLISHED (npm 10.0.11, not private),
   // and this factory is part of its public surface. Requiring `owner` would
   // break every external `{ chainId, endpoints }` caller at compile time and at
@@ -39,15 +47,30 @@ export function snapshotStrictFinalizedSnapshotConfigV1(
   // this work exists to add is preserved, because the registry is process-wide
   // regardless of who holds it, and RFC64/W2 pass their owner explicitly rather
   // than relying on the default.
-  const resolved = owner ?? 'foreground';
-  if (!FINALIZED_CHAIN_READ_OWNERS.includes(resolved as FinalizedChainReadOwnerV1)) {
+  const owner = input.owner ?? 'foreground';
+  if (!FINALIZED_CHAIN_READ_OWNERS.includes(owner as FinalizedChainReadOwnerV1)) {
     throw new TypeError(
-      `Strict finalized snapshot RPC config received an unknown owner "${String(owner)}"`,
+      `Strict finalized snapshot RPC config received an unknown owner "${String(input.owner)}"`,
     );
   }
+
+  // Rebuild explicitly from the now-proven data properties rather than spreading
+  // the caller's object: the base validator must receive exactly the keys it
+  // declares, and `blockReferenceProfile` is only present when the caller set it
+  // (its allowlist rejects an explicit `undefined` key).
+  const base: Record<string, unknown> = {
+    chainId: input.chainId,
+    endpoints: input.endpoints,
+  };
+  if (Object.prototype.hasOwnProperty.call(input, 'blockReferenceProfile')) {
+    base.blockReferenceProfile = input.blockReferenceProfile;
+  }
+
   return Object.freeze({
-    ...snapshotStrictCurrentFinalizedEvmConfigV1(rest as StrictCurrentFinalizedEvmRpcConfigV1),
-    owner: resolved as FinalizedChainReadOwnerV1,
+    ...snapshotStrictCurrentFinalizedEvmConfigV1(
+      base as unknown as StrictCurrentFinalizedEvmRpcConfigV1,
+    ),
+    owner: owner as FinalizedChainReadOwnerV1,
   });
 }
 
@@ -76,12 +99,23 @@ export function snapshotStrictCurrentFinalizedEvmConfigV1(
   });
 }
 
-function assertConfigDataProperties(input: Record<string, unknown>): void {
+/**
+ * Prove an input is data-only BEFORE any field is read.
+ *
+ * The ordering is the contract, not an implementation detail: an accessor-backed
+ * config must be rejected without its getter ever running. Reading a field first
+ * — including implicitly, via object rest/spread — executes attacker-supplied
+ * code and then hands the validator a plain object that trivially passes.
+ */
+function assertConfigDataProperties(
+  input: Record<string, unknown>,
+  optionalKeys: readonly string[] = CONFIG_OPTIONAL_KEYS,
+): void {
   const keys = Reflect.ownKeys(input);
   if (keys.some((key) => typeof key !== 'string')) {
     throw new TypeError('Strict current-finalized RPC config cannot contain symbol keys');
   }
-  const allowed = new Set<string>([...CONFIG_REQUIRED_KEYS, ...CONFIG_OPTIONAL_KEYS]);
+  const allowed = new Set<string>([...CONFIG_REQUIRED_KEYS, ...optionalKeys]);
   if (
     !CONFIG_REQUIRED_KEYS.every((key) => keys.includes(key))
     || (keys as string[]).some((key) => !allowed.has(key))
