@@ -179,6 +179,36 @@ export function canonicalDigest32(value: unknown, label = 'digest'): Digest32V1 
   return text as Digest32V1;
 }
 
+/**
+ * A canonical UAL chain id.
+ *
+ * This is NOT the numeric EVM chain id. `ChainAdapter.chainId` is **namespaced**
+ * — `base:84532`, `otp:20430`, `evm:31337` — and its own doc comment says it is
+ * "not directly parseable with `BigInt()`"; `getEvmChainId()` is the numeric
+ * one. UALs are built from the namespaced form
+ * (`chain-adapter.ts:960,1534-1540`), so a scope validated as a bare decimal
+ * would reject every real mainnet and testnet UAL while passing a test suite
+ * that only used `31337`.
+ *
+ * Accepted: an optional lowercase namespace, then a canonical decimal with no
+ * leading-zero alias. The decimal tail is canonicalized so `base:084532` cannot
+ * become a second spelling of one chain.
+ */
+export function canonicalUalChainId(value: unknown, label = 'chainId'): string {
+  const text = boundedString(value, label);
+  const separator = text.lastIndexOf(':');
+  const namespace = separator === -1 ? '' : text.slice(0, separator);
+  const decimal = separator === -1 ? text : text.slice(separator + 1);
+  if (separator !== -1 && !/^[a-z][a-z0-9-]*(?::[a-z0-9-]+)*$/.test(namespace)) {
+    fail('noncanonical-scalar', `${label} namespace must be lowercase alphanumeric`);
+  }
+  if (!CANONICAL_UNSIGNED_DECIMAL.test(decimal)) {
+    fail('noncanonical-scalar', `${label} must end in a canonical decimal chain number`);
+  }
+  parseCanonicalDecimalU256(decimal, label);
+  return text;
+}
+
 /** A canonical unsigned decimal with no leading-zero alias. */
 export function canonicalUnsignedDecimal(value: unknown, label = 'value'): bigint {
   const text = boundedString(value, label);
@@ -251,7 +281,7 @@ function lengthPrefixed(parts: readonly string[]): Uint8Array {
  * not include `deploymentBlock` — see the module header.
  */
 export function deriveVmUpdateScopeId(identity: VmUpdateScopeIdentityV1): string {
-  const chainId = canonicalUnsignedDecimal(identity.chainId, 'scope.chainId').toString();
+  const chainId = canonicalUalChainId(identity.chainId, 'scope.chainId');
   const deploymentId = boundedString(identity.deploymentId, 'scope.deploymentId');
   if (deploymentId.length === 0) fail('noncanonical-scalar', 'scope.deploymentId must not be empty');
   const kaStorage = canonicalEvmAddress(
@@ -271,7 +301,7 @@ export function deriveVmUpdateScopeId(identity: VmUpdateScopeIdentityV1): string
 /** Canonicalize a scope and recompute its `scopeId`; a supplied mismatch fails closed. */
 export function canonicalVmUpdateScope(input: VmUpdateScopeV1): Readonly<VmUpdateScopeV1> {
   const identity: VmUpdateScopeIdentityV1 = {
-    chainId: canonicalUnsignedDecimal(input.chainId, 'scope.chainId').toString(),
+    chainId: canonicalUalChainId(input.chainId, 'scope.chainId'),
     deploymentId: boundedString(input.deploymentId, 'scope.deploymentId'),
     knowledgeAssetStorageAddress: canonicalEvmAddress(
       input.knowledgeAssetStorageAddress,

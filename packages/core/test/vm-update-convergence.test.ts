@@ -17,6 +17,7 @@ import {
   canonicalNullableAuthorAddress,
   canonicalPageProof,
   canonicalScopedKaCandidatesFromVerifiedUal,
+  canonicalUalChainId,
   canonicalUnsignedDecimal,
   canonicalVmUpdateScope,
   compareEventPosition,
@@ -177,6 +178,77 @@ describe('canonical scalars', () => {
     expect(canonicalUnsignedDecimal('0')).toBe(0n);
     expect(canonicalUnsignedDecimal('7')).toBe(7n);
     expect(codeOf(() => canonicalUnsignedDecimal('007'))).toBe('noncanonical-scalar');
+  });
+});
+
+describe('UAL chain ids are NAMESPACED, not bare decimals', () => {
+  // `ChainAdapter.chainId` is namespaced — its own doc comment says it is "not
+  // directly parseable with `BigInt()`" and that `getEvmChainId()` is the
+  // numeric one. Real UALs are `did:dkg:base:84532/…`, `did:dkg:otp:20430/…`,
+  // `did:dkg:hardhat:31337/…`. An earlier version of this module validated the
+  // scope's chain id as a bare decimal; every test used `84532` so the suite was
+  // green while the code would have rejected every mainnet and testnet UAL.
+  it('accepts the namespaced forms actually shipped', () => {
+    for (const chainId of ['base:84532', 'base:8453', 'gnosis:100', 'otp:20430', 'evm:31337', '31337', '1']) {
+      expect(canonicalUalChainId(chainId)).toBe(chainId);
+    }
+  });
+
+  it('still rejects a leading-zero alias in the decimal tail', () => {
+    // Otherwise `base:084532` and `base:84532` would be two scopes for one chain.
+    expect(codeOf(() => canonicalUalChainId('base:084532'))).toBe('noncanonical-scalar');
+    expect(codeOf(() => canonicalUalChainId('007'))).toBe('noncanonical-scalar');
+  });
+
+  it('rejects an uppercase namespace, an empty namespace, and a missing number', () => {
+    expect(codeOf(() => canonicalUalChainId('Base:84532'))).toBe('noncanonical-scalar');
+    expect(codeOf(() => canonicalUalChainId(':84532'))).toBe('noncanonical-scalar');
+    expect(codeOf(() => canonicalUalChainId('base:'))).toBe('noncanonical-scalar');
+    expect(codeOf(() => canonicalUalChainId('base'))).toBe('noncanonical-scalar');
+  });
+
+  it('parses a real namespaced UAL end to end', () => {
+    const namespaced = scope({ chainId: 'base:84532' });
+    const set = canonicalScopedKaCandidatesFromVerifiedUal(
+      namespaced,
+      `did:dkg:base:84532/${KA_STORAGE}/7`,
+    );
+    // Both candidates, exactly as for the bare-decimal chain: the namespace is
+    // carried through, not stripped.
+    expect(set.candidates.map((candidate) => candidate.kind).sort()).toEqual([
+      'legacy-sequential',
+      'rootless-packed',
+    ]);
+    for (const candidate of set.candidates) {
+      expect(buildScopedKnowledgeAssetUal('base:84532', KA_STORAGE, BigInt(candidate.kaId)))
+        .toBe(`did:dkg:base:84532/${KA_STORAGE}/7`);
+    }
+  });
+
+  it('still rejects a UAL from a different namespaced chain', () => {
+    expect(
+      codeOf(() =>
+        canonicalScopedKaCandidatesFromVerifiedUal(
+          scope({ chainId: 'base:84532' }),
+          `did:dkg:base:8453/${KA_STORAGE}/7`,
+        ),
+      ),
+    ).toBe('foreign-chain');
+    // …and one that drops the namespace entirely is a DIFFERENT chain id, not
+    // the same chain written another way.
+    expect(
+      codeOf(() =>
+        canonicalScopedKaCandidatesFromVerifiedUal(
+          scope({ chainId: 'base:84532' }),
+          `did:dkg:84532/${KA_STORAGE}/7`,
+        ),
+      ),
+    ).toBe('foreign-chain');
+  });
+
+  it('gives a namespaced and a bare chain id different scope ids', () => {
+    expect(deriveVmUpdateScopeId(scope({ chainId: 'base:84532' })))
+      .not.toBe(deriveVmUpdateScopeId(scope({ chainId: '84532' })));
   });
 });
 

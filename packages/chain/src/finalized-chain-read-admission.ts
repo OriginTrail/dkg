@@ -34,8 +34,8 @@ import { parseCanonicalDecimalU256, type ChainIdV1 } from '@origintrail-official
  * invisible at runtime and cannot be checked.
  */
 export const FINALIZED_CHAIN_READ_OWNERS = [
+  'foreground',
   'rfc64',
-  'current-finalized',
   'w2-page',
   'w2-target',
 ] as const;
