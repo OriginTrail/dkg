@@ -128,12 +128,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/w1-promtool
-          sed 's/\${node:regex}/.*/g' tools/observability/w1/w1-rules.yaml > /tmp/w1-promtool/w1-rules.yaml
+          # `[$]` is a literal dollar. A bare backslash-dollar inside single
+          # quotes trips SC2016, and in BRE `$` is only an anchor at
+          # end-of-pattern anyway, so this form is both lint-clean and exact.
+          # (Do not start a comment line with the linter's name — it is then
+          # parsed as a directive, which is how this step first failed.)
+          sed 's/[$]{node:regex}/.*/g' tools/observability/w1/w1-rules.yaml > /tmp/w1-promtool/w1-rules.yaml
           cp tools/observability/w1/w1-rules.test.yaml /tmp/w1-promtool/
           # Fail loudly if the substitution did nothing — a silently unchanged
-          # file would make every assertion below vacuous.
-          grep -q 'node:regex' /tmp/w1-promtool/w1-rules.yaml && {
-            echo 'placeholder substitution failed; tests would be vacuous' >&2; exit 1; }
+          # file would make every assertion below vacuous. Written as `if`
+          # rather than `grep … && { exit 1; }`: under `set -e` that form
+          # returns 1 from the whole list on the SUCCESS path (grep finds
+          # nothing), which would fail the step exactly when it should pass.
+          if grep -q 'node:regex' /tmp/w1-promtool/w1-rules.yaml; then
+            echo 'placeholder substitution failed; tests would be vacuous' >&2
+            exit 1
+          fi
           docker run --rm -v /tmp/w1-promtool:/t:ro --entrypoint promtool \
             prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
             test rules /t/w1-rules.test.yaml
