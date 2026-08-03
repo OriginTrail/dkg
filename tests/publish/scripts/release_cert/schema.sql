@@ -44,8 +44,30 @@ CREATE TABLE IF NOT EXISTS publish_layer_ops (
     server_ms       BIGINT,
     error           TEXT,
     node_version    TEXT,
+    details         JSONB,
     time_stamp      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_publish_layer_ops_time ON publish_layer_ops (time_stamp);
 CREATE INDEX IF NOT EXISTS idx_publish_layer_ops_key  ON publish_layer_ops (node_name, layer, cg_kind, time_stamp);
+
+-- Scorecard verdicts per release checkpoint (M4).
+CREATE TABLE IF NOT EXISTS scorecards (
+    id         BIGSERIAL PRIMARY KEY,
+    release_id BIGINT      NOT NULL REFERENCES releases (id),
+    checkpoint TEXT        NOT NULL, -- '1h' | '6h' | '24h'
+    verdict    TEXT        NOT NULL, -- PASS | DEGRADED | FAIL | INCONCLUSIVE
+    details    JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (release_id, checkpoint)
+);
+
+-- Queue-incident evidence bundles (Q3).
+CREATE TABLE IF NOT EXISTS incidents (
+    id         BIGSERIAL PRIMARY KEY,
+    node_name  TEXT        NOT NULL,
+    trigger    TEXT        NOT NULL,
+    bundle     JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_node_time ON incidents (node_name, created_at);

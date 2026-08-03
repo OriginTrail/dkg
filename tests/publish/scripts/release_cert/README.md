@@ -1,17 +1,25 @@
-# Release certification — M1: queue visibility + release markers
+# Release certification — additive harness (M1–M5)
 
 Additive module next to the existing publish tests. Nothing here modifies the
 existing jobs, tables, or dashboards.
 
 ## Pieces
 
-| File | What it does |
-|---|---|
-| `schema.sql` | Creates `queue_snapshots`, `releases`, `publish_layer_ops` (idempotent, `IF NOT EXISTS`) |
-| `db.mjs` | pg client using the existing `DB_*_PUBLISH` env contract (testnet DB) |
-| `queue_state_recorder.mjs` | Polls each node's `/api/status` (+ `/api/diagnostics/backpressure` when a token is configured) on a 30s loop and inserts `queue_snapshots` rows |
-| `release_watcher.mjs` | Polls npm dist-tags for `@origintrail-official/dkg`, records every (tag, version) change into `releases` |
-| `../../dashboards/release-certification-dashboard.json` | "DKG Release Certification" Grafana dashboard (uid `dkg-release-cert`): backpressure state timeline, admission in-flight/rejected, lane age/depth panels, release annotation lines from the `releases` table |
+| File | Milestone | What it does |
+|---|---|---|
+| `schema.sql` | M1 | Creates `queue_snapshots`, `releases`, `publish_layer_ops`, `scorecards`, `incidents` (idempotent, `IF NOT EXISTS`) |
+| `db.mjs` | M1 | pg client using the existing `DB_*_PUBLISH` env contract (testnet DB) |
+| `queue_state_recorder.mjs` | M1 | Polls each node's `/api/status` (+ `/api/diagnostics/backpressure` when a token is configured) on a 30s loop → `queue_snapshots` |
+| `release_watcher.mjs` | M1 | Polls npm dist-tags for `@origintrail-official/dkg` → `releases` (dashboard annotation lines + scorecard/campaign trigger) |
+| `blackbox_nightly.sh` | M2 | Conductor + 2 locally spawned participants inside the job container: fresh CG + fresh SWM content on a local curator, participants prove subscription parity |
+| `layered_suite.mjs` | M3 | Staged WM → SWM → VM ops with receiver-side verification + payload-size matrix → `publish_layer_ops` (public CG by default; private via `RC_CG_PRIVATE`) |
+| `cg_rotate.mjs` | M3 | Ensures weekly public CG + permanent aging CG (+ optional private pair) exist, registered, and subscribed — idempotent daily cron |
+| `scorecard.mjs` | M4 | T+1h/6h/24h release verdicts (PASS/DEGRADED/FAIL/INCONCLUSIVE) vs 24h pre-release baseline → `scorecards` + digest (Slack when `SLACK_WEBHOOK_SCORECARD` is set) |
+| `canary_gate.mjs` | M4 | Canary smoke gate — armed, needs the fleet canary edge + `next`-tag release flow |
+| `cold_start_sync.mjs` | M5 | Fresh throwaway edge in-container → subscribe → time-to-parity with exact triple-count parity → `publish_layer_ops` (`cold_start`) |
+| `capture_incident.mjs` | Q3 | On non-healthy backpressure states: captures node evidence bundles → `incidents` + prints a ready ListenerBoi prompt |
+| `rollback_drill.mjs` | M5 | update → verify → rollback → verify drill — armed, needs a fleet edge (`RC_FLEET_SSH`/`RC_FLEET_API`), never the shared beacons |
+| `../../dashboards/release-certification-dashboard.json` | M1–Q2 | "DKG Release Certification" dashboard (uid `dkg-release-cert`): queue state/age/depth, layer success + latency, scorecards, top store occupants, release lines |
 
 ## Running
 

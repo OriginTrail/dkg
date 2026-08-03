@@ -127,6 +127,67 @@
           "rawSql": "SELECT DISTINCT ON (node_name) node_name AS \"node\", node_version AS \"version\", state, time_stamp AS \"last seen\" FROM queue_snapshots WHERE source = 'status' ORDER BY node_name, time_stamp DESC"
         }
       ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Layer success rate (hourly) — layered suite",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "spanNulls": true } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', time_stamp) AS \"time\", layer || ' / ' || COALESCE(cg_kind, '-') AS metric, ROUND(100.0 * AVG(CASE WHEN success THEN 1 ELSE 0 END), 1)::float AS value FROM publish_layer_ops WHERE $__timeFilter(time_stamp) GROUP BY 1, 2 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Layer latency by payload size (successes only)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "spanNulls": true } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('hour', time_stamp) AS \"time\", layer || ' ' || COALESCE(payload_size_kb::text, '?') || 'KB' AS metric, ROUND(AVG(client_ms))::bigint AS value FROM publish_layer_ops WHERE success AND client_ms IS NOT NULL AND $__timeFilter(time_stamp) GROUP BY 1, 2 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Release scorecards",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 39 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT s.created_at AS \"evaluated\", r.dist_tag AS \"tag\", r.version, s.checkpoint, s.verdict, s.details->'notes'->>0 AS \"top note\" FROM scorecards s JOIN releases r ON r.id = s.release_id ORDER BY s.created_at DESC LIMIT 20"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Top store occupants (latest active operations) — Q2",
+      "description": "Which operations were RUNNING when queues built up — not just the queued victims. Populates from the diagnostics endpoint (node token).",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 39 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "efqzlbzj3dvk0f" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT time_stamp AS \"time\", node_name AS \"node\", source, COALESCE(lane, '-') AS lane, LEFT(active_ops::text, 300) AS \"active ops\" FROM queue_snapshots WHERE active_ops IS NOT NULL AND $__timeFilter(time_stamp) ORDER BY time_stamp DESC LIMIT 25"
+        }
+      ]
     }
   ]
 }

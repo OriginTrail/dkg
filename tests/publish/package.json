@@ -22,7 +22,14 @@
     "insert-errors": "node scripts/insert_errors_to_db.js",
     "print-errors": "node scripts/print_aggregated_errors.js",
     "rc:recorder": "node scripts/release_cert/queue_state_recorder.mjs",
-    "rc:watcher": "node scripts/release_cert/release_watcher.mjs"
+    "rc:watcher": "node scripts/release_cert/release_watcher.mjs",
+    "rc:layered": "node scripts/release_cert/layered_suite.mjs",
+    "rc:rotate": "node scripts/release_cert/cg_rotate.mjs",
+    "rc:scorecard": "node scripts/release_cert/scorecard.mjs",
+    "rc:coldstart": "node scripts/release_cert/cold_start_sync.mjs",
+    "rc:capture": "node scripts/release_cert/capture_incident.mjs",
+    "rc:rollback-drill": "node scripts/release_cert/rollback_drill.mjs",
+    "rc:canary-gate": "node scripts/release_cert/canary_gate.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
