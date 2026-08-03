@@ -1586,6 +1586,19 @@ export class FinalizationHandler {
       subGraphName,
     });
     if (vmVerification.status === 'verified') {
+      // A cold join can receive the durable VM snapshot and its still-present
+      // SWM recovery snapshot from different catch-up planes without ever
+      // seeing the live finalization envelope. Exact VM content plus the
+      // chain-resolved root is sufficient to retire only the matching current
+      // SWM head from the user-facing view. This does not synthesize confirmed
+      // transaction metadata: provenance repair remains pending below.
+      await this.markMatchingGraphScopedSwmFinalized({
+        contextGraphId,
+        scope,
+        merkleRoot,
+        subGraphName,
+        ctx,
+      });
       const access = resolveGraphScopedAccessEnvelope(
         head,
         trustedAssertionEvidence?.accessPolicy,
@@ -1604,13 +1617,6 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
-        await this.markMatchingGraphScopedSwmFinalized({
-          contextGraphId,
-          scope,
-          merkleRoot,
-          subGraphName,
-          ctx,
-        });
         await this.advanceExactGraphScopedVersion({
           contextGraphId,
           scope,

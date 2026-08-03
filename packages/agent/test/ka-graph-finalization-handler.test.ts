@@ -2235,6 +2235,59 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('retires an exact cold-joined SWM copy while VM provenance remains pending', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const swmResult = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (swmResult.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.dropGraph(vmGraph);
+    await store.insert(swmResult.quads.map((quad) => ({ ...quad, graph: vmGraph })));
+    await store.deleteByPattern({
+      graph: `did:dkg:context-graph:${CG}/_meta`,
+      subject: UAL,
+    });
+
+    const recoveryHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      { writeLocks: new Map() },
+    );
+    const internals = recoveryHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(recoveryHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+        <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}>
+          "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(new DKGQueryEngine(store).query(
+      'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
+      { contextGraphId: CG, view: 'shared-working-memory' },
+    )).resolves.toEqual({ bindings: [] });
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}>
+        <http://dkg.io/ontology/transactionHash> ?tx .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
