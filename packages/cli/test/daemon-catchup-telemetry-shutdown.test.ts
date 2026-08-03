@@ -68,11 +68,14 @@ const { daemonState } = await import('../src/daemon/state.js');
 const { CONTEXT_GRAPH_READINESS_VERSION } = await import('../src/context-graph-readiness.js');
 const {
   CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS,
+  beginWalkCatchupJob,
   catchupLedgerSize,
   drainCatchupJobs,
+  releaseCatchupJob,
   resetCatchupJobLedger,
 } = await import('../src/daemon/catchup-telemetry.js');
 const {
+  beginGracefulShutdown,
   buildProducerQuiescentTeardownSteps,
   runProducerQuiescentTeardown,
 } = await import('../src/daemon/teardown.js');
@@ -409,6 +412,78 @@ describe('I7 — one requests_total point per subscribe-route return', () => {
   });
 });
 
+describe('A24 — shutdown closes catch-up admission BEFORE its first await', () => {
+  /**
+   * Every other test in this file sets `catchupAcceptingJobs` by hand, so all
+   * of them observe only what happens once admission is ALREADY closed. That
+   * leaves the transition itself unpinned, and two distinct regressions
+   * invisible: deleting the write, and sinking it below the first `await`.
+   *
+   * `beginGracefulShutdown` owns the write and that await together, so
+   * suspending inside `removeApiPort` puts the test in the one window where
+   * the two orderings differ. In production that window is real filesystem
+   * I/O, so it is genuinely reachable by a concurrent request.
+   */
+  async function subscribeInsideTheEarlyCleanupWindow() {
+    const harness = await createHarness({
+      subscriptions: { 'cg-ready': { ...readySubscription } },
+      readiness: { 'cg-ready': { ...readyProvenance } },
+    });
+    try {
+      let enteredWindow!: () => void;
+      const suspended = new Promise<void>((resolve) => { enteredWindow = resolve; });
+      let leaveWindow!: () => void;
+      const held = new Promise<void>((resolve) => { leaveWindow = resolve; });
+
+      const shutdownStarted = beginGracefulShutdown({
+        state: daemonState,
+        log: () => {},
+        removeApiPort: async () => { enteredWindow(); await held; },
+      });
+
+      await suspended; // now inside the FIRST awaited step of shutdown
+      const crossing = await harness.subscribe({ contextGraphId: 'cg-ready' });
+      leaveWindow();
+      await shutdownStarted;
+      return crossing;
+    } finally {
+      await harness.close();
+    }
+  }
+
+  it('refuses a subscribe issued while the early api.port removal is still suspended', async () => {
+    // Precondition: admission is genuinely OPEN going in, so a later refusal is
+    // the TRANSITION under test and not the state the test started in.
+    expect(daemonState.catchupAcceptingJobs).toBe(true);
+
+    const crossing = await subscribeInsideTheEarlyCleanupWindow();
+
+    expect(crossing.status).toBe(503);
+    expect(crossing.body.code).toBe('CATCHUP_SHUTTING_DOWN');
+    // Nothing minted: a job created here would be queued against a runner whose
+    // worker is about to be terminated.
+    expect(metrics.jobs()).toHaveLength(0);
+  });
+
+  it('…and that same subscribe SUCCEEDS when no shutdown is in flight', async () => {
+    // Positive control. Without it the test above passes on any 503 — an
+    // unsubscribable CG, a broken fixture, a route that 503s for its own
+    // reasons — and would read as proof the admission guard fired when it
+    // never ran at all.
+    const harness = await createHarness({
+      subscriptions: { 'cg-ready': { ...readySubscription } },
+      readiness: { 'cg-ready': { ...readyProvenance } },
+    });
+    try {
+      const response = await harness.subscribe({ contextGraphId: 'cg-ready' });
+      expect(response.status).toBe(200);
+      expect(metrics.jobs()).toHaveLength(1);
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
 describe('A21 — a subscribe crossing shutdown never names a job that does not exist', () => {
   it('generates NO job id at the synthetic mint site once admission is closed', async () => {
     // Kills "move the synthetic guard after the id mint": the 503 body must
@@ -681,39 +756,62 @@ describe('A11 — instrumentation never breaks the route or the drain', () => {
   });
 });
 
+/**
+ * The full step list, in contract order. Every entry is ONE action: the three
+ * background workers are separate steps rather than one composed
+ * `stopBackgroundWorkers`, because the sequencer's resilience is per-entry and
+ * a composed entry would strand its own tail.
+ */
+const TEARDOWN_ORDER = [
+  'closeServer',
+  'drainCatchupJobs',
+  'flushTelemetry',
+  'stopPublisherRuntime',
+  'stopPromoteWorker',
+  'closeCatchupRunner',
+  'stopAgent',
+  'stopTelemetry',
+] as const;
+
+type StepName = (typeof TEARDOWN_ORDER)[number];
+
+/** Steps that record their own name; `failing` (if any) also rejects. */
+function recordingSteps(failing?: StepName) {
+  const ran: StepName[] = [];
+  const make = (name: StepName) => async () => {
+    ran.push(name);
+    if (name === failing) throw new Error(`${name} exploded`);
+  };
+  const steps = Object.fromEntries(
+    TEARDOWN_ORDER.map((name) => [name, make(name)]),
+  ) as Record<StepName, () => Promise<void>>;
+  return { ran, steps };
+}
+
 describe('A24 — producer-quiescent teardown order', () => {
   it('drains and flushes before the workers stop, and shuts telemetry down last', async () => {
     const events: string[] = [];
     let meterLiveAtAgentStop = false;
+    const { steps } = recordingSteps();
 
     await runProducerQuiescentTeardown({
-      closeServer: () => events.push('server.close'),
-      drainCatchupJobs: async () => {
-        await sleep(1);
-        events.push('drain');
-      },
-      flushTelemetry: async () => {
-        await sleep(1);
-        events.push('flush');
-      },
-      stopBackgroundWorkers: async () => {
-        await sleep(1);
-        events.push('workers.stop');
-      },
+      ...steps,
+      closeServer: () => events.push('closeServer'),
+      drainCatchupJobs: async () => { await sleep(1); events.push('drainCatchupJobs'); },
+      flushTelemetry: async () => { await sleep(1); events.push('flushTelemetry'); },
+      stopPublisherRuntime: async () => { events.push('stopPublisherRuntime'); },
+      stopPromoteWorker: async () => { events.push('stopPromoteWorker'); },
+      closeCatchupRunner: async () => { events.push('closeCatchupRunner'); },
       stopAgent: async () => {
         // Parent-side sync surviving into `agent.stop()` still emits I1–I6.
         // The point of this ordering is that those points reach a LIVE meter.
-        events.push('agent.stop');
-        meterLiveAtAgentStop = !events.includes('telemetry.stop');
+        events.push('stopAgent');
+        meterLiveAtAgentStop = !events.includes('stopTelemetry');
       },
-      stopTelemetry: async () => {
-        events.push('telemetry.stop');
-      },
+      stopTelemetry: async () => { events.push('stopTelemetry'); },
     });
 
-    expect(events).toEqual([
-      'server.close', 'drain', 'flush', 'workers.stop', 'agent.stop', 'telemetry.stop',
-    ]);
+    expect(events).toEqual([...TEARDOWN_ORDER]);
     expect(meterLiveAtAgentStop).toBe(true);
   });
 
@@ -726,26 +824,86 @@ describe('A24 — producer-quiescent teardown order', () => {
     const observed: string[][] = [];
     const step = (name: string) => async () => {
       observed.push([...resolved]);
-      await sleep(5);
+      await sleep(2);
       resolved.push(name);
     };
+    const steps = Object.fromEntries(
+      TEARDOWN_ORDER.map((name) => [name, step(name)]),
+    ) as Record<StepName, () => Promise<void>>;
 
-    await runProducerQuiescentTeardown({
-      closeServer: () => resolved.push('server.close'),
-      drainCatchupJobs: step('drain'),
-      flushTelemetry: step('flush'),
-      stopBackgroundWorkers: step('workers.stop'),
-      stopAgent: step('agent.stop'),
-      stopTelemetry: step('telemetry.stop'),
-    });
+    await runProducerQuiescentTeardown(steps);
 
-    expect(observed).toEqual([
-      ['server.close'],
-      ['server.close', 'drain'],
-      ['server.close', 'drain', 'flush'],
-      ['server.close', 'drain', 'flush', 'workers.stop'],
-      ['server.close', 'drain', 'flush', 'workers.stop', 'agent.stop'],
-    ]);
+    expect(observed).toEqual(
+      TEARDOWN_ORDER.map((_, i) => TEARDOWN_ORDER.slice(0, i)),
+    );
+  });
+});
+
+describe('A24 — a failing step never strands the steps after it', () => {
+  // D11: one case per step, so a step added later is covered by construction
+  // rather than by someone remembering to extend a hand-written list.
+  it.each(TEARDOWN_ORDER)('continues the whole sequence when %s rejects', async (failing) => {
+    const { ran, steps } = recordingSteps(failing);
+    const logged: string[] = [];
+
+    const outcome = await runProducerQuiescentTeardown(steps, (m) => logged.push(m));
+
+    // Every step ran, in order, including the ones after the failure.
+    expect(ran).toEqual([...TEARDOWN_ORDER]);
+    // …and `stopTelemetry` in particular, which is what the 🔴 was about.
+    expect(ran).toContain('stopTelemetry');
+    expect(outcome.failures).toHaveLength(1);
+    expect(outcome.failures[0].step).toBe(failing);
+    expect((outcome.failures[0].error as Error).message).toBe(`${failing} exploded`);
+    // Reported, not swallowed — the whole justification for continuing.
+    expect(logged.join(' | ')).toContain(failing);
+  });
+
+  it('still terminates the catch-up runner when the PUBLISHER stop rejects', async () => {
+    // D10. These three used to be sequential awaits inside one composed
+    // `stopBackgroundWorkers` step, so the sequencer's per-step guard caught the
+    // publisher failure only AFTER it had already skipped the promote worker and
+    // the catch-up runner — leaving the runner's worker thread alive. The guard
+    // is per-entry, so the entries have to be per-action.
+    const { ran, steps } = recordingSteps('stopPublisherRuntime');
+
+    const outcome = await runProducerQuiescentTeardown(steps);
+
+    expect(ran).toContain('stopPromoteWorker');
+    expect(ran).toContain('closeCatchupRunner');
+    expect(ran).toContain('stopTelemetry');
+    expect(outcome.failures.map((f) => f.step)).toEqual(['stopPublisherRuntime']);
+  });
+
+  it('never throws, so the caller reaches ITS remaining cleanup', async () => {
+    // In `lifecycle.ts` the steps after this call are `managedOxigraph.stop()`
+    // and `dashDb.close()`. A throw here would be caught by `cleanup`'s outer
+    // `.catch` and skip both.
+    const { steps } = recordingSteps('stopAgent');
+    await expect(runProducerQuiescentTeardown(steps)).resolves.toBeDefined();
+  });
+
+  it('reports EVERY failing step and still runs all of them', async () => {
+    const ran: StepName[] = [];
+    const steps = Object.fromEntries(
+      TEARDOWN_ORDER.map((name) => [name, async () => {
+        ran.push(name);
+        throw new Error(`${name} exploded`);
+      }]),
+    ) as Record<StepName, () => Promise<void>>;
+
+    const outcome = await runProducerQuiescentTeardown(steps);
+
+    expect(ran).toEqual([...TEARDOWN_ORDER]);
+    expect(outcome.failures.map((f) => f.step)).toEqual([...TEARDOWN_ORDER]);
+  });
+
+  it('reports NO failures on a clean teardown', async () => {
+    // Without this, "failures is empty" would also hold if the collector were
+    // never wired up at all.
+    const { steps } = recordingSteps();
+    const outcome = await runProducerQuiescentTeardown(steps);
+    expect(outcome.failures).toEqual([]);
   });
 });
 
@@ -809,21 +967,20 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
       dispatched.push([name, [...calls]]);
     };
 
-    await observe('closeServer', () => steps.closeServer());
-    await observe('drainCatchupJobs', () => steps.drainCatchupJobs());
-    await observe('flushTelemetry', () => steps.flushTelemetry());
-    await observe('stopBackgroundWorkers', () => steps.stopBackgroundWorkers());
-    await observe('stopAgent', () => steps.stopAgent());
-    await observe('stopTelemetry', () => steps.stopTelemetry());
+    for (const name of TEARDOWN_ORDER) {
+      await observe(name, () => steps[name]());
+    }
 
+    // Every slot reaches exactly one dep, and it is the one it is named after.
+    // No slot fans out: the three background workers are their own steps, so
+    // the sequencer's per-step guard covers each of them individually.
     expect(dispatched).toEqual([
       ['closeServer', ['server.close']],
       ['drainCatchupJobs', ['drainCatchupJobs']],
       ['flushTelemetry', ['flushTelemetry']],
-      // The one slot that fans out — and its internal order is load-bearing:
-      // the promote queue must drain before the agent takes its triple store
-      // away, and the catch-up runner must not be terminated any earlier.
-      ['stopBackgroundWorkers', ['stopPublisherRuntime', 'stopPromoteWorker', 'closeCatchupRunner']],
+      ['stopPublisherRuntime', ['stopPublisherRuntime']],
+      ['stopPromoteWorker', ['stopPromoteWorker']],
+      ['closeCatchupRunner', ['closeCatchupRunner']],
       ['stopAgent', ['stopAgent']],
       ['stopTelemetry', ['stopTelemetry']],
     ]);
@@ -840,5 +997,59 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
     // flush with no `log` would swallow its own timeout report.
     expect(drainArgs).toEqual([[CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS, log]]);
     expect(flushArgs).toEqual([{ log }]);
+  });
+});
+
+// ── D3: the ledger's identity guard on release ─────────────────────────────
+//
+// `releaseCatchupJob` deletes a slot only when it still holds THAT entry:
+//
+//   if (ledger.get(entry.job.jobId) === entry) ledger.delete(entry.job.jobId);
+//
+// Nothing else in the suite constructs two ledger generations for one `jobId`,
+// so before this test the guard could be deleted outright with every suite
+// still green — the mutation survived the whole matrix.
+//
+// It is reachable WITHOUT relying on an id collision: `routes/context-graph.ts`
+// deliberately reuses an existing `jobId` on the already-ready replay path.
+//
+// The consequence is a shutdown-correctness one, not a missing metric.
+// `drainCatchupJobs` snapshots `[...ledger.values()]` at CALL TIME, so a live
+// job evicted by an older generation's cleanup is not merely unreported — it is
+// never awaited. The grace drain returns while that work is still running, and
+// terminating the worker underneath then rejects it.
+describe('W1 D3 — releasing an older ledger generation must not evict a live newer one', () => {
+  beforeEach(() => resetCatchupJobLedger());
+  afterEach(() => resetCatchupJobLedger());
+
+  it('still AWAITS the newer job after the older generation of the same id is released', async () => {
+    const REUSED_ID = 'reused-job-id';
+    const jobAt = (jobId: string) => ({
+      jobId,
+      contextGraphId: 'cg-d3',
+      includeWorkspace: false,
+      status: 'running' as const,
+      queuedAt: 0,
+      startedAt: 0,
+    });
+    const older = beginWalkCatchupJob(jobAt(REUSED_ID));
+    const newer = beginWalkCatchupJob(jobAt(REUSED_ID));
+
+    let newerSettled = false;
+    newer.task = sleep(40).then(() => { newerSettled = true; });
+
+    // The older generation's cleanup runs — it must not take the newer job's
+    // slot with it.
+    releaseCatchupJob(older);
+    expect(catchupLedgerSize()).toBe(1);
+
+    const { drained, expired } = await drainCatchupJobs(2_000, () => {});
+
+    // The assertion that matters is `newerSettled`: without the identity guard
+    // the drain's snapshot is empty, it returns immediately, and this is false
+    // while the work is still running.
+    expect(newerSettled).toBe(true);
+    expect(expired).toBe(false);
+    expect(drained).toBe(1);
   });
 });

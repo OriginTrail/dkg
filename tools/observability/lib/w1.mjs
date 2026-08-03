@@ -33,7 +33,22 @@ const promParts = (inst) => {
   const base = inst.name.replaceAll('.', '_');
   const unit = UNIT_SUFFIX[inst.unit];
   if (unit === undefined) throw new Error(`w1: no Prometheus unit suffix known for unit '${inst.unit}' (${inst.name}) — add it to UNIT_SUFFIX consciously`);
-  const withUnit = unit ? `${base}_${unit}` : base;
+  // The unit word is appended ONLY when the normalized name does not already
+  // carry it as a token — the OTel Prometheus/OpenMetrics compatibility rule,
+  // and what `prometheus/otlptranslator` implements. A counter already named
+  // `…request_bytes` with unit `By` therefore translates to
+  // `…_request_bytes_total`, NOT the doubled `…_request_bytes_bytes_total`,
+  // which no ingest route emits. Getting this wrong is not a cosmetic naming
+  // slip: the alternation then covers a form that never exists while MISSING
+  // the real one, so the byte gates read empty on a standard ingest path and
+  // §7.3 reports `inconclusive` forever with nothing pointing at the cause.
+  //
+  // Token containment rather than endsWith: it is the faithful rule and also
+  // covers a future name like `dkg.bytes_received.foo` (today the two readings
+  // agree on every instrument here). The comparison is against the mapped unit
+  // WORD, so `duration_ms` — tokens […, duration, ms] — does not contain
+  // `milliseconds` and correctly still receives the suffix.
+  const withUnit = unit && !base.split('_').includes(unit) ? `${base}_${unit}` : base;
   // `_total` is appended to monotonic counters unless the name already ends
   // in it (dkg.sync.attempt.total -> dkg_sync_attempt_total, never
   // dkg_sync_attempt_total_total), which is why some instruments have exactly

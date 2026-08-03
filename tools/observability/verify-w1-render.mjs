@@ -96,17 +96,30 @@ const spellingsOf = (inst) => {
   const base = inst.name.replaceAll('.', '_');
   const unit = UNIT_SUFFIX[inst.unit];
   if (unit === undefined) throw new Error(`verify-w1: unmapped unit '${inst.unit}' on ${inst.name}`);
-  const withUnit = unit ? `${base}_${unit}` : base;
-  const translated = inst.kind === 'counter' && !withUnit.endsWith('_total') ? `${withUnit}_total` : withUnit;
-  return { native: base, translated };
+  // The unit word is appended only when the normalized name does not already
+  // carry it as a token (OTel Prometheus/OpenMetrics compatibility), so
+  // `…request_bytes` + `By` is `…_request_bytes_total` — never the doubled
+  // `…_request_bytes_bytes_total`.
+  const unitAlreadyPresent = Boolean(unit) && base.split('_').includes(unit);
+  const addTotal = (n) => (inst.kind === 'counter' && !n.endsWith('_total') ? `${n}_total` : n);
+  const translated = addTotal(unit && !unitAlreadyPresent ? `${base}_${unit}` : base);
+  // The spelling the naive "always append the unit" rule produces. NO ingest
+  // route emits it, so a selector matching it is the duplicated-unit bug.
+  // Rejecting it is NOT redundant with requiring `translated`: an alternation
+  // can match both, and the original defect was exactly an alternation that
+  // covered this form while missing the real one — which reads empty on a
+  // standard suffixed backend and reports `inconclusive` forever.
+  const overSuffixed = unitAlreadyPresent ? addTotal(`${base}_${unit}`) : null;
+  return { native: base, translated, overSuffixed };
 };
 const SERIES_SUFFIXES = (inst) => (inst.kind === 'histogram' ? ['_bucket', '_sum', '_count'] : ['']);
 // Flat index of every (instrument, series) the artifacts may legitimately read.
 const SPELLING_INDEX = [...EXPECTED_INSTRUMENTS, ...EXPECTED_CORROBORATING].flatMap((inst) => {
-  const { native, translated } = spellingsOf(inst);
+  const { native, translated, overSuffixed } = spellingsOf(inst);
   return SERIES_SUFFIXES(inst).map((series) => ({
     id: inst.id, series, dual: native !== translated,
     native: `${native}${series}`, translated: `${translated}${series}`,
+    overSuffixed: overSuffixed ? `${overSuffixed}${series}` : null,
   }));
 });
 
@@ -190,6 +203,7 @@ const mask = (s) => s.replace(/\$\{[^}]*\}/g, '__GVAR__');
 const NODE_FILTER = mask(`${LABEL}=~"\${node:regex}"`);
 const covered = new Set();
 let dualSpelledSelectors = 0;
+let overSuffixedRejections = 0;
 let selectorsSeen = 0;
 /** @type {{group: string, readsBytes: boolean, readsActiveMs: boolean}[]} */
 const allSourceDenominators = [];
@@ -222,7 +236,16 @@ for (const rule of allRules) {
 
     // dual spelling: matching one form obliges the selector to match the other
     const reads = [];
+    let sawOverSuffixed = false;
     for (const entry of SPELLING_INDEX) {
+      // Checked BEFORE the native/translated gate: a selector matching only the
+      // duplicated form reads nothing real, and must be reported as the
+      // duplicated-unit bug rather than as an unknown metric.
+      if (entry.overSuffixed && matchesSpelling(spec, entry.overSuffixed)) {
+        sawOverSuffixed = true;
+        overSuffixedRejections++;
+        fail(where, `selector matches the duplicated-unit spelling "${entry.overSuffixed}" of ${entry.id} — no ingest route emits it (the unit word is NOT appended when the name already carries it): ${text}`);
+      }
       const hitsNative = matchesSpelling(spec, entry.native);
       const hitsTranslated = matchesSpelling(spec, entry.translated);
       if (!hitsNative && !hitsTranslated) continue;
@@ -231,7 +254,10 @@ for (const rule of allRules) {
       if (!hitsTranslated) fail(where, `selector matches the native spelling of ${entry.id} but NOT the translated "${entry.translated}" — one ingest route returns empty: ${text}`);
       if (entry.dual && hitsNative && hitsTranslated) dualSpelledSelectors++;
     }
-    if (!reads.length) { fail(where, `selector reads no known W1 or corroborating instrument (typo or unmapped metric): ${text}`); continue; }
+    if (!reads.length) {
+      if (!sawOverSuffixed) fail(where, `selector reads no known W1 or corroborating instrument (typo or unmapped metric): ${text}`);
+      continue;
+    }
     for (const entry of reads) covered.add(entry.id);
 
     // runnable filters (§7.2) — stated as predicates, so they are checkable
@@ -267,6 +293,13 @@ if (selectorsSeen < EXPECTED_INSTRUMENTS.length) fail('w1-rules.yaml', `only ${s
 // spellings actually differ; if a refactor dropped every byte/duration query
 // the check above would pass vacuously.
 if (dualSpelledSelectors < 1) fail('w1-rules.yaml', 'no selector exercises a dual-spelling (__name__ alternation) instrument — the dual-spelling assertion would be vacuous');
+// Same anti-vacuity discipline for the duplicated-unit rejection: it can only
+// discriminate on instruments whose name already carries their unit word. If a
+// refactor removed both `By` counters, the rejection would silently become a
+// check over an empty set — green, and proving nothing.
+if (!SPELLING_INDEX.some((e) => e.overSuffixed)) {
+  fail('metric inventory', 'no instrument exercises the duplicated-unit rule (a name already ending in its unit word) — the duplicated-spelling rejection would be vacuous');
+}
 
 // ── source vocabulary and the §5.5 family mapping ─────────────────────────
 {

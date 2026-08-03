@@ -13,8 +13,11 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import { DKGAgent, runCatchupPlaneWithPolicy } from '../src/index.js';
 import { getSyncBackpressureSnapshot } from '../src/sync/backpressure.js';
+import { ethers } from 'ethers';
+
 import { withSyncAdmissionSource } from '../src/sync/attempt-telemetry.js';
 import { runCuratorMetaRefresh } from '../src/curator-meta-refresh.js';
+import { authorizePrivateSyncRequest } from '../src/sync/auth/request-authorize.js';
 import { encodeChangelogResponse } from '../src/sync/changelog/wire.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
@@ -597,10 +600,16 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
    * edge stubbed: the guard, `agent.fetchSyncPages` and `sendSyncRequest` are
    * all the production code, so these assertions read genuine I1 labels.
    */
-  async function createRefreshAgent(): Promise<{ agent: DKGAgent; sends: () => number }> {
+  async function createRefreshAgent(
+    /** Omitted ⇒ an empty successful page. Supply one to inject a wire failure. */
+    onSend?: () => Promise<Uint8Array>,
+  ): Promise<{ agent: DKGAgent; sends: () => number }> {
     let sends = 0;
     const agent = await createAgent({
-      sendToPeer: async () => { sends += 1; return new Uint8Array(0); },
+      sendToPeer: async () => {
+        sends += 1;
+        return onSend ? onSend() : new Uint8Array(0);
+      },
     });
     (agent as any).node = {
       ...(agent as any).node,
@@ -646,36 +655,132 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
     expect(await harness.matching(I1, { source: 'control-plane' })).toEqual([]);
   });
 
-  // ── assertion 3 (responder auth lookup) is DELIBERATELY ABSENT ────────────
-  //
-  // The plan's five-assertion set reserves this slot for the responder path
-  // (`authorizePrivateSyncRequest` in `sync/auth/request-authorize.ts`, the third
-  // enumerated caller of `refreshMetaFromCurator`). The numbering below keeps
-  // its gap rather than closing it, so this file and the plan's table stay in
-  // correspondence.
-  //
-  // Why not a metrics-level responder test: the responder shares assertion 1's
-  // guard branch exactly — both reach the refresh with no ambient scope — so it
-  // would prove the same fact twice while reading as independent coverage.
-  //
-  // Why not the precondition test that briefly stood here: it executed NO
-  // responder code. It defined a local closure, invoked it from the test body,
-  // and asserted that the test body had no ambient scope — a result determined
-  // entirely by its own setup. Wrapping the real responder path in
-  // `withSyncAdmissionSource(...)`, which is precisely the regression its name
-  // promised to catch, would have left it green. **A test that claims a path is
-  // pinned when it is not is worse than an acknowledged gap: a gap gets
-  // revisited, a green test does not.**
-  //
-  // What would close it: drive the real `authorizePrivateSyncRequest` with a dependency
-  // object whose `refreshMetaFromCurator` records `hasSyncAdmissionSource()`.
-  // That is an integration harness rather than a line, and is a tracked
-  // follow-up.
-  //
-  // Until then the responder half is REASONED FROM SOURCE, not asserted — one
-  // guard covers all three callers because this is the only fetch in that file
-  // and every route funnels through it. Recorded in the plan's §12 next to the
-  // A24 wiring residual.
+  /**
+   * Build a signed envelope that clears the responder's auth preflight and then
+   * FAILS the allowlist, which is what routes control to `refreshMetaFromCurator`.
+   *
+   * Each gate, and why it passes: `computeSyncDigest` is injected, so the digest
+   * is ours; recovery is `recoverAddress(hashMessage(digest), {r, yParityAndS})`,
+   * so a throwaway wallet signing those bytes satisfies it; `requesterIdentityId`
+   * is omitted, so the else-branch requires `requesterAgentAddress` to equal the
+   * recovered address; `recovery` is unset, so the member-recovery branch (which
+   * returns early) is not taken; freshness and replay pass with a live
+   * `issuedAtMs` and an empty seen-map.
+   */
+  async function respondToSyncRequest(
+    agent: DKGAgent,
+    onRefresh: () => Promise<boolean>,
+  ): Promise<boolean> {
+    void agent;
+    const wallet = ethers.Wallet.createRandom();
+    const digest = new TextEncoder().encode('w1-responder-auth-digest');
+    const signature = ethers.Signature.from(await wallet.signMessage(digest));
+    const LOCAL_PEER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
+
+    return authorizePrivateSyncRequest({
+      ctx: createOperationContext('sync'),
+      request: {
+        contextGraphId: CG,
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: LOCAL_PEER,
+        requesterPeerId: PEER_A,
+        requestId: `w1-responder-${Math.random()}`,
+        issuedAtMs: Date.now(),
+        requesterAgentAddress: wallet.address,
+        requesterSignatureR: signature.r,
+        requesterSignatureVS: signature.yParityAndS,
+      },
+      remotePeerId: PEER_A,
+      localPeerId: LOCAL_PEER,
+      syncAuthMaxAgeMs: 90_000,
+      seenRequestIds: new Map(),
+      computeSyncDigest: () => digest,
+      // Empty everywhere, so `resolveAllowed()` is false and the refresh runs.
+      getParticipants: async () => null,
+      getAllowedPeers: async () => null,
+      getAgentGateAddresses: async () => null,
+      getAllowedDelegateePeers: async () => new Map(),
+      getAllowedDelegateeKeys: async () => new Map(),
+      getMemberRecoveryGate: async () => null,
+      refreshMetaFromCurator: onRefresh,
+      logWarn: () => {},
+      logInfo: () => {},
+    } as any);
+  }
+
+  it('3: the REAL responder auth path labels its curator refresh `control-plane`', async () => {
+    harness.install();
+    const { agent, sends } = await createRefreshAgent();
+
+    // Drives the production `authorizePrivateSyncRequest`, whose own
+    // `refreshMetaFromCurator` hook runs the production `runCuratorMetaRefresh`.
+    // Nothing about the guard is simulated: the responder genuinely reaches the
+    // refresh with no ambient requester scope, and the label is read off a real
+    // I1 point rather than inferred from the call graph.
+    const allowed = await respondToSyncRequest(agent, () => refresh(agent));
+
+    // Still denied — the refresh found no authoritative meta. That is the
+    // responder behaving correctly; what is under test is the ATTRIBUTION of
+    // the bytes it spent getting there.
+    expect(allowed).toBe(false);
+    expect(sends()).toBeGreaterThanOrEqual(1);
+    expect((await harness.matching(I1, { source: 'control-plane', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'unspecified' })).toEqual([]);
+  });
+
+  it('3b: a responder that acquires an ambient scope stops reporting `control-plane`', async () => {
+    harness.install();
+    const { agent } = await createRefreshAgent();
+
+    // The regression assertion 3 exists to catch, EXECUTED rather than argued:
+    // if the responder path is ever wrapped in an admission scope, its curator
+    // refresh inherits that label instead of the control-plane base case. This
+    // is what makes assertion 3 able to fail — without it, 3 would pass whether
+    // or not the responder was still landing on the base case.
+    await withSyncAdmissionSource('catchup-foreground', () =>
+      respondToSyncRequest(agent, () => refresh(agent)));
+
+    expect((await harness.matching(I1, { source: 'catchup-foreground', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    expect(await harness.matching(I1, { source: 'control-plane' })).toEqual([]);
+  });
+
+  it('3c: a control-plane refresh that FAILS still carries `control-plane`, bytes included', async () => {
+    harness.install();
+    const { agent, sends } = await createRefreshAgent(async () => {
+      throw new Error('all multiaddr dials failed');
+    });
+
+    // FAILURE INJECTION, and this is the branch that matters most in production:
+    // the whole point of a curator meta refresh is recovering metadata from a
+    // peer that may be down, so an unreachable curator is the NORMAL case — yet
+    // every other assertion in this block drives a successful fetch.
+    //
+    // The attribution holding here follows from where the scope wraps
+    // `runFetch()` — the transport bracket's `finally` runs inside it. That is
+    // "correct by construction and unasserted", which is exactly the shape M9
+    // had: also correct, also unprotected, and it survived every suite in the
+    // repo until someone wrote the assertion. A refactor that moved the wrapper
+    // inside the try, or unwrapped the failure path, would be silent without this.
+    await refresh(agent).catch(() => undefined);
+
+    expect(sends()).toBeGreaterThanOrEqual(1);
+    expect((await harness.matching(I1, {
+      source: 'control-plane', outcome: 'transport_error', phase: 'meta',
+    })).length).toBeGreaterThanOrEqual(1);
+
+    // §6.2 records I2 BEFORE `send()` precisely so an attempt that never
+    // receives a response still counts its request bytes — the leg a naive
+    // failure path drops, and the one that would silently shrink the denominator.
+    expect((await harness.matching(I2, { source: 'control-plane', phase: 'meta' })).length)
+      .toBeGreaterThanOrEqual(1);
+    // I3 exists only if the send RESOLVED. It did not.
+    expect(await harness.matching(I3, { source: 'control-plane' })).toEqual([]);
+    expect(await harness.matching(I1, { source: 'unspecified' })).toEqual([]);
+  });
 
   it('4: an admitted operation with NO source stays `unspecified`, never `control-plane`', async () => {
     harness.install();

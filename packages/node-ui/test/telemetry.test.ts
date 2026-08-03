@@ -87,6 +87,54 @@ describe('telemetry — disabled is a total no-op', () => {
     expect(() => getMetrics().publishTotal.add(1, { outcome: 'failed', source: 'direct' })).not.toThrow();
     expect(() => getMetrics().chainRpcDuration.record(12, { rpc_method: 'eth_call' })).not.toThrow();
   });
+
+  /**
+   * The `provider === null` conjuncts in `tracesOn`/`metricsOn` are what make a
+   * repeat `initTelemetry` idempotent. Drop either and that signal is
+   * CONSTRUCTED a second time — but the OTel API refuses a duplicate global
+   * registration, so the module's stored provider silently diverges from the
+   * globally registered one. `shutdownTelemetry()` then tears down the stored
+   * provider while the registered one keeps exporting, unshut, for the life of
+   * the process.
+   *
+   * The assertions therefore target that divergence directly rather than
+   * `isTelemetryConfigured()`, which stays `true` either way and cannot see it.
+   */
+  it('a repeat init does NOT construct a second provider behind the registered one', async () => {
+    const cfg = {
+      enabled: true,
+      metrics: { endpoint: 'http://127.0.0.1:1/v1/metrics', exportIntervalMs: 600_000 },
+      traces: { endpoint: 'http://127.0.0.1:1/v1/traces' },
+    };
+    let meterShutdownTarget: unknown;
+    const meterShutdownSpy = vi
+      .spyOn(MeterProvider.prototype, 'shutdown')
+      .mockImplementation(async function (this: unknown) {
+        meterShutdownTarget = this;
+      } as any);
+    const registerSpy = vi.spyOn(NodeTracerProvider.prototype, 'register');
+    try {
+      await initTelemetry(cfg);
+      const registeredMeter = metrics.getMeterProvider();
+      // Precondition: the first init really did register, so a "no second
+      // provider" result cannot come from nothing having happened at all.
+      expect(registeredMeter.constructor.name).toBe('MeterProvider');
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+
+      await initTelemetry(cfg); // must be a total no-op
+      await shutdownTelemetry();
+
+      // Metrics: the provider we shut down is the one that is globally
+      // registered. A second construction makes these two different objects.
+      expect(meterShutdownSpy).toHaveBeenCalledTimes(1);
+      expect(meterShutdownTarget).toBe(registeredMeter);
+      // Traces: `register()` is called once per constructed provider.
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      meterShutdownSpy.mockRestore();
+      registerSpy.mockRestore();
+    }
+  });
 });
 
 describe('withSpan — status + attributes + error recording', () => {
@@ -557,41 +605,95 @@ describe('flushTelemetry — bounded terminal flush that leaves the provider liv
 });
 
 describe('shutdownTelemetry — flush completes before shutdown starts', () => {
-  it('does not start a provider shutdown until that provider has finished flushing', async () => {
-    // `MeterProvider.forceFlush()` opens with
-    // `if (this._shutdown) { diag.warn(…); return; }`, so starting both
-    // concurrently made scheduling order decide whether the flush happened.
-    //
-    // Call ORDER cannot pin this: a concurrent `Promise.all` invokes both in
-    // the same tick, in the same order. What discriminates is whether the
-    // flush had already RESOLVED when shutdown began.
+  /**
+   * `shutdownTelemetry()` has TWO independent per-provider branches, and an
+   * earlier version of this test registered METRICS ONLY — so reverting just
+   * the tracer branch to the concurrent `Promise.all` shape passed. Both
+   * signals are registered here and each is asserted separately, so a revert of
+   * either branch alone fails.
+   *
+   * `forceFlush`/`shutdown` live on `BasicTracerProvider.prototype`, which
+   * `NodeTracerProvider` inherits; spying on the subclass prototype would not
+   * intercept the inherited call, so the base prototype is reached via
+   * `getPrototypeOf` rather than by taking a dependency on sdk-trace-base.
+   */
+  function watchProviderOrdering(prototype: object, label: string) {
     let flushResolved = false;
-    let shutdownSawResolvedFlush: boolean | undefined;
-    const flushSpy = vi
-      .spyOn(MeterProvider.prototype, 'forceFlush')
-      .mockImplementation(async () => {
-        await sleep(30);
-        flushResolved = true;
-      });
-    const shutdownSpy = vi
-      .spyOn(MeterProvider.prototype, 'shutdown')
-      .mockImplementation(async () => {
-        shutdownSawResolvedFlush = flushResolved;
-      });
+    const seen: { shutdownSawResolvedFlush?: boolean } = {};
+    const flushSpy = vi.spyOn(prototype as any, 'forceFlush').mockImplementation((async () => {
+      await sleep(30);
+      flushResolved = true;
+    }) as any);
+    const shutdownSpy = vi.spyOn(prototype as any, 'shutdown').mockImplementation((async () => {
+      seen.shutdownSawResolvedFlush = flushResolved;
+    }) as any);
+    return {
+      label,
+      flushSpy,
+      shutdownSpy,
+      seen,
+      restore: () => {
+        flushSpy.mockRestore();
+        shutdownSpy.mockRestore();
+      },
+    };
+  }
+
+  /**
+   * Registers BOTH signals and reports each provider's ordering separately.
+   *
+   * The two branches are asserted in two separate tests deliberately: one test
+   * covering both would be killed by a revert of either branch, giving the two
+   * mutants an identical kill set and no evidence that each branch is pinned
+   * on its own. Split, a meter-only revert kills only the meter test and a
+   * tracer-only revert kills only the tracer test.
+   */
+  async function observeShutdownOrdering() {
+    const meter = watchProviderOrdering(MeterProvider.prototype, 'meter');
+    const tracer = watchProviderOrdering(
+      Object.getPrototypeOf(NodeTracerProvider.prototype),
+      'tracer',
+    );
     try {
       await initTelemetry({
         enabled: true,
         metrics: { endpoint: 'http://127.0.0.1:1/v1/metrics', exportIntervalMs: 600_000 },
+        traces: { endpoint: 'http://127.0.0.1:1/v1/traces' },
       });
       await shutdownTelemetry();
-
-      expect(flushSpy).toHaveBeenCalledTimes(1);
-      expect(shutdownSpy).toHaveBeenCalledTimes(1);
-      expect(shutdownSawResolvedFlush).toBe(true);
+      return {
+        meter: { ...meter.seen, flushes: meter.flushSpy.mock.calls.length, shutdowns: meter.shutdownSpy.mock.calls.length },
+        tracer: { ...tracer.seen, flushes: tracer.flushSpy.mock.calls.length, shutdowns: tracer.shutdownSpy.mock.calls.length },
+      };
     } finally {
-      flushSpy.mockRestore();
-      shutdownSpy.mockRestore();
+      meter.restore();
+      tracer.restore();
     }
+  }
+
+  // `MeterProvider.forceFlush()` opens with
+  // `if (this._shutdown) { diag.warn(…); return; }`, so starting both
+  // concurrently made scheduling order decide whether the flush happened.
+  //
+  // Call ORDER cannot pin this: a concurrent `Promise.all` invokes both in the
+  // same tick, in the same order. What discriminates is whether the flush had
+  // already RESOLVED when shutdown began.
+  it('does not shut the METER down until its own flush has resolved', async () => {
+    const observed = await observeShutdownOrdering();
+    // Preconditions: the branch ran at all. Without these an unregistered
+    // provider leaves the flag undefined and the ordering assertion is
+    // unreachable rather than satisfied — which is how the tracer branch went
+    // uncovered in the first place.
+    expect(observed.meter.flushes).toBe(1);
+    expect(observed.meter.shutdowns).toBe(1);
+    expect(observed.meter.shutdownSawResolvedFlush).toBe(true);
+  });
+
+  it('does not shut the TRACER down until its own flush has resolved', async () => {
+    const observed = await observeShutdownOrdering();
+    expect(observed.tracer.flushes).toBe(1);
+    expect(observed.tracer.shutdowns).toBe(1);
+    expect(observed.tracer.shutdownSawResolvedFlush).toBe(true);
   });
 });
 
