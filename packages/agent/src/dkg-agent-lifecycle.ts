@@ -6976,7 +6976,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
     contextGraphId: string,
-    next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>,
+    next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted' | 'syncAdmission'>,
   ): void {
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
@@ -6992,8 +6992,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let activated = status.activated;
     let dormantIds = status.dormantIds.filter((id) => id !== contextGraphId);
     let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
+    let nextRehydratedAlwaysOnIds = (status.rehydratedAlwaysOnIds ?? [])
+      .filter((id) => id !== contextGraphId);
     if (next?.coreHosted === true) {
       nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
+    }
+    // A freshly configured Edge selection is just as durable as one loaded
+    // from a previous process once this save commits. Admit it to the bounded
+    // periodic lane now so a first cold boot with broad sync-on-connect
+    // disabled does not require an otherwise pointless restart. On-demand
+    // subscriptions never reach this branch because their persistence
+    // projection is `skip`.
+    if (
+      (this.config.nodeRole ?? 'edge') === 'edge'
+      && next?.subscribed === true
+      && next.syncAdmission === 'explicit'
+    ) {
+      nextRehydratedAlwaysOnIds = sortIds([
+        ...nextRehydratedAlwaysOnIds,
+        contextGraphId,
+      ]);
     }
 
     if (isPersisted) {
@@ -7017,6 +7035,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       persistedTotal,
       hostedActivated: nextHostedActivatedIds.length,
       hostedActivatedIds: nextHostedActivatedIds,
+      rehydratedAlwaysOnIds: nextRehydratedAlwaysOnIds,
       activated,
       dormant: dormantIds.length,
       dormantIds,
@@ -7033,6 +7052,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     const dormantIds = [...status.dormantIds];
     const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
+    const rehydratedAlwaysOnIds = [...(status.rehydratedAlwaysOnIds ?? [])];
     const removeFrom = (ids: string[], id: string): boolean => {
       const index = ids.indexOf(id);
       if (index < 0) return false;
@@ -7048,6 +7068,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
       const wasDormant = removeFrom(dormantIds, id);
       removeFrom(hostedActivatedIds, id);
+      removeFrom(rehydratedAlwaysOnIds, id);
       if (!wasAccounted) continue;
       persistedTotal = Math.max(0, persistedTotal - 1);
       if (!wasDormant) {
@@ -7058,6 +7079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
+      removeFrom(rehydratedAlwaysOnIds, id);
       if (!dormantIds.includes(id)) {
         activated = Math.max(0, activated - 1);
         dormantIds.push(id);
@@ -7070,6 +7092,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       persistedTotal,
       hostedActivated: hostedActivatedIds.length,
       hostedActivatedIds,
+      rehydratedAlwaysOnIds,
       activated,
       dormant: dormantIds.length,
       dormantIds,

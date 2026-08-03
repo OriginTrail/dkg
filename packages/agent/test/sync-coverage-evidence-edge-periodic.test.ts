@@ -123,7 +123,110 @@ async function createRehydratedEdgeEvidenceAgent(contextGraphId: string): Promis
   return agent;
 }
 
+async function createFreshConfiguredEdgeEvidenceAgent(contextGraphId: string): Promise<DKGAgent> {
+  const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+  const contextGraphSubscriptionStore: ContextGraphSubscriptionStore = {
+    loadAll: async () => [...persisted.values()],
+    save: async (record) => { persisted.set(record.id, { ...record }); },
+    delete: async (id) => { persisted.delete(id); },
+  };
+  const agent = await DKGAgent.create({
+    name: 'SyncEvidenceFreshConfiguredEdgePeriodic',
+    listenHost: '127.0.0.1',
+    nodeRole: 'edge',
+    syncContextGraphs: [contextGraphId],
+    syncOnConnectEnabled: false,
+    syncSharedMemoryOnConnect: false,
+    chainAdapter: new MockChainAdapter(),
+    contextGraphSubscriptionStore,
+  });
+  (agent as any).started = true;
+  (agent as any).networkAdmissionCoordinator.isAcceptedPeer = () => true;
+  (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+  (agent as any).discoverContextGraphsFromStore = async () => 0;
+  (agent as any).planSharedMemorySyncContextGraphs = async (
+    _peerId: string,
+    contextGraphIds: string[],
+  ) => ({
+    publicContextGraphIds: [...contextGraphIds],
+    privateRecoverFromCurator: [],
+    eligibleContextGraphIds: [...contextGraphIds],
+  });
+  (agent as any).refreshMetaSyncedFlags = async () => new Set<string>();
+  (agent as any).hasConfirmedMetaState = async () => true;
+  (agent as any).gossip = {
+    subscribe: () => undefined,
+    unsubscribe: () => undefined,
+    onMessage: () => undefined,
+    offMessage: () => undefined,
+  };
+  (agent.node as any).node = {
+    peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
+  };
+  await (agent as any).rehydrateContextGraphSubscriptions();
+  (agent as any).setContextGraphSubscription(contextGraphId, {
+    subscribed: true,
+    synced: false,
+    sharedMemorySynced: false,
+    metaSynced: false,
+    syncMode: 'always-on',
+    syncAdmission: 'explicit',
+  });
+  await waitFor(() => (
+    persisted.has(contextGraphId)
+    && agent.getContextGraphSubscriptionRehydrationStatus()
+      ?.rehydratedAlwaysOnIds?.includes(contextGraphId) === true
+  ));
+  (agent.node as any).node = {
+    getPeers: () => [{ toString: () => PEER }],
+    getConnections: () => [],
+  };
+  (agent as any).getSyncReconcilerProbe = async () => ({
+    protocolsKey: PROTOCOL_SYNC,
+    connectionKey: PEER,
+  });
+  return agent;
+}
+
 describe('Edge periodic sync scope evidence', () => {
+  it('admits a freshly persisted configured Edge selection on its first periodic tick', async () => {
+    const configured = 'cg-fresh-configured-periodic';
+    const agent = await createFreshConfiguredEdgeEvidenceAgent(configured);
+    const durableScopes: string[][] = [];
+    const sharedMemoryScopes: string[][] = [];
+    (agent as any).syncFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      durableScopes.push([...contextGraphIds]);
+      return cleanDurableSyncResult();
+    };
+    (agent as any).syncSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      sharedMemoryScopes.push([...contextGraphIds]);
+      const summary = cleanSharedMemorySyncResult();
+      return {
+        ...summary,
+        contextGraphTerminals: contextGraphIds.map((id) => ({
+          contextGraphId: id,
+          lane: 'shared_memory' as const,
+          disposition: 'settled' as const,
+          result: { ...summary },
+        })),
+      };
+    };
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    await waitFor(() => (agent as any).lastSuccessfulSyncAt.has(PEER));
+
+    expect(durableScopes).toEqual([[configured]]);
+    expect(sharedMemoryScopes).toEqual([[configured]]);
+    expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+  });
+
   it('keeps the normal Edge periodic scope when broad sync-on-connect is enabled', async () => {
     const rehydrated = 'cg-rehydrated-normal-periodic';
     const runtimeSelected = 'cg-runtime-normal-periodic';
