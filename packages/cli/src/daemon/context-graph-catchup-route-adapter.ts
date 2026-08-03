@@ -11,6 +11,23 @@ import { ContextGraphCatchupCoordinatorService } from './context-graph-catchup-c
 import type { CatchupTracker } from './types.js';
 
 /**
+ * End one point-in-time Edge subscription without deleting synchronized data.
+ * The live mode is read at settlement time: a concurrent always-on promotion
+ * therefore wins and remains attached.
+ */
+export function settleOnDemandContextGraphSubscription(
+  agent: DKGAgent,
+  contextGraphId: string,
+): boolean {
+  const subscription = agent.getSubscribedContextGraphs().get(contextGraphId);
+  if (subscription?.subscribed !== true || subscription.syncMode !== 'on-demand') {
+    return false;
+  }
+  agent.unsubscribeFromContextGraph(contextGraphId, { persist: false });
+  return true;
+}
+
+/**
  * Bind daemon-owned persistence, agent, and event effects once at the route
  * boundary. The subscribe route only chooses a scope and delegates
  * start/coalescing; readiness classification and side effects stay behind the
@@ -43,6 +60,9 @@ export function createContextGraphCatchupRouteAdapter(input: {
         contextGraphId,
         ...payload,
       });
+    },
+    settleSubscriptionLifetime: (contextGraphId) => {
+      settleOnDemandContextGraphSubscription(input.agent, contextGraphId);
     },
     ...(input.trace ? { trace: input.trace } : {}),
   });

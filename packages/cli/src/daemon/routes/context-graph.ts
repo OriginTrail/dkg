@@ -1791,6 +1791,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           catchupTracker.jobs.set(jobId, syntheticJob);
           catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
         }
+        // No detached coordinator worker will run for this fast path, so end
+        // a point-in-time on-demand subscription here. The coordinator-owned
+        // settlement callback re-reads the live mode and preserves a request
+        // that was promoted to always-on while readiness was evaluated.
+        catchupCoordinator.settleSubscriptionLifetime(contextGraphId);
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
