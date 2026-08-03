@@ -932,6 +932,81 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
+interface LifecycleSyncScopePlan {
+  readonly effectiveBatchSize: number;
+  readonly automaticContextGraphIds: readonly string[];
+  readonly initialDurableContextGraphIds: readonly string[];
+  contextGraphIdsAfterDiscovery(): string[];
+}
+
+interface LifecycleSyncInvocationPolicy {
+  readonly canStart: boolean;
+  readonly includeSystemContextGraphs: boolean;
+  readonly syncSharedMemory: boolean;
+  buildScopePlan(defaultPlan: LifecycleSyncScopePlan): LifecycleSyncScopePlan;
+  requestedSharedMemoryContextGraphIds(
+    contextGraphIdsAfterDiscovery: readonly string[],
+  ): string[];
+  filterSharedMemoryPlan(
+    plan: SharedMemorySyncContextGraphPlan,
+  ): SharedMemorySyncContextGraphPlan;
+  sharedMemoryInvocationContextGraphIds(
+    requestedContextGraphIds: string[],
+    plan: SharedMemorySyncContextGraphPlan,
+  ): string[];
+}
+
+function createLifecycleSyncInvocationPolicy(input: {
+  readonly initialRehydratedAlwaysOnContextGraphIds: readonly string[];
+  readonly nodeRole: 'core' | 'edge';
+  readonly syncOnConnect: boolean;
+  readonly syncSharedMemoryOnConnect: boolean;
+  readonly trigger: SyncCoverageEvidenceTrigger | undefined;
+  getLiveRehydratedAlwaysOnContextGraphIds(): string[];
+}): LifecycleSyncInvocationPolicy {
+  const periodicEdgeRehydration = input.nodeRole === 'edge'
+    && input.trigger === 'periodic-reconciler';
+  if (periodicEdgeRehydration) {
+    return {
+      canStart: input.syncOnConnect
+        || input.initialRehydratedAlwaysOnContextGraphIds.length > 0,
+      includeSystemContextGraphs: false,
+      syncSharedMemory: true,
+      buildScopePlan: (defaultPlan) => {
+        const live = input.getLiveRehydratedAlwaysOnContextGraphIds();
+        return {
+          effectiveBatchSize: Math.min(defaultPlan.effectiveBatchSize, live.length),
+          automaticContextGraphIds: [],
+          initialDurableContextGraphIds: [...live],
+          contextGraphIdsAfterDiscovery: input.getLiveRehydratedAlwaysOnContextGraphIds,
+        };
+      },
+      requestedSharedMemoryContextGraphIds: () =>
+        input.getLiveRehydratedAlwaysOnContextGraphIds(),
+      filterSharedMemoryPlan: (plan) => {
+        const live = new Set(input.getLiveRehydratedAlwaysOnContextGraphIds());
+        return {
+          ...plan,
+          eligibleContextGraphIds: plan.eligibleContextGraphIds.filter((id) => live.has(id)),
+        };
+      },
+      sharedMemoryInvocationContextGraphIds: (_requestedContextGraphIds, plan) =>
+        plan.eligibleContextGraphIds,
+    };
+  }
+  return {
+    canStart: input.syncOnConnect,
+    includeSystemContextGraphs: true,
+    syncSharedMemory: input.syncOnConnect && input.syncSharedMemoryOnConnect,
+    buildScopePlan: (defaultPlan) => defaultPlan,
+    requestedSharedMemoryContextGraphIds: (contextGraphIdsAfterDiscovery) =>
+      [...new Set(contextGraphIdsAfterDiscovery)],
+    filterSharedMemoryPlan: (plan) => plan,
+    sharedMemoryInvocationContextGraphIds: (requestedContextGraphIds) =>
+      requestedContextGraphIds,
+  };
+}
+
 const automaticSyncInvocationBrand: unique symbol = Symbol('automatic-sync-invocation');
 
 interface AutomaticSyncInvocation {
@@ -3904,14 +3979,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const configured = [...new Set(this.config.syncContextGraphs ?? [])];
       return this.getRehydratedAlwaysOnEvidenceContextGraphIds(configured);
     };
-    const scopedEdgePeriodicInvocation = (this.config.nodeRole ?? 'edge') === 'edge'
-      && trigger === 'periodic-reconciler';
     const initialRehydratedAlwaysOnContextGraphIds =
       getLiveRehydratedAlwaysOnContextGraphIds();
-    if (
-      !syncOnConnectEnabled(this.config)
-      && !(scopedEdgePeriodicInvocation && initialRehydratedAlwaysOnContextGraphIds.length > 0)
-    ) {
+    const invocationPolicy = createLifecycleSyncInvocationPolicy({
+      initialRehydratedAlwaysOnContextGraphIds,
+      nodeRole: this.config.nodeRole ?? 'edge',
+      syncOnConnect: syncOnConnectEnabled(this.config),
+      syncSharedMemoryOnConnect: this.config.syncSharedMemoryOnConnect ?? true,
+      trigger,
+      getLiveRehydratedAlwaysOnContextGraphIds,
+    });
+    if (!invocationPolicy.canStart) {
       return 'not-started';
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
@@ -3933,17 +4011,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const rehydratedAlwaysOnContextGraphIds =
         getLiveRehydratedAlwaysOnContextGraphIds();
       const defaultScopePlan = this.planCorePublicSyncPeerRound(remotePeer);
-      const scopePlan = scopedEdgePeriodicInvocation
-        ? {
-          effectiveBatchSize: Math.min(
-            defaultScopePlan.effectiveBatchSize,
-            rehydratedAlwaysOnContextGraphIds.length,
-          ),
-          automaticContextGraphIds: [],
-          initialDurableContextGraphIds: [...rehydratedAlwaysOnContextGraphIds],
-          contextGraphIdsAfterDiscovery: getLiveRehydratedAlwaysOnContextGraphIds,
-        }
-        : defaultScopePlan;
+      const scopePlan = invocationPolicy.buildScopePlan(defaultScopePlan);
       evidence.beginRound({
         effectiveBatchSize: scopePlan.effectiveBatchSize,
         selectedContextGraphIds: configuredContextGraphIds,
@@ -3957,9 +4025,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: string,
       contextGraphIdsAfterDiscovery: readonly string[],
     ): Promise<SharedMemorySyncContextGraphPlan> => {
-      const requestedContextGraphIds = scopedEdgePeriodicInvocation
-        ? getLiveRehydratedAlwaysOnContextGraphIds()
-        : [...new Set(contextGraphIdsAfterDiscovery)];
+      const requestedContextGraphIds =
+        invocationPolicy.requestedSharedMemoryContextGraphIds(contextGraphIdsAfterDiscovery);
       const key = `${peerId}\0${requestedContextGraphIds.join('\0')}`;
       let plan = sharedMemorySyncPlans.get(key);
       if (!plan) {
@@ -3971,12 +4038,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         sharedMemorySyncPlans.set(key, plan);
       }
       const resolved = await plan;
-      if (!scopedEdgePeriodicInvocation) return resolved;
-      const live = new Set(getLiveRehydratedAlwaysOnContextGraphIds());
-      return {
-        ...resolved,
-        eligibleContextGraphIds: resolved.eligibleContextGraphIds.filter((id) => live.has(id)),
-      };
+      return invocationPolicy.filterSharedMemoryPlan(resolved);
     };
     let terminalOutcome: SyncOnConnectOutcome | undefined;
     try {
@@ -4012,9 +4074,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
         syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
           const plan = await getSharedMemorySyncPlan(peerId, contextGraphIds);
-          const requestedContextGraphIds = scopedEdgePeriodicInvocation
-            ? plan.eligibleContextGraphIds
-            : contextGraphIds;
+          const requestedContextGraphIds =
+            invocationPolicy.sharedMemoryInvocationContextGraphIds(contextGraphIds, plan);
           const result = await this.syncSharedMemoryFromPeerDetailed(
             peerId,
             requestedContextGraphIds,
@@ -4030,11 +4091,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           evidence.markSharedMemoryResult(result);
           return result;
         },
-        syncSharedMemoryOnConnect:
-          scopedEdgePeriodicInvocation
-            || (syncOnConnectEnabled(this.config)
-              && (this.config.syncSharedMemoryOnConnect ?? true)),
-        includeSystemContextGraphs: !scopedEdgePeriodicInvocation,
+        syncSharedMemoryOnConnect: invocationPolicy.syncSharedMemory,
+        includeSystemContextGraphs: invocationPolicy.includeSystemContextGraphs,
         logInfo: (ctx, message) => this.log.info(ctx, message),
         onPeerSkippedNoSync: (peerId) => {
           this.skippedNoSyncPeers.add(peerId);
