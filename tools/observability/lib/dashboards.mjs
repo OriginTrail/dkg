@@ -12,6 +12,7 @@ import {
   severityMatches,
   RPC_USAGE_PIPELINE,
 } from './queries.mjs';
+import { buildW1GrafanaModel } from './w1.mjs';
 
 const LOKI = { type: 'loki', uid: '${loki}' };
 const VM = { type: 'prometheus', uid: '${vm}' };
@@ -82,6 +83,17 @@ const INSTANT_LOKI_TARGET = (refId, expr, legendFormat) => ({
   legendFormat,
   instant: true,
   queryType: 'instant',
+});
+
+const INSTANT_PROM_TARGET = (refId, expr, legendFormat) => ({
+  datasource: VM,
+  refId,
+  expr,
+  legendFormat,
+  instant: true,
+  range: false,
+  queryType: 'instant',
+  editorMode: 'code',
 });
 
 const BACKPRESSURE_FLAME = (stream) => {
@@ -198,6 +210,134 @@ const BACKPRESSURE_HEATMAP = (stream, phase) => {
     },
   };
 };
+
+const W1_FLAMEGRAPH = (targets) => ({
+  w: 24,
+  h: 14,
+  def: {
+    datasource: VM,
+    type: 'flamegraph',
+    title: 'Source-attributed sync active occupancy — $node',
+    description: 'Hierarchy is source → requester lane → terminal outcome. Width is completed logical-sync active wall-clock occupancy accumulated over the selected Grafana range. It is admitted occupancy, not CPU time, and excludes rejected-before-start operations (shown separately).',
+    options: { showFlameGraphOnly: false },
+    fieldConfig: { defaults: { unit: 'ms' }, overrides: [] },
+    targets: [
+      INSTANT_PROM_TARGET('A', targets.flame_root, '0|0|all selected sync occupancy'),
+      INSTANT_PROM_TARGET('B', targets.flame_source, '1|0|{{source}}'),
+      INSTANT_PROM_TARGET('C', targets.flame_source_lane, '2|0|{{source}}/{{lane}}'),
+      INSTANT_PROM_TARGET('D', targets.flame_source_lane_outcome, '3|1|{{source}}/{{lane}}/{{outcome}}'),
+    ],
+    transformations: [
+      { id: 'seriesToRows', options: {} },
+      {
+        id: 'extractFields',
+        options: {
+          source: 'Metric',
+          format: 'regexp',
+          regexp: '(?<level>\\d+)\\|(?<leaf>[01])\\|(?<label>.*)',
+          replace: false,
+        },
+      },
+      {
+        id: 'convertFieldType',
+        options: {
+          conversions: [
+            { targetField: 'level', destinationType: 'number' },
+            { targetField: 'leaf', destinationType: 'number' },
+          ],
+        },
+      },
+      {
+        id: 'calculateField',
+        options: {
+          mode: 'binary',
+          binary: {
+            left: { matcher: { id: 'byName', options: 'Value' } },
+            operator: '*',
+            right: { matcher: { id: 'byName', options: 'leaf' } },
+          },
+          alias: 'self',
+          replaceFields: false,
+        },
+      },
+      {
+        id: 'organize',
+        options: {
+          excludeByName: { Time: true, Metric: true, leaf: true },
+          indexByName: { level: 0, label: 1, Value: 2, self: 3 },
+          renameByName: { Value: 'value' },
+        },
+      },
+    ],
+  },
+});
+
+const PROM_HISTOGRAM_HEATMAP = (w, title, description, expr, scheme = 'Oranges') => ({
+  w,
+  h: 12,
+  def: {
+    datasource: VM,
+    type: 'heatmap',
+    title,
+    description,
+    fieldConfig: { defaults: { unit: 'ms' }, overrides: [] },
+    options: {
+      calculate: false,
+      cellGap: 1,
+      cellValues: {},
+      color: { mode: 'scheme', scheme, steps: 64, reverse: false, scale: 'exponential', exponent: 0.5 },
+      filterValues: { le: 0 },
+      legend: { show: true },
+      rowsFrame: { layout: 'auto' },
+      tooltip: { mode: 'single', showColorScale: true, yHistogram: true },
+      yAxis: { axisPlacement: 'left', reverse: false, unit: 'ms' },
+    },
+    targets: [{
+      datasource: VM,
+      refId: 'A',
+      expr,
+      format: 'heatmap',
+      legendFormat: '{{le}}',
+      queryType: 'range',
+      editorMode: 'code',
+    }],
+  },
+});
+
+const STAT = (w, title, description, expr, unit = 'short', thresholds) => ({
+  w,
+  h: 6,
+  def: {
+    datasource: VM,
+    type: 'stat',
+    title,
+    description,
+    fieldConfig: {
+      defaults: {
+        unit,
+        ...(thresholds ? { color: { mode: 'thresholds' }, thresholds } : {}),
+      },
+      overrides: [],
+    },
+    options: {
+      colorMode: thresholds ? 'value' : 'none',
+      graphMode: 'area',
+      justifyMode: 'auto',
+      reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false },
+      textMode: 'auto',
+    },
+    targets: [INSTANT_PROM_TARGET('A', expr, '')],
+  },
+});
+
+const MIN_GATE = (minimum) => ({ mode: 'absolute', steps: [
+  { color: 'red', value: null },
+  { color: 'green', value: minimum },
+] });
+const ZERO_GATE = { mode: 'absolute', steps: [
+  { color: 'green', value: null },
+  { color: 'red', value: 1 },
+] };
 
 // Loki query building blocks come from the shared contract (lib/queries.mjs)
 // — the same module alerts.mjs composes from, so the stream selector,
@@ -341,6 +481,112 @@ const buildMetricsDashboard = (nodeProfile, NODE_IDENTITY) => {
   };
 };
 
+const buildSyncCostDashboard = (nodeProfile, NODE_IDENTITY) => {
+  const model = buildW1GrafanaModel({ nodeProfile });
+  const Q = model.targets;
+  const multiCustom = (name, label, values) => ({
+    name,
+    label,
+    type: 'custom',
+    query: values.join(','),
+    includeAll: true,
+    multi: true,
+    allValue: '.+',
+    current: { text: ['All'], value: ['$__all'] },
+  });
+  return {
+    uid: 'dkg-sync-cost',
+    title: 'DKG Nodes — Sync Cost',
+    timezone: 'browser',
+    refresh: '1m',
+    time: { from: 'now-6h', to: 'now' },
+    tags: ['dkg', 'metrics', 'sync'],
+    links: dashLinks,
+    description: `PR #2033 W1 source-attributed sync telemetry (I1–I9). Node label profile: ${nodeProfile.label}. The dashboard is an interactive operational view; the generated w1/w1-queries.md remains the fixed 1 h / 2 h decision contract.`,
+    templating: { list: [
+      { name: 'vm', type: 'datasource', query: 'prometheus', label: 'Metrics DS', hide: 2, current: {} },
+      nodeVarMulti(NODE_IDENTITY.metrics),
+      multiCustom('sync_source', 'Sync source', model.variables.sources),
+      multiCustom('sync_lane', 'Operation lane', model.variables.lanes),
+      multiCustom('sync_outcome', 'Operation outcome', model.variables.outcomes),
+    ] },
+    panels: layout([
+      [ TEXT('**Requires the extended sync diagnostics from PR #2033 and node metric export.** The flame graph and duration heatmaps use real OpenTelemetry counters/histograms, while the existing **DKG Node — Logs** pressure views continue to use Loki transition/summary records. Filter the interactive operation views with the source/lane/outcome controls above. The evidence and materiality panels intentionally retain W1\'s fixed durable filters and source-family rules; a failed gate means **inconclusive**, not healthy.') ],
+      [ ROW('Source-attributed sync cost (I1–I4)') ],
+      [ W1_FLAMEGRAPH(Q) ],
+      [
+        TS(8, 9, VM, 'Physical sync attempts by source/outcome (I1)', [
+          { expr: Q.attempts_rate, legend: '{{source}} · {{outcome}} · {{transport}}/{{plane}}/{{phase}}' },
+        ], 'ops'),
+        TS(8, 9, VM, 'Encoded payload throughput by source (I2 + I3)', [
+          { expr: Q.request_bytes_rate, legend: 'request · {{source}}' },
+          { expr: Q.response_bytes_rate, legend: 'response · {{source}} · {{outcome}}' },
+        ], 'Bps'),
+        TS(8, 9, VM, 'Average active worker equivalents (I4 sum)', [
+          { expr: Q.active_worker_equivalents, legend: '{{source}} · {{lane}} · {{outcome}}' },
+        ], 'short'),
+      ],
+      [
+        PROM_HISTOGRAM_HEATMAP(12, 'Logical sync operation duration heatmap (I4)', 'Completed logical-sync duration distribution for the selected source/lane/outcome filters. Rejected-before-start work is excluded by contract and appears in I5.', Q.sync_operation_duration_buckets, 'Reds'),
+        PROM_HISTOGRAM_HEATMAP(12, 'Sync scheduler queue-wait heatmap (corroborating P1)', 'Queue-wait distribution for the sync-global scheduler and selected operation lanes. This corroborates W1 cost; it is not one of I1–I9.', Q.queue_wait_buckets, 'Oranges'),
+      ],
+      [ TS(24, 7, VM, 'Oldest queued sync item age by lane (corroborating P2)', [
+        { expr: Q.oldest_queued_age, legend: '{{lane}}' },
+      ], 'ms') ],
+
+      [ ROW('Admission and coalescing (I5–I6)') ],
+      [
+        TS(12, 9, VM, 'Operations rejected before starting (I5)', [
+          { expr: Q.rejected_rate, legend: '{{source}} · {{lane}} · {{reason}}' },
+        ], 'ops'),
+        TS(12, 9, VM, 'Single-flight joins (I6)', [
+          { expr: Q.singleflight_joins_rate, legend: '{{scope}} · {{owner_source}} ← {{joiner_source}}' },
+        ], 'ops'),
+      ],
+
+      [ ROW('Catch-up request and job accounting (I7–I9)') ],
+      [
+        TS(8, 9, VM, 'Catch-up requests by route result (I7)', [
+          { expr: Q.catchup_requests_rate, legend: '{{result}} · swm={{include_shared_memory}}' },
+        ], 'ops'),
+        TS(8, 9, VM, 'Catch-up jobs by terminal state (I8)', [
+          { expr: Q.catchup_jobs_rate, legend: '{{status}} · {{admission}}' },
+        ], 'ops'),
+        TS(8, 9, VM, 'Walk catch-up duration p95 (I9)', [
+          { expr: Q.catchup_duration_p95, legend: 'walk p95' },
+        ], 'ms'),
+      ],
+      [ PROM_HISTOGRAM_HEATMAP(24, 'Walk catch-up job duration heatmap (I9)', 'Wall-clock duration distribution for real walk jobs. Synthetic already-ready jobs deliberately produce no zero-duration sample.', Q.catchup_duration_buckets, 'Blues') ],
+
+      [ ROW('W1 evidence gates — selected Grafana range') ],
+      [ TEXT('These six panels are the same gate expressions as the generated W1 decision packet, evaluated over the selected Grafana range. Threshold colors encode the fixed contract where a numeric threshold exists. **All gates must pass** before interpreting the source-family shares; low export coverage must be compared with selected-range length ÷ scrape interval.') ],
+      [
+        STAT(4, 'Completed durable operations', 'I4 count; must be at least 200.', Q.gate_completed_operations, 'short', MIN_GATE(200)),
+        STAT(4, 'Attributed durable payload', 'I2 + I3; must be at least 50 MB.', Q.gate_payload_bytes, 'bytes', MIN_GATE(50_000_000)),
+        STAT(4, 'Cross-family joins', 'I6; must remain zero.', Q.gate_cross_family_joins, 'short', ZERO_GATE),
+        STAT(4, 'Unclassified source samples', 'I1/I4/I5; must remain zero.', Q.gate_invalidating_sources, 'short', ZERO_GATE),
+        STAT(4, 'Counter resets', 'Must remain zero inside the selected range.', Q.gate_counter_resets, 'short', ZERO_GATE),
+        STAT(4, 'Minimum export samples', 'Compare with selected-range length divided by scrape interval.', Q.gate_export_samples),
+      ],
+
+      [ ROW('W1 materiality and source-family decision') ],
+      [
+        STAT(6, 'All-source durable active ms/hour', 'I4 strain denominator; occupancy, not CPU.', Q.all_source_active_ms_per_hour, 'ms'),
+        STAT(6, 'All-source durable bytes/hour', 'I2 + I3 volume denominator.', Q.all_source_bytes_per_hour, 'bytes'),
+        STAT(6, 'Excluded-family bytes/hour', 'Background, VM/SWM recovery, and control-plane traffic.', Q.excluded_bytes_per_hour, 'bytes'),
+        STAT(6, 'Excluded-family active ms/hour', 'Reported separately; never eligible for the shadow decision.', Q.excluded_active_ms_per_hour, 'ms'),
+      ],
+      [
+        STAT(4, 'Eligible active share', 'Foreground + recurring share of all-source active occupancy; must reach 30%.', Q.eligible_active_share, 'percentunit', MIN_GATE(0.30)),
+        STAT(5, 'Foreground share — bytes', 'A candidate family must reach 60% on both axes.', Q.foreground_bytes_share, 'percentunit'),
+        STAT(5, 'Foreground share — active ms', 'A candidate family must reach 60% on both axes.', Q.foreground_active_share, 'percentunit'),
+        STAT(5, 'Recurring share — bytes', 'A candidate family must reach 60% on both axes.', Q.recurring_bytes_share, 'percentunit'),
+        STAT(5, 'Recurring share — active ms', 'A candidate family must reach 60% on both axes.', Q.recurring_active_share, 'percentunit'),
+      ],
+    ]),
+  };
+};
+
 const TQ = (w, h, title, q, limit) => ({ w, h, def: { datasource: TEMPO, type: 'table', title,
   targets: [{ datasource: TEMPO, refId: 'A', queryType: 'traceql', query: q, limit: limit ?? 20, tableType: 'traces', filters: [] }] } });
 const NODEQ = 'resource.service.name="dkg-node" && resource.service.instance.id=~"${node:regex}"';
@@ -369,6 +615,7 @@ export const buildDashboards = ({ nodeProfile }) => {
     fleet: buildFleetLogsDashboard(),
     nodeLogs: buildNodeLogsDashboard(NODE_IDENTITY),
     metrics: buildMetricsDashboard(nodeProfile, NODE_IDENTITY),
+    syncCost: buildSyncCostDashboard(nodeProfile, NODE_IDENTITY),
     traces: buildTracesDashboard(NODE_IDENTITY),
   };
 };

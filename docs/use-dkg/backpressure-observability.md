@@ -217,6 +217,48 @@ fell into that time/age bucket; it does not mean more CPU was consumed. Empty
 periods mean Loki received no matching diagnostic sample, not necessarily that
 the scheduler was idle.
 
+## Grafana source-attributed sync cost
+
+The **DKG Nodes — Sync Cost** dashboard is the interactive Grafana companion
+to the W1 measurement contract introduced by PR #2033. It reads OpenTelemetry
+metrics from VictoriaMetrics and keeps the existing Loki pressure dashboard
+intact: logs answer what was present in a bounded pressure snapshot, while the
+metrics dashboard measures completed work, transferred payload, admission
+pressure, and catch-up outcomes over time.
+
+The dashboard covers every W1 instrument:
+
+| Instrument | Dashboard view |
+| --- | --- |
+| I1 physical sync attempts | Rate by source, outcome, transport, plane, and phase |
+| I2/I3 request and response payload bytes | Throughput by source and response outcome |
+| I4 logical operation duration | Source/lane/outcome flame graph, active-worker equivalents, and duration heatmap |
+| I5 rejected operations | Rate by source, lane, and bounded reason |
+| I6 single-flight joins | Rate by scope, owner source, and joining source |
+| I7 catch-up requests | Rate by route result and shared-memory request flag |
+| I8 catch-up jobs | Rate by terminal status and admission path |
+| I9 catch-up job duration | Walk-job p95 and duration heatmap |
+
+The flame-graph width is accumulated **active wall-clock occupancy** for
+completed logical sync operations in the selected Grafana range. It is not CPU
+time. Operations rejected before they start never receive a zero-duration I4
+sample; they appear in I5 instead.
+
+The two Prometheus heatmaps read real histogram buckets rather than estimating
+a distribution from log samples:
+
+- logical sync operation duration uses I4 and follows the selected
+  source/lane/outcome filters;
+- walk catch-up duration uses I9 and deliberately excludes synthetic
+  already-ready jobs, which perform no work.
+
+The dashboard also renders the W1 evidence gates and source-family shares over
+the selected Grafana range. Those interactive panels are for investigation;
+the generated `tools/observability/w1/w1-queries.md` packet remains the fixed
+1-hour/2-hour decision contract. Any failed evidence gate makes the window
+**inconclusive** rather than healthy, and the byte counters describe encoded
+application payload rather than network-wire bandwidth.
+
 ## Metrics
 
 The common OpenTelemetry instruments use bounded `scheduler` and `lane`

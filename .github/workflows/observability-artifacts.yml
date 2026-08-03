@@ -106,12 +106,12 @@ jobs:
       # contract. `--entrypoint promtool` is REQUIRED: the image entrypoint is
       # ["/bin/prometheus"], so the un-overridden form fails with
       # `prometheus: error: unexpected promtool`.
-      - name: Parse the W1 rule fixture (pinned promtool)
+      - name: Parse the W1 decision and Grafana-dashboard rule fixtures (pinned promtool)
         run: |
           set -euo pipefail
           docker run --rm -v "${PWD}/tools/observability:/w" --entrypoint promtool \
             prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218 \
-            check rules /w/w1/w1-rules.yaml
+            check rules /w/w1/w1-rules.yaml /w/w1/w1-dashboard-rules.yaml
 
       # `check rules` proves the expressions PARSE. It is blind to what they
       # RETURN, and the defect that motivated these tests parsed perfectly:

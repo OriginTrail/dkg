@@ -145,6 +145,144 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   }
 }
 
+// ── W1 sync-cost dashboard: complete I1–I9 surface + parser fixture ───────
+{
+  const dash = load('grafana-dashboard-dkg-sync-cost.json');
+  const nodeVar = (dash.templating?.list ?? []).find((v) => v.name === 'node');
+  const wantVarQuery = `label_values({__name__=~"dkg_.+"}, ${LABEL})`;
+  if (!nodeVar) fail('sync-cost dashboard', 'no $node template variable');
+  else if (nodeVar.query !== wantVarQuery) fail('sync-cost dashboard $node variable', `query is ${JSON.stringify(nodeVar.query)}, want ${JSON.stringify(wantVarQuery)}`);
+
+  const expectedVariables = {
+    sync_source: 'catchup-foreground,on-connect,reconcile,catchup-background,vm-recovery,swm-recovery,control-plane,unspecified',
+    sync_lane: 'durable,changelog,shared_memory,swm_recovery',
+    sync_outcome: 'resolved,error,cancelled',
+  };
+  for (const [name, query] of Object.entries(expectedVariables)) {
+    const variable = (dash.templating?.list ?? []).find((v) => v.name === name);
+    if (!variable) fail('sync-cost dashboard', `missing $${name} variable`);
+    else {
+      if (variable.query !== query) fail(`sync-cost dashboard $${name}`, `query is ${JSON.stringify(variable.query)}, want ${JSON.stringify(query)}`);
+      if (!variable.includeAll || !variable.multi || variable.allValue !== '.+') {
+        fail(`sync-cost dashboard $${name}`, 'must be multi-select with an explicit .+ All value');
+      }
+    }
+  }
+
+  const allPanels = (dash.panels ?? []).flatMap((panel) => [panel, ...(panel.panels ?? [])]);
+  const allTargets = allPanels.flatMap((panel) => (panel.targets ?? []).map((target) => ({ panel, target })));
+  const nodeFilter = `${LABEL}=~"\${node:regex}"`;
+  const dashboardExprs = [];
+  for (const { panel, target } of allTargets) {
+    const expr = target.expr ?? '';
+    if (!/dkg_/.test(expr)) continue;
+    dashboardExprs.push(expr);
+    const where = `sync-cost panel "${panel.title}" target ${target.refId}`;
+    for (const sel of dkgSelectorViolations(expr, nodeFilter)) {
+      fail(where, `dkg_* selector lacks the profiled node filter ${nodeFilter}: ${sel}`);
+    }
+    if (profiled) {
+      if (usesUnprofiledLabel(expr)) fail(where, `unprofiled '${DEFAULT_LABEL}' label survived in expr: ${expr}`);
+      if (target.legendFormat && legendRe(DEFAULT_LABEL).test(target.legendFormat)) fail(where, `unprofiled legend: ${target.legendFormat}`);
+    }
+  }
+  if (profiled) {
+    for (const variable of dash.templating?.list ?? []) {
+      const query = typeof variable.query === 'string' ? variable.query : JSON.stringify(variable.query ?? '');
+      if (usesUnprofiledLabel(query)) fail(`sync-cost dashboard variable $${variable.name}`, `unprofiled '${DEFAULT_LABEL}' in query: ${query}`);
+    }
+  }
+
+  const expressionText = dashboardExprs.join('\n');
+  const expectedInstruments = [
+    'dkg_sync_attempt_total',
+    'dkg_sync_attempt_request_bytes',
+    'dkg_sync_attempt_response_bytes',
+    'dkg_sync_operation_duration_ms',
+    'dkg_sync_operation_rejected_total',
+    'dkg_sync_singleflight_joins_total',
+    'dkg_context_graph_catchup_requests_total',
+    'dkg_context_graph_catchup_jobs_total',
+    'dkg_context_graph_catchup_job_duration_ms',
+  ];
+  for (const instrument of expectedInstruments) {
+    if (!expressionText.includes(instrument)) fail('sync-cost dashboard', `W1 instrument ${instrument} is not read by any panel`);
+  }
+
+  const flame = allPanels.find((panel) => panel.type === 'flamegraph');
+  if (!flame) fail('sync-cost dashboard', 'source-attributed flamegraph is missing');
+  else {
+    const refs = (flame.targets ?? []).map((target) => target.refId).join('');
+    if (refs !== 'ABCD') fail('sync-cost dashboard flamegraph', `target order is ${JSON.stringify(refs)}, want ABCD`);
+    const transforms = (flame.transformations ?? []).map((transform) => transform.id);
+    const wanted = ['seriesToRows', 'extractFields', 'convertFieldType', 'calculateField', 'organize'];
+    if (JSON.stringify(transforms) !== JSON.stringify(wanted)) {
+      fail('sync-cost dashboard flamegraph', `transform chain is ${JSON.stringify(transforms)}, want ${JSON.stringify(wanted)}`);
+    }
+    const exprs = (flame.targets ?? []).map((target) => target.expr ?? '').join('\n');
+    for (const label of ['source', 'lane', 'outcome']) {
+      if (!exprs.includes(label)) fail('sync-cost dashboard flamegraph', `hierarchy does not include ${label}`);
+    }
+    if (!exprs.includes('$__range')) fail('sync-cost dashboard flamegraph', 'width is not evaluated over the selected Grafana range');
+  }
+
+  const heatmaps = allPanels.filter((panel) => panel.type === 'heatmap');
+  const expectedHeatmaps = [
+    ['Logical sync operation duration heatmap', 'dkg_sync_operation_duration_ms'],
+    ['Sync scheduler queue-wait heatmap', 'dkg_sync_scheduler_queue_wait_ms'],
+    ['Walk catch-up job duration heatmap', 'dkg_context_graph_catchup_job_duration_ms'],
+  ];
+  if (heatmaps.length !== expectedHeatmaps.length) {
+    fail('sync-cost dashboard', `expected ${expectedHeatmaps.length} histogram heatmaps, got ${heatmaps.length}`);
+  }
+  for (const [title, metric] of expectedHeatmaps) {
+    const panel = heatmaps.find((candidate) => candidate.title?.startsWith(title));
+    const where = `sync-cost dashboard ${title}`;
+    if (!panel) { fail(where, 'panel is missing'); continue; }
+    if (panel.options?.calculate !== false) fail(where, 'must consume server-side Prometheus histogram buckets');
+    if (panel.fieldConfig?.defaults?.unit !== 'ms' || panel.options?.yAxis?.unit !== 'ms') fail(where, 'must render duration in milliseconds');
+    const [target, ...extra] = panel.targets ?? [];
+    if (!target || extra.length) { fail(where, `expected exactly one target, got ${(panel.targets ?? []).length}`); continue; }
+    if (target.format !== 'heatmap' || target.queryType !== 'range') fail(where, 'target must be a Prometheus range heatmap');
+    if (!target.expr?.includes(metric) || !target.expr?.includes('_bucket') || !target.expr?.includes('sum by (le)')) {
+      fail(where, `target is not a bucket aggregation for ${metric}`);
+    }
+  }
+
+  for (const title of [
+    'Completed durable operations',
+    'Attributed durable payload',
+    'Cross-family joins',
+    'Unclassified source samples',
+    'Counter resets',
+    'Minimum export samples',
+  ]) {
+    if (!allPanels.some((panel) => panel.type === 'stat' && panel.title === title)) {
+      fail('sync-cost dashboard evidence gates', `stat panel "${title}" is missing`);
+    }
+  }
+
+  // The generated promtool fixture must be expression-identical to the
+  // dashboard after substituting only Grafana runtime variables. That makes
+  // the CI parser check certify every panel query, rather than a nearby copy.
+  const substituteGrafana = (expr) => expr
+    .replaceAll('${node:regex}', '.*')
+    .replaceAll('${sync_source:regex}', '.*')
+    .replaceAll('${sync_lane:regex}', '.*')
+    .replaceAll('${sync_outcome:regex}', '.*')
+    .replaceAll('$__rate_interval', '5m')
+    .replaceAll('$__range', '2h');
+  const fixtureText = fs.readFileSync(path.join(DIR, 'w1/w1-dashboard-rules.yaml'), 'utf8').replace(/\r\n/g, '\n');
+  const fixtureExprs = [...fixtureText.matchAll(/^ {8}expr: "((?:[^"\\]|\\.)*)"$/gm)]
+    .map((match) => match[1].replace(/\\(["\\])/g, '$1'));
+  const sorted = (values) => [...values].sort();
+  const rendered = sorted(dashboardExprs.map(substituteGrafana));
+  const fixture = sorted(fixtureExprs);
+  if (rendered.length !== fixture.length || rendered.some((expr, index) => expr !== fixture[index])) {
+    fail('sync-cost dashboard ↔ w1-dashboard-rules.yaml', `expression sets differ (${rendered.length} dashboard targets vs ${fixture.length} fixture rules)`);
+  }
+}
+
 // ── logs dashboard: PR #2003 worker-pressure surface ──────────────────────
 {
   const dash = load('grafana-dashboard-dkg-node-logs.json');
