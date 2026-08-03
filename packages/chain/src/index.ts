@@ -69,6 +69,13 @@ export {
 } from './strict-current-finalized-evm-rpc.js';
 export { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from './strict-current-finalized-evm-snapshot-factory.js';
 export {
+  FINALIZED_CHAIN_READ_MAX_CONCURRENT_PER_CHAIN_V1,
+  FINALIZED_CHAIN_READ_OWNERS,
+  acquireFinalizedChainRead,
+  finalizedChainReadRegistryDepth,
+  type FinalizedChainReadOwnerV1,
+} from './finalized-chain-read-admission.js';
+export {
   type StrictCurrentFinalizedEvmReadCallV1,
   type StrictCurrentFinalizedEvmReadRequestV1,
   type StrictCurrentFinalizedEvmReadResultV1,

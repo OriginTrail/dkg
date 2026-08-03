@@ -3,13 +3,44 @@ import { assertCanonicalChainId } from '@origintrail-official/dkg-core';
 import { CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1 } from './current-finalized-evm-read-profile.js';
 import { snapshotDenseDataArray } from './strict-local-data.js';
 import {
+  FINALIZED_CHAIN_READ_OWNERS,
+  type FinalizedChainReadOwnerV1,
+} from './finalized-chain-read-admission.js';
+import {
   CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1,
   type StrictCurrentFinalizedEvmRpcConfigV1,
+  type StrictFinalizedSnapshotConfigSnapshotV1,
+  type StrictFinalizedSnapshotRpcConfigV1,
   type StrictRpcConfigSnapshotV1,
 } from './strict-current-finalized-evm-types.js';
 
 const CONFIG_REQUIRED_KEYS = Object.freeze(['chainId', 'endpoints'] as const);
 const CONFIG_OPTIONAL_KEYS = Object.freeze(['blockReferenceProfile'] as const);
+
+/**
+ * Snapshot-path config: identical validation plus a REQUIRED owner.
+ *
+ * `owner` is peeled off before delegating rather than added to the shared
+ * allowlist, because the one-shot read path has no owner concept and silently
+ * accepting a field it ignores is worse than rejecting it.
+ */
+export function snapshotStrictFinalizedSnapshotConfigV1(
+  input: StrictFinalizedSnapshotRpcConfigV1,
+): StrictFinalizedSnapshotConfigSnapshotV1 {
+  if (!isPlainRecord(input)) {
+    throw new TypeError('Strict finalized snapshot RPC config must be a plain data record');
+  }
+  const { owner, ...rest } = input;
+  if (!FINALIZED_CHAIN_READ_OWNERS.includes(owner as FinalizedChainReadOwnerV1)) {
+    throw new TypeError(
+      `Strict finalized snapshot RPC config requires a known owner, got "${String(owner)}"`,
+    );
+  }
+  return Object.freeze({
+    ...snapshotStrictCurrentFinalizedEvmConfigV1(rest as StrictCurrentFinalizedEvmRpcConfigV1),
+    owner: owner as FinalizedChainReadOwnerV1,
+  });
+}
 
 export function snapshotStrictCurrentFinalizedEvmConfigV1(
   input: StrictCurrentFinalizedEvmRpcConfigV1,

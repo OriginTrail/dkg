@@ -17,7 +17,7 @@ import {
   createStrictFinalizedSnapshotTransportV1,
   type StrictFinalizedSnapshotTransportSessionV1,
 } from './strict-current-finalized-evm-snapshot-transport.js';
-import type { StrictRpcConfigSnapshotV1 } from './strict-current-finalized-evm-types.js';
+import type { StrictFinalizedSnapshotConfigSnapshotV1 } from './strict-current-finalized-evm-types.js';
 
 interface SnapshotReadSessionControllerV1 {
   readonly session: StrictCurrentFinalizedEvmSnapshotSessionV1;
@@ -26,7 +26,7 @@ interface SnapshotReadSessionControllerV1 {
 
 /** Package-internal runtime for a scoped, pinned finalized snapshot. */
 export function createStrictFinalizedSnapshotRpcRuntimeV1(
-  config: StrictRpcConfigSnapshotV1,
+  config: StrictFinalizedSnapshotConfigSnapshotV1,
 ): StrictCurrentFinalizedEvmSnapshotScopeV1 {
   const transport = createStrictFinalizedSnapshotTransportV1(config);
   const withSnapshot: StrictCurrentFinalizedEvmSnapshotScopeV1 = async (

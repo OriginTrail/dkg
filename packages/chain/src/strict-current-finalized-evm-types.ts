@@ -4,6 +4,8 @@ import type {
   Digest32V1,
 } from '@origintrail-official/dkg-core';
 
+import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
+
 export const CURRENT_FINALIZED_EVM_BLOCK_REFERENCE_PROFILES_V1 = Object.freeze([
   'eip1898',
   'trusted-block-number-hash-sandwich',
@@ -28,6 +30,21 @@ export interface StrictRpcConfigSnapshotV1 {
   readonly chainId: ChainIdV1;
   readonly endpoints: readonly string[];
   readonly blockReferenceProfile: CurrentFinalizedEvmBlockReferenceProfileV1;
+}
+
+/**
+ * Snapshot callers must declare an owner. It is REQUIRED, not optional: an
+ * ownerless snapshot path cannot be attributed in the `owner` metric dimension
+ * and cannot participate in the fairness rules W2 adds later, so leaving a
+ * default would quietly recreate the unattributed lane this work removes.
+ */
+export interface StrictFinalizedSnapshotRpcConfigV1
+  extends StrictCurrentFinalizedEvmRpcConfigV1 {
+  readonly owner: FinalizedChainReadOwnerV1;
+}
+
+export interface StrictFinalizedSnapshotConfigSnapshotV1 extends StrictRpcConfigSnapshotV1 {
+  readonly owner: FinalizedChainReadOwnerV1;
 }
 
 export interface FinalizedAnchorV1 {
