@@ -17,6 +17,8 @@
  * retriggered by a later announcement or reconcile cadence.
  */
 
+import { isFinalizedChainAdmissionContention } from '@origintrail-official/dkg-chain';
+
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
@@ -58,6 +60,12 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
    * ordinary failure instead of looping. Default 240 (~2 minutes at 500ms).
    */
   readonly maxAdmissionDeferrals?: number;
+  /**
+   * Which failures mean "retry later, nothing is wrong with this head".
+   * Defaults to the chain layer's own contention predicate; injectable so the
+   * receiver does not hardcode another layer's error shapes.
+   */
+  readonly isDeferrableError?: (error: unknown) => boolean;
   readonly onHeadApplied?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
@@ -83,6 +91,8 @@ export interface Rfc64PublicCatalogReceiverStatsV1 {
    * `failed`: the head is still pending, not lost.
    */
   readonly admissionDeferred: number;
+  /** Accepted heads currently waiting on the chain lane: neither queued nor active. */
+  readonly deferred: number;
   readonly inFlight: number;
   readonly queued: number;
 }
@@ -117,27 +127,20 @@ const DEFAULTS = Object.freeze({
 });
 
 /**
- * Is this failure "the chain lane is busy" rather than "this head is bad"?
+ * Default deferral policy: "the chain lane is busy" rather than "this head is bad".
  *
  * The pinned finalized read is one-per-chain PROCESS-WIDE, so an unrelated
  * context graph on the same chain can legitimately hold it for up to the
  * snapshot deadline. That is contention, not an error about this head — but the
- * generic retry path treats it like a provider failure: three attempts and
+ * generic retry path treated it like a provider failure: three attempts and
  * exponential backoff finish in under two seconds, the task is marked failed,
- * and its pending key is deleted. The head is then only retried if some later
- * announcement or explicit pull happens to arrive.
+ * and its pending key is deleted.
  *
- * Matching is on the chain layer's own typed code, not on message text.
+ * The predicate itself is OWNED BY THE CHAIN PACKAGE, whose code
+ * `concurrency-saturated` is, and is injectable here — the receiver should not
+ * be crawling the shape of errors from a layer it does not own.
  */
-function isChainAdmissionContention(error: unknown): boolean {
-  for (let cause: unknown = error, depth = 0; cause !== undefined && cause !== null && depth < 8; depth += 1) {
-    if (typeof cause === 'object' && (cause as { code?: unknown }).code === 'concurrency-saturated') {
-      return true;
-    }
-    cause = (cause as { cause?: unknown }).cause;
-  }
-  return false;
-}
+const DEFAULT_DEFERRABLE_ERROR = isFinalizedChainAdmissionContention;
 
 export class Rfc64PublicCatalogReceiverV1 {
   readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerV1;
@@ -161,7 +164,18 @@ export class Rfc64PublicCatalogReceiverV1 {
 
   readonly #admissionDeferralMs: number;
   readonly #maxAdmissionDeferrals: number;
+  readonly #isDeferrableError: (error: unknown) => boolean;
   readonly #deferralTimers = new Set<ReturnType<typeof setTimeout>>();
+  /**
+   * The third scheduler state, made explicit: accepted work that is neither
+   * queued nor active because it is waiting for the chain lane.
+   *
+   * It MUST be observable by `#isIdle()`. Without it a deferred head sits in
+   * `#pendingByKey` and a timer only, so `whenIdle()` resolved during the retry
+   * window and a caller draining the receiver — `synchronizeCurrentCatalogHead()`
+   * — could conclude scheduling had settled before the head was applied.
+   */
+  readonly #deferred = new Set<ReceiverTaskV1>();
 
   #scheduled = 0;
   #admissionDeferred = 0;
@@ -195,6 +209,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       options.maxAdmissionDeferrals,
       DEFAULTS.maxAdmissionDeferrals,
     );
+    this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
     this.#onError = options.onError;
   }
@@ -260,6 +275,8 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#closed = true;
     for (const timer of this.#deferralTimers) clearTimeout(timer);
     this.#deferralTimers.clear();
+    for (const task of this.#deferred) this.#pendingByKey.delete(task.key);
+    this.#deferred.clear();
     const abandoned = this.#queue.splice(0);
     for (const task of abandoned) this.#pendingByKey.delete(task.key);
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
@@ -279,6 +296,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       droppedQueueFull: this.#droppedQueueFull,
       droppedProviders: this.#droppedProviders,
       admissionDeferred: this.#admissionDeferred,
+      deferred: this.#deferred.size,
       inFlight: this.#active.size,
       queued: this.#queue.length,
     });
@@ -325,15 +343,21 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#admissionDeferred += 1;
     if (task.admissionDeferrals > this.#maxAdmissionDeferrals) {
       this.#failed += 1;
+      this.#deferred.delete(task);
       this.#pendingByKey.delete(task.key);
       this.#safeNotify(() => this.#onError?.(
         task.providers[0]!.announcement,
         new Error('RFC-64 receiver gave up waiting for the finalized chain-read lane'),
       ));
+      if (this.#isIdle()) this.#resolveIdle();
       return;
     }
+    // Registered BEFORE the timer is armed: between these two statements the
+    // task must never be invisible to the idle predicate.
+    this.#deferred.add(task);
     const timer = setTimeout(() => {
       this.#deferralTimers.delete(timer);
+      this.#deferred.delete(task);
       if (this.#closed || this.#closing.signal.aborted) {
         this.#pendingByKey.delete(task.key);
         if (this.#isIdle()) this.#resolveIdle();
@@ -399,7 +423,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         this.#safeNotify(() => this.#onHeadApplied?.(provider.announcement, provider.peerId));
         return 'done';
       } catch (error) {
-        if (isChainAdmissionContention(error)) {
+        if (this.#isDeferrableError(error)) {
           // Not this head's fault and not this provider's fault: give the
           // attempt back and let the task wait for the lane outside the slot.
           attemptsByProvider.set(provider.key, providerAttempt - 1);
@@ -439,7 +463,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   }
 
   #isIdle(): boolean {
-    return this.#active.size === 0 && this.#queue.length === 0;
+    return this.#active.size === 0 && this.#queue.length === 0 && this.#deferred.size === 0;
   }
 
   #resolveIdle(): void {

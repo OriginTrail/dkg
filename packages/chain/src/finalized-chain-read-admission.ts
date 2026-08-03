@@ -28,6 +28,8 @@
  */
 import { parseCanonicalDecimalU256, type ChainIdV1 } from '@origintrail-official/dkg-core';
 
+import type { EndpointAdmissionPolicyV1 } from './nonqueueing-admission.js';
+
 /**
  * Closed owner vocabulary. Exported as a value tuple so callers can iterate it
  * and a test can prove every owner shares the one lane; a bare type union is
@@ -122,26 +124,30 @@ export async function acquireFinalizedChainRead<T>(
 }
 
 /**
- * An admission policy the endpoint runner can execute without knowing what kind
- * of policy it is.
+ * Is this failure "the chain lane is busy" rather than "the work is bad"?
  *
- * The runner used to own endpoint lifecycle only. Giving it a `sharedOwner` mode
- * flag made it also understand a snapshot-specific owner vocabulary — a boundary
- * leak that would grow an enum in the generic lifecycle every time another
- * shared caller appeared. It now runs whatever policy its factory supplies.
+ * Owned HERE because `concurrency-saturated` is a chain-layer code. Consumers —
+ * notably the RFC64 receiver, which must treat contention as a deferral rather
+ * than a provider failure — should ask this instead of crawling error shapes
+ * they do not own.
  */
-export interface FinalizedReadAdmissionV1 {
-  run<T>(
-    chainId: ChainIdV1,
-    operation: () => Promise<T>,
-    saturated: (active: number, holder?: string) => Error,
-  ): Promise<T>;
+export function isFinalizedChainAdmissionContention(error: unknown): boolean {
+  for (let cause: unknown = error, depth = 0;
+    cause !== undefined && cause !== null && depth < 8;
+    depth += 1) {
+    if (typeof cause === 'object'
+      && (cause as { code?: unknown }).code === 'concurrency-saturated') {
+      return true;
+    }
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /** The process-wide single-permit policy, bound to one owner label. */
 export function createSharedFinalizedReadAdmissionV1(
   owner: FinalizedChainReadOwnerV1,
-): FinalizedReadAdmissionV1 {
+): EndpointAdmissionPolicyV1<ChainIdV1> {
   return Object.freeze({
     run: <T>(
       chainId: ChainIdV1,

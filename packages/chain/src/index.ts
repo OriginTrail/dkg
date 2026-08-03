@@ -73,8 +73,10 @@ export {
   FINALIZED_CHAIN_READ_OWNERS,
   acquireFinalizedChainRead,
   finalizedChainReadRegistryDepth,
+  isFinalizedChainAdmissionContention,
   type FinalizedChainReadOwnerV1,
 } from './finalized-chain-read-admission.js';
+export type { EndpointAdmissionPolicyV1 } from './nonqueueing-admission.js';
 export {
   type StrictCurrentFinalizedEvmReadCallV1,
   type StrictCurrentFinalizedEvmReadRequestV1,

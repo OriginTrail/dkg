@@ -147,6 +147,73 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     await receiver.close();
   });
 
+  it('does NOT report idle while a head is waiting on the chain lane', async () => {
+    // The deferral releases the slot and the queue entry by design, so without
+    // an explicit deferred state `#isIdle()` saw `active=0, queue=0` and
+    // `whenIdle()` resolved during the retry window. A caller draining the
+    // receiver (`synchronizeCurrentCatalogHead`) would then conclude scheduling
+    // had settled before the head was applied, staged, not-found or failed.
+    const { reconciler } = contendingReconciler(1);
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      admissionDeferralMs: 300,
+    });
+    receiver.schedule(announcement('0xf1'), 'peer-a');
+
+    // Wait until the task is genuinely in the deferred state.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && receiver.stats().deferred === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const waiting = receiver.stats();
+    expect(waiting.deferred).toBe(1);
+    expect(waiting.inFlight).toBe(0);
+    expect(waiting.queued).toBe(0);
+
+    let idleResolved = false;
+    const idle = receiver.whenIdle().then(() => {
+      idleResolved = true;
+    });
+    // Long enough to catch an immediate resolve, short of the 300ms retry.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(idleResolved).toBe(false);
+
+    await idle;
+    // Idle only after the deferred work reached a terminal outcome.
+    expect(receiver.stats().applied).toBe(1);
+    expect(receiver.stats().deferred).toBe(0);
+    await receiver.close();
+  });
+
+  it('keeps the pending key while deferred, so a duplicate does not fork a second writer', async () => {
+    // The deferral moved `pendingByKey.delete` out of the `finally` path. If a
+    // regression moved it back, the single-announcement tests above would still
+    // pass — but a re-announcement during the detached retry window would miss
+    // the existing task and create a second semantic writer for one head.
+    const { reconciler, calls } = contendingReconciler(1);
+    const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {
+      admissionDeferralMs: 250,
+    });
+    receiver.schedule(announcement('0xf2'), 'peer-a');
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && receiver.stats().deferred === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(receiver.stats().inFlight).toBe(0);
+
+    // Same head, different peer, while the retry timer is pending.
+    receiver.schedule(announcement('0xf2'), 'peer-b');
+    expect(receiver.stats().dedupedInFlight).toBe(1);
+
+    await settle(receiver, 600);
+    const stats = receiver.stats();
+    expect(stats.applied).toBe(1);
+    expect(stats.failed).toBe(0);
+    // One writer, not two: the second announcement contributed a provider.
+    expect(calls.reconcile).toBe(2);
+    await receiver.close();
+  });
+
   it('drops pending deferrals on close without leaking a timer', async () => {
     const { reconciler } = contendingReconciler(Number.MAX_SAFE_INTEGER);
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler as never, {

@@ -1,7 +1,7 @@
 import type { ChainIdV1 } from '@origintrail-official/dkg-core';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
-import type { FinalizedReadAdmissionV1 } from './finalized-chain-read-admission.js';
+import type { EndpointAdmissionPolicyV1 } from './nonqueueing-admission.js';
 import {
   cancelled,
   isAnchorDependentResourceLimit,
@@ -32,7 +32,7 @@ export interface StrictFinalizedEndpointRunnerProfileV1 {
    * primitive injects a local gate: its limit is 4, and folding it into the
    * snapshot's single lane would throttle an unrelated path.
    */
-  readonly admission: FinalizedReadAdmissionV1;
+  readonly admission: EndpointAdmissionPolicyV1<ChainIdV1>;
 }
 
 export interface StrictFinalizedEndpointRunnerMessagesV1 {
