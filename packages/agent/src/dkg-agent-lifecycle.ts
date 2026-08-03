@@ -3795,7 +3795,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         remotePeer,
         probe,
         'on-connect',
-        'connection-open',
+        automaticSyncInvocation('connection-open'),
       );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
@@ -3807,7 +3807,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
-    trigger?: SyncCoverageEvidenceTrigger,
+    invocation?: AutomaticSyncInvocation,
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
@@ -3819,12 +3819,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Keep the established three-argument call shape when no internal
       // automatic trigger exists. Some embedders replace this method with a
       // strict-arity seam, and a trailing `undefined` is still observable.
-      const outcome = trigger
+      const outcome = invocation
         ? await this.trySyncFromPeer(
           remotePeer,
           onSyncAccounting,
           source,
-          automaticSyncInvocation(trigger),
+          invocation,
         )
         : await this.trySyncFromPeer(remotePeer, onSyncAccounting, source);
       if (outcome === 'deferred-backpressure') {
@@ -3897,7 +3897,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) {
       return 'not-started';
     }
-    if (!syncOnConnectEnabled(this.config)) {
+    const trigger = invocation?.[automaticSyncInvocationBrand] === true
+      ? invocation.trigger
+      : undefined;
+    const getLiveRehydratedAlwaysOnContextGraphIds = () => {
+      const configured = [...new Set(this.config.syncContextGraphs ?? [])];
+      return this.getRehydratedAlwaysOnEvidenceContextGraphIds(configured);
+    };
+    const scopedEdgePeriodicInvocation = (this.config.nodeRole ?? 'edge') === 'edge'
+      && trigger === 'periodic-reconciler';
+    const initialRehydratedAlwaysOnContextGraphIds =
+      getLiveRehydratedAlwaysOnContextGraphIds();
+    if (
+      !syncOnConnectEnabled(this.config)
+      && !(scopedEdgePeriodicInvocation && initialRehydratedAlwaysOnContextGraphIds.length > 0)
+    ) {
       return 'not-started';
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
@@ -3909,40 +3923,60 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Runtime-check the module-private brand as well as relying on the type:
       // plain JavaScript callers cannot forge automatic provenance by passing
       // an object with a trigger-shaped public property.
-      trigger: invocation?.[automaticSyncInvocationBrand] === true
-        ? invocation.trigger
-        : undefined,
+      trigger,
       nodeRole: this.config.nodeRole ?? 'edge',
       planningLane: remotePeer,
       configuredBatchSize: coverageStatus.batchSize,
     });
     const createScopePlan = () => {
-      const scopePlan = this.planCorePublicSyncPeerRound(remotePeer);
-      const selectedContextGraphIds = [...new Set(this.config.syncContextGraphs ?? [])];
+      const configuredContextGraphIds = [...new Set(this.config.syncContextGraphs ?? [])];
+      const rehydratedAlwaysOnContextGraphIds =
+        getLiveRehydratedAlwaysOnContextGraphIds();
+      const defaultScopePlan = this.planCorePublicSyncPeerRound(remotePeer);
+      const scopePlan = scopedEdgePeriodicInvocation
+        ? {
+          effectiveBatchSize: Math.min(
+            defaultScopePlan.effectiveBatchSize,
+            rehydratedAlwaysOnContextGraphIds.length,
+          ),
+          automaticContextGraphIds: [],
+          initialDurableContextGraphIds: [...rehydratedAlwaysOnContextGraphIds],
+          contextGraphIdsAfterDiscovery: getLiveRehydratedAlwaysOnContextGraphIds,
+        }
+        : defaultScopePlan;
       evidence.beginRound({
         effectiveBatchSize: scopePlan.effectiveBatchSize,
-        selectedContextGraphIds,
+        selectedContextGraphIds: configuredContextGraphIds,
         automaticContextGraphIds: scopePlan.automaticContextGraphIds,
-        rehydratedAlwaysOnContextGraphIds:
-          this.getRehydratedAlwaysOnEvidenceContextGraphIds(selectedContextGraphIds),
+        rehydratedAlwaysOnContextGraphIds,
       });
       return scopePlan;
     };
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
-    const getSharedMemorySyncPlan = (
+    const getSharedMemorySyncPlan = async (
       peerId: string,
       contextGraphIdsAfterDiscovery: readonly string[],
     ): Promise<SharedMemorySyncContextGraphPlan> => {
-      let plan = sharedMemorySyncPlans.get(peerId);
+      const requestedContextGraphIds = scopedEdgePeriodicInvocation
+        ? getLiveRehydratedAlwaysOnContextGraphIds()
+        : [...new Set(contextGraphIdsAfterDiscovery)];
+      const key = `${peerId}\0${requestedContextGraphIds.join('\0')}`;
+      let plan = sharedMemorySyncPlans.get(key);
       if (!plan) {
         plan = this.planSharedMemorySyncContextGraphs(
           peerId,
-          [...contextGraphIdsAfterDiscovery],
+          requestedContextGraphIds,
           createOperationContext('sync'),
         );
-        sharedMemorySyncPlans.set(peerId, plan);
+        sharedMemorySyncPlans.set(key, plan);
       }
-      return plan;
+      const resolved = await plan;
+      if (!scopedEdgePeriodicInvocation) return resolved;
+      const live = new Set(getLiveRehydratedAlwaysOnContextGraphIds());
+      return {
+        ...resolved,
+        eligibleContextGraphIds: resolved.eligibleContextGraphIds.filter((id) => live.has(id)),
+      };
     };
     let terminalOutcome: SyncOnConnectOutcome | undefined;
     try {
@@ -3978,9 +4012,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
         syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
           const plan = await getSharedMemorySyncPlan(peerId, contextGraphIds);
+          const requestedContextGraphIds = scopedEdgePeriodicInvocation
+            ? plan.eligibleContextGraphIds
+            : contextGraphIds;
           const result = await this.syncSharedMemoryFromPeerDetailed(
             peerId,
-            contextGraphIds,
+            requestedContextGraphIds,
             {
             stopOnBackoffWorthyFailure: true,
             source,
@@ -3994,7 +4031,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return result;
         },
         syncSharedMemoryOnConnect:
-          syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
+          (syncOnConnectEnabled(this.config) || scopedEdgePeriodicInvocation)
+            && (this.config.syncSharedMemoryOnConnect ?? true),
+        includeSystemContextGraphs: !scopedEdgePeriodicInvocation,
         logInfo: (ctx, message) => this.log.info(ctx, message),
         onPeerSkippedNoSync: (peerId) => {
           this.skippedNoSyncPeers.add(peerId);
@@ -4245,7 +4284,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async reconcileSyncFromConnectedPeers(this: DKGAgent): Promise<void> {
     if (!this.started) return;
-    if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
+    if (!syncReconcilerEnabled(this.config)) return;
+    if (!syncOnConnectEnabled(this.config)) {
+      const hasScopedEdgeResume = (this.config.nodeRole ?? 'edge') === 'edge'
+        && this.getRehydratedAlwaysOnEvidenceContextGraphIds(
+          this.config.syncContextGraphs ?? [],
+        ).length > 0;
+      if (!hasScopedEdgeResume) return;
+    }
     const now = Date.now();
     const ctx = createOperationContext('sync');
     this.pruneSyncReconcilerState(now);
@@ -4283,7 +4329,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         peerId,
         probe,
         'reconcile',
-        'periodic-reconciler',
+        automaticSyncInvocation('periodic-reconciler'),
       )
         .then(() => undefined)
         .catch((err: unknown) => {

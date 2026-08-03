@@ -35,6 +35,12 @@ interface SyncOnConnectCommonContext {
   discoverContextGraphsFromStore: () => Promise<number>;
   syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
+  /**
+   * Keep the legacy Agents/Ontology bootstrap in the durable request by
+   * default. A narrowly scoped Edge reconciler may disable it when resuming
+   * only persisted, explicit always-on subscriptions.
+   */
+  includeSystemContextGraphs?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
@@ -175,6 +181,7 @@ export async function runSyncOnConnectWithScopePlan(
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
+    includeSystemContextGraphs = true,
     logInfo,
   } = context;
 
@@ -278,13 +285,15 @@ export async function runSyncOnConnectWithScopePlan(
 
     const scopePlan = createScopePlan();
     const initialDurableContextGraphIds = [...scopePlan.initialDurableContextGraphIds];
+    const systemContextGraphIds = includeSystemContextGraphs
+      ? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]
+      : [];
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
     const knownCgsBefore = new Set(initialDurableContextGraphIds);
     const synced = await syncFromPeer(
       remotePeer,
       [
-        SYSTEM_CONTEXT_GRAPHS.AGENTS,
-        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        ...systemContextGraphIds,
         ...initialDurableContextGraphIds,
       ],
     );
@@ -300,8 +309,7 @@ export async function runSyncOnConnectWithScopePlan(
     }
 
     const syncScope = new Set<string>([
-      SYSTEM_CONTEXT_GRAPHS.AGENTS,
-      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      ...systemContextGraphIds,
       ...initialDurableContextGraphIds,
     ]);
     await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));

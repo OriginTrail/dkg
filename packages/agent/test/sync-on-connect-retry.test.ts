@@ -105,6 +105,43 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('can resume one explicit Edge scope without bootstrapping system graphs', async () => {
+    const remotePeer = freshPeerIdString();
+    const durableScopes: string[][] = [];
+    const metadataScopes: string[][] = [];
+    const sharedMemoryScopes: string[][] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      contextGraphScope: {
+        initialDurableContextGraphIds: ['cg-saved-always-on'],
+        contextGraphIdsAfterDiscovery: () => ['cg-saved-always-on'],
+      },
+      includeSystemContextGraphs: false,
+      syncFromPeer: async (_peerId, contextGraphIds) => {
+        durableScopes.push([...(contextGraphIds ?? [])]);
+        return 1;
+      },
+      refreshMetaSyncedFlags: async (contextGraphIds) => {
+        metadataScopes.push([...contextGraphIds]);
+      },
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        sharedMemoryScopes.push([...contextGraphIds]);
+        return 1;
+      },
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(durableScopes).toEqual([['cg-saved-always-on']]);
+    expect(metadataScopes).toEqual([['cg-saved-always-on']]);
+    expect(sharedMemoryScopes).toEqual([['cg-saved-always-on']]);
+  });
+
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
     const remotePeer = freshPeerIdString();
     const synced: SyncOnConnectPeerOutcome[] = [];

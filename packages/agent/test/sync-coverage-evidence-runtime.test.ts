@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { performance } from 'node:perf_hooks';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
@@ -9,6 +9,20 @@ import {
 } from '../src/index.js';
 
 const PEER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error('condition did not become true');
+}
 
 function cleanDurableSyncResult() {
   return {
@@ -118,6 +132,43 @@ async function createEvidenceAgent(
     return confirmed;
   };
   (agent as any).hasConfirmedMetaState = async () => true;
+  return agent;
+}
+
+async function createRehydratedEdgeEvidenceAgent(contextGraphId: string): Promise<DKGAgent> {
+  const persisted = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
+    id: contextGraphId,
+    subscribed: true,
+    synced: false,
+    sharedMemorySynced: false,
+    metaSynced: false,
+    syncAdmission: 'explicit',
+    syncScoped: true,
+  }]]);
+  const agent = await createEvidenceAgent('edge', [], {
+    loadAll: async () => [...persisted.values()],
+    save: async (record) => { persisted.set(record.id, { ...record }); },
+    delete: async (id) => { persisted.delete(id); },
+  });
+  (agent as any).gossip = {
+    subscribe: () => undefined,
+    unsubscribe: () => undefined,
+    onMessage: () => undefined,
+    offMessage: () => undefined,
+  };
+  (agent.node as any).node = {
+    peerId: { toString: () => '12D3KooWLocalEvidencePeer' },
+  };
+  await (agent as any).rehydrateContextGraphSubscriptions();
+  (agent as any).config.syncOnConnectEnabled = false;
+  (agent.node as any).node = {
+    getPeers: () => [{ toString: () => PEER }],
+    getConnections: () => [],
+  };
+  (agent as any).getSyncReconcilerProbe = async () => ({
+    protocolsKey: PROTOCOL_SYNC,
+    connectionKey: PEER,
+  });
   return agent;
 }
 
@@ -547,6 +598,37 @@ describe('automatic sync coverage runtime evidence', () => {
     expect(agent.getContextGraphSubscriptionRehydrationStatus()?.rehydratedAlwaysOnIds)
       .toEqual([rehydrated]);
 
+    // Edge's broad sync-on-connect switch remains off. Only the internal
+    // periodic reconciler may resume persisted always-on intent.
+    (agent as any).config.syncOnConnectEnabled = false;
+    const durableScopes: string[][] = [];
+    const sharedMemoryScopes: string[][] = [];
+    (agent as any).syncFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      durableScopes.push([...contextGraphIds]);
+      return cleanDurableSyncResult();
+    };
+    (agent as any).syncSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      sharedMemoryScopes.push([...contextGraphIds]);
+      return withSettledSharedMemoryTerminals(cleanSharedMemorySyncResult(), contextGraphIds);
+    };
+
+    const forgedOutcome = await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(
+      PEER,
+      { protocolsKey: PROTOCOL_SYNC, connectionKey: PEER },
+      'reconcile',
+      'periodic-reconciler',
+    );
+    expect(forgedOutcome).toBe('not-started');
+    expect(agent.getSyncCoverageEvidence().entries).toEqual([]);
+    expect(durableScopes).toEqual([]);
+    expect(sharedMemoryScopes).toEqual([]);
+
     (agent.node as any).node = {
       getPeers: () => [{ toString: () => PEER }],
       getConnections: () => [],
@@ -588,6 +670,130 @@ describe('automatic sync coverage runtime evidence', () => {
       jobId: entries[0]!.jobId,
       state: 'complete',
       verified: { metadata: true, durable: true, sharedMemory: true },
+    });
+    expect(durableScopes).toEqual([[rehydrated]]);
+    expect(sharedMemoryScopes).toEqual([[rehydrated]]);
+    expect(durableScopes.flat()).not.toContain(runtimeSelected);
+    expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+  });
+
+  it('drops a rehydrated Edge selection removed during protocol discovery', async () => {
+    const contextGraphId = 'cg-edge-protocol-race';
+    const agent = await createRehydratedEdgeEvidenceAgent(contextGraphId);
+    const protocols = deferred<string[]>();
+    let protocolLookupStarted = false;
+    const durableScopes: string[][] = [];
+    const sharedMemoryScopes: string[][] = [];
+    (agent as any).getPeerProtocols = async () => {
+      protocolLookupStarted = true;
+      return protocols.promise;
+    };
+    (agent as any).syncFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      durableScopes.push([...contextGraphIds]);
+      return cleanDurableSyncResult();
+    };
+    (agent as any).syncSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      sharedMemoryScopes.push([...contextGraphIds]);
+      return withSettledSharedMemoryTerminals(cleanSharedMemorySyncResult(), contextGraphIds);
+    };
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    await waitFor(() => protocolLookupStarted);
+    (agent as any).subscribedContextGraphs.get(contextGraphId).syncMode = 'on-demand';
+    protocols.resolve([PROTOCOL_SYNC]);
+    await waitFor(() => (agent as any).lastSuccessfulSyncAt.has(PEER));
+
+    expect(durableScopes.flat()).not.toContain(contextGraphId);
+    expect(sharedMemoryScopes.flat()).not.toContain(contextGraphId);
+    expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    expect(durableScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(agent.getSyncCoverageEvidence().entries).toEqual([]);
+  });
+
+  it('does not start Edge shared-memory work after intent is removed during durable sync', async () => {
+    const contextGraphId = 'cg-edge-durable-race';
+    const agent = await createRehydratedEdgeEvidenceAgent(contextGraphId);
+    const durableResult = deferred<ReturnType<typeof cleanDurableSyncResult>>();
+    const durableScopes: string[][] = [];
+    const sharedMemoryScopes: string[][] = [];
+    (agent as any).syncFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      durableScopes.push([...contextGraphIds]);
+      return durableResult.promise;
+    };
+    (agent as any).syncSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      sharedMemoryScopes.push([...contextGraphIds]);
+      return withSettledSharedMemoryTerminals(cleanSharedMemorySyncResult(), contextGraphIds);
+    };
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    await waitFor(() => durableScopes.length === 1);
+    expect(durableScopes).toEqual([[contextGraphId]]);
+    (agent as any).subscribedContextGraphs.get(contextGraphId).syncMode = 'on-demand';
+    durableResult.resolve(cleanDurableSyncResult());
+    await waitFor(() => (agent as any).lastSuccessfulSyncAt.has(PEER));
+
+    expect(sharedMemoryScopes.flat()).not.toContain(contextGraphId);
+    expect(sharedMemoryScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    expect(sharedMemoryScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(agent.getSyncCoverageEvidence().entries.at(-1)).toMatchObject({
+      contextGraphId,
+      state: 'failed',
+      verified: { metadata: true, durable: true, sharedMemory: false },
+    });
+  });
+
+  it('revalidates Edge intent after shared-memory planning resolves', async () => {
+    const contextGraphId = 'cg-edge-plan-race';
+    const agent = await createRehydratedEdgeEvidenceAgent(contextGraphId);
+    const plan = deferred<{
+      publicContextGraphIds: string[];
+      privateRecoverFromCurator: string[];
+      eligibleContextGraphIds: string[];
+    }>();
+    let planStarted = false;
+    const sharedMemoryScopes: string[][] = [];
+    (agent as any).planSharedMemorySyncContextGraphs = async () => {
+      planStarted = true;
+      return plan.promise;
+    };
+    (agent as any).syncSharedMemoryFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphIds: string[],
+    ) => {
+      sharedMemoryScopes.push([...contextGraphIds]);
+      return withSettledSharedMemoryTerminals(cleanSharedMemorySyncResult(), contextGraphIds);
+    };
+
+    await (agent as any).reconcileSyncFromConnectedPeers();
+    await waitFor(() => planStarted);
+    (agent as any).subscribedContextGraphs.get(contextGraphId).syncMode = 'on-demand';
+    plan.resolve({
+      publicContextGraphIds: [contextGraphId],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [contextGraphId],
+    });
+    await waitFor(() => (agent as any).lastSuccessfulSyncAt.has(PEER));
+
+    expect(sharedMemoryScopes.flat()).not.toContain(contextGraphId);
+    expect(sharedMemoryScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    expect(sharedMemoryScopes.flat()).not.toContain(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(agent.getSyncCoverageEvidence().entries.at(-1)).toMatchObject({
+      contextGraphId,
+      state: 'failed',
+      verified: { metadata: true, durable: true, sharedMemory: false },
     });
   });
 
