@@ -264,11 +264,21 @@ function runRound(seam, opts) {
     monotonicNowMs,
   } = seam;
 
+  // Pages are dealt out from a REMAINING counter rather than re-derived as
+  // `ceil(pages / operations)`. For a non-divisible split the derived form
+  // over-executes and then divides by the requested count: `--pages 201
+  // --pages-per-operation 20` gave 11 x 19 = 209 recorded attempts reported as
+  // 201, inflating ms/page by ~4% and able to fail the A18 budget on cost the
+  // benchmark invented. The last operation is simply short.
   const operations = Math.max(1, Math.ceil(opts.pages / opts.pagesPerOperation));
-  const pagesPerOperation = Math.ceil(opts.pages / operations);
+  let remainingPages = opts.pages;
+  let recordedPages = 0;
 
   const startedAt = monotonicNowMs();
   for (let op = 0; op < operations; op += 1) {
+    const pagesPerOperation = Math.min(opts.pagesPerOperation, remainingPages);
+    remainingPages -= pagesPerOperation;
+    recordedPages += pagesPerOperation;
     // The real I4 boundary: the ambient-source scope wrapping a monotonic
     // bracket, ending in the duration record.
     withSyncAdmissionSource('catchup-foreground', () => {
@@ -292,7 +302,17 @@ function runRound(seam, opts) {
       });
     });
   }
-  return monotonicNowMs() - startedAt;
+  const elapsedMs = monotonicNowMs() - startedAt;
+  // The caller divides by `opts.pages`, so that has to be what actually ran.
+  // Asserted rather than commented, because the previous arithmetic was wrong
+  // in exactly this way and reported a plausible number while being wrong.
+  if (recordedPages !== opts.pages) {
+    throw new Error(
+      `bench-sync-telemetry: recorded ${recordedPages} page attempts but reports per ${opts.pages} `
+      + `(operations=${operations}, pagesPerOperation=${opts.pagesPerOperation}) — ms/page would be wrong`,
+    );
+  }
+  return elapsedMs;
 }
 
 // ───────────────────────────────────────────────────── statistics ───────────

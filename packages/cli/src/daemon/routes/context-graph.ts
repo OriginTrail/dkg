@@ -1715,7 +1715,20 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     (path === "/api/context-graph/subscribe" || path === "/api/subscribe")
   ) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
+    // Parsed HERE rather than letting the outer daemon error mapper catch it.
+    // That mapper still returns the same 400, but it returns it from outside
+    // this route — so a malformed body produced a subscribe-route return with
+    // NO I7 point, breaking the one-point-per-return invariant this module
+    // documents. `include_shared_memory` is reported `false` because the field
+    // that would have set it is precisely what could not be read: guessing the
+    // default would attribute an unparseable request to the `true` bucket.
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      recordCatchupRequest('bad_request', false);
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
     const { includeWorkspace, includeSharedMemory } = parsed;
     // Resolved before the first return so that EVERY I7 point carries a real
     // `include_shared_memory` value; it depends only on the parsed body.

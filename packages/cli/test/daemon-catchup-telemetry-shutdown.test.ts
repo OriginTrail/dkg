@@ -261,6 +261,15 @@ async function createHarness(opts: HarnessOptions = {}) {
       });
       return { status: response.status, body: (await response.json()) as any };
     },
+    /** Sends the body VERBATIM, so a malformed payload really reaches the route. */
+    async subscribeRaw(rawBody: string) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/context-graph/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: rawBody,
+      });
+      return { status: response.status, body: (await response.json()) as any };
+    },
     async catchupStatus(jobId: string) {
       const response = await fetch(
         `http://127.0.0.1:${port}/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`,
@@ -389,6 +398,26 @@ describe('I7 — one requests_total point per subscribe-route return', () => {
       }
     } finally {
       await open.close();
+    }
+  });
+
+  it('counts an UNPARSEABLE body as `bad_request` instead of returning silently', async () => {
+    // The invariant is one I7 point per subscribe-route RETURN. A malformed
+    // body used to return 400 through the outer daemon error mapper — a real
+    // route return, with no point — so the counter under-reported exactly the
+    // requests a client is most likely to retry.
+    const harness = await createHarness();
+    try {
+      const response = await harness.subscribeRaw('{');
+
+      expect(response.status).toBe(400);
+      expect(metrics.results()).toEqual(['bad_request']);
+      // `include_shared_memory` must still be a real boolean: the point is
+      // emitted before anything could have read the field.
+      expect(typeof metrics.requests()[0].attrs.include_shared_memory).toBe('boolean');
+      expect(metrics.jobs()).toHaveLength(0);
+    } finally {
+      await harness.close();
     }
   });
 

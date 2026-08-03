@@ -34,7 +34,11 @@
 // changing both in the same PR.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { assertPromLabel, parseCliArgs } from './lib/cli.mjs';
+
+/** Repo root, from this file's own location — the artifacts dir is a CLI arg. */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const usage = 'usage: node verify-w1-render.mjs <dir> [--prom-node-label <label>]';
 const opts = parseCliArgs({ argv: process.argv.slice(2), usage, valueFlags: ['--prom-node-label'] });
@@ -279,6 +283,46 @@ for (const rule of allRules) {
     }
   }
   if (!sawSelector) fail(where, 'expression contains no vector selector');
+}
+
+// ── the DECLARATION binding ───────────────────────────────────────────────
+// Everything else here compares the artifacts against the transcription above.
+// That catches an artifact that drifted from the contract, and is completely
+// blind to the opposite drift: rename an instrument in
+// `packages/core/src/telemetry-api.ts` and the generator catalog, this catalog
+// and the artifacts stay mutually consistent — while every query reads a name
+// the node no longer emits. Nothing else fails either, because the catch-up
+// suites assert through the instrument OBJECT (`getMetrics().x.add`), which
+// survives any rename of the string passed to `meter.create*`.
+//
+// So the transcription is bound to the one copy that decides what is actually
+// exported. Independence is preserved deliberately: this reads SOURCE TEXT and
+// does not import the module, so a rename still has to be made consciously in
+// both places — it just can no longer be made in ONLY one.
+{
+  const declRel = 'packages/core/src/telemetry-api.ts';
+  const declPath = path.join(REPO_ROOT, declRel);
+  if (!fs.existsSync(declPath)) {
+    fail('metric declaration', `${declRel} not found from repo root ${REPO_ROOT} — the binding check cannot run`);
+  } else {
+    const src = fs.readFileSync(declPath, 'utf8');
+    const declared = new Set(
+      [...src.matchAll(/\.create(?:Counter|UpDownCounter|Histogram|Gauge|Observable(?:Counter|UpDownCounter|Gauge))\(\s*'([^']+)'/g)]
+        .map((m) => m[1]),
+    );
+    // Anti-vacuity: if the declaration style ever changes (double quotes, a
+    // helper wrapper, a name built by concatenation) this regex matches nothing
+    // and every name below would "pass" against an empty set — the exact
+    // failure shape this whole check exists to remove.
+    if (declared.size === 0) {
+      fail('metric declaration', `no \`meter.create*('name')\` literals found in ${declRel} — the binding check would pass vacuously`);
+    }
+    for (const inst of [...EXPECTED_INSTRUMENTS, ...EXPECTED_CORROBORATING]) {
+      if (declared.size > 0 && !declared.has(inst.name)) {
+        fail('metric declaration', `${inst.id} "${inst.name}" is queried by the W1 artifacts but is NOT declared in ${declRel} — the queries read a name nothing emits`);
+      }
+    }
+  }
 }
 
 // ── inventory and surface floors ──────────────────────────────────────────
