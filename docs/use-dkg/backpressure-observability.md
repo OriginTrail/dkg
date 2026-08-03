@@ -145,7 +145,7 @@ The daemon routes these records through its structured log sink. That keeps a
 full local copy and forwards the same redacted record to enabled syslog and
 OTLP exporters, so the records reach the Loki-backed Grafana dashboards.
 
-## Grafana worker-pressure flame graph
+## Grafana worker-pressure flame graph and heatmaps
 
 The **DKG Node — Logs** dashboard includes a **Scheduler pressure** row. Its
 flame graph expands the bounded `activeOperations` and `queuedOperations`
@@ -163,6 +163,22 @@ request share, invocation count, or an exact completed-job duration. The
 monitor intentionally emits transition, periodic summary, and recovery records
 instead of a per-item event stream, so Grafana must not claim more precision
 than the log contract provides.
+
+Two heatmaps below the flame graph keep the active and queued meanings
+separate. Each heatmap groups samples by scheduler/lane and shows the
+distribution over time of the peak sampled age in each Grafana resolution
+bucket:
+
+- **Active / admitted pressure age** shows how old the oldest work occupying a
+  worker slot became;
+- **Queued / waiting pressure age** shows how old the oldest work waiting for
+  admission became.
+
+The heatmaps retain the maximum observed age in each time bucket because the
+source is a sparse transition/summary stream. A darker cell means more samples
+fell into that time/age bucket; it does not mean more CPU was consumed. Empty
+periods mean Loki received no matching diagnostic sample, not necessarily that
+the scheduler was idle.
 
 ## Metrics
 

@@ -5,6 +5,7 @@
 // live at module scope. Rendering, CLI handling and --check live in
 // ../generate-observability.mjs.
 import {
+  backpressurePeakAgeOverTime,
   backpressurePeakAgeByOperation,
   dkgLogStream,
   severityIs,
@@ -149,6 +150,55 @@ const BACKPRESSURE_FLAME = (stream) => {
   };
 };
 
+const BACKPRESSURE_HEATMAP = (stream, phase) => {
+  if (phase !== 'active' && phase !== 'queued') {
+    throw new Error(`backpressure heatmap phase must be active or queued, got ${phase}`);
+  }
+  const active = phase === 'active';
+  const label = active ? 'Active / admitted' : 'Queued / waiting';
+  const meaning = active ? 'oldest work occupying a worker slot' : 'oldest work waiting for admission';
+  return {
+    w: 12,
+    h: 12,
+    def: {
+      datasource: LOKI,
+      type: 'heatmap',
+      title: `${label} pressure age heatmap — $node`,
+      description: `Distribution over time of the peak sampled age of the ${meaning}, grouped by scheduler/lane. Values come from sparse PR #2003 transition and summary records; they are sampled pressure age in milliseconds, not CPU time or exact job duration.`,
+      fieldConfig: { defaults: { unit: 'ms' }, overrides: [] },
+      options: {
+        calculate: true,
+        calculation: {
+          xBuckets: { mode: 'count', value: '60' },
+          yBuckets: { mode: 'count', value: '20', scale: { type: 'linear' } },
+        },
+        cellGap: 1,
+        cellValues: {},
+        color: {
+          mode: 'scheme',
+          scheme: active ? 'Reds' : 'Oranges',
+          steps: 64,
+          reverse: false,
+          scale: 'exponential',
+          exponent: 0.5,
+        },
+        filterValues: { le: 0 },
+        legend: { show: true },
+        rowsFrame: { layout: 'auto' },
+        tooltip: { mode: 'single', showColorScale: true, yHistogram: false },
+        yAxis: { axisPlacement: 'left', reverse: false, unit: 'ms' },
+      },
+      targets: [{
+        datasource: LOKI,
+        refId: 'A',
+        expr: backpressurePeakAgeOverTime(stream, phase),
+        legendFormat: '{{scheduler}}/{{lane}}',
+        queryType: 'range',
+      }],
+    },
+  };
+};
+
 // Loki query building blocks come from the shared contract (lib/queries.mjs)
 // — the same module alerts.mjs composes from, so the stream selector,
 // severity filter shape and rpc_usage pipeline cannot drift between the
@@ -212,8 +262,9 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
         targets: [{ datasource: LOKI, refId: 'A', expr: `sum(sum_over_time(${NB}${RPCPIPE}[$__auto]))` }] } },
     ],
     [ ROW('Scheduler pressure') ],
-    [ TEXT('**Worker queue diagnostics (PR #2003).** The flame graph reads structured `[backpressure]` records from Loki. A leaf answers **which scheduler/lane/operation produced the work** and shows the **largest sampled elapsed age** observed in the selected time range. Active and queued work are separate branches. These sparse transition/summary samples describe pressure; they are not CPU profiles, invocation counts, or exact end-to-end job durations.') ],
+    [ TEXT('**Worker queue diagnostics (PR #2003).** The flame graph answers **which scheduler/lane/operation produced the pressure**; the two heatmaps show **when active and queued pressure accumulated and how old it became**. All three views read the same bounded structured `[backpressure]` records from Loki. These sparse transition/summary samples describe elapsed pressure age; they are not CPU profiles, invocation counts, or exact end-to-end job durations.') ],
     [ BACKPRESSURE_FLAME(NB) ],
+    [ BACKPRESSURE_HEATMAP(NB, 'active'), BACKPRESSURE_HEATMAP(NB, 'queued') ],
     [ LOGSP(24, 10, 'Backpressure transitions and summaries — $node', `${NB} |= \`[backpressure]\``) ],
   ]),
 });

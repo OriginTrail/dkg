@@ -186,6 +186,42 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   if (!raw?.targets?.some((target) => target.expr?.includes('|= `[backpressure]`'))) {
     fail('logs dashboard', 'raw backpressure evidence panel is missing');
   }
+
+  const heatmaps = (dash.panels ?? []).filter((panel) => panel.type === 'heatmap');
+  if (heatmaps.length !== 2) {
+    fail('logs dashboard', `expected 2 worker-pressure heatmaps, got ${heatmaps.length}`);
+  }
+  for (const phase of ['Active / admitted', 'Queued / waiting']) {
+    const heatmap = heatmaps.find((panel) => panel.title?.startsWith(phase));
+    const field = phase.startsWith('Active') ? 'oldestActiveAgeMs' : 'oldestQueuedAgeMs';
+    const where = `logs dashboard ${phase.toLowerCase()} heatmap`;
+    if (!heatmap) {
+      fail(where, 'panel is missing');
+      continue;
+    }
+    if (heatmap.options?.calculate !== true) {
+      fail(where, 'must calculate heatmap buckets from the Loki time series');
+    }
+    if (heatmap.fieldConfig?.defaults?.unit !== 'ms' || heatmap.options?.yAxis?.unit !== 'ms') {
+      fail(where, 'sampled pressure age must be rendered in milliseconds');
+    }
+    if ((heatmap.targets ?? []).length !== 1) {
+      fail(where, `expected one range target, got ${(heatmap.targets ?? []).length}`);
+      continue;
+    }
+    const [target] = heatmap.targets;
+    const expr = target.expr ?? '';
+    if (target.queryType !== 'range') fail(where, `queryType is ${JSON.stringify(target.queryType)}, want range`);
+    if (!expr.includes('service_instance_id="$node"')) fail(where, 'query is not scoped to the selected node');
+    if (!expr.includes('|= `[backpressure]`')) fail(where, 'query does not select PR #2003 backpressure records');
+    if (!expr.includes(`age="${field}"`)) fail(where, `query does not extract ${field}`);
+    if (!expr.includes('max_over_time(') || !expr.includes('[$__auto]')) {
+      fail(where, 'query must retain the peak sparse sample in each Grafana resolution bucket');
+    }
+    if (target.legendFormat !== '{{scheduler}}/{{lane}}') {
+      fail(where, `legend is ${JSON.stringify(target.legendFormat)}, want scheduler/lane`);
+    }
+  }
 }
 
 // ── alert payload: datasource UID integrity + profiled rules + routing ─────

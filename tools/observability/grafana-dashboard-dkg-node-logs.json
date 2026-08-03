@@ -227,7 +227,7 @@
       "type": "text",
       "options": {
         "mode": "markdown",
-        "content": "**Worker queue diagnostics (PR #2003).** The flame graph reads structured `[backpressure]` records from Loki. A leaf answers **which scheduler/lane/operation produced the work** and shows the **largest sampled elapsed age** observed in the selected time range. Active and queued work are separate branches. These sparse transition/summary samples describe pressure; they are not CPU profiles, invocation counts, or exact end-to-end job durations."
+        "content": "**Worker queue diagnostics (PR #2003).** The flame graph answers **which scheduler/lane/operation produced the pressure**; the two heatmaps show **when active and queued pressure accumulated and how old it became**. All three views read the same bounded structured `[backpressure]` records from Loki. These sparse transition/summary samples describe elapsed pressure age; they are not CPU profiles, invocation counts, or exact end-to-end job durations."
       },
       "transparent": true
     },
@@ -385,12 +385,168 @@
       ]
     },
     {
+      "title": "Active / admitted pressure age heatmap — $node",
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "heatmap",
+      "description": "Distribution over time of the peak sampled age of the oldest work occupying a worker slot, grouped by scheduler/lane. Values come from sparse PR #2003 transition and summary records; they are sampled pressure age in milliseconds, not CPU time or exact job duration.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "count",
+            "value": "60"
+          },
+          "yBuckets": {
+            "mode": "count",
+            "value": "20",
+            "scale": {
+              "type": "linear"
+            }
+          }
+        },
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Reds",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "max by (scheduler, lane) (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, age=\"oldestActiveAgeMs\" | unwrap age | __error__ = `` [$__auto]))",
+          "legendFormat": "{{scheduler}}/{{lane}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "title": "Queued / waiting pressure age heatmap — $node",
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "heatmap",
+      "description": "Distribution over time of the peak sampled age of the oldest work waiting for admission, grouped by scheduler/lane. Values come from sparse PR #2003 transition and summary records; they are sampled pressure age in milliseconds, not CPU time or exact job duration.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "count",
+            "value": "60"
+          },
+          "yBuckets": {
+            "mode": "count",
+            "value": "20",
+            "scale": {
+              "type": "linear"
+            }
+          }
+        },
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64,
+          "reverse": false,
+          "scale": "exponential",
+          "exponent": 0.5
+        },
+        "filterValues": {
+          "le": 0
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false,
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "refId": "A",
+          "expr": "max by (scheduler, lane) (max_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `[backpressure]` | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})` | line_format `{{.payload}}` | json scheduler, lane, age=\"oldestQueuedAgeMs\" | unwrap age | __error__ = `` [$__auto]))",
+          "legendFormat": "{{scheduler}}/{{lane}}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
       "title": "Backpressure transitions and summaries — $node",
       "gridPos": {
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 64
       },
       "datasource": {
         "type": "loki",

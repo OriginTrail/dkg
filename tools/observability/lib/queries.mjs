@@ -50,6 +50,29 @@ export const backpressurePeakAgeByOperation = (stream, phase) => {
   return `max by (scheduler, lane, phase, operation) (${entries.map((entry) => `(${entry})`).join(' or ')})`;
 };
 
+/**
+ * Build a Loki range expression for the peak sampled scheduler/lane age in
+ * each Grafana resolution bucket. The heatmap uses these time-series samples
+ * to calculate its distribution client-side. `max_over_time` is deliberate:
+ * backpressure records are sparse transition/summary/recovery samples, so the
+ * most severe observed age in a bucket is the honest value to retain.
+ *
+ * The returned value is sampled elapsed age in milliseconds. It is not CPU
+ * time, request share, or an exact completed-job duration.
+ */
+export const backpressurePeakAgeOverTime = (stream, phase) => {
+  if (phase !== 'active' && phase !== 'queued') {
+    throw new Error(`backpressure phase must be active or queued, got ${phase}`);
+  }
+  const field = phase === 'active' ? 'oldestActiveAgeMs' : 'oldestQueuedAgeMs';
+  return `max by (scheduler, lane) (max_over_time(${stream}`
+    + ' |= `[backpressure]`'
+    + ' | regexp `\\[backpressure\\] (?P<payload>\\{.*\\})`'
+    + ' | line_format `{{.payload}}`'
+    + ` | json scheduler, lane, age="${field}"`
+    + ' | unwrap age | __error__ = `` [$__auto]))';
+};
+
 /** Loki-side node identity: the label pair every per-node log aggregation
  *  groups by (Tempo's equivalent is resource.service.instance.id). */
 export const LOKI_NODE_GROUP = 'service_instance_id, deployment_environment';
