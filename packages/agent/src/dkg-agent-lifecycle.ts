@@ -282,7 +282,13 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { runSyncOnConnectWithScopePlan, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
+import {
+  runSyncOnConnectWithScopePlan,
+  SyncOnConnectPostSyncError,
+  type SyncOnConnectOutcome,
+  type SyncOnConnectPeerOutcome,
+  type SyncOnConnectScopePlan,
+} from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
@@ -932,14 +938,10 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
-interface LifecycleSyncScopePlan {
+interface LifecycleSyncScopePlan extends SyncOnConnectScopePlan {
   readonly effectiveBatchSize: number;
   readonly automaticCoverageEpoch?: number;
   readonly automaticContextGraphIds: readonly string[];
-  readonly initialBootstrapContextGraphIds: readonly string[];
-  readonly initialDurableContextGraphIds: readonly string[];
-  readonly prioritizeInitialDurableBeforeBootstrap?: boolean;
-  contextGraphIdsAfterDiscovery(): string[];
 }
 
 interface LifecycleSyncInvocationPolicy {

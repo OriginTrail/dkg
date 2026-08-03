@@ -248,7 +248,7 @@ import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
+import type { SyncOnConnectScopePlan } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -434,15 +434,11 @@ type ContextGraphDiscoveryDisposition =
   | 'automatic-public-coverage';
 
 /** Internal peer-round policy: initial durable scope is frozen; later explicit intent is live. */
-interface PeerSyncScope {
+interface PeerSyncScope extends SyncOnConnectScopePlan {
   readonly effectiveBatchSize: number;
   /** Automatic public-coverage generation frozen with this peer plan. */
   readonly automaticCoverageEpoch?: number;
   readonly automaticContextGraphIds: readonly string[];
-  readonly initialBootstrapContextGraphIds: readonly string[];
-  readonly initialDurableContextGraphIds: readonly string[];
-  readonly prioritizeInitialDurableBeforeBootstrap?: boolean;
-  contextGraphIdsAfterDiscovery(): string[];
 }
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1777,8 +1773,7 @@ export class DKGAgentBase {
         ? { automaticCoverageEpoch: this.corePublicSyncCoverageScheduler.getCoverageEpoch() }
         : {}),
       automaticContextGraphIds,
-      prioritizeInitialDurableBeforeBootstrap:
-        (this.config.nodeRole ?? 'edge') === 'core' && automaticContextGraphIds.length > 0,
+      preBootstrapPublicContextGraphIds: automaticContextGraphIds,
       initialBootstrapContextGraphIds: [
         SYSTEM_CONTEXT_GRAPHS.AGENTS,
         SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,

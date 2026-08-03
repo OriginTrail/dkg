@@ -123,7 +123,7 @@ describe('runSyncOnConnect callbacks', () => {
           SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
         ],
         initialDurableContextGraphIds: ['public-a', 'public-b'],
-        prioritizeInitialDurableBeforeBootstrap: true,
+        preBootstrapPublicContextGraphIds: ['public-a', 'public-b'],
         contextGraphIdsAfterDiscovery: () => ['public-a', 'public-b'],
       }),
       syncFromPeer: async (_peerId, contextGraphIds) => {
@@ -1333,7 +1333,7 @@ describe('DKGAgent peer-round scope wiring', () => {
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
       nodeRole: 'core',
-      syncContextGraphs: ['initial-selected'],
+      syncContextGraphs: ['initial-private'],
       syncCorePublicBatchSize: 1,
     });
     try {
@@ -1349,45 +1349,63 @@ describe('DKGAgent peer-round scope wiring', () => {
       (agent as any).getPeerProtocols = async () => [];
       expect(await (agent as any).trySyncFromPeer(remotePeer)).toBe('skipped-no-sync');
       (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-      (agent as any).refreshMetaSyncedFlags = async () => {};
+      const phases: string[] = [];
+      (agent as any).refreshMetaSyncedFlags = async (contextGraphIds: Iterable<string>) => {
+        phases.push(`meta:${[...contextGraphIds].join(',')}`);
+      };
       (agent as any).discoverContextGraphsFromStore = async () => {
+        phases.push('discover');
         (agent as any).config.syncContextGraphs = [
           ...(agent as any).config.syncContextGraphs,
           'restored-private',
         ];
         return 1;
       };
-      const durable = recorder(async (..._args: unknown[]) => 1);
+      const durable = recorder(async (_peerId: string, contextGraphIds: string[]) => {
+        phases.push(`durable:${contextGraphIds.join(',')}`);
+        return 1;
+      });
       const planShared = recorder(async (_peerId: string, contextGraphIds: string[]) => ({
         publicContextGraphIds: contextGraphIds,
         privateRecoverFromCurator: [],
         eligibleContextGraphIds: contextGraphIds,
       }));
-      const shared = recorder(async (..._args: unknown[]) => 1);
+      const shared = recorder(async (_peerId: string, contextGraphIds: string[]) => {
+        phases.push(`shared:${contextGraphIds.join(',')}`);
+        return 1;
+      });
       (agent as any).syncFromPeerDetailed = durable;
       (agent as any).planSharedMemorySyncContextGraphs = planShared;
       (agent as any).syncSharedMemoryFromPeerDetailed = shared;
 
       await (agent as any).trySyncFromPeer(remotePeer);
 
-      expect(durable.calls[0]?.[1]).toEqual([
-        'initial-selected',
-        'automatic-public-a',
-      ]);
+      expect(durable.calls[0]?.[1]).toEqual(['automatic-public-a']);
       expect(durable.calls[1]?.[1]).toEqual([
         SYSTEM_CONTEXT_GRAPHS.AGENTS,
         SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        'initial-private',
       ]);
       expect(durable.calls[2]?.[1]).toEqual(['restored-private']);
-      expect(planShared.calls[0]?.[1]).toEqual([
-        'initial-selected',
+      expect(planShared.calls[0]?.[1]).toEqual(['automatic-public-a']);
+      expect(shared.calls[0]?.[1]).toEqual(['automatic-public-a']);
+      expect(planShared.calls[1]?.[1]).toEqual([
+        'initial-private',
+        'restored-private',
         'automatic-public-a',
       ]);
-      expect(shared.calls[0]?.[1]).toEqual([
-        'initial-selected',
-        'automatic-public-a',
+      expect(shared.calls[1]?.[1]).toEqual(['initial-private', 'restored-private']);
+      expect(phases).toEqual([
+        'durable:automatic-public-a',
+        'meta:automatic-public-a',
+        'shared:automatic-public-a',
+        `durable:${SYSTEM_CONTEXT_GRAPHS.AGENTS},${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY},initial-private`,
+        `meta:${SYSTEM_CONTEXT_GRAPHS.AGENTS},${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY},initial-private`,
+        'discover',
+        'durable:restored-private',
+        'meta:restored-private',
+        'shared:initial-private,restored-private',
       ]);
-      expect(shared.calls[1]?.[1]).toEqual(['restored-private']);
     } finally {
       await agent.stop().catch(() => {});
     }

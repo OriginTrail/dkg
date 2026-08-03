@@ -13,8 +13,12 @@ export interface SyncOnConnectScopePlan {
   initialBootstrapContextGraphIds: readonly string[];
   /** Explicit plus automatic CGs frozen for the first durable request. */
   initialDurableContextGraphIds: readonly string[];
-  /** Complete the bounded durable scope, including SWM, before bootstrap backlog. */
-  prioritizeInitialDurableBeforeBootstrap?: boolean;
+  /**
+   * Scheduler-vetted automatic public CGs to complete before bootstrap.
+   * Configured/private CGs must stay in the normal post-bootstrap path because
+   * private SWM recovery depends on the refreshed Agents registry.
+   */
+  preBootstrapPublicContextGraphIds?: readonly string[];
   /** Explicit intent re-read after discovery, merged with the frozen automatic tail. */
   contextGraphIdsAfterDiscovery: () => string[];
 }
@@ -279,6 +283,46 @@ export async function runSyncOnConnectWithScopePlan(
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
   };
+  type OrderedSyncPhase = Readonly<{
+    kind: 'durable' | 'shared';
+    label: string;
+    contextGraphIds: readonly string[];
+    /** Preserve the legacy initial probe/accounting call even for an empty scope. */
+    runWhenEmpty?: boolean;
+  }>;
+  const runSyncPhase = async (
+    phase: OrderedSyncPhase,
+  ): Promise<SyncOnConnectOutcome | undefined> => {
+    const contextGraphIds = [...new Set(phase.contextGraphIds)];
+    if (contextGraphIds.length === 0 && phase.runWhenEmpty !== true) return undefined;
+    const result = phase.kind === 'durable'
+      ? await syncFromPeer(remotePeer, contextGraphIds)
+      : await syncSharedMemoryFromPeer(remotePeer, contextGraphIds);
+    const accounting = recordSyncAccounting(result, phase.kind);
+    const dataLabel = phase.kind === 'durable' ? 'data' : 'shared memory';
+    logInfo(
+      ctx,
+      `Synced ${accounting.insertedTriples} ${phase.label} ${dataLabel} triples from peer ${shortPeer}`,
+    );
+    if (accounting.deferredByBackpressure) {
+      logInfo(
+        ctx,
+        `Stopping sync-on-connect fanout for peer ${shortPeer} after ${phase.label} ${phase.kind} admission deferral`,
+      );
+      return finishSyncAccounting();
+    }
+    if (accounting.backoffWorthyFailure) {
+      logInfo(
+        ctx,
+        `Stopping sync-on-connect fanout for peer ${shortPeer} after ${phase.label} ${phase.kind} sync hit backoff-worthy pressure`,
+      );
+      return finishSyncAccounting();
+    }
+    if (phase.kind === 'durable') {
+      await runNonTransportStep(() => refreshMetaSyncedFlags(contextGraphIds));
+    }
+    return undefined;
+  };
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
@@ -307,79 +351,58 @@ export async function runSyncOnConnectWithScopePlan(
     }
 
     const scopePlan = createScopePlan();
-    const bootstrapContextGraphIds = scopePlan.initialBootstrapContextGraphIds;
-    const initialDurableContextGraphIds = [...scopePlan.initialDurableContextGraphIds];
-    const prioritizeInitialDurable = scopePlan.prioritizeInitialDurableBeforeBootstrap === true
-      && initialDurableContextGraphIds.length > 0;
-    const initialSyncContextGraphIds = prioritizeInitialDurable
-      ? [...new Set(bootstrapContextGraphIds)]
-      : [...new Set([
-        ...bootstrapContextGraphIds,
-        ...initialDurableContextGraphIds,
+    const bootstrapContextGraphIds = [...new Set(scopePlan.initialBootstrapContextGraphIds)];
+    const initialDurableContextGraphIds = [...new Set(scopePlan.initialDurableContextGraphIds)];
+    const initialDurableSet = new Set(initialDurableContextGraphIds);
+    const preBootstrapPublicContextGraphIds = [
+      ...new Set(scopePlan.preBootstrapPublicContextGraphIds ?? []),
+    ].filter((contextGraphId) => initialDurableSet.has(contextGraphId));
+    const preBootstrapPublicSet = new Set(preBootstrapPublicContextGraphIds);
+    const bootstrapAndConfiguredContextGraphIds = [...new Set([
+      ...bootstrapContextGraphIds,
+      ...initialDurableContextGraphIds.filter(
+        (contextGraphId) => !preBootstrapPublicSet.has(contextGraphId),
+      ),
     ])];
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
     const knownCgsBefore = new Set(initialDurableContextGraphIds);
-    const sharedMemoryContextGraphsAlreadyAttempted = new Set<string>();
+    let completedPreBootstrapSharedMemoryIds: readonly string[] = [];
 
-    if (prioritizeInitialDurable) {
-      logInfo(ctx, `Prioritizing ${initialDurableContextGraphIds.length} bounded context graph(s) before bootstrap backlog from ${shortPeer}`);
-      const prioritySynced = await syncFromPeer(remotePeer, initialDurableContextGraphIds);
-      const priorityAccounting = recordSyncAccounting(prioritySynced, 'durable');
-      logInfo(ctx, `Synced ${priorityAccounting.insertedTriples} priority data triples from peer ${shortPeer}`);
-      if (priorityAccounting.deferredByBackpressure) {
-        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after priority admission deferral`);
-        return finishSyncAccounting();
-      }
-      if (priorityAccounting.backoffWorthyFailure) {
-        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after priority durable sync hit backoff-worthy pressure`);
-        return finishSyncAccounting();
-      }
-      await runNonTransportStep(() => refreshMetaSyncedFlags(initialDurableContextGraphIds));
+    if (preBootstrapPublicContextGraphIds.length > 0) {
+      logInfo(
+        ctx,
+        `Prioritizing ${preBootstrapPublicContextGraphIds.length} bounded public context graph(s) before bootstrap backlog from ${shortPeer}`,
+      );
+      const priorityDurableOutcome = await runSyncPhase({
+        kind: 'durable',
+        label: 'priority public',
+        contextGraphIds: preBootstrapPublicContextGraphIds,
+      });
+      if (priorityDurableOutcome) return priorityDurableOutcome;
 
       if (syncSharedMemoryOnConnect) {
         const prioritySharedMemoryContextGraphIds = getSharedMemorySyncContextGraphs
           ? await runNonTransportStep(() => Promise.resolve(
-            getSharedMemorySyncContextGraphs(remotePeer, initialDurableContextGraphIds),
+            getSharedMemorySyncContextGraphs(remotePeer, preBootstrapPublicContextGraphIds),
           ))
-          : initialDurableContextGraphIds;
-        if (prioritySharedMemoryContextGraphIds.length > 0) {
-          const priorityShared = await syncSharedMemoryFromPeer(
-            remotePeer,
-            prioritySharedMemoryContextGraphIds,
-          );
-          const prioritySharedAccounting = recordSyncAccounting(priorityShared, 'shared');
-          logInfo(ctx, `Synced ${prioritySharedAccounting.insertedTriples} priority shared memory triples from peer ${shortPeer}`);
-          for (const contextGraphId of prioritySharedMemoryContextGraphIds) {
-            sharedMemoryContextGraphsAlreadyAttempted.add(contextGraphId);
-          }
-          if (prioritySharedAccounting.deferredByBackpressure) {
-            logInfo(ctx, `Priority shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
-            return finishSyncAccounting();
-          }
-          if (prioritySharedAccounting.backoffWorthyFailure) {
-            logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after priority shared-memory sync hit backoff-worthy pressure`);
-            return finishSyncAccounting();
-          }
-        }
+          : preBootstrapPublicContextGraphIds;
+        const prioritySharedOutcome = await runSyncPhase({
+          kind: 'shared',
+          label: 'priority public',
+          contextGraphIds: prioritySharedMemoryContextGraphIds,
+        });
+        if (prioritySharedOutcome) return prioritySharedOutcome;
+        completedPreBootstrapSharedMemoryIds = prioritySharedMemoryContextGraphIds;
       }
     }
 
-    const synced = await syncFromPeer(
-      remotePeer,
-      initialSyncContextGraphIds,
-    );
-    const syncedAccounting = recordSyncAccounting(synced, 'durable');
-    logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
-    if (syncedAccounting.deferredByBackpressure) {
-      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
-      return finishSyncAccounting();
-    }
-    if (syncedAccounting.backoffWorthyFailure) {
-      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
-      return finishSyncAccounting();
-    }
-
-    await runNonTransportStep(() => refreshMetaSyncedFlags(initialSyncContextGraphIds));
+    const bootstrapOutcome = await runSyncPhase({
+      kind: 'durable',
+      label: 'bootstrap',
+      contextGraphIds: bootstrapAndConfiguredContextGraphIds,
+      runWhenEmpty: true,
+    });
+    if (bootstrapOutcome) return bootstrapOutcome;
 
     await runNonTransportStep(() => discoverContextGraphsFromStore());
 
@@ -387,18 +410,12 @@ export async function runSyncOnConnectWithScopePlan(
     const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
-      const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
-      const discoverAccounting = recordSyncAccounting(discoverSynced, 'durable');
-      logInfo(ctx, `Synced ${discoverAccounting.insertedTriples} durable triples for newly discovered CG(s) from ${shortPeer}`);
-      if (discoverAccounting.deferredByBackpressure) {
-        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG admission deferral`);
-        return finishSyncAccounting();
-      }
-      if (discoverAccounting.backoffWorthyFailure) {
-        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG durable sync hit backoff-worthy pressure`);
-        return finishSyncAccounting();
-      }
-      await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
+      const discoveredOutcome = await runSyncPhase({
+        kind: 'durable',
+        label: 'discovered',
+        contextGraphIds: newlyDiscovered,
+      });
+      if (discoveredOutcome) return discoveredOutcome;
     }
 
     durableSyncCompleted = true;
@@ -407,16 +424,19 @@ export async function runSyncOnConnectWithScopePlan(
         getSharedMemorySyncContextGraphs(remotePeer, allCgsAfter),
       ))
       : allCgsAfter;
+    const completedPreBootstrapSharedMemory = new Set(
+      completedPreBootstrapSharedMemoryIds,
+    );
     const remainingWsContextGraphIds = wsContextGraphIds.filter(
-      (contextGraphId) => !sharedMemoryContextGraphsAlreadyAttempted.has(contextGraphId),
+      (contextGraphId) => !completedPreBootstrapSharedMemory.has(contextGraphId),
     );
     if (syncSharedMemoryOnConnect && remainingWsContextGraphIds.length > 0) {
-      const wsSynced = await syncSharedMemoryFromPeer(remotePeer, remainingWsContextGraphIds);
-      const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
-      logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
-      if (sharedAccounting.deferredByBackpressure) {
-        logInfo(ctx, `Shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
-      }
+      const remainingSharedOutcome = await runSyncPhase({
+        kind: 'shared',
+        label: 'remaining',
+        contextGraphIds: remainingWsContextGraphIds,
+      });
+      if (remainingSharedOutcome) return remainingSharedOutcome;
     } else if (!syncSharedMemoryOnConnect && remainingWsContextGraphIds.length > 0) {
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
