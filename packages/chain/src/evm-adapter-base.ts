@@ -38,6 +38,7 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import type { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -914,22 +915,8 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
-  /**
-   * Deployment-scoped reverse bindings recovered from indexed
-   * ContextGraphCreated.nameHash logs. Positive results are immutable for a
-   * contract address. Negative results use a short TTL so a configured CG that
-   * is registered later becomes visible without restarting the adapter.
-   */
-  protected readonly contextGraphIdsByNameHash = new Map<
-    string,
-    { value: bigint | null; cachedAt: number }
-  >();
-
-  /** One bounded historical scan per deployment + name hash at a time. */
-  protected readonly contextGraphIdByNameHashInflight = new Map<
-    string,
-    Promise<bigint | null>
-  >();
+  /** Lazily constructed by the context-graph mixin; state must live on base. */
+  protected contextGraphNameHashResolver: ContextGraphNameHashResolver | undefined;
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
@@ -956,8 +943,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.contextGraphIdsByNameHash.clear();
-    this.contextGraphIdByNameHashInflight.clear();
+    this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
   }
 
