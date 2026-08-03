@@ -11,7 +11,7 @@ import {
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
-import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
+import type { SharedMemorySnapshotCommitter } from './swm-snapshot-committer.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -69,9 +69,9 @@ interface SharedMemorySyncContext {
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   /**
-   * Everything needed to MATERIALIZE verified public SWM snapshots into the
-   * triple store, as ONE cohesive dependency — the contract (and the
-   * production implementation) live in `swm-snapshot-materializer.ts`.
+   * Everything needed to COMMIT verified public SWM snapshots as one cohesive
+   * dependency: a store-focused materializer plus the post-commit settlement
+   * policy. The production composition lives in `swm-snapshot-committer.ts`.
    *
    * Why it exists at all: contentScopeVersion-2 KAs carry no dkg:rootEntity,
    * so the aggregate data phase legitimately returns 0 data quads for them —
@@ -80,7 +80,7 @@ interface SharedMemorySyncContext {
    * missed the live gossip stayed empty forever ("0 data + N meta triples").
    * Absent entirely => materialization is skipped (never half-applied).
    */
-  snapshotMaterializer?: SharedMemorySnapshotMaterializer;
+  snapshotCommitter?: SharedMemorySnapshotCommitter;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -118,7 +118,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     processSharedMemoryBatch,
     ensureContextGraph,
     storeInsert,
-    snapshotMaterializer,
+    snapshotCommitter,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -266,6 +266,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // incomplete metadata, and this lane pages meta, so a timed-out page would
       // otherwise abort the whole CG fanout. A parse failure here must degrade to
       // "no materialization this round" — never take down the sync.
+      const snapshotMaterializer = snapshotCommitter?.materializer;
       const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
       if (snapshotMaterializer && publicSnapshotStore && wsMetaResult.completed) {
         try {
@@ -471,9 +472,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // Deliberately outside the per-KA snapshot lock above: the finalizer
       // acquires the same lock before stamping the local retirement marker.
       // Running settlement inside the materializer critical section would
-      // deadlock. The handoff remains part of the ONE required materializer
-      // contract, so production cannot wire materialization without it.
-      await snapshotMaterializer?.settleCommittedSnapshots(
+      // deadlock. The higher-level committer keeps materialization and
+      // settlement required together without giving the store adapter
+      // finalization responsibilities.
+      await snapshotCommitter?.settleCommittedSnapshots(
         pid,
         [...settledDescriptors.values()],
       );

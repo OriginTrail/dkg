@@ -264,6 +264,7 @@ import {
 } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { createSharedMemorySnapshotCommitter } from './sync/requester/swm-snapshot-committer.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -5723,24 +5724,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const graphManager = new GraphManager(this.store);
                 await graphManager.ensureContextGraph(contextGraphId);
               },
-              // Everything needed to materialize verified public SWM snapshots,
-              // as ONE dependency (a loose optional trio allowed a silent
-              // half-configured mode). Graph-scoped (contentScopeVersion 2) KAs
+              // Everything needed to commit verified public SWM snapshots as
+              // ONE dependency. Graph-scoped (contentScopeVersion 2) KAs
               // carry no dkg:rootEntity, so the aggregate data phase returns 0
               // data quads for them by design — their content arrives as
               // immutable snapshots, and without this the catch-up lane cached
               // every verified snapshot and never wrote one to the store.
-              // Thin wiring only: the materialization policy (content-digest
-              // guard, MAX head read + duplicate repair, atomic replace, head
-              // metadata swap) lives in `swm-snapshot-materializer.ts`. What
-              // the agent contributes here is its own resources — the store,
-              // the SAME lock map injected into SharedMemoryHandler (sharing
-              // the map + key helper is what closes the check-then-replace
-              // race with gossip), and list-cache invalidation.
-              snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-                store: this.store,
-                writeLocks: this.writeLocks,
-                invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+              // The store adapter owns materialization policy; the higher-level
+              // committer separately owns post-commit finalization settlement.
+              // Settlement runs after verified metadata insertion and outside
+              // the shared per-KA lock, preventing a lock recursion deadlock.
+              snapshotCommitter: createSharedMemorySnapshotCommitter({
+                materializer: createSharedMemorySnapshotMaterializer({
+                  store: this.store,
+                  writeLocks: this.writeLocks,
+                  invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+                }),
                 settleGraphScopedSnapshot: async (contextGraphId, descriptor) => {
                   await this.getOrCreateFinalizationHandler()
                     .retireSyncedGraphScopedSwmIfFinalized({

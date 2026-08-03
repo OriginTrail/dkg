@@ -2288,6 +2288,62 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
+  it('keeps exact SWM visible when trusted VM metadata repair fails', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const swmResult = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (swmResult.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.dropGraph(vmGraph);
+    await store.insert(swmResult.quads.map((quad) => ({ ...quad, graph: vmGraph })));
+    await store.deleteByPattern({
+      graph: `did:dkg:context-graph:${CG}/_meta`,
+      subject: UAL,
+    });
+
+    const repairHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(),
+      { writeLocks: new Map() },
+    );
+    const internals = repairHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+    if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+    store.replaceGraphAndSubject = async () => {
+      throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.update');
+    };
+
+    try {
+      await expect(repairHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 123,
+        authorAddress: AUTHOR,
+        trustedAssertionEvidence: trustedRecoveryEvidence(message),
+      }, createOperationContext('system'))).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    } finally {
+      store.replaceGraphAndSubject = replaceGraphAndSubject;
+    }
+
+    await expect(store.query(
+      `ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+        <${swmGraph}> <${DKG_SWM_FINALIZED_PREDICATE}> ?version .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    const visible = await new DKGQueryEngine(store).query(
+      'SELECT ?value WHERE { ?s <urn:predicate:value> ?value }',
+      { contextGraphId: CG, view: 'shared-working-memory' },
+    );
+    expect(visible.bindings).toHaveLength(2);
+  });
+
   it('retires a synced SWM copy with separate batch provenance after exact chain revalidation', async () => {
     const staged = await stageGraph();
     // `batchId` is adapter provenance and need not equal the UAL-derived packed

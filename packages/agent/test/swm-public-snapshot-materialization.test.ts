@@ -179,28 +179,30 @@ function harness(overrides: HarnessOverrides = {}) {
         events.push('meta-inserted');
         inserted.push(quads);
       },
-      snapshotMaterializer: {
-        withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => {
-          events.push('lock-requested');
-          overrides.onLockRequested?.();
-          return withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
-        },
-        isGraphAssetMaterialized: async () => {
-          events.push('content-checked');
-          return overrides.contentPresent?.() ?? false;
-        },
-        readStoredHead: async () => {
-          events.push('version-read');
-          return overrides.storedHead?.() ?? { version: null, needsRepair: false };
-        },
-        replaceGraph: async (graphUri, quads) => {
-          events.push('replaced');
-          if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);
-          replaced.push({ graphUri, quads });
-        },
-        replaceHeadMetadata: async (contextGraphId, descriptor) => {
-          events.push('head-swapped');
-          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+      snapshotCommitter: {
+        materializer: {
+          withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => {
+            events.push('lock-requested');
+            overrides.onLockRequested?.();
+            return withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
+          },
+          isGraphAssetMaterialized: async () => {
+            events.push('content-checked');
+            return overrides.contentPresent?.() ?? false;
+          },
+          readStoredHead: async () => {
+            events.push('version-read');
+            return overrides.storedHead?.() ?? { version: null, needsRepair: false };
+          },
+          replaceGraph: async (graphUri, quads) => {
+            events.push('replaced');
+            if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);
+            replaced.push({ graphUri, quads });
+          },
+          replaceHeadMetadata: async (contextGraphId, descriptor) => {
+            events.push('head-swapped');
+            headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+          },
         },
         settleCommittedSnapshots: async (contextGraphId, descriptors) => {
           for (const descriptor of descriptors) {

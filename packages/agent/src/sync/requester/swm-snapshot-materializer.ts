@@ -4,10 +4,9 @@
  * This module OWNS the persistence policy for turning a verified graph-scoped
  * snapshot into durable store state: what "already materialized" means, how
  * the stored head version is read, how stale head metadata is replaced, and
- * which lock serializes it all against live gossip. `runSharedMemorySync`
- * consumes it as one cohesive dependency (see `SharedMemorySnapshotMaterializer`);
- * `dkg-agent-lifecycle` is reduced to wiring agent-owned resources into
- * `createSharedMemorySnapshotMaterializer`.
+ * which lock serializes it all against live gossip. The higher-level snapshot
+ * committer composes this store adapter with post-commit settlement;
+ * `dkg-agent-lifecycle` only wires agent-owned resources into both.
  *
  * Every SPARQL read/write here is scoped to an exact per-KA IRI (the head
  * subject, the operation subject, or the KA's own assertion graph), so each
@@ -45,8 +44,8 @@ export interface StoredWorkspaceHeadState {
 }
 
 /**
- * Everything `runSharedMemorySync` needs to MATERIALIZE verified public SWM
- * snapshots into the triple store, as ONE cohesive dependency.
+ * Everything the snapshot committer needs to MATERIALIZE verified public SWM
+ * snapshots into the triple store, as one cohesive store dependency.
  *
  * Why one object: these capabilities are only meaningful together. An earlier
  * revision exposed them as independent optionals, which allowed a silent
@@ -103,19 +102,6 @@ export interface SharedMemorySnapshotMaterializer {
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<void>;
-  /**
-   * Complete the graph-scoped snapshot transaction after the caller has
-   * inserted the verified head metadata. Keeping this handoff on the same
-   * required abstraction prevents a caller from materializing snapshots while
-   * silently omitting post-commit finalization settlement.
-   *
-   * This MUST be invoked outside `withKaWriteLock`: the finalization owner
-   * takes that same per-KA lock while revalidating the current SWM head.
-   */
-  settleCommittedSnapshots(
-    contextGraphId: string,
-    descriptors: readonly GraphScopedSwmRecoveryDescriptor[],
-  ): Promise<void>;
 }
 
 /**
@@ -130,10 +116,6 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
-  settleGraphScopedSnapshot: (
-    contextGraphId: string,
-    descriptor: GraphScopedSwmRecoveryDescriptor,
-  ) => Promise<void>;
 }): SharedMemorySnapshotMaterializer {
   return {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
@@ -246,12 +228,6 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { graph: descriptor.metaGraph, subject: operationSubject },
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
-      }
-    },
-
-    settleCommittedSnapshots: async (contextGraphId, descriptors) => {
-      for (const descriptor of descriptors) {
-        await deps.settleGraphScopedSnapshot(contextGraphId, descriptor);
       }
     },
   };
