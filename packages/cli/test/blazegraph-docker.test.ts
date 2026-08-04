@@ -43,6 +43,8 @@ import {
   isDockerAvailable,
   BLAZEGRAPH_IMAGE,
   BLAZEGRAPH_CONTAINER_PORT,
+  BLAZEGRAPH_LOG_MAX_SIZE,
+  BLAZEGRAPH_LOG_MAX_FILE,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   type DockerRunner,
   type DockerCommandResult,
@@ -351,7 +353,7 @@ describe('provisionBlazegraphDocker', () => {
     expect(calls.some((c) => c[0] === 'run')).toBe(true);
   });
 
-  it('auto-bumps to the next free loopback port and uses the multi-architecture image', async () => {
+  it('auto-bumps the port and provisions durable data with bounded local-driver logs', async () => {
     const takenPorts = new Set([9999, 10000]);
     const { runner, calls } = mockDocker({
       matchers: [
@@ -375,6 +377,12 @@ describe('provisionBlazegraphDocker', () => {
     const runCall = calls.find((c) => c[0] === 'run');
     expect(runCall).toBeDefined();
     expect(runCall).toContain(`127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`);
+    expect(runCall).toContain('type=volume,source=dkg-blazegraph-mynode-data,target=/data');
+    expect(runCall).toContain('local');
+    expect(runCall).toContain(`max-size=${BLAZEGRAPH_LOG_MAX_SIZE}`);
+    expect(runCall).toContain(`max-file=${BLAZEGRAPH_LOG_MAX_FILE}`);
+    expect(BLAZEGRAPH_LOG_MAX_SIZE).toBe('200m');
+    expect(BLAZEGRAPH_LOG_MAX_FILE).toBe('20');
     expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
     const metadata = JSON.parse(
       readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),

@@ -14,6 +14,8 @@
  *  3. Port-collision auto-bump — try ports `[9999, 9999+range)`
  *     before giving up. Operators may have V6 nodes on 9999 from
  *     prior installs.
+ *  4. Durable, bounded storage — persist the journal in a named volume and
+ *     retain at most 4 GB of compressed local-driver container logs.
  *
  * Every external dependency (docker CLI, fetch, port-free check) is
  * injectable so the unit tests run in <50 ms without spawning real
@@ -94,6 +96,9 @@ export const BLAZEGRAPH_CONTAINER_PORT = BLAZEGRAPH_IMAGE_METADATA.containerPort
 const DEFAULT_HOST_PORT_START = 9999;
 /** Inclusive range above start to scan for a free port before failing. */
 const DEFAULT_HOST_PORT_RANGE = 12; // 9999..10010
+/** Keep enough Blazegraph history for incident response without filling the host disk. */
+export const BLAZEGRAPH_LOG_MAX_SIZE = '200m';
+export const BLAZEGRAPH_LOG_MAX_FILE = '20';
 
 // --------------------------------------------------------------------
 // Injectable types — tests pass mocks for every external boundary.
@@ -395,6 +400,7 @@ export async function provisionBlazegraphDocker(
     log(`  Normalized Blazegraph namespace "${opts.namespace}" → "${namespace}".`);
   }
   const containerName = opts.containerName ?? sanitiseContainerName(namespace);
+  const volumeName = `${containerName}-data`;
 
   // 1. Pre-flight: is docker installed?
   const versionResult = await docker.run(['--version'], { timeoutMs: 5000 });
@@ -473,6 +479,12 @@ export async function provisionBlazegraphDocker(
     // Blazegraph is an implementation detail of the local node. Do not publish
     // its unauthenticated SPARQL/update endpoint on every host interface.
     '-p', `127.0.0.1:${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
+    '--mount', `type=volume,source=${volumeName},target=/data`,
+    // Docker's local driver rotates and compresses logs. The explicit options
+    // keep the bound independent of host-wide Docker daemon defaults.
+    '--log-driver', 'local',
+    '--log-opt', `max-size=${BLAZEGRAPH_LOG_MAX_SIZE}`,
+    '--log-opt', `max-file=${BLAZEGRAPH_LOG_MAX_FILE}`,
     BLAZEGRAPH_IMAGE,
   ]);
   if (runResult.exitCode !== 0) {

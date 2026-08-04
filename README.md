@@ -439,7 +439,7 @@ No URL provided. Provision a Blazegraph container via Docker? (y/n) (y): y
   Created Blazegraph namespace "mynode".
 ```
 
-The Docker provisioner pins `lyrasis/blazegraph:2.1.5` (same image and tag as mainnet and the devnet test fixture), uses `--restart unless-stopped`, auto-bumps the host port if 9999 is taken, and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
+The Docker provisioner uses the pinned multi-architecture image declared in `blazegraph-image.json`, stores the journal in a named Docker volume, and uses `--restart unless-stopped`. Blazegraph output uses Docker's compressed `local` log driver with a 4 GB rotation budget (`200m` × 20 files), so an unattended container cannot fill the host disk. The provisioner auto-bumps the host port if 9999 is taken and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
 
 The wizard validates non-Docker URLs via an `ASK { ?s ?p ?o }` probe before saving — typos or unreachable namespaces are caught at setup time, not at first boot. A 404 surfaces a specific "namespace likely doesn't exist" message rather than the generic network-failure hint.
 
