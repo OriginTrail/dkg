@@ -2112,12 +2112,18 @@ describe('#2050 coverage retention across a failed round', () => {
             shared.push(peerId);
             if (peerId === STEADY) {
               steadySeen += 1;
-              // Advances by a WIDE margin each pass, and the margin is
-              // load-bearing. `highestResolvedCoverage` is a max over all peers,
-              // so at +1 per pass the peer under test — retained at 2 — would hold
-              // the max flat and the loop would stop at `coverage-stalled` before
-              // a third pass ever ran. The row would then fail for a reason having
-              // nothing to do with retention.
+              // Advances every pass so the loop keeps running and the row can
+              // actually reach the retention question.
+              //
+              // The WIDTH of the margin is no longer load-bearing. It was: the
+              // progress gate used to be a max over all peers, so at +1 per pass
+              // the peer under test — retained at 2 — held the max flat and the
+              // loop stopped at `coverage-stalled` before a third pass ran, and
+              // the row failed for a reason having nothing to do with retention.
+              // That fixture-shaped dodge was evidence of a real defect, and the
+              // gate is now a sum over each peer's OWN high-water
+              // (`totalPeerProgress`), which rises whenever ANY peer advances.
+              // The margin is kept as belt-and-braces, not as a workaround.
               return {
                 ...sharedResult(),
                 failedPhases: 1,
