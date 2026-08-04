@@ -760,6 +760,8 @@ export interface VmReconcileRotationRecord {
   ordinal: number;
   fingerprint: string;
   phase: 'collecting' | 'backoff';
+  /** Backoff cause; only `clean-absence` represents a completed absence proof. */
+  backoffReason?: 'clean-absence' | 'no-progress';
   candidatePeerIds: Set<string>;
   /** Peers physically attempted during the current proof cycle. */
   attemptedPeerIds: Set<string>;

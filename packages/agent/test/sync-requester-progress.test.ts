@@ -1313,6 +1313,8 @@ describe('exact durable fetch disposition', () => {
   it.each([
     ['resumed empty suffix', { meta: { resumedFromOffset: 4, nextOffset: 4 } }],
     ['reused offset-zero responder session', { meta: { responderSessionStartedFresh: false } }],
+    ['resumed empty data suffix', { data: { resumedFromOffset: 4, nextOffset: 4 } }],
+    ['reused offset-zero data responder session', { data: { responderSessionStartedFresh: false } }],
     ['partial phase', { data: { completed: false } }],
     ['timed out phase', { data: { completed: false, timedOut: true } }],
     ['integrity rejection', { rejectedKcs: 1 }],

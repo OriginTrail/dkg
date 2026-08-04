@@ -2193,6 +2193,59 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       .toEqual(curators.slice(0, 3));
   });
 
+  it('keeps a successful-empty metadata fallback ahead of the ordinary roster cap', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmFallbackCurator', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/fallback-curator';
+    const fallbackPeer = '12D3KooWFallbackCuratorHolder';
+    const ordinaryPeers = [1, 2, 3].map((n) => `12D3KooWFallbackOrdinary${n}`);
+    const connectedById = new Map(
+      ordinaryPeers.map((peerId) => [peerId, { toString: () => peerId }]),
+    );
+    (internals as any).node = {
+      peerId: '12D3KooWFallbackCuratorLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()].map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: false,
+    });
+    (internals as any).resolvePreferredSyncPeerId = async () => fallbackPeer;
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectedById.set(peerId, { toString: () => peerId });
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: peerId === fallbackPeer ? 1 : 0,
+          fetchedMetaTriples: peerId === fallbackPeer ? 8 : 0,
+          insertedTriples: peerId === fallbackPeer ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: peerId === fallbackPeer ? 'found' : 'clean-absent',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'fallback')], 100, () => true,
+    );
+
+    expect(fetches).toEqual([fallbackPeer]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId))
+      .toEqual([fallbackPeer]);
+  });
+
   it('clears cached authoritative curators after a successful empty resolution', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmClearCuratorCache', chainAdapter: chain });
@@ -2204,7 +2257,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       peerId: '12D3KooWClearCuratorLocal',
       libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
     };
-    (internals as any).preferredSyncPeers.set(localCgId, stalePeer);
     (internals as any).vmReconcileCuratorPeersByCg.set(localCgId, [stalePeer]);
     (internals as any).resolveCuratorPeerIdsForCg = async () => ({
       peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: false,
@@ -2244,9 +2296,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
     };
     (internals as any).vmReconcileCuratorPeersByCg.set(localCgId, [cachedPeer]);
-    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
-      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: true,
-    });
+    (internals as any).discovery.findAgents = async () => {
+      throw new Error('agent registry unavailable');
+    };
+    (internals as any).refreshMetaFromCurator = async () => false;
     (internals as any).ensurePeerConnected = async () => undefined;
     (internals as any).selectCatchupPeers = () => [connectedPeer];
     (internals as any).waitForSyncProtocol = async () => true;
@@ -2466,6 +2519,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(second.attemptedOrdinals).toEqual([1]);
     expect(second.continuationOrdinal).toBeUndefined();
 
+    const rotationState = (internals as any).vmReconcileRotationState as Map<
+      string,
+      { nextRetryAt: number }
+    >;
+    now = Math.max(...targets.map((target) => rotationState.get(
+      (internals as any).vmReconcileRotationSlotKey(target),
+    )!.nextRetryAt));
     (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
     const wrapped = await internals.recoverVmReconcileBatch(
       localCgId, 1n, targets, 100, () => true,
@@ -2475,7 +2535,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const firstRecord = (internals as any).vmReconcileRotationState.get(
       (internals as any).vmReconcileRotationSlotKey(targets[0]),
     );
-    expect(firstRecord).toMatchObject({ phase: 'collecting', failures: 0 });
+    expect(firstRecord).toMatchObject({
+      phase: 'backoff', backoffReason: 'no-progress', failures: 2,
+    });
   });
 
   it('rotates one pending recovery target across eligible peers between windows', async () => {
@@ -2613,20 +2675,23 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
       await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
     }
-    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB, peerA]);
+    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB]);
     const record = (internals as any).vmReconcileRotationState.get(
       (internals as any).vmReconcileRotationSlotKey(activeTarget),
     );
     expect(record.cleanAbsentPeerIds.size).toBe(0);
-    expect(record).toMatchObject({ phase: 'collecting', failures: 0 });
-    expect([...record.attemptedPeerIds]).toEqual([peerA]);
+    expect(record).toMatchObject({
+      phase: 'backoff', backoffReason: 'no-progress', failures: 1,
+    });
+    expect([...record.attemptedPeerIds]).toEqual([]);
 
+    now = record.nextRetryAt;
     (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
-    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB, peerA, peerB]);
+    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB, peerA]);
     expect((internals as any).vmReconcileRotationState.get(
       (internals as any).vmReconcileRotationSlotKey(activeTarget),
-    )).toMatchObject({ phase: 'collecting', failures: 0 });
+    )).toMatchObject({ phase: 'collecting', failures: 1 });
   });
 
   it('backs off only after a complete clean-absence rotation and requires a fresh next cycle', async () => {
@@ -2822,7 +2887,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
   });
 
-  it('fails open after a mixed clean-absence and incomplete rotation', async () => {
+  it('completion-anchors no-progress backoff after a legacy full-CG incomplete rotation', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmPartialCycleExpiry', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
@@ -2857,7 +2922,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           : 'incomplete';
       return {
         result: {
-          fetchedDataTriples: lastDisposition === 'found' ? 1 : 0,
+          fetchedDataTriples: lastDisposition === 'found'
+            ? 1
+            : lastDisposition === 'incomplete'
+              ? 50_000
+              : 0,
           fetchedMetaTriples: lastDisposition === 'found' ? 8 : 0,
           insertedTriples: lastDisposition === 'found' ? 9 : 0,
           failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
@@ -2881,8 +2950,16 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(networkAttempts).toEqual([peerA, peerB]);
     expect([...partial.cleanAbsentPeerIds]).toEqual([]);
     expect([...partial.attemptedPeerIds]).toEqual([]);
-    expect(partial).toMatchObject({ phase: 'collecting', failures: 0, nextRetryAt: 0 });
+    expect(partial).toMatchObject({
+      phase: 'backoff', backoffReason: 'no-progress', failures: 1,
+    });
+    expect(partial.nextRetryAt).toBeGreaterThan(now);
 
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(networkAttempts).toEqual([peerA, peerB]);
+
+    now = partial.nextRetryAt;
     (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
     const recovered = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -2995,6 +3072,51 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       expect(rotationState.get(overflowKey)).toMatchObject({ phase: 'backoff' });
       expect(attemptsByUal.get(first.ual)).toEqual([peerA, peerB, peerB, peerA]);
       expect(attemptsByUal.get(overflow.ual)).toEqual([peerB, peerA, peerA, peerB]);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('makes a completed no-progress rotation evictable at the state cap', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 1,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmNoProgressCapacity', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWNoProgressCapacityPeer';
+      const first = vmRecoveryTarget('no-progress-capacity', 0, 'first');
+      const second = vmRecoveryTarget('no-progress-capacity', 1, 'second');
+      const firstKey = (internals as any).vmReconcileRotationSlotKey(first);
+      const secondKey = (internals as any).vmReconcileRotationSlotKey(second);
+      const firstRecord = (internals as any).prepareVmReconcileRotationTarget(
+        first, [peer], 100,
+      ).record;
+
+      (internals as any).settleVmReconcileRotationAttempt(
+        first, peer, 'incomplete', [peer], firstRecord,
+      );
+      expect(firstRecord).toMatchObject({
+        phase: 'backoff', backoffReason: 'no-progress', failures: 1,
+      });
+
+      const secondRecord = (internals as any).prepareVmReconcileRotationTarget(
+        second, [peer], 101,
+      ).record;
+      expect(secondRecord).toBeDefined();
+      expect((internals as any).vmReconcileRotationState.has(firstKey)).toBe(false);
+      expect((internals as any).vmReconcileRotationState.get(secondKey)).toBe(secondRecord);
     } finally {
       Object.defineProperty(
         DKGAgentBase,
@@ -3182,6 +3304,123 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     expect(result.attemptedOrdinals).toEqual([]);
     expect(fetch).not.toHaveBeenCalled();
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it.each(['unsubscribe', 'rebind'])('does not recreate state after %s during curator resolution', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmResolutionInvalidation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/resolution-invalidation';
+    const peer = '12D3KooWResolutionInvalidationPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWResolutionInvalidationLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    let releaseResolution!: () => void;
+    let markResolutionStarted!: () => void;
+    const resolutionStarted = new Promise<void>((resolve) => { markResolutionStarted = resolve; });
+    const resolutionRelease = new Promise<void>((resolve) => { releaseResolution = resolve; });
+    (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      markResolutionStarted();
+      await resolutionRelease;
+      return { peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false };
+    };
+    const connect = recorder(async () => undefined);
+    const fetch = recorder(async () => undefined);
+    (internals as any).ensurePeerConnected = connect;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    let current = true;
+    const target = vmRecoveryTarget(localCgId, 0, 'resolution-invalidation');
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => current,
+    );
+    await resolutionStarted;
+    current = false;
+    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+    releaseResolution();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(connect.calls).toEqual([]);
+    expect(fetch.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('does not recreate state after shutdown during fallback resolution', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmFallbackShutdown', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/fallback-shutdown';
+    const peer = '12D3KooWFallbackShutdownPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWFallbackShutdownLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    let releaseFallback!: () => void;
+    let markFallbackStarted!: () => void;
+    const fallbackStarted = new Promise<void>((resolve) => { markFallbackStarted = resolve; });
+    const fallbackRelease = new Promise<void>((resolve) => { releaseFallback = resolve; });
+    (internals as any).resolvePreferredSyncPeerId = async () => {
+      markFallbackStarted();
+      await fallbackRelease;
+      return peer;
+    };
+    const connect = recorder(async () => undefined);
+    (internals as any).ensurePeerConnected = connect;
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'fallback-shutdown')], 100, () => true,
+    );
+    await fallbackStarted;
+    (internals as any).closeVmReconcileRotationState();
+    releaseFallback();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(connect.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.size).toBe(0);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('does not recreate state after a rebind while dialing the curator', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmDialInvalidation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/dial-invalidation';
+    const peer = '12D3KooWDialInvalidationPeer';
+    (internals as any).node = {
+      peerId: '12D3KooWDialInvalidationLocal',
+      libp2p: { getConnections: () => [] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    let releaseDial!: () => void;
+    let markDialStarted!: () => void;
+    const dialStarted = new Promise<void>((resolve) => { markDialStarted = resolve; });
+    const dialRelease = new Promise<void>((resolve) => { releaseDial = resolve; });
+    (internals as any).ensurePeerConnected = async () => {
+      markDialStarted();
+      await dialRelease;
+    };
+    const fetch = recorder(async () => undefined);
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    let current = true;
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'dial-invalidation')], 100, () => current,
+    );
+    await dialStarted;
+    current = false;
+    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+    releaseDial();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(fetch.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.has(localCgId)).toBe(false);
     expect((internals as any).vmReconcileRotationState.size).toBe(0);
   });
 

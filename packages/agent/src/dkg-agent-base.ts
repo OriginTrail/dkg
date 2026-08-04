@@ -916,8 +916,10 @@ export class DKGAgentBase {
   );
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
-  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
+    1_000,
+  );
   /** Exact recovery keeps its existing curator/core-first three-peer fanout cap. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =

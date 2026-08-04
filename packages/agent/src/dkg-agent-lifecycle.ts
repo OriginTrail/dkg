@@ -5637,8 +5637,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
       let resolution = await resolve();
       if (resolution.peerIds.length === 0) {
-        await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+        const refreshed = await this.refreshMetaFromCurator(contextGraphId).catch(() => false);
         resolution = await resolve();
+        // An empty local query after a failed/cooldown refresh is not an
+        // authoritative empty registry. Preserve any caller-side last-known
+        // curator roster unless another writer populated the registry.
+        if (!refreshed && !resolution.lookupFailed && resolution.peerIds.length === 0) {
+          resolution = { ...resolution, lookupFailed: true };
+        }
       }
       return {
         peerIds: resolution.peerIds,

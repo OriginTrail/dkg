@@ -72,6 +72,42 @@ describe('private SWM curator recovery planning', () => {
     expect(plan.eligibleContextGraphIds).toEqual([]);
   });
 
+  it('does not treat an empty registry after a failed metadata refresh as authoritative', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const contextGraphId = `${curator}/refresh-failed-plan`;
+    const agent = await createAgent('CuratorRecoveryRefreshFailure');
+    const internals = agent as unknown as {
+      localAgents: Map<string, unknown>;
+      discovery: { findAgents: () => Promise<Array<{ agentAddress?: string; peerId: string }>> };
+      refreshMetaFromCurator: (contextGraphId: string) => Promise<boolean>;
+      resolveCuratorPeerIdsForCg: (contextGraphId: string) => Promise<{
+        peerIds: string[];
+        curatorIsLocal: boolean;
+        legacyTripleResolved: boolean;
+        lookupFailed?: boolean;
+      }>;
+    };
+    internals.localAgents.clear();
+    let lookups = 0;
+    internals.discovery = {
+      findAgents: async () => {
+        lookups += 1;
+        return [];
+      },
+    };
+    internals.refreshMetaFromCurator = async () => false;
+
+    const result = await internals.resolveCuratorPeerIdsForCg(contextGraphId);
+
+    expect(lookups).toBe(2);
+    expect(result).toEqual({
+      peerIds: [],
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+      lookupFailed: true,
+    });
+  });
+
   async function createAgent(name: string): Promise<DKGAgent> {
     const agent = await DKGAgent.create({
       name,
