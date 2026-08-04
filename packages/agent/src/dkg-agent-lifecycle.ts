@@ -275,7 +275,7 @@ import {
   type ExactDurableFetchDisposition,
 } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
-import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { runSharedMemorySync, selectSwmSnapshotCoverage, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -1237,6 +1237,9 @@ function emptySharedMemorySyncResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
+    snapshotPlaneIncomplete: 0,
+    replayPhaseBytesReceived: 0,
+    snapshotPhaseBytesReceived: 0,
   };
 }
 
@@ -1244,6 +1247,7 @@ function mergeSharedMemorySyncResults(
   a: SharedMemorySyncResult,
   b: SharedMemorySyncResult,
 ): SharedMemorySyncResult {
+  const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
     insertedTriples: a.insertedTriples + b.insertedTriples,
     fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
@@ -1263,6 +1267,17 @@ function mergeSharedMemorySyncResults(
     deniedPhases: a.deniedPhases + b.deniedPhases,
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
+    snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
+    continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
+    // The two halves of `bytesReceived`, kept apart so replay cost stays
+    // measurable once passes repeat.
+    replayPhaseBytesReceived: (a.replayPhaseBytesReceived ?? 0) + (b.replayPhaseBytesReceived ?? 0),
+    snapshotPhaseBytesReceived:
+      (a.snapshotPhaseBytesReceived ?? 0) + (b.snapshotPhaseBytesReceived ?? 0),
+    // Scalars above sum; coverage does NOT. It is selected whole from one round
+    // so the counts, their peer and the sample can never be spliced together
+    // from different manifests — see `selectSwmSnapshotCoverage`.
+    ...(swmCoverage ? { swmCoverage } : {}),
   };
 }
 
@@ -6682,6 +6697,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
+        // The #2050 signals. Without these the in-agent walk silently drops the
+        // only per-graph SWM coverage the plane has ever produced, and a job run
+        // through the inline runner reports a shortfall it cannot name — while
+        // the worker-backed runner reports it fully. Coverage is SELECTED, never
+        // summed: independent maxima over resolved and total would combine a peer
+        // reporting 178/250 with one reporting 200/200 into 200/250, a state no
+        // peer described.
+        if (r.shared.swmCoverage) {
+          diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
+            diagnostics.sharedMemory.swmCoverage,
+            r.shared.swmCoverage,
+          );
+        }
+        diagnostics.sharedMemory.snapshotPlaneIncomplete =
+          (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
+          + (r.shared.snapshotPlaneIncomplete ?? 0);
+        diagnostics.sharedMemory.replayPhaseBytesReceived =
+          (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
+          + (r.shared.replayPhaseBytesReceived ?? 0);
+        diagnostics.sharedMemory.snapshotPhaseBytesReceived =
+          (diagnostics.sharedMemory.snapshotPhaseBytesReceived ?? 0)
+          + (r.shared.snapshotPhaseBytesReceived ?? 0);
         diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
         diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
         diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;

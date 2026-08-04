@@ -1003,6 +1003,52 @@ export interface DurableSyncDiagnostics {
   deferredBackpressure?: number;
 }
 
+/**
+ * ONE peer's public-SWM snapshot coverage for ONE round, and the ONLY shape in
+ * which that coverage travels.
+ *
+ * **Reduced whole or not at all.** Numerator and denominator are never reduced
+ * independently: an independent `max` over ready and total combines peers
+ * reporting `178/250` and `200/200` into `200/250` — a state no peer reported,
+ * attributed to a peer that never said it, alongside a missing sample drawn
+ * from a third inventory. Every reducer therefore picks one record and keeps it
+ * intact; `selectSwmSnapshotCoverage` in `sync/requester/shared-memory-sync.ts`
+ * is that reducer, and it is the only one.
+ */
+export interface SwmSnapshotCoverage {
+  /**
+   * The Context Graph this coverage describes. Required, because the reduction
+   * runs INSIDE the `contextGraphIds` loop: on a multi-CG call exactly one
+   * graph's record survives, and without this field no consumer can tell which
+   * graph the surviving counts belong to.
+   */
+  contextGraphId: string;
+  /** Last 8 chars of the peer id this whole record came from. */
+  peerIdSuffix: string;
+  /** Snapshot refs already valid locally or fetched in this round. */
+  snapshotsResolved: number;
+  /** Snapshot refs declared by this peer's verified SWM metadata. */
+  snapshotsTotal: number;
+  /**
+   * The peer's SWM metadata phase paged to completion, so `snapshotsTotal` is
+   * its full manifest rather than a truncated prefix. False means the
+   * denominator is a lower bound.
+   */
+  manifestComplete: boolean;
+  missingCount: number;
+  /**
+   * Bounded identifiers for the shortfall — a public peer controls manifest
+   * size, so this is a sample, never the full inventory. Always drawn from the
+   * same round as the counts above.
+   */
+  missingSample: string[];
+  /**
+   * This round came from the metadata-resolved curator. Set only by the
+   * catch-up walk, which knows peer roles; the agent-side sync does not.
+   */
+  fromAuthority?: boolean;
+}
+
 export interface SharedMemorySyncDiagnostics {
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -1020,6 +1066,31 @@ export interface SharedMemorySyncDiagnostics {
   backoffWorthyFailures?: number;
   /** Context Graph admissions deferred by local scheduler pressure. */
   deferredBackpressure?: number;
+  /** Coverage for the graph this round touched; see {@link SwmSnapshotCoverage}. */
+  swmCoverage?: SwmSnapshotCoverage;
+  /**
+   * Snapshot phases that stopped on the local clock with unfetched refs
+   * remaining — a VOLUNTARY yield, not a peer fault. Deliberately distinct from
+   * `timedOutPhases`, which marks the round backoff-worthy
+   * (`durable-progress.ts` `backoffWorthyFailure`) and would put a healthy peer
+   * into backoff for our own budget decision.
+   */
+  snapshotPlaneIncomplete?: number;
+  /** Extra catch-up passes spent over the peer set beyond the first. */
+  continuationPasses?: number;
+  /**
+   * The REPLAY half of `bytesReceived`: the metadata and aggregate-data phases,
+   * which a repeated pass re-fetches in full. Named for the plan's single
+   * "metadata/aggregate replay" bucket — it spans BOTH phases, not just meta.
+   *
+   * Split out because `bytesReceived` merges replay and useful bytes into one
+   * scalar, which makes the accepted cost of repeating the peer walk
+   * unmeasurable in bytes — exactly the quantity the efficiency gate exists to
+   * bound. `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
+   */
+  replayPhaseBytesReceived?: number;
+  /** The USEFUL half of `bytesReceived`: immutable snapshot content. */
+  snapshotPhaseBytesReceived?: number;
 }
 
 export interface CatchupSyncDiagnostics {

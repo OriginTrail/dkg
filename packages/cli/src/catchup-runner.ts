@@ -10,6 +10,7 @@ import {
   type DurableProgressSummary,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
@@ -109,6 +110,24 @@ export interface CatchupJobResult {
       /** A resolvable curator never cleanly answered this plane; see
        * `catchupPlaneProvenByUnanimousEmpty`. */
       authorityUnanswered?: boolean;
+      /**
+       * Public-SWM snapshot coverage for this graph, selected WHOLE from one
+       * peer round by `selectSwmSnapshotCoverage`. The counts, the peer they
+       * are attributed to and the missing sample are never mixed across peers.
+       */
+      swmCoverage?: SwmSnapshotCoverage;
+      /** Snapshot phases that yielded on the local clock — see the agent-side field. */
+      snapshotPlaneIncomplete: number;
+      /** Extra passes over the peer set beyond the first. */
+      continuationPasses: number;
+      /**
+       * `bytesReceived` split into its replay half (metadata + aggregate data,
+       * which every pass re-fetches in full) and its useful half (snapshot
+       * content), so the cost of repeating the walk stays measurable instead of
+       * being merged into one scalar. The two sum to `bytesReceived`.
+       */
+      replayPhaseBytesReceived: number;
+      snapshotPhaseBytesReceived: number;
     };
   };
 }

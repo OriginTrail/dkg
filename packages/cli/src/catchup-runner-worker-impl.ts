@@ -2,14 +2,20 @@ import { parentPort } from 'node:worker_threads';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   CATCHUP_STOP_ON_PROOF,
+  SWM_CATCHUP_MAX_PASSES,
+  SWM_CATCHUP_PASS_BUDGET_MS,
+  catchupPassNowMs,
   catchupWaveSizes,
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
+  selectSwmSnapshotCoverage,
+  shouldRunAnotherCatchupPass,
   type CatchupPlaneContext,
   type DurableSyncResult,
   type SharedMemorySyncResult,
+  type SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
 import {
   addCatchupPlaneEvidence,
@@ -85,6 +91,60 @@ interface PeerRound {
   shared: CatchupSharedMemoryResult | null;
 }
 
+/** What distinguishes one pass of the peer walk from the next. */
+interface CatchupPassContext {
+  /** Continuation passes re-pull only the shared-memory plane. */
+  sharedMemoryOnly: boolean;
+  /** Absent on pass 1: the budget bounds the REPEAT, not the original walk. */
+  deadlineMs?: number;
+}
+
+/**
+ * The peers a further pass may contact — the CAPABILITY GATE.
+ *
+ * Read this and nothing else: a peer is capable exactly when its own last round
+ * said it holds refs we have not resolved.
+ *
+ * It deliberately does NOT consult `failedPhases`, `hasBlockingFailure`,
+ * `peersSucceeded`, or membership in `cleanPlaneCompletions`. That looks like the
+ * obvious tidy-up and it inverts the fix: a peer that yielded mid-manifest on the
+ * local clock sets `failedPhases` (so a partial round cannot report `done`) and is
+ * therefore absent from every one of those — and it is precisely the peer the next
+ * pass exists to revisit. Gating on "no failures" would have given zero extra
+ * passes to the two peers that mattered in the r26 incident, and extra passes to
+ * the ten barren ones.
+ *
+ * `snapshotsTotal > 0` is what excludes the barren and cleanly-empty peers;
+ * `snapshotsResolved < snapshotsTotal` is what excludes the ones already done.
+ * `manifestComplete` is deliberately NOT required: a peer whose metadata was
+ * truncated still has real, fetchable refs in the prefix it did serve, and
+ * excluding it would strand exactly the work it can still deliver.
+ */
+function capablePeersForNextPass(coverageByPeer: Map<string, SwmSnapshotCoverage>): string[] {
+  const capable: string[] = [];
+  for (const [peerId, coverage] of coverageByPeer) {
+    if (coverage.snapshotsTotal > 0 && coverage.snapshotsResolved < coverage.snapshotsTotal) {
+      capable.push(peerId);
+    }
+  }
+  return capable;
+}
+
+/**
+ * The walk's coverage high-water reading: the best any single peer reported.
+ *
+ * A progress signal, never a correctness denominator — peers describe different
+ * manifests, and the completion proof stays `catchupPlaneProvenByData`. Taken as a
+ * max over whole per-peer records so no synthetic pair is ever formed.
+ */
+function highestResolvedCoverage(coverageByPeer: Map<string, SwmSnapshotCoverage>): number {
+  let highest = 0;
+  for (const coverage of coverageByPeer.values()) {
+    if (coverage.snapshotsResolved > highest) highest = coverage.snapshotsResolved;
+  }
+  return highest;
+}
+
 function emptyShared(): CatchupSharedMemoryResult {
   return {
     insertedTriples: 0,
@@ -103,6 +163,14 @@ function emptyShared(): CatchupSharedMemoryResult {
     failedPhases: 0,
     deniedPhases: 0,
     deferredBackpressure: 0,
+    snapshotPlaneIncomplete: 0,
+    replayPhaseBytesReceived: 0,
+    snapshotPhaseBytesReceived: 0,
+    // `swmCoverage` stays ABSENT here on purpose. This is the fallback for a
+    // peer whose round threw, so it has no manifest to report; a fabricated
+    // `0/0` would be a record the reduction could select and Chunk 5 could
+    // print. Absent and `0/0` both read as "not capable", but only absent is
+    // honest.
   };
 }
 
@@ -121,9 +189,16 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   }>('prepareCatchup', request.contextGraphId);
 
   let syncCapablePeers = 0;
-  let peersTried = 0;
-  let peersResponded = 0;
-  let peersSucceeded = 0;
+  // DISTINCT peers, not peer-passes. Once the walk can repeat, `+= 1` per round
+  // counts the same peer once per pass — which inflates every one of these and
+  // drives `peersNotAttempted` (`syncCapable.length - peersTried`) NEGATIVE on the
+  // second pass. `continuationPasses` is the separate signal for how many passes
+  // were spent.
+  const peersTried = new Set<string>();
+  const peersResponded = new Set<string>();
+  const peersSucceeded = new Set<string>();
+  /** Each peer's own coverage from its LAST round; the capability gate's input. */
+  const lastCoverageByPeer = new Map<string, SwmSnapshotCoverage>();
   let deferredBackpressure = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
@@ -178,6 +253,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       failedPhases: 0,
       deferredBackpressure: 0,
       deniedPhases: 0,
+      snapshotPlaneIncomplete: 0,
+      continuationPasses: 0,
+      replayPhaseBytesReceived: 0,
+      snapshotPhaseBytesReceived: 0,
     },
   };
 
@@ -280,7 +359,23 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
-  const syncPeer = async (peerId: string): Promise<PeerRound> => {
+  const syncPeer = async (peerId: string, pass: CatchupPassContext): Promise<PeerRound> => {
+    const fromAuthorityPeer = prepared.authoritativePeerId !== undefined
+      && peerId === prepared.authoritativePeerId;
+    // A deferred plane can burn up to CATCHUP_BACKPRESSURE_MAX_WAIT_MS (180 s)
+    // inside a single admission, so a continuation pass can go past its budget
+    // between one peer and the next. Decline to START another peer rather than
+    // interrupt one: a wave member already in flight is never cancelled, for the
+    // same reason the wave loop below never cancels one — an aborted resumed
+    // session is indistinguishable from a responder supersede.
+    //
+    // Pass 1 has no deadline. It is today's walk unchanged, and the budget bounds
+    // the REPEAT, not the original: a zero budget would otherwise expire before
+    // the first peer and turn the kill switch into "fetch nothing".
+    if (pass.deadlineMs !== undefined && catchupPassNowMs() >= pass.deadlineMs) {
+      return { peerId, fromAuthority: fromAuthorityPeer, durable: null, shared: null };
+    }
+    peersTried.add(peerId);
     const syncDurable = (
       { priority, source }: CatchupPlaneContext,
     ): Promise<CatchupDurableResult> =>
@@ -304,11 +399,16 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // amplification this fix exists to remove. The kill-switch restores the
     // previous fan-out faithfully: every peer, both requested planes.
     const optimize = CATCHUP_STOP_ON_PROOF;
-    const needDurable = !optimize || !authorityProven.durable;
+    // A continuation pass is shared-memory only. The capability gate that put
+    // this peer here is defined purely on SWM coverage, so re-pulling the durable
+    // plane would be amplification with nothing selecting for it — and the whole
+    // accepted cost of repeating the walk is per-pass replay. Pass 1's durable
+    // evidence is already in `cleanPlaneCompletions`; a later pass producing none
+    // cannot take it away.
+    const needDurable = !pass.sharedMemoryOnly && (!optimize || !authorityProven.durable);
     const needSharedMemory = request.includeSharedMemory
       && (!optimize || !authorityProven.sharedMemory);
-    const fromAuthority = prepared.authoritativePeerId !== undefined
-      && peerId === prepared.authoritativePeerId;
+    const fromAuthority = fromAuthorityPeer;
     if (!needDurable) {
       const shared = needSharedMemory
         ? await runCatchupPlaneWithPolicy('foreground', syncSharedMemory)
@@ -324,8 +424,44 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     return { peerId, fromAuthority, ...round };
   };
 
-  const accumulate = ({ durable, shared, fromAuthority }: PeerRound): void => {
+  const accumulate = ({ peerId, durable, shared, fromAuthority }: PeerRound): void => {
     let peerDenied = false;
+    if (shared) {
+      // This peer's OWN latest coverage, kept apart from the reduced record in
+      // `diagnostics`. The reduction picks one peer's record to REPORT; the
+      // capability gate needs each peer's own, and last-round-wins is what makes
+      // "still has refs we lack" a statement about now rather than about pass 1.
+      //
+      // A round that reports no coverage is forgotten ONLY when it completed
+      // cleanly — a genuinely barren peer, whose record Chunk 1 suppresses at
+      // `snapshotsTotal === 0`. A FAILED round retains what the peer last told
+      // us, because a throw is not evidence of absence: `syncSharedMemory`'s
+      // `.catch(() => emptyShared())` returns a truthy result carrying no
+      // coverage, so forgetting on it would erase a peer's `178/250` the moment
+      // one pass against it threw. If that was the last capable peer, the next
+      // decision sees an empty set and stops at `no-capable-peers` — abandoning a
+      // graph we have positive evidence is recoverable. That is the #2050
+      // scenario itself: those peers were recorded with SWM transport failures,
+      // and surviving them is the whole reason the walk repeats.
+      //
+      // The asymmetry is deliberate. A stale-but-positive record can only
+      // over-attempt one peer, bounded by the pass cap and the budget; deleting
+      // it gives up. `catchupPlaneCompletedWithoutFailure` is the same predicate
+      // the authority-answering logic below uses, so the two cannot disagree, and
+      // it already counts a deferred plane as not completed.
+      //
+      // For whoever reads a stop reason later: `highestResolvedCoverage` is a max
+      // over this map, so any forgetting can make the reading DECREASE between
+      // passes, which trips the stalled check and reports `coverage-stalled` for
+      // what was really a transport failure. Requiring a clean round removes the
+      // common cause; a decrease stays reachable when a barren round follows a
+      // productive one against a different peer.
+      if (shared.swmCoverage) {
+        lastCoverageByPeer.set(peerId, shared.swmCoverage);
+      } else if (catchupPlaneCompletedWithoutFailure(shared)) {
+        lastCoverageByPeer.delete(peerId);
+      }
+    }
     if (durable) {
       dataSynced += durable.insertedDataTriples ?? 0;
       diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
@@ -381,7 +517,22 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
       diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
       diagnostics.sharedMemory.deferredBackpressure += shared.deferredBackpressure ?? 0;
+      diagnostics.sharedMemory.snapshotPlaneIncomplete += shared.snapshotPlaneIncomplete ?? 0;
+      diagnostics.sharedMemory.replayPhaseBytesReceived += shared.replayPhaseBytesReceived ?? 0;
+      diagnostics.sharedMemory.snapshotPhaseBytesReceived += shared.snapshotPhaseBytesReceived ?? 0;
       deferredBackpressure += shared.deferredBackpressure ?? 0;
+      // Coverage is the one field here that is SELECTED, not summed. Summing —
+      // or taking independent maxima over resolved and total — would let a peer
+      // reporting 178/250 and a peer reporting 200/200 combine into 200/250: a
+      // graph state no peer described, carrying a missing sample from neither.
+      // `fromAuthority` is attached here because peer roles are the walk's
+      // knowledge, not the agent-side sync's.
+      if (shared.swmCoverage) {
+        diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
+          diagnostics.sharedMemory.swmCoverage,
+          { ...shared.swmCoverage, fromAuthority },
+        );
+      }
       diagnostics.sharedMemory.deniedPhases =
         (diagnostics.sharedMemory.deniedPhases ?? 0) + (shared.deniedPhases ?? 0);
       peerDenied = peerDenied || shared.deniedPhases > 0;
@@ -403,7 +554,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     }
 
     if (catchupPeerResponded(durable, shared)) {
-      peersResponded += 1;
+      peersResponded.add(peerId);
     }
 
     // Count peers that completed a sync round without a transport
@@ -412,7 +563,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // `syncContextGraphFromConnectedPeers` path so both runners report the
     // same shape.
     if (catchupPeerSucceeded(durable, shared, peerDenied, durable?.complete)) {
-      peersSucceeded += 1;
+      peersSucceeded.add(peerId);
     }
   };
 
@@ -456,8 +607,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // waves and the opening width is unobservable. The comparison is what
   // actually decides: narrow the opening wave only when the authority IS the
   // peer that wave would contact.
+  const runWalk = async (walkPeers: string[], pass: CatchupPassContext): Promise<void> => {
   const authorityFirst = prepared.authoritativePeerId !== undefined
-    && syncCapable[0] === prepared.authoritativePeerId;
+    && walkPeers[0] === prepared.authoritativePeerId;
   // Waves exist ONLY so an authority can cut the walk short. With no authority
   // resolvable nothing can ever break the loop, so splitting the peer set into
   // waves cannot save a single fetch — it only adds a barrier between them,
@@ -466,28 +618,67 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   const canStopEarly = CATCHUP_STOP_ON_PROOF && prepared.authoritativePeerId !== undefined;
   const waveSizes = canStopEarly
     ? catchupWaveSizes(
-      syncCapable.length,
+      walkPeers.length,
       CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
       authorityFirst ? 1 : CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
     )
-    : [syncCapable.length];
+    : [walkPeers.length];
   let cursor = 0;
   for (const waveSize of waveSizes) {
-    const wave = syncCapable.slice(cursor, cursor + waveSize);
+    const wave = walkPeers.slice(cursor, cursor + waveSize);
     if (wave.length === 0) break;
     cursor += wave.length;
-    peersTried += wave.length;
     // Never cancel a wave member mid-stream: an aborted resumed session is
     // indistinguishable from a responder supersede. Let the wave finish, then
     // stop before dispatching the next one.
     const rounds = await mapWithConcurrency(
       wave,
       Math.min(CATCHUP_MAX_CONCURRENT_PEER_SYNCS, wave.length),
-      syncPeer,
+      (peerId) => syncPeer(peerId, pass),
     );
     for (const round of rounds) accumulate(round);
     settleAuthorityForWave();
     if (CATCHUP_STOP_ON_PROOF && authorityProvedEverything()) break;
+  }
+  };
+
+  // Pass 1 IS today's walk: same peers, both planes, no deadline. Everything the
+  // repeat loop adds happens after it returns, so a node with extra passes
+  // disabled behaves exactly as it did before #2050.
+  await runWalk(syncCapable, { sharedMemoryOnly: false });
+
+  // The bounded, progress-aware repeat (#2050). A receiver that ran out of clock
+  // mid-manifest used to terminate `unreachable` with a partial graph and no
+  // resume path; now the walk repeats while it is provably converging.
+  //
+  // The budget is read from the environment rather than passed per request
+  // because this runner has exactly one caller shape — the daemon's foreground
+  // catch-up job. `DKG_SWM_CATCHUP_PASS_BUDGET_MS=0` is the operator kill switch
+  // and needs no redeploy; it makes the deadline expire before the first repeat.
+  let continuationPasses = 0;
+  let coverageHighWaterMark = 0;
+  if (request.includeSharedMemory) {
+    const passDeadlineMs = catchupPassNowMs() + SWM_CATCHUP_PASS_BUDGET_MS;
+    for (;;) {
+      const lastPassCoverage = highestResolvedCoverage(lastCoverageByPeer);
+      const decision = shouldRunAnotherCatchupPass({
+        nowMs: catchupPassNowMs(),
+        deadlineMs: passDeadlineMs,
+        passesRun: 1 + continuationPasses,
+        maxPasses: SWM_CATCHUP_MAX_PASSES,
+        coverageHighWaterMark,
+        lastPassCoverage,
+        planeProven: catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
+        capablePeers: capablePeersForNextPass(lastCoverageByPeer),
+      });
+      if (!decision.continue) break;
+      coverageHighWaterMark = lastPassCoverage;
+      continuationPasses += 1;
+      await runWalk(decision.peers, { sharedMemoryOnly: true, deadlineMs: passDeadlineMs });
+    }
+    if (continuationPasses > 0) {
+      diagnostics.sharedMemory.continuationPasses = continuationPasses;
+    }
   }
 
   // A curator we resolved but never heard cleanly from makes the round
@@ -510,10 +701,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     totalPeers: prepared.connectedPeers,
     selectedPeers: prepared.peerIds.length,
     syncCapablePeers,
-    peersTried,
-    peersResponded,
-    peersSucceeded,
-    peersNotAttempted: syncCapable.length - peersTried,
+    peersTried: peersTried.size,
+    peersResponded: peersResponded.size,
+    peersSucceeded: peersSucceeded.size,
+    peersNotAttempted: syncCapable.length - peersTried.size,
     deferredBackpressure,
     dataSynced,
     sharedMemorySynced,

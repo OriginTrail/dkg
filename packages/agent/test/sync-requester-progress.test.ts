@@ -8,7 +8,9 @@ import {
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
+import { runSharedMemorySync, selectSwmSnapshotCoverage } from '../src/sync/requester/shared-memory-sync.js';
+import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
   SyncPageAccumulationLimitError,
   type SyncPageResult,
@@ -1429,5 +1431,172 @@ describe('exact durable fetch disposition', () => {
     }).not.toThrow();
     await expect(publicResult).rejects.toThrow();
     await expect(detailedResult).rejects.toThrow();
+  });
+});
+
+describe('public SWM snapshot coverage (#2050)', () => {
+  const COVERAGE_CG = 'coverage-swm';
+  const META_GRAPH = `did:dkg:context-graph:${COVERAGE_CG}/_shared_memory_meta`;
+
+  function snapshotMeta(subject: string, digest: string, count: number): Quad[] {
+    return [
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/publicQuadsDigest',
+        object: `"${digest}"`,
+        graph: META_GRAPH,
+      } as Quad,
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/publicQuadsCount',
+        object: `"${count}"`,
+        graph: META_GRAPH,
+      } as Quad,
+    ];
+  }
+
+  // The external review's M2 case, verbatim: independent maxima over ready and
+  // total turn these two peers into `200/250` — a graph state neither reported.
+  const partialOfLarge: SwmSnapshotCoverage = {
+    contextGraphId: COVERAGE_CG,
+    peerIdSuffix: 'aaaa1111',
+    snapshotsResolved: 178,
+    snapshotsTotal: 250,
+    manifestComplete: true,
+    missingCount: 72,
+    missingSample: ['did:dkg:ka:from-the-large-manifest'],
+  };
+  const completeSmaller: SwmSnapshotCoverage = {
+    contextGraphId: COVERAGE_CG,
+    peerIdSuffix: 'bbbb2222',
+    snapshotsResolved: 200,
+    snapshotsTotal: 200,
+    manifestComplete: true,
+    missingCount: 0,
+    missingSample: [],
+  };
+
+  it('reports the shortfall against the largest manifest, not the best fraction', () => {
+    const bothOrders = [
+      selectSwmSnapshotCoverage(partialOfLarge, completeSmaller),
+      selectSwmSnapshotCoverage(completeSmaller, partialOfLarge),
+    ];
+
+    for (const selected of bothOrders) {
+      // Whole record from ONE peer: reducing numerator and denominator
+      // independently would give 200/250, which equals neither input and
+      // carries a sample from neither manifest.
+      expect([partialOfLarge, completeSmaller]).toContainEqual(selected);
+      expect(selected).not.toMatchObject({ snapshotsResolved: 200, snapshotsTotal: 250 });
+      // And the winner must be the peer that knows the graph is 250 KAs, not
+      // the one whose smaller view is fully resolved. Picking `200/200` would
+      // report "0 outstanding" on a job that is 72 short — self-consistent,
+      // undetectable downstream, and worse than the synthetic pair above.
+      expect(selected).toEqual(partialOfLarge);
+      expect(selected?.missingCount).toBe(72);
+    }
+    expect(bothOrders[0]).toEqual(bothOrders[1]);
+  });
+
+  it('prefers authority evidence even when another peer knows a larger manifest', () => {
+    // Deliberately the record that LOSES on every later rule: smaller total,
+    // fewer outstanding. Only the authority rule can select it, so this fails
+    // if authority stops sorting first.
+    const authoritySmaller: SwmSnapshotCoverage = { ...completeSmaller, fromAuthority: true };
+
+    expect(selectSwmSnapshotCoverage(authoritySmaller, partialOfLarge)).toEqual(authoritySmaller);
+    expect(selectSwmSnapshotCoverage(partialOfLarge, authoritySmaller)).toEqual(authoritySmaller);
+  });
+
+  it('prefers a complete manifest, whose denominator is not merely a lower bound', () => {
+    // Larger total than `partialOfLarge`, so the largest-manifest rule alone
+    // would select it; only `manifestComplete` rejects it.
+    const truncatedButLarger: SwmSnapshotCoverage = {
+      contextGraphId: COVERAGE_CG,
+      peerIdSuffix: 'cccc3333',
+      snapshotsResolved: 9,
+      snapshotsTotal: 300,
+      manifestComplete: false,
+      missingCount: 291,
+      missingSample: [],
+    };
+
+    expect(selectSwmSnapshotCoverage(truncatedButLarger, partialOfLarge)).toEqual(partialOfLarge);
+    expect(selectSwmSnapshotCoverage(partialOfLarge, truncatedButLarger)).toEqual(partialOfLarge);
+  });
+
+  it('prefers the most resolved when two peers report the same manifest size', () => {
+    const behind: SwmSnapshotCoverage = {
+      ...partialOfLarge,
+      peerIdSuffix: 'dddd4444',
+      snapshotsResolved: 12,
+      missingCount: 238,
+    };
+
+    expect(selectSwmSnapshotCoverage(behind, partialOfLarge)).toEqual(partialOfLarge);
+    expect(selectSwmSnapshotCoverage(partialOfLarge, behind)).toEqual(partialOfLarge);
+  });
+
+  it('breaks a genuine tie deterministically on the peer id', () => {
+    const later: SwmSnapshotCoverage = { ...partialOfLarge, peerIdSuffix: 'zzzz9999' };
+
+    expect(selectSwmSnapshotCoverage(partialOfLarge, later)).toEqual(partialOfLarge);
+    expect(selectSwmSnapshotCoverage(later, partialOfLarge)).toEqual(partialOfLarge);
+  });
+
+  it('carries the round coverage onto the summary when the snapshot phase does not finish', async () => {
+    const cachedQuads = [quad('cached-snapshot-row')];
+    const cachedDigest = workspacePublicQuadsDigest(cachedQuads);
+    const meta = [
+      ...snapshotMeta('did:dkg:assertion:cached', cachedDigest, cachedQuads.length),
+      ...snapshotMeta('did:dkg:assertion:unreachable', 'digest-never-served', 5),
+    ];
+
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-coverage-abcd1234',
+      contextGraphIds: [COVERAGE_CG],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: OperationContext,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: string,
+      ) => (phase === 'snapshot'
+        ? pageResult(contextGraphId, phase, { completed: false, timedOut: true })
+        : pageResult(contextGraphId, phase)),
+      processSharedMemoryBatch: async () => ({
+        ...sharedMemoryProcessResult(),
+        emptyResponses: 0,
+        verifiedMeta: meta,
+        totalFetchedMetaQuads: meta.length,
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      publicSnapshotStore: {
+        getSnapshot: async (ref: string) => (ref === cachedDigest ? cachedQuads : null),
+        putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    // One cached snapshot resolved, one never served, and the manifest itself
+    // paged cleanly — so the shortfall is real rather than an artefact of a
+    // truncated denominator.
+    expect(summary.swmCoverage).toEqual({
+      contextGraphId: COVERAGE_CG,
+      peerIdSuffix: 'abcd1234',
+      snapshotsResolved: 1,
+      snapshotsTotal: 2,
+      manifestComplete: true,
+      missingCount: 1,
+      missingSample: [],
+    });
   });
 });

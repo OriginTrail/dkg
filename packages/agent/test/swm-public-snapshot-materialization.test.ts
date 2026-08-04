@@ -179,10 +179,18 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => {
+        withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
           overrides.onLockRequested?.();
-          return withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
+          try {
+            return await withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
+          } finally {
+            // Records the CLOSE of the window, not just its open. Without it the
+            // tape cannot tell a write made UNDER the lock from one made after it
+            // released — which is the entire claim of the per-KA meta insert.
+            // `finally`, so a KA that threw still closes its own window.
+            events.push('lock-released');
+          }
         },
         isGraphAssetMaterialized: async () => {
           events.push('content-checked');

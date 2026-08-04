@@ -21,7 +21,7 @@
  *     ambiguous mix. A second round is a pure no-op, which also proves the
  *     digest survives the store round-trip (no churn).
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -66,21 +66,25 @@ class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
  * count with different content: only a digest-binding guard can tell them
  * apart.
  */
-function share(version: number, operationId: string, marker: string) {
-  const scope = createGraphKnowledgeAssetScope(UAL, version);
+function share(version: number, operationId: string, marker: string, ual: string = UAL, payloadCount = 2) {
+  const scope = createGraphKnowledgeAssetScope(ual, version);
   const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
   const operationSubject = `urn:dkg:share:${CG}:${operationId}`;
-  const headSubject = `${UAL}#dkg-swm-head`;
-  const payload: Quad[] = [
-    { subject: 'urn:snap:a', predicate: 'http://schema.org/status', object: `"${marker}"`, graph: '' },
-    { subject: 'urn:snap:b', predicate: 'http://schema.org/status', object: `"${marker}"`, graph: '' },
-  ];
+  const headSubject = `${ual}#dkg-swm-head`;
+  // `ual`/`payloadCount` default to the original single-KA values, so `v1`/`v2`
+  // and every test built on them are behaviourally unchanged. The multi-KA
+  // manifest below varies both: distinct UALs give distinct head subjects, and
+  // distinct payload SIZES mean a KA materialized in place of another shows up
+  // in the counters instead of cancelling out.
+  const payload: Quad[] = Array.from({ length: payloadCount }, (_, i) => ({
+    subject: `urn:snap:${marker}:${i}`, predicate: 'http://schema.org/status', object: `"${marker}"`, graph: '',
+  }));
   const digest = workspacePublicQuadsDigest(payload);
   const meta: Quad[] = [
     ...generateKnowledgeAssetShareMetadata({
       shareOperationId: operationId,
       contextGraphId: CG,
-      kaUal: UAL,
+      kaUal: ual,
       assertionVersion: version,
       publicTripleCount: payload.length,
       privateTripleCount: 0,
@@ -90,12 +94,23 @@ function share(version: number, operationId: string, marker: string) {
     { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
     { subject: operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"${digest}"`, graph: WS_META },
     { subject: headSubject, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: WS_META },
-    { subject: headSubject, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+    { subject: headSubject, predicate: `${DKG}kaUal`, object: ual, graph: WS_META },
     { subject: headSubject, predicate: `${DKG}assertionVersion`, object: `"${version}"^^<${XSD_INTEGER}>`, graph: WS_META },
     { subject: headSubject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: WS_META },
     { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: WS_META },
   ];
   return { version, operationId, operationSubject, headSubject, assertionGraph, payload, digest, meta };
+}
+
+/** N independent KAs — distinct UAL, operation and payload size each. */
+function manifest(count: number) {
+  return Array.from({ length: count }, (_, i) => share(
+    1,
+    `op-ka-${i + 1}`,
+    `ka-${i + 1}`,
+    `did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/${i + 1}`,
+    2 + i,
+  ));
 }
 
 const v1 = share(1, 'op-v1', 'version-one');
@@ -362,5 +377,127 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(again.failedPhases).toBe(0);
       expect(h.replaceCalls()).toBe(1);
     });
+  });
+});
+
+/**
+ * T9 / T9b (#2050) — a PARTIAL round must leave its own progress readable.
+ *
+ * The G7 defect: `replaceHeadMetadata` is delete-only, and the only statement
+ * that writes head rows — `storeInsert(processed.verifiedMeta)` — sits BELOW the
+ * `continue` on the incomplete branch. So a round that materializes some KAs and
+ * then abandons the rest writes their assertion graphs and no head rows at all:
+ * content present, heads absent, invisible to every head reader. That is the
+ * r26 residual.
+ *
+ * This needs no Chunk 2 yield to reproduce. A snapshot-phase fetch that returns
+ * `completed: false` already drives `syncPublicSnapshotsForMeta` to its early
+ * return, which makes `snapshotPhaseUsable` false and skips the bulk insert —
+ * the same branch a deadline yield will take.
+ *
+ * Asserted over the FULL final quad set rather than per-KA presence, so an
+ * over-broad "insert everything" implementation fails here too: heads must exist
+ * for exactly the KAs that were materialized, and for no others.
+ */
+describe('T9 — a partial round leaves content AND head rows for what it materialized', () => {
+  const stores: OxigraphStore[] = [];
+  afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
+
+  /** Which of these KAs currently carry ANY head row in the store. */
+  async function headsPresent(store: TripleStore, shares: ReturnType<typeof manifest>): Promise<string[]> {
+    const present: string[] = [];
+    for (const s of shares) {
+      const r = await store.query(`ASK { GRAPH <${WS_META}> { <${s.headSubject}> ?p ?o } }`);
+      if (r.type === 'boolean' && r.value) present.push(s.headSubject);
+    }
+    return present.sort();
+  }
+
+  async function graphsPresent(store: TripleStore, shares: ReturnType<typeof manifest>): Promise<string[]> {
+    const present: string[] = [];
+    for (const s of shares) {
+      const r = await store.query(`ASK { GRAPH <${s.assertionGraph}> { ?s ?p ?o } }`);
+      if (r.type === 'boolean' && r.value) present.push(s.assertionGraph);
+    }
+    return present.sort();
+  }
+
+  /**
+   * Runs a round over `shares` where the first `materializeCount` snapshots are
+   * pre-cached (so they materialize from cache) and the next one is NOT cached
+   * and its network fetch returns incomplete — the partial-round branch.
+   */
+  async function runPartial(store: OxigraphStore, shares: ReturnType<typeof manifest>, materializeCount: number) {
+    const snapshotStore = new MemorySnapshotStore();
+    for (const s of shares.slice(0, materializeCount)) {
+      await snapshotStore.putSnapshot({ digest: s.digest, quads: s.payload });
+    }
+    const { materializer } = materializerFor(store);
+    return runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-source',
+      contextGraphIds: [CG],
+      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => {
+        if (phase === 'meta') {
+          const quads = shares.flatMap((s) => s.meta);
+          return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed: true, timedOut: false };
+        }
+        if (phase === 'snapshot') {
+          // The uncached snapshot cannot be served: the phase ends incomplete,
+          // which is exactly what a mid-list deadline produces.
+          return { quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0, checkpointKey: 'snap', completed: false, timedOut: true };
+        }
+        return { quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0, checkpointKey: 'k', completed: true, timedOut: false };
+      },
+      processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
+        verifiedData: wsDataQuads, verifiedMeta: wsMetaQuads,
+        totalFetchedDataQuads: wsDataQuads.length, totalFetchedMetaQuads: wsMetaQuads.length,
+        droppedDataTriples: 0, emptyResponses: 0, entityCreators: [],
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async (quads) => { await store.insert(quads); },
+      snapshotMaterializer: materializer,
+      publicSnapshotStore: snapshotStore,
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: () => {}, logWarn: () => {}, logDebug: () => {},
+    });
+  }
+
+  it('writes head rows for exactly the KAs it materialized, and none for the rest', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const shares = manifest(5);
+
+    await runPartial(store, shares, 2);
+
+    // The two cached KAs were written to the store...
+    expect(await graphsPresent(store, shares))
+      .toEqual([shares[0]!.assertionGraph, shares[1]!.assertionGraph].sort());
+
+    // ...and their heads must be readable, or the content is invisible to every
+    // head reader. PRE-FIX THIS IS `[]`: the bulk meta insert is skipped on the
+    // incomplete branch and nothing else writes a head row.
+    expect(await headsPresent(store, shares))
+      .toEqual([shares[0]!.headSubject, shares[1]!.headSubject].sort());
+  });
+
+  it('does not certify a KA it never materialized', async () => {
+    // The over-broad direction: an implementation that inserts all verified meta
+    // on the partial branch would stamp head rows for KAs 3-5, whose assertion
+    // graphs were never written — a head certifying an unwritten graph, which is
+    // the precise failure the withhold rule exists to prevent.
+    const store = new OxigraphStore();
+    stores.push(store);
+    const shares = manifest(5);
+
+    await runPartial(store, shares, 2);
+
+    const heads = await headsPresent(store, shares);
+    for (const s of shares.slice(2)) {
+      expect(heads).not.toContain(s.headSubject);
+    }
   });
 });

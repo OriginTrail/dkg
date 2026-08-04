@@ -1,6 +1,7 @@
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
@@ -34,6 +35,72 @@ export interface SharedMemorySyncSummary {
   backoffWorthyFailures: number;
   /** Context Graph admissions deferred by local scheduler pressure. */
   deferredBackpressure: number;
+  /**
+   * Snapshot phases that stopped on the local clock with refs still unfetched.
+   * A voluntary yield, NOT a peer fault — see `SwmSnapshotCoverage` and the
+   * note on `SharedMemorySyncDiagnostics.snapshotPlaneIncomplete`.
+   */
+  snapshotPlaneIncomplete: number;
+  /** Coherent snapshot coverage for this round; reduced only by {@link selectSwmSnapshotCoverage}. */
+  swmCoverage?: SwmSnapshotCoverage;
+  /**
+   * The REPLAY half of `bytesReceived` — metadata AND aggregate data, the two
+   * phases a repeated pass re-fetches in full. `bytesReceived` merges these
+   * with snapshot bytes into one scalar, which leaves the accepted cost of
+   * repeating the peer walk unmeasurable in bytes.
+   */
+  replayPhaseBytesReceived: number;
+  /** The USEFUL half of `bytesReceived` — immutable snapshot content. */
+  snapshotPhaseBytesReceived: number;
+}
+
+/**
+ * Pick the coverage record a caller should report, WHOLE.
+ *
+ * This is the single reduction for {@link SwmSnapshotCoverage}, used both when
+ * one peer's rounds are merged across Context Graphs (`mergeSharedMemorySyncResults`)
+ * and when a catch-up walk merges across peers. It never builds a new pair of
+ * counts — the returned record is byte-for-byte one of its inputs, so the
+ * counts, the peer they are attributed to, and the missing sample always
+ * describe the same round.
+ *
+ * Order: authority evidence, then a complete manifest (an incomplete one's
+ * denominator is only a lower bound), then the LARGEST manifest, then the most
+ * resolved within that manifest, then a lexicographic peer-id tiebreak.
+ *
+ * **Largest manifest, not best fraction.** Ranking by `resolved/total` picks
+ * `200/200` over `178/250` and so reports "0 outstanding" on a job that is 72
+ * Knowledge Assets short. That is worse than the synthetic `200/250` this
+ * record shape exists to prevent, because it is internally self-consistent and
+ * nothing downstream can detect it. The largest complete manifest is the best
+ * known lower bound on what the graph actually holds, so the shortfall is
+ * reported against that.
+ *
+ * Residual, stated: a peer that sorts first on authority still wins with a
+ * stale or smaller manifest, and can report converged while a
+ * non-authoritative peer knows of more. That one is accepted — the curator is
+ * definitionally authoritative about its own Context Graph's inventory.
+ */
+export function selectSwmSnapshotCoverage(
+  a: SwmSnapshotCoverage | undefined,
+  b: SwmSnapshotCoverage | undefined,
+): SwmSnapshotCoverage | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  if ((a.fromAuthority ?? false) !== (b.fromAuthority ?? false)) {
+    return a.fromAuthority ? a : b;
+  }
+  if (a.manifestComplete !== b.manifestComplete) return a.manifestComplete ? a : b;
+  if (a.snapshotsTotal !== b.snapshotsTotal) return a.snapshotsTotal > b.snapshotsTotal ? a : b;
+  if (a.snapshotsResolved !== b.snapshotsResolved) {
+    return a.snapshotsResolved > b.snapshotsResolved ? a : b;
+  }
+  // Genuinely indistinguishable records. This settles a cross-PEER tie only:
+  // in the cross-Context-Graph merge both records come from the SAME peer, so
+  // the suffixes are equal and the choice falls through to `a` — that is,
+  // to Context Graph iteration order. Deterministic either way, but not
+  // because of this comparison.
+  return a.peerIdSuffix <= b.peerIdSuffix ? a : b;
 }
 
 interface SharedMemorySyncContext {
@@ -149,6 +216,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     failedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
+    snapshotPlaneIncomplete: 0,
+    replayPhaseBytesReceived: 0,
+    snapshotPhaseBytesReceived: 0,
   };
 
   const recordPhaseOutcome = (
@@ -222,6 +292,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
+      summary.replayPhaseBytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
@@ -416,10 +487,39 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           + `KA snapshot(s) totalling ${materializedQuads} triples`);
       }
       summary.bytesReceived += snapshotSync.bytesReceived;
+      summary.snapshotPhaseBytesReceived += snapshotSync.bytesReceived;
       summary.resumedPhases += snapshotSync.resumedPhases;
       summary.timedOutPhases += snapshotSync.timedOutPhases;
       summary.completedPhases += snapshotSync.completedPhases;
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
+      // Coverage is recorded HERE — above the incomplete branch below — because
+      // a partial round is exactly the round whose coverage the caller needs.
+      // The counts, the peer they are attributed to and the missing sample all
+      // come from this one round and stay together from here on.
+      //
+      // No record for a graph that declared no snapshot refs. `0/0` is not a
+      // shortfall, and a peer with nothing to offer must not look like a peer
+      // that still owes us KAs — an absent record reads as "not capable".
+      //
+      // Across a MULTI-CG call the reduction keeps exactly ONE graph's record,
+      // named by its `contextGraphId`; the others are dropped. Foreground
+      // catch-up always passes a single CG (`dkg-agent-lifecycle.ts:5982`), so
+      // that only bites the on-connect fan-out, where this field is a
+      // diagnostic rather than a decision input.
+      if (snapshotSync.totalSnapshots > 0) {
+        summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
+          contextGraphId: pid,
+          peerIdSuffix: remotePeerId.slice(-8),
+          snapshotsResolved: snapshotSync.readySnapshots,
+          snapshotsTotal: snapshotSync.totalSnapshots,
+          // A truncated meta phase makes `totalSnapshots` a lower bound, and is
+          // also the state in which `snapshotDescriptorsByRef` is empty (:270)
+          // so nothing materializes at all.
+          manifestComplete: wsMetaResult.completed,
+          missingCount: snapshotSync.totalSnapshots - snapshotSync.readySnapshots,
+          missingSample: [],
+        });
+      }
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       // A snapshot that verified but could not be written must be treated
       // exactly like a snapshot phase that did not complete. Otherwise the meta
@@ -577,6 +677,20 @@ export async function syncPublicSnapshotsForMeta(params: {
   /** Total immutable snapshot refs declared by the verified SWM metadata. */
   totalSnapshots: number;
   completed: boolean;
+  /** Exact count of declared refs this round did not resolve. */
+  missingCount: number;
+  /**
+   * Bounded identifiers for the shortfall. A public peer controls manifest
+   * size, so this is capped; `missingCount` carries the true figure.
+   */
+  missingSample: string[];
+  /**
+   * The round stopped on OUR OWN clock with refs still unfetched — a voluntary
+   * yield, not a peer fault. Callers must surface this as
+   * `snapshotPlaneIncomplete` and must NOT fold it into `timedOutPhases`, which
+   * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
+   */
+  yieldedAtDeadline: boolean;
 }> {
   const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
   if (snapshots.length === 0) {
@@ -589,6 +703,9 @@ export async function syncPublicSnapshotsForMeta(params: {
       readySnapshots: 0,
       totalSnapshots: 0,
       completed: true,
+      missingCount: 0,
+      missingSample: [],
+      yieldedAtDeadline: false,
     };
   }
   if (!params.publicSnapshotStore) {
@@ -603,7 +720,37 @@ export async function syncPublicSnapshotsForMeta(params: {
   let completedPhases = 0;
   let checkpointAdvances = 0;
   let readySnapshots = 0;
-  for (const snapshot of snapshots) {
+  let missingCount = 0;
+  let yieldedAtDeadline = false;
+  const missingSample: string[] = [];
+  const noteMissing = (ref: string): void => {
+    missingCount += 1;
+    if (missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) missingSample.push(ref);
+  };
+  /** Every ref from `index` onward is unresolved; record them and stop. */
+  const abandonFrom = (index: number): void => {
+    for (let i = index; i < snapshots.length; i += 1) noteMissing(snapshots[i]!.ref);
+  };
+
+  for (const [index, snapshot] of snapshots.entries()) {
+    // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
+    // for this one. Both halves matter:
+    //
+    // - Before, not after: a cache "hit" is O(KA size) — a full `.nq` read plus
+    //   a SHA-256 — and a miss is a network round trip. Checking afterwards
+    //   would let one KA overrun the budget it was supposed to respect.
+    // - Before the fetch specifically: no `SyncPageResult` exists yet, so
+    //   `timedOutPhases` structurally CANNOT move on this path. That is what
+    //   keeps a local budget decision from being reported as a peer timeout and
+    //   putting a healthy responder into backoff.
+    //
+    // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
+    // can never leave a partially materialized asset.
+    if (Date.now() >= params.deadline) {
+      yieldedAtDeadline = true;
+      abandonFrom(index);
+      break;
+    }
     if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
       await params.onSnapshotReady?.(snapshot, 'cache');
       readySnapshots += 1;
@@ -633,16 +780,8 @@ export async function syncPublicSnapshotsForMeta(params: {
       // monotonic recovery progress across the CG without accepting a partial
       // asset.
       params.deleteCheckpoint(result.checkpointKey);
-      return {
-        bytesReceived,
-        resumedPhases,
-        timedOutPhases,
-        completedPhases,
-        checkpointAdvances,
-        readySnapshots,
-        totalSnapshots: snapshots.length,
-        completed: false,
-      };
+      abandonFrom(index);
+      break;
     }
 
     const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
@@ -654,17 +793,17 @@ export async function syncPublicSnapshotsForMeta(params: {
       // in a later bounded recovery round. Equal-count digest mismatches remain
       // fatal below so a complete but tampered snapshot is never softened into
       // a transport retry.
+      //
+      // SKIP this ref and keep walking, rather than returning. Ref order is
+      // byte-identical on every pass (`Map` insertion order), so returning here
+      // would pin every future pass at this same index: one permanently
+      // unserveable ref would stall the whole manifest forever and drive a
+      // repeat-pass design to a fixed point at zero progress. Skipping costs
+      // this KA and nothing else — it stays uncached and unapplied, and is
+      // retried from offset zero next pass.
       params.deleteCheckpoint(result.checkpointKey);
-      return {
-        bytesReceived,
-        resumedPhases,
-        timedOutPhases,
-        completedPhases,
-        checkpointAdvances,
-        readySnapshots,
-        totalSnapshots: snapshots.length,
-        completed: false,
-      };
+      noteMissing(snapshot.ref);
+      continue;
     }
     const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
     if (actualDigest !== snapshot.digest || snapshotQuads.length !== snapshot.count) {
