@@ -1791,6 +1791,12 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
   const PEER = 'peer-continuation-0001';
 
   /** A round that resolved some of its manifest and did NOT complete cleanly. */
+  /** Same shape but the manifest is a truncated prefix, so the peer is NOT capable. */
+  function truncatedSharedRound(resolved: number, total: number) {
+    const round = partialSharedRound(resolved, total);
+    return { ...round, swmCoverage: { ...round.swmCoverage, manifestComplete: false } };
+  }
+
   function partialSharedRound(resolved: number, total: number) {
     return {
       ...sharedResult(),
@@ -1914,11 +1920,17 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
     expect(continuationLines[0]).toContain(CG);
   });
 
-  it('does NOT run a second pass when the first pass resolved nothing', async () => {
-    // The high-water mark starts at 0, so a pass that resolved zero has not
-    // advanced it — a peer that just demonstrated it can deliver nothing does not
-    // earn a repeat. This is the negative half: without it, the row above would
-    // pass under an implementation that always ran a second pass.
+  it('does NOT run a second pass when nothing was resolved AND nobody is capable', async () => {
+    // The negative half: without it, the row above would pass under an
+    // implementation that always ran a second pass.
+    //
+    // The peer here reports a TRUNCATED manifest, so it is not capable and there
+    // is nothing a repeat could collect. That distinction is the whole point.
+    // This row used to use a peer reporting `0/3` with a COMPLETE manifest and
+    // assert no repeat — but such a peer is capable by construction: it has just
+    // said it holds three refs we do not have. Stopping there reported
+    // "more passes would not help" on a graph three Knowledge Assets short. See
+    // the row below for the corrected behaviour.
     const sharedCalls: string[] = [];
 
     const result = await runWorkerCatchup(
@@ -1933,7 +1945,7 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
             return durableResult();
           case 'syncSharedMemory':
             sharedCalls.push(String(args[0]));
-            return partialSharedRound(0, 3);
+            return truncatedSharedRound(0, 3);
           default:
             return null;
         }
@@ -1947,6 +1959,48 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
     // means "no repeats" would write the same wrong assertion again.
     expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(0);
     expect(result.diagnostics?.sharedMemory?.continuationStopReason).toBe('coverage-stalled');
+  });
+
+  it('DOES repeat for a capable peer whose first pass materialized nothing', async () => {
+    // The #2050 headline shape, end to end: a store fault failed every write, or
+    // the round deadline was spent by the metadata and aggregate phases before
+    // the snapshot walk began. Either way the peer reports `0/3` with a COMPLETE
+    // manifest — it holds three refs we lack, and on a warm cache a repeat costs
+    // no network bytes at all.
+    //
+    // Before the pass-1 suppression this stopped at `coverage-stalled` after one
+    // contact, rendering "more passes would not help" while the graph stayed
+    // three Knowledge Assets short. The peer advances by one per pass here, so a
+    // correct loop keeps going.
+    const sharedCalls: string[] = [];
+    let seen = 0;
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            sharedCalls.push(String(args[0]));
+            const resolved = seen;
+            seen += 1;
+            return partialSharedRound(resolved, 3);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+
+    expect(sharedCalls.length).toBeGreaterThan(1);
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBeGreaterThan(0);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason)
+      .not.toBe('coverage-stalled');
   });
 });
 

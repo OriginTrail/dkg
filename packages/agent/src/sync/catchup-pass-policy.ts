@@ -125,7 +125,30 @@ export function shouldRunAnotherCatchupPass(input: CatchupPassPolicyInput): Catc
   if (input.planeProven && input.capablePeers.length === 0) return stop('plane-proven');
   // Strictly greater: a pass that resolved exactly as much as every pass before
   // it moved nothing, however large the number is.
-  if (input.lastPassCoverage <= input.coverageHighWaterMark) return stop('coverage-stalled');
+  //
+  // Suppressed at the pass-1 boundary while a capable peer exists. There
+  // `coverageHighWaterMark` is 0 by initialization, so the test collapses to
+  // "the whole walk materialized zero" — and that is a state a CAPABLE peer
+  // routinely reports: a store fault that failed every write, or a round whose
+  // deadline was spent by the metadata and aggregate phases so the snapshot walk
+  // yielded at index 0. Such a peer emits `{resolved: 0, total: 250,
+  // manifestComplete: true}`, which says "I hold 250 refs you do not have", and
+  // it earned ZERO repeats while the message told the operator more passes would
+  // not help. That is the same abandonment the plane-proven gate above was
+  // narrowed to prevent, one clause further down.
+  //
+  // This does NOT re-admit the barren-retry the high-water 0-init guards
+  // against. A barren peer emits no coverage record at all
+  // (`recordSnapshotCoverage` returns early when the manifest is empty), and a
+  // truncated-manifest peer is excluded by `capablePeersForNextPass`. So a
+  // non-empty capable set at the pass-1 boundary IS the positive evidence that a
+  // repeat could pay — it is a peer's own statement that it holds what we lack,
+  // not an absence of failure. Later passes still stall normally, and the pass
+  // cap and wall-clock budget still bound the loop.
+  const firstPassWithCapablePeers = input.passesRun === 1 && input.capablePeers.length > 0;
+  if (input.lastPassCoverage <= input.coverageHighWaterMark && !firstPassWithCapablePeers) {
+    return stop('coverage-stalled');
+  }
   if (input.capablePeers.length === 0) return stop('no-capable-peers');
   if (input.passesRun >= input.maxPasses) return stop('max-passes-reached');
   // `>=`, so a budget of 0 stops before the first repeat rather than granting one.

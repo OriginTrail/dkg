@@ -71,21 +71,54 @@ describe('shouldRunAnotherCatchupPass', () => {
   it('stops when coverage did not advance, including when it went nowhere at all', () => {
     // Equal is not advancement, however large: 178 resolved twice running means
     // the second pass bought nothing and a third would buy nothing either.
+    // `passesRun: 2` throughout: on pass 1 the mark is 0 only because nothing
+    // has run, and a capable peer there earns its repeat (see the rows below).
     expect(shouldRunAnotherCatchupPass(
-      base({ coverageHighWaterMark: 178, lastPassCoverage: 178 }),
+      base({ passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 178 }),
     ).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(
-      base({ coverageHighWaterMark: 178, lastPassCoverage: 120 }),
+      base({ passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 120 }),
     ).reason).toBe('coverage-stalled');
   });
 
-  it('gives a first pass that resolved nothing zero repeats', () => {
+  it('gives a first pass that resolved nothing zero repeats when nobody is capable', () => {
     // This is the whole reason the high-water mark is initialised to 0 rather
     // than −1. At −1 a barren first pass would read as "advanced to 0" and earn
     // a repeat — for a peer that has just demonstrated it can deliver nothing.
     expect(shouldRunAnotherCatchupPass(
-      base({ coverageHighWaterMark: 0, lastPassCoverage: 0 }),
+      base({ coverageHighWaterMark: 0, lastPassCoverage: 0, capablePeers: [] }),
     ).reason).toBe('coverage-stalled');
+  });
+
+  it('DOES repeat a first pass that materialized nothing while a capable peer remains', () => {
+    // The counterpart, and the distinction the barren guard above cannot make on
+    // its own: `resolved 0` is reported both by a peer with nothing to give and
+    // by a peer holding 250 refs whose every write failed, or whose round
+    // deadline was spent before the snapshot walk began. The second states it
+    // holds what we lack — `capablePeersForNextPass` already filtered out the
+    // barren (`0/0`, no record at all) and truncated-manifest peers, so a
+    // non-empty capable set at the pass-1 boundary IS the evidence a repeat can
+    // pay. Stopping here reported "more passes would not help" on a graph 250
+    // Knowledge Assets short, with the blobs already cached.
+    expect(shouldRunAnotherCatchupPass(base({
+      passesRun: 1, coverageHighWaterMark: 0, lastPassCoverage: 0,
+      capablePeers: ['peer-holding-250'],
+    }))).toEqual({
+      continue: true,
+      peers: ['peer-holding-250'],
+      reason: 'continue',
+    });
+  });
+
+  it('still stalls on a LATER pass that made no progress, capable peers or not', () => {
+    // The suppression is scoped to the pass-1 boundary, where the high-water
+    // mark is 0 only because nothing has run yet. Once a pass has established a
+    // baseline, a repeat that beats nobody's record is genuine evidence that
+    // more passes would not help — which is exactly what the reason says.
+    expect(shouldRunAnotherCatchupPass(base({
+      passesRun: 2, coverageHighWaterMark: 190, lastPassCoverage: 190,
+      capablePeers: ['peer-a'],
+    })).reason).toBe('coverage-stalled');
   });
 
   it('stops when no peer admits to holding anything we lack', () => {
@@ -137,10 +170,10 @@ describe('shouldRunAnotherCatchupPass', () => {
     // Same two stops, but a capable peer is left: plane-proven no longer applies
     // at all, so the honest reason is the one that actually held.
     expect(shouldRunAnotherCatchupPass(base({
-      planeProven: true, coverageHighWaterMark: 178, lastPassCoverage: 178,
+      planeProven: true, passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 178,
     })).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(base({
-      coverageHighWaterMark: 178, lastPassCoverage: 178, nowMs: 999_999,
+      passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 178, nowMs: 999_999,
     })).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(base({
       coverageHighWaterMark: 178, lastPassCoverage: 178, passesRun: 4,
