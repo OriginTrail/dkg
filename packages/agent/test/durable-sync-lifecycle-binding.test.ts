@@ -104,6 +104,7 @@ async function captureGraphScopedStore(
     chain,
     store: {},
     subscribedContextGraphs: new Map(),
+    contextGraphBindingGenerations: new Map(),
     wireIdToLocalCgId: new Map(),
     graphScopedStoreClosed: false,
     graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -299,6 +300,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain: { chainId: 'none' },
       store: {},
       subscribedContextGraphs: new Map(),
+      contextGraphBindingGenerations: new Map(),
       wireIdToLocalCgId: new Map(),
       bindSubscriptionOnChainId: vi.fn(),
       persistContextGraphSubscriptionStrict: vi.fn(),
@@ -672,6 +674,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
+      contextGraphBindingGenerations: new Map(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -788,6 +791,9 @@ describe('durable sync lifecycle chain binding', () => {
     subscription.onChainId = undefined;
     expect(shouldQuarantineCommitted?.()).toBe(true);
     subscription.onChainId = '14';
+    agentLike.subscribedContextGraphs.delete(contextGraphId);
+    expect(shouldQuarantineCommitted?.()).toBe(true);
+    agentLike.subscribedContextGraphs.set(contextGraphId, subscription);
 
     subscription.onChainId = undefined;
     persistContextGraphSubscriptionStrict.mockRejectedValueOnce(new Error('subscription store unavailable'));
@@ -879,6 +885,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
+      contextGraphBindingGenerations: new Map(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -1078,6 +1085,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
+      contextGraphBindingGenerations: new Map(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),

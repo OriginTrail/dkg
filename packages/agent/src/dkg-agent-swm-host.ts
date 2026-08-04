@@ -2310,11 +2310,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   bumpContextGraphBindingGeneration(this: DKGAgent, localCgId: string): number {
-    return bumpBindingGeneration(this, localCgId);
+    return bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
   }
 
   captureContextGraphBindingGeneration(this: DKGAgent, localCgId: string): number {
-    return captureBindingGeneration(this, localCgId);
+    return captureBindingGeneration(this.contextGraphBindingGenerations, localCgId);
   }
 
   isContextGraphBindingGenerationCurrent(
@@ -2322,7 +2322,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     generation: number,
   ): boolean {
-    return isBindingGenerationCurrent(this, localCgId, generation);
+    return isBindingGenerationCurrent(
+      this.contextGraphBindingGenerations,
+      localCgId,
+      generation,
+    );
   }
 
   /**
@@ -2340,7 +2344,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   bindSubscriptionOnChainId(this: DKGAgent, localCgId: string, sub: ContextGraphSub, newOnChainId: string): void {
     const prev = sub.onChainId;
     if (prev === newOnChainId) return;
-    bumpBindingGeneration(this, localCgId);
+    bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
     sub.onChainId = newOnChainId;
     if (!prev) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
@@ -2697,12 +2701,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<string | null> {
-    const bindingGeneration = captureBindingGeneration(this, localCgId);
+    const bindingGeneration = captureBindingGeneration(
+      this.contextGraphBindingGenerations,
+      localCgId,
+    );
     const isSubscriptionCurrent = () => isCurrent()
       && this.subscribedContextGraphs.get(localCgId) === sub
       && sub.subscribed
       && !sub.onChainId
-      && isBindingGenerationCurrent(this, localCgId, bindingGeneration);
+      && isBindingGenerationCurrent(
+        this.contextGraphBindingGenerations,
+        localCgId,
+        bindingGeneration,
+      );
     if (!isSubscriptionCurrent()) return null;
     let resolved: string | null = null;
     try {
@@ -2876,7 +2887,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && this.subscribedContextGraphs.get(localCgId) === target.sub
         && target.sub.onChainId === target.onChainId
         && isBindingGenerationCurrent(
-          this,
+          this.contextGraphBindingGenerations,
           localCgId,
           target.bindingGeneration,
         )
@@ -2992,7 +3003,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       onChainId: sub.onChainId,
       onChainCgId: BigInt(sub.onChainId),
       cursor,
-      bindingGeneration: captureBindingGeneration(this, localCgId),
+      bindingGeneration: captureBindingGeneration(
+        this.contextGraphBindingGenerations,
+        localCgId,
+      ),
       watermarkBefore: cursor.watermark,
     };
   }
@@ -3008,7 +3022,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const capturedSub = target?.sub ?? this.subscribedContextGraphs.get(localCgId);
     const capturedOnChainId = target?.onChainId ?? capturedSub?.onChainId;
     const capturedBindingGeneration = target?.bindingGeneration
-      ?? captureBindingGeneration(this, localCgId);
+      ?? captureBindingGeneration(this.contextGraphBindingGenerations, localCgId);
     const capturedCursor = execution?.identityCursor
       ?? target?.cursor
       ?? this.reconcileCursors.get(localCgId);
@@ -3019,7 +3033,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && current === capturedSub
         && current?.onChainId === capturedOnChainId
         && isBindingGenerationCurrent(
-          this,
+          this.contextGraphBindingGenerations,
           localCgId,
           capturedBindingGeneration,
         )
@@ -3080,13 +3094,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     watermark: number,
     expectedSub?: ContextGraphSub,
-    expectedBindingGeneration = captureBindingGeneration(this, localCgId),
+    expectedBindingGeneration = captureBindingGeneration(
+      this.contextGraphBindingGenerations,
+      localCgId,
+    ),
     expectedCursor?: CursorState,
   ): Promise<void> {
     const sub = this.subscribedContextGraphs.get(localCgId);
     const isTargetCurrent = () => this.subscribedContextGraphs.get(localCgId) === sub
       && (!expectedSub || sub === expectedSub)
-      && isBindingGenerationCurrent(this, localCgId, expectedBindingGeneration)
+      && isBindingGenerationCurrent(
+        this.contextGraphBindingGenerations,
+        localCgId,
+        expectedBindingGeneration,
+      )
       && (!expectedCursor || this.reconcileCursors.get(localCgId) === expectedCursor);
     if (!sub || !isTargetCurrent()) return Promise.resolve();
     const previous = sub.lastReconciledOrdinal ?? 0;

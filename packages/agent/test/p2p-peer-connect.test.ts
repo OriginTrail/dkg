@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
-import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
+import {
+  connectToMultiaddr,
+  ensurePeerConnected,
+  primeCatchupConnections,
+} from '../src/p2p/peer-connect.js';
+import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -126,5 +131,64 @@ describe('primeCatchupConnections', () => {
     expect(merge.calls).toHaveLength(2);
     expect(dial.calls).toHaveLength(2);
     expect(admissionCalls).toEqual([foreignPeer, eligiblePeer]);
+  });
+});
+
+describe('abortable recovery connection helpers', () => {
+  it('forwards cancellation to the real direct-dial path', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const dialStarted = Promise.withResolvers<void>();
+    const dial = (_peer: unknown, options?: { signal?: AbortSignal }) => {
+      observedSignal = options?.signal;
+      dialStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('dial aborted', 'AbortError'));
+        }, { once: true });
+      });
+    };
+    let discoveryCalled = false;
+
+    const connection = ensurePeerConnected({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge: async () => undefined },
+    }, {
+      findAgentByPeerId: async () => {
+        discoveryCalled = true;
+        return undefined;
+      },
+    } as any, peerId, { signal: controller.signal });
+
+    await dialStarted.promise;
+    controller.abort();
+    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
+    expect(observedSignal).toBe(controller.signal);
+    expect(discoveryCalled).toBe(false);
+  });
+
+  it('interrupts the real protocol-readiness delay', async () => {
+    const controller = new AbortController();
+    let reads = 0;
+    const readiness = waitForPeerProtocol(
+      {
+        get: async () => {
+          reads += 1;
+          return { protocols: [] };
+        },
+      },
+      { toString: () => 'peer-under-test' },
+      '/dkg/test/sync',
+      3,
+      10_000,
+      controller.signal,
+    );
+
+    await Promise.resolve();
+    controller.abort();
+    await expect(readiness).rejects.toMatchObject({ name: 'AbortError' });
+    expect(reads).toBe(1);
   });
 });

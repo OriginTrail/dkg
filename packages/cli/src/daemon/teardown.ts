@@ -36,6 +36,10 @@
 //     that belong to them — numerator and denominator from different
 //     lifecycles.
 
+import {
+  CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+  VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from '@origintrail-official/dkg-agent';
 import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
 
 /**
@@ -157,9 +161,9 @@ export interface TeardownOutcome {
   dependencyQuarantined: boolean;
 }
 
-const DEPENDENCY_QUARANTINE_ERROR_CODES = new Set([
-  'VmReconcileShutdownTimeout',
-  'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT',
+const DEPENDENCY_QUARANTINE_ERROR_CODES = new Set<string>([
+  VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
+  CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 ]);
 
 function isDependencyQuarantineError(error: unknown): boolean {

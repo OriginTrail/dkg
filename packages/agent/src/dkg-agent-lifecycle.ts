@@ -5054,13 +5054,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
         let bindingGeneration = captureContextGraphBindingGeneration(
-          this,
+          this.contextGraphBindingGenerations,
           asset.contextGraphId,
         );
         const bindingIsCurrent = () => (
           this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
           && isContextGraphBindingGenerationCurrent(
-            this,
+            this.contextGraphBindingGenerations,
             asset.contextGraphId,
             bindingGeneration,
           )
@@ -5126,7 +5126,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               verifiedOnChainId,
             );
             bindingGeneration = captureContextGraphBindingGeneration(
-              this,
+              this.contextGraphBindingGenerations,
               asset.contextGraphId,
             );
             assertLifecycleCurrent();
@@ -5148,9 +5148,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             isCurrent: () => (isCurrent?.() ?? true) && bindingIsCurrent(),
             shouldQuarantineCommitted: () => {
               const current = this.subscribedContextGraphs.get(asset.contextGraphId);
-              return verifiedOnChainId !== null
-                && current !== undefined
-                && current.onChainId !== verifiedOnChainId;
+              return current === undefined
+                || (verifiedOnChainId !== null && current.onChainId !== verifiedOnChainId);
             },
             options: {
               priority: 'background',
@@ -7373,7 +7372,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.
-    clearContextGraphBindingGeneration(this, contextGraphId);
+    clearContextGraphBindingGeneration(this.contextGraphBindingGenerations, contextGraphId);
     return deleted;
   }
 
@@ -7473,7 +7472,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
     const expectedBindingGeneration = captureContextGraphBindingGeneration(
-      this,
+      this.contextGraphBindingGenerations,
       contextGraphId,
     );
     const sub = subscription ?? expectedLiveSub;
@@ -7505,7 +7504,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         current !== expectedLiveSub
         || (!current?.subscribed && !current?.coreHosted)
         || !isContextGraphBindingGenerationCurrent(
-          this,
+          this.contextGraphBindingGenerations,
           contextGraphId,
           expectedBindingGeneration,
         )

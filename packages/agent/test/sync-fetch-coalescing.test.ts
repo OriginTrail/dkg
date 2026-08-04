@@ -8,6 +8,7 @@ import {
   DKGAgent,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
 } from '../src/index.js';
+import type { ContextGraphMembershipStore } from '../src/dkg-agent-types.js';
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -125,11 +126,13 @@ async function createAgentWithSend(
     syncGlobalQueueLimit: number;
     syncContextGraphPriorities?: Record<string, number>;
   },
+  contextGraphMembershipStore?: ContextGraphMembershipStore,
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'SyncFetchCoalescing',
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
+    contextGraphMembershipStore,
     ...backpressure,
   });
   (agent as any).messenger = { sendToPeer };
@@ -138,19 +141,38 @@ async function createAgentWithSend(
 }
 
 describe('exact VM recovery lifecycle', () => {
-  it('reopens rotation admission when the same agent is restarted', async () => {
-    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+  it('reopens reconcile and membership persistence admission on same-object restart', async () => {
+    const membershipUpsert = vi.fn(async () => undefined);
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      undefined,
+      {
+        loadAll: async () => [],
+        upsert: membershipUpsert,
+        delete: async () => undefined,
+      },
+    );
     try {
       await agent.start();
       const initialGeneration = (agent as any).vmReconcileLifecycleGeneration;
       await agent.stop();
       expect((agent as any).vmReconcileRotationClosed).toBe(true);
       expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(true);
 
       await agent.start();
       expect((agent as any).vmReconcileRotationClosed).toBe(false);
       expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
       expect((agent as any).vmReconcileDispatcher.snapshot().closed).toBe(false);
+      expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(false);
+      const upsertsBeforeRestartProbe = membershipUpsert.mock.calls.length;
+      await agent.upsertContextGraphMember({
+        contextGraphId: 'restart-membership',
+        principalType: 'node',
+        principalId: PEER_A,
+        status: 'active',
+      }, { strict: true });
+      expect(membershipUpsert).toHaveBeenCalledTimes(upsertsBeforeRestartProbe + 1);
     } finally {
       await agent.stop().catch(() => {});
     }

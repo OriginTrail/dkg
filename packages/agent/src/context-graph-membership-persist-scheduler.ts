@@ -18,8 +18,11 @@ export class ContextGraphMembershipPersistQueueClosedError extends Error {
   }
 }
 
+export const CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE =
+  'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT';
+
 export class ContextGraphMembershipPersistShutdownTimeoutError extends Error {
-  readonly code = 'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT';
+  readonly code = CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE;
 
   constructor(timeoutMs: number) {
     super(`Context-graph membership persistence did not drain within ${timeoutMs}ms`);

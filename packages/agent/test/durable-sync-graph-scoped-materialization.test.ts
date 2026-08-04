@@ -1628,7 +1628,7 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'assertionVersion')).toEqual(['"2"']);
   });
 
-  it('atomically removes an asset committed against a binding that changed in flight', async () => {
+  it('atomically removes an asset when its subscription is deleted after commit starts', async () => {
     const store = new OxigraphStore();
     let releaseReplace!: () => void;
     let markReplaceEntered!: () => void;
@@ -1652,8 +1652,7 @@ describe('durable graph-scoped KA materialization', () => {
         return typeof value === 'function' ? value.bind(target) : value;
       },
     }) as TripleStore;
-    let current = true;
-    let bindingChanged = false;
+    let subscriptionPresent = true;
     const materialization = materializeVerifiedGraphScopedAsset({
       store: gatedStore,
       asset: {
@@ -1665,13 +1664,12 @@ describe('durable graph-scoped KA materialization', () => {
         dataQuads: [dataQuad(2)],
         metadataQuads: metadata(2),
       },
-      isCurrent: () => current,
-      shouldQuarantineCommitted: () => bindingChanged,
+      isCurrent: () => true,
+      shouldQuarantineCommitted: () => !subscriptionPresent,
     });
 
     await replaceEntered;
-    current = false;
-    bindingChanged = true;
+    subscriptionPresent = false;
     releaseReplace();
 
     await expect(materialization).resolves.toBe('quarantined');
