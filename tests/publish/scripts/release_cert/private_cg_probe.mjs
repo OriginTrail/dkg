@@ -52,6 +52,29 @@ async function main() {
     const sub = await api(recvUrl, '/api/context-graph/subscribe', recvToken, { contextGraphId: cgId, includeSharedMemory: true });
     console.log(`• receiver subscribe: ${JSON.stringify(sub).slice(0, 160)}`);
 
+    // The receiver rejects the sender-key handshake with "not-agent-gated"
+    // until it has actually SYNCED the CG's agent-gate definition (the
+    // DKG_ALLOWED_AGENT / DKG_PARTICIPANT_AGENT rows live in the CG's meta
+    // graph). Wait for its catch-up to reach a terminal state first.
+    const catchupDeadline = Date.now() + Number(process.env.RC_PROBE_CATCHUP_MS || 240000);
+    let lastStatus = null;
+    while (Date.now() < catchupDeadline) {
+        const st = await api(recvUrl, `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(cgId)}`, recvToken);
+        const status = st?.catchup?.status || st?.status || 'unknown';
+        if (status !== lastStatus) { console.log(`   ↪ receiver catchup: ${status}`); lastStatus = status; }
+        if (status === 'done') break;
+        if (['failed', 'error', 'denied'].includes(status)) { console.warn(`⚠️ receiver catchup terminal: ${status}`); break; }
+        await new Promise((r) => setTimeout(r, 3000));
+    }
+
+    // Verify the receiver can actually see the gate before we try to share.
+    try {
+        const gates = await api(recvUrl, `/api/context-graph/agents?contextGraphId=${encodeURIComponent(cgId)}`, recvToken);
+        console.log(`• receiver sees allowed agents: ${JSON.stringify(gates).slice(0, 220)}`);
+    } catch (e) {
+        console.warn(`⚠️ receiver could not read the agent gate: ${e.message}`);
+    }
+
     // Encrypted SWM needs each allowlisted agent's ENCRYPTION profile to be
     // discoverable — otherwise the sender-key handshake is rejected
     // ("SWM Sender Key setup rejected by N agent(s)"). Publish both profiles
