@@ -62,6 +62,10 @@ async function countTriples(base, token, cg, view) {
 async function main() {
     const curatorUrl = process.env.RC_CURATOR_URL || 'http://100.99.142.87:9200';
     const curatorToken = process.env[process.env.RC_CURATOR_TOKEN_ENV || 'V10_TOKEN_TESTNET1'];
+    // SWM parity must reference a RECEIVER: publishers clean their SWM copies
+    // after finalization, so the curator legitimately reports 0 SWM triples.
+    const receiverUrl = process.env.RC_RECEIVER_URL || 'http://100.70.65.41:9200';
+    const receiverToken = process.env[process.env.RC_RECEIVER_TOKEN_ENV || 'V10_TOKEN_TESTNET2'];
     const cg = process.env.RC_COLDSTART_CG || weeklyCgNames().public;
 
     const home = fs.mkdtempSync(path.join(process.env.WORKSPACE || os.tmpdir(), 'rc-coldstart-'));
@@ -116,16 +120,16 @@ async function main() {
         const syncMs = Date.now() - t0;
 
         // Parity: exact triple-count comparison against the curator, per layer view.
-        const [freshVm, curatorVm, freshSwm, curatorSwm] = await Promise.all([
+        const [freshVm, curatorVm, freshSwm, receiverSwm] = await Promise.all([
             countTriples(base, token, cg, 'verifiable-memory'),
             countTriples(curatorUrl, curatorToken, cg, 'verifiable-memory'),
             countTriples(base, token, cg, 'shared-working-memory'),
-            countTriples(curatorUrl, curatorToken, cg, 'shared-working-memory'),
+            countTriples(receiverUrl, receiverToken, cg, 'shared-working-memory'),
         ]);
         const vmParity = freshVm !== null && freshVm === curatorVm;
-        const swmParity = freshSwm !== null && freshSwm === curatorSwm;
-        outcome.details = { cg, bootMs, syncMs, freshVm, curatorVm, freshSwm, curatorSwm, vmParity, swmParity };
-        if (!vmParity || !swmParity) throw new Error(`parity mismatch: vm ${freshVm}/${curatorVm}, swm ${freshSwm}/${curatorSwm} (partial progress does not count)`);
+        const swmParity = freshSwm !== null && freshSwm === receiverSwm;
+        outcome.details = { cg, bootMs, syncMs, freshVm, curatorVm, freshSwm, receiverSwm, vmParity, swmParity };
+        if (!vmParity || !swmParity) throw new Error(`parity mismatch: vm ${freshVm}/${curatorVm} (vs curator), swm ${freshSwm}/${receiverSwm} (vs receiver) — partial progress does not count`);
         outcome.success = true;
         outcome.ms = syncMs;
         console.log(`✅ cold-start parity in ${Math.round(syncMs / 1000)}s (vm=${freshVm}, swm=${freshSwm})`);
