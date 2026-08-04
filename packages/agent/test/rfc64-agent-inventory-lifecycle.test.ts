@@ -15,6 +15,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
+import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
   INVENTORY_V1_RELATIVE_PATH,
@@ -49,6 +50,7 @@ function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
+    contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
     rfc64PersistenceV1: undefined,
   });

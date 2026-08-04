@@ -77,8 +77,10 @@ const {
 const {
   beginGracefulShutdown,
   buildProducerQuiescentTeardownSteps,
+  closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } = await import('../src/daemon/teardown.js');
+const { raceShutdownWithTimeout } = await import('../src/daemon/shutdown.js');
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -954,6 +956,83 @@ describe('A24 — a failing step never strands the steps after it', () => {
     const { steps } = recordingSteps();
     const outcome = await runProducerQuiescentTeardown(steps);
     expect(outcome.failures).toEqual([]);
+    expect(outcome.dependencyQuarantined).toBe(false);
+  });
+
+  it.each([
+    'VmReconcileShutdownTimeout',
+    'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT',
+  ])('quarantines backing stores when stopAgent fails with %s', async (code) => {
+    const { steps } = recordingSteps();
+    steps.stopAgent = async () => {
+      throw Object.assign(new Error('physical work still active'), { code });
+    };
+    const outcome = await runProducerQuiescentTeardown(steps);
+    const stopManagedOxigraph = vi.fn(async () => undefined);
+    const closeDashboardDb = vi.fn();
+    const logged: string[] = [];
+    const retryAgentStop = vi.fn(async () => undefined);
+
+    expect(outcome.dependencyQuarantined).toBe(true);
+    await expect(closeDaemonBackingStoresAfterTeardown(outcome, {
+      retryAgentStop,
+      stopManagedOxigraph,
+      closeDashboardDb,
+      log: (message) => logged.push(message),
+    })).resolves.toBe(true);
+    expect(retryAgentStop).toHaveBeenCalledOnce();
+    expect(stopManagedOxigraph).toHaveBeenCalledOnce();
+    expect(closeDashboardDb).toHaveBeenCalledOnce();
+    expect(logged.join(' ')).toContain('backing stores remain live');
+  });
+
+  it('still closes backing stores after an ordinary agent-stop failure', async () => {
+    const { steps } = recordingSteps('stopAgent');
+    const outcome = await runProducerQuiescentTeardown(steps);
+    const stopManagedOxigraph = vi.fn(async () => undefined);
+    const closeDashboardDb = vi.fn();
+
+    await expect(closeDaemonBackingStoresAfterTeardown(outcome, {
+      retryAgentStop: vi.fn(async () => undefined),
+      stopManagedOxigraph,
+      closeDashboardDb,
+      log: () => undefined,
+    })).resolves.toBe(true);
+    expect(stopManagedOxigraph).toHaveBeenCalledOnce();
+    expect(closeDashboardDb).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a permanent retirement quarantine pending through the hard shutdown deadline', async () => {
+    const outcome = {
+      failures: [{
+        step: 'stopAgent' as const,
+        error: Object.assign(new Error('still active'), { code: 'VmReconcileShutdownTimeout' }),
+      }],
+      dependencyQuarantined: true,
+    };
+    let canRetire = false;
+    const stopManagedOxigraph = vi.fn(async () => undefined);
+    const closeDashboardDb = vi.fn();
+    const cleanup = closeDaemonBackingStoresAfterTeardown(outcome, {
+      retryAgentStop: async () => {
+        if (!canRetire) {
+          throw Object.assign(new Error('still active'), { code: 'VmReconcileShutdownTimeout' });
+        }
+      },
+      stopManagedOxigraph,
+      closeDashboardDb,
+      log: () => undefined,
+    }).then(() => undefined);
+
+    await expect(raceShutdownWithTimeout(cleanup, 250, () => undefined))
+      .resolves.toEqual({ forced: true });
+    expect(stopManagedOxigraph).not.toHaveBeenCalled();
+    expect(closeDashboardDb).not.toHaveBeenCalled();
+
+    canRetire = true;
+    await cleanup;
+    expect(stopManagedOxigraph).toHaveBeenCalledOnce();
+    expect(closeDashboardDb).toHaveBeenCalledOnce();
   });
 });
 

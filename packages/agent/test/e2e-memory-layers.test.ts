@@ -1585,24 +1585,25 @@ describe('rootless graph-scoped KA lifecycle', () => {
   // assertion below (the CG would already be on-chain after the share).
   it('seals a FULL share on an UNregistered CG (no seal-time registration); registers + publishes at publish time', async () => {
     const agent = await createAgent('UnregisteredCgSealBot');
+    const unregisteredCgId = `${CG_ID}-full-share-deferred-registration`;
     // LOCAL-ONLY CG: created but DELIBERATELY never registered on-chain.
-    await agent.createContextGraph({ id: CG_ID, name: 'Unregistered CG Seal E2E' });
+    await agent.createContextGraph({ id: unregisteredCgId, name: 'Unregistered CG Seal E2E' });
 
     const name = 'unregistered-cg-seal';
-    await agent.assertion.create(CG_ID, name);
-    await agent.assertion.write(CG_ID, name, [
+    await agent.assertion.create(unregisteredCgId, name);
+    await agent.assertion.write(unregisteredCgId, name, [
       { subject: `${ENTITY_BASE}:ucs`, predicate: 'http://schema.org/name', object: '"Unregistered CG Seal"' },
     ]);
 
     // Default FULL share — must SEAL despite the CG being unregistered (the seal
     // no longer depends on CG registration).
-    const fullShare = await agent.assertion.promote(CG_ID, name);
+    const fullShare = await agent.assertion.promote(unregisteredCgId, name);
     expect(fullShare.sealed).toBe(true);
     expect(fullShare.publishReady).toBe(true);
 
     // CORE ASSERTION: the CG is STILL unregistered after sealing — sealing did
     // NOT register it on-chain. Reintroducing seal-time registration breaks here.
-    const onChainIdAfterSeal = await agent.getContextGraphOnChainId(CG_ID);
+    const onChainIdAfterSeal = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainIdAfterSeal == null).toBe(true);
 
     // And publishing the unregistered CG fails CLOSED for that exact reason —
@@ -1612,7 +1613,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // .code convention for SWM_SUBSET_NOT_SEALABLE / UNSEALED_SHARE_BLOCKED).
     let notRegisteredErr: any;
     try {
-      await agent.publishFromFinalizedAssertion(CG_ID, name);
+      await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     } catch (e) {
       notRegisteredErr = e;
     }
@@ -1623,11 +1624,11 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // Registration happens at PUBLISH time (the /vm/publish route's
     // ensureRegisteredForPublish step). After it, the same sealed asset publishes
     // to VM and confirms — no re-seal, no recreate.
-    await agent.ensureRegisteredForPublish(CG_ID);
-    const onChainIdAfterRegister = await agent.getContextGraphOnChainId(CG_ID);
+    await agent.ensureRegisteredForPublish(unregisteredCgId);
+    const onChainIdAfterRegister = await agent.getContextGraphOnChainId(unregisteredCgId);
     expect(onChainIdAfterRegister).toBeTruthy();
 
-    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    const pub = await agent.publishFromFinalizedAssertion(unregisteredCgId, name);
     expect(pub.status).toBe('confirmed');
     expect(pub.ual).toBeDefined();
     expect(pub.seal).toBeDefined();

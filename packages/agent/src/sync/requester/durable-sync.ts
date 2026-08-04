@@ -32,6 +32,12 @@ import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext,
 } from './durable-sync-compat.js';
+import {
+  classifyExactDurableFetch,
+  filterExactAssetDurablePayload,
+  mergeExactDurableFetchDisposition,
+  type ExactDurableFetchDisposition,
+} from './exact-durable-fetch.js';
 
 export {
   createContextGraphSyncDeadline,
@@ -47,6 +53,14 @@ export type {
   DurableSyncContextGraphBudgetRequest,
 } from './durable-sync-budget.js';
 export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
+export { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
+export type { ExactDurableFetchDisposition } from './exact-durable-fetch.js';
+
+export interface DetailedDurableSyncResult {
+  readonly result: InitializedDurableSyncResult;
+  /** Present only when this physical run used an exact-asset filter. */
+  readonly exactFetchDisposition?: ExactDurableFetchDisposition;
+}
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
@@ -187,39 +201,6 @@ export interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-/**
- * Rolling-upgrade guard: an old responder may ignore the additive exact-asset
- * filter and return the whole CG. Keep only requested descriptor subjects and
- * their declared assertion graphs before any verification or store write.
- */
-export function filterExactAssetDurablePayload(
-  dataQuads: readonly Quad[],
-  metaQuads: readonly Quad[],
-  assetUals: readonly string[],
-): { dataQuads: Quad[]; metaQuads: Quad[]; descriptorCoverageComplete: boolean } {
-  const exactUals = new Set(assetUals);
-  const exactMeta = metaQuads.filter((quad) => exactUals.has(quad.subject));
-  const returnedDescriptors = new Set(
-    exactMeta
-      .filter((quad) => (
-        quad.predicate === KA_UAL
-        && quad.subject === stripLiteral(quad.object)
-      ))
-      .map((quad) => quad.subject),
-  );
-  const exactGraphs = new Set(
-    exactMeta
-      .filter((quad) => quad.predicate === ASSERTION_GRAPH)
-      .map((quad) => quad.object),
-  );
-  return {
-    metaQuads: exactMeta,
-    dataQuads: dataQuads.filter((quad) => exactGraphs.has(quad.graph)),
-    descriptorCoverageComplete: returnedDescriptors.size === exactUals.size
-      && [...exactUals].every((ual) => returnedDescriptors.has(ual)),
-  };
-}
-
 export function runDurableSync(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult>;
@@ -229,12 +210,24 @@ export function runDurableSync(
 export async function runDurableSync(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
+  return (await runDurableSyncWithBudget(normalizeDurableSyncContext(context))).result;
+}
+
+export function runDurableSyncDetailed(
+  context: DurableSyncContext,
+): Promise<DetailedDurableSyncResult>;
+export function runDurableSyncDetailed(
+  context: LegacyDurableSyncContext,
+): Promise<DetailedDurableSyncResult>;
+export async function runDurableSyncDetailed(
+  context: DurableSyncContext | LegacyDurableSyncContext,
+): Promise<DetailedDurableSyncResult> {
   return runDurableSyncWithBudget(normalizeDurableSyncContext(context));
 }
 
 async function runDurableSyncWithBudget(
   context: DurableSyncContext,
-): Promise<InitializedDurableSyncResult> {
+): Promise<DetailedDurableSyncResult> {
   const {
     ctx,
     remotePeerId,
@@ -273,6 +266,7 @@ async function runDurableSyncWithBudget(
   });
 
   const accumulator = createDurableSyncAccumulator();
+  const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -323,6 +317,7 @@ async function runDurableSyncWithBudget(
   for (const [contextGraphIndex, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
+    let exactFetchDispositionIndex: number | undefined;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
       onPhase?.(phase, 'start');
@@ -344,6 +339,9 @@ async function runDurableSyncWithBudget(
       const deadline = contextGraphBudget.fetchDeadline;
       const activeFetchContext = fetchContext(deadline);
       const exactAssetUals = exactAssetUalsFor?.(pid);
+      if (exactAssetUals !== undefined) {
+        exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
+      }
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
@@ -564,6 +562,17 @@ async function runDurableSyncWithBudget(
         && !metaResult.timedOut
         && effectiveDataResult.completed
         && !effectiveDataResult.timedOut;
+      const settledExactDisposition = (): ExactDurableFetchDisposition => (
+        classifyExactDurableFetch({
+          requestedAssetCount: exactAssetUals?.length ?? 0,
+          metaResult,
+          dataResult: rawDataResult,
+          metaFetched: !skipAgentsMeta,
+          descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+          rejectedKcs: processed.rejectedKcs,
+          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+        })
+      );
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (
@@ -588,6 +597,9 @@ async function runDurableSyncWithBudget(
           emptyPhase,
         });
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
+        if (exactFetchDispositionIndex !== undefined) {
+          exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
+        }
         if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
@@ -666,6 +678,9 @@ async function runDurableSyncWithBudget(
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
+      if (exactFetchDispositionIndex !== undefined) {
+        exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
+      }
       endPhase();
       if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
@@ -719,8 +734,15 @@ async function runDurableSyncWithBudget(
   if (result.insertedTriples > 0) {
     logInfo(ctx, `Sync complete: ${result.insertedTriples} verified triples from ${remotePeerId}`);
   }
+  const exactFetchDisposition = exactFetchDispositions.reduce<ExactDurableFetchDisposition | undefined>(
+    mergeExactDurableFetchDisposition,
+    undefined,
+  );
 
-  return result;
+  return {
+    result,
+    ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
+  };
 }
 
 function partitionVerifiedGraphScopedAssets(

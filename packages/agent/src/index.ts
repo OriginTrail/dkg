@@ -78,11 +78,19 @@ export {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
+  VmReconcileShutdownTimeoutError,
+  VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
   VmReconcileUnavailableError,
   type ContextGraphReconcileResult,
   type ContextGraphReconcileStatus,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
+export {
+  ContextGraphMembershipPersistQueueClosedError,
+  ContextGraphMembershipPersistQueueFullError,
+  ContextGraphMembershipPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-membership-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,

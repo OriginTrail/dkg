@@ -669,7 +669,11 @@ export class OwnershipMethods extends DKGAgentBase {
     return false;
   }
 
-  async getContextGraphOwner(this: DKGAgent, contextGraphId: string): Promise<string | null> {
+  async getContextGraphOwner(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
     // Prefer the curator (wallet-scoped owner) so per-agent authorization
     // works on multi-agent nodes. Fall back to the creator (libp2p peer ID)
     // for legacy CGs created before the curator triple existed.
@@ -681,9 +685,9 @@ export class OwnershipMethods extends DKGAgentBase {
     // that preference, the LIMIT-1 lookup here would non-deterministically
     // pick a foreign curator and lock the real local curator out of
     // manage-participants / rename / policy operations.
-    const curatorOwner = await this.getContextGraphCurator(contextGraphId);
+    const curatorOwner = await this.getContextGraphCurator(contextGraphId, options);
     if (curatorOwner) return curatorOwner;
-    const fromCreator = await this.getContextGraphCreator(contextGraphId);
+    const fromCreator = await this.getContextGraphCreator(contextGraphId, options);
     if (fromCreator) return fromCreator;
     // Final fallback: V10 wallet-scoped cgId convention (`0x.../<name>`)
     // encodes the curator structurally, which lets us answer for CGs
@@ -701,7 +705,7 @@ export class OwnershipMethods extends DKGAgentBase {
     // create stray `_meta` rows for graphs that were never created
     // here. The fallback is meant to rescue real-but-half-registered
     // graphs, not impersonate ownership of unknown ones.
-    const exists = await this.contextGraphExists(contextGraphId);
+    const exists = await this.contextGraphExists(contextGraphId, options);
     if (!exists) return null;
     return deriveCuratorDidFromCgId(contextGraphId);
   }
@@ -858,8 +862,12 @@ export class OwnershipMethods extends DKGAgentBase {
    * Emitted approve/revoke binding metadata must use this value so remote
    * peers validating via `gossip-publish-handler` see a matching owner.
    */
-  async getContextGraphCreator(this: DKGAgent, contextGraphId: string): Promise<string | null> {
-    return (await this.getCgMeta(contextGraphId)).creator ?? null;
+  async getContextGraphCreator(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
+    return (await this.getCgMeta(contextGraphId, { signal: options.signal })).creator ?? null;
   }
 
   public async listCclPolicyBindings(this: DKGAgent, opts: {

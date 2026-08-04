@@ -233,7 +233,9 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
         lastReconciledOrdinal: 0,
       },
     ]]);
+    agentLike.contextGraphBindingGenerations = new Map();
     agentLike.reconcileCursors = new Map();
+    agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileDispatcher = {
       dispatch: async <T>(_key: string, source: string): Promise<T> => {
         priorities.push(source === 'periodic' ? 'background' : 'foreground');
@@ -289,7 +291,8 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const countAfterFirst = await scopedTripleCount(store, TEST_CG, TEST_ONCHAIN);
     expect(countAfterFirst).toBeGreaterThan(0);
 
-    // Second run: the ASK-guard short-circuits (scoped now has batchId), so the
+    // Second run: the ASK-guard short-circuits (scoped now has batchId plus a
+    // materialization version), so the
     // scoped triple count is UNCHANGED — no re-copy, no duplication, no throw.
     await runHeal(store, TEST_CG, TEST_ONCHAIN);
     const countAfterSecond = await scopedTripleCount(store, TEST_CG, TEST_ONCHAIN);
@@ -333,10 +336,80 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const nsScopedMeta = contextGraphMetaUri(NS_CG, NS_ONCHAIN);
     expect(await readMaterializedVersion(store, nsScopedMeta, NS_UAL)).toEqual({ blockNumber: 0, txIndex: 0 });
 
-    // Idempotent: a second run is a no-op (ASK-guard short-circuits on the now-present batchId).
+    // Idempotent: a second run is a no-op once both completion markers exist.
     const c1 = await scopedTripleCount(store, NS_CG, NS_ONCHAIN);
     await runHeal(store, NS_CG, NS_ONCHAIN);
     expect(await scopedTripleCount(store, NS_CG, NS_ONCHAIN)).toBe(c1);
+  });
+
+  it('repairs scoped metadata that has a batchId but no completion version', async () => {
+    const cg = 'partial-meta-cg';
+    const onChainId = '23';
+    const ual = 'did:dkg:hardhat:31337/0xpartial/42';
+    await seedOntology(store, cg, onChainId);
+    await store.insert([
+      ...metaQuads(ual, contextGraphMetaUri(cg)),
+      ...publicTriples().map((triple) => ({ ...triple, graph: contextGraphDataUri(cg) })),
+      // Simulate the old crash window: metadata including batchId committed,
+      // but the separate materializedVersion write never did.
+      ...metaQuads(ual, contextGraphMetaUri(cg, onChainId)),
+    ]);
+    expect(await readMaterializedVersion(store, contextGraphMetaUri(cg, onChainId), ual)).toBeNull();
+
+    await runHeal(store, cg, onChainId);
+
+    expect(await readMaterializedVersion(store, contextGraphMetaUri(cg, onChainId), ual))
+      .toEqual({ blockNumber: 0, txIndex: 0 });
+    await expect(extractV10KCFromStore(store, BigInt(onChainId), KA_ID)).resolves.toBeTruthy();
+  });
+
+  it('retries after a non-transactional endpoint partially copies metadata', async () => {
+    const cg = 'atomic-meta-retry-cg';
+    const onChainId = '29';
+    const ual = 'did:dkg:hardhat:31337/0xatomicretry/42';
+    await seedOntology(store, cg, onChainId);
+    await store.insert([
+      ...metaQuads(ual, contextGraphMetaUri(cg)),
+      ...publicTriples().map((triple) => ({ ...triple, graph: contextGraphDataUri(cg) })),
+    ]);
+
+    const originalUpdate = store.update.bind(store);
+    const scopedMeta = contextGraphMetaUri(cg, onChainId);
+    let failMetadataCopyOnce = true;
+    store.update = async (sparql, options) => {
+      if (
+        failMetadataCopyOnce
+        && sparql.includes(`FILTER(?p != <${DKG}materializedVersion>)`)
+      ) {
+        failMetadataCopyOnce = false;
+        await originalUpdate(sparql, options);
+        // Model a non-transactional endpoint that applied only part of the
+        // metadata INSERT before reporting failure. Completion must remain
+        // unstamped so the next sweep repairs the missing child row.
+        await originalUpdate(
+          `DELETE WHERE {
+             GRAPH <${scopedMeta}> {
+               <${ual}/1> <${RDF}type> ?type
+             }
+           }`,
+          options,
+        );
+        throw new Error('injected partial metadata copy failure');
+      }
+      return originalUpdate(sparql, options);
+    };
+
+    await runHeal(store, cg, onChainId);
+    expect(await readMaterializedVersion(store, scopedMeta, ual)).toBeNull();
+    const missingChild = await store.query(
+      `ASK { GRAPH <${scopedMeta}> { <${ual}/1> <${RDF}type> ?type } }`,
+    );
+    expect(missingChild.type === 'boolean' && missingChild.value).toBe(false);
+
+    await runHeal(store, cg, onChainId);
+    expect(await readMaterializedVersion(store, scopedMeta, ual))
+      .toEqual({ blockNumber: 0, txIndex: 0 });
+    await expect(extractV10KCFromStore(store, BigInt(onChainId), KA_ID)).resolves.toBeTruthy();
   });
 
   it('relocates a publisher one-shot strand whose public data is in the VM graph only (read-both)', async () => {

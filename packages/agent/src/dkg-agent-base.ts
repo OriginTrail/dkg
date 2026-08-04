@@ -24,6 +24,7 @@ import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
+import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -362,6 +363,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -417,6 +419,11 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   if (raw === undefined || raw.trim() === '') return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
+function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function createListContextGraphsCacheInvalidatingStore(
@@ -898,14 +905,26 @@ export class DKGAgentBase {
     );
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
-  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
-    Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
-  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS = (() => {
+    const configured = Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']);
+    return Number.isFinite(configured) && configured > 0
+      ? configured
+      : 10 * 60_000;
+  })();
+  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
+    1_000,
+  );
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
-  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
+    1_000,
+  );
+  /** Maximum peers connected/probed/transported by one exact-recovery pass. */
+  static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
+  /** Bounded proof universe retained across passes; transport still uses the cap above. */
+  static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
   /**
@@ -968,6 +987,17 @@ export class DKGAgentBase {
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** Closed dispatcher retained until every physically active worker settles. */
+  protected vmReconcileRetirement: Promise<void> | null = null;
+  /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
+  protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
+  protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
+  protected graphScopedStoreClosed = false;
+  /** True only after startup has installed every dependency the VM worker uses. */
+  protected vmReconcileRuntimeReady = false;
+  /** A timed-out physical retirement quarantines this instance until stop is retried. */
+  protected vmReconcileShutdownBlocked = false;
   /** Next eligible CG index for bounded periodic-sweep admission. */
   protected vmReconcileSweepCursor = 0;
   /** Deterministically staggered cold-start prime, separate from the interval. */
@@ -990,9 +1020,27 @@ export class DKGAgentBase {
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
-  /** Keys already consulted in the durable store during this process lifetime. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Set<string>();
+  /** Bounded access-ordered keys already consulted in the durable store. */
+  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
+  /** Bounded, process-local clean-absence rotations for production VM recovery. */
+  protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Next stable batch index to consider when the bounded rotation cache has waiters. */
+  protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
+  /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
+  protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /** Exclusive peer-id cursor used to walk oversized curator registries. */
+  protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
+  /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
+  protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
+  protected contextGraphMembershipPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
+  /** Late exact responses must not mutate rotation state after shutdown begins. */
+  protected vmReconcileRotationClosed = false;
+  /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
+  protected vmReconcileLifecycleGeneration = 0;
+  /** Abortable boundary paired with the generation guard for restart-safe async work. */
+  protected vmReconcileLifecycleController = new AbortController();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
@@ -1057,6 +1105,8 @@ export class DKGAgentBase {
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
+  protected readonly contextGraphBindingGenerations = new Map<string, number>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
