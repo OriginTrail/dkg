@@ -8,7 +8,7 @@ import {
   DKGAgent,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
 } from '../src/index.js';
-import type { ContextGraphMembershipStore } from '../src/dkg-agent-types.js';
+import type { ContextGraphMembershipStore, SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -1153,6 +1153,151 @@ describe('DKGAgent sync fetch coalescing', () => {
       } finally {
         await agent.stop().catch(() => {});
       }
+    }
+  });
+
+  // #2050. The IN-AGENT catch-up walk (`runCatchupOverPeers`) has to publish the
+  // same SWM diagnostics the worker-backed CLI runner does, or a job that happens
+  // to take the inline path reports a shortfall it cannot name while an identical
+  // job through the worker names it fully. The aggregation is three statements
+  // inside the `if (r.shared)` arm; deleting them leaves every other suite green,
+  // which is exactly why this row exists.
+  //
+  // TWO peers, not one. With a single peer `+=` is indistinguishable from `=`, and
+  // last-writer-wins is indistinguishable from whole-record selection — a one-peer
+  // fixture here passes against a completely broken aggregator.
+  it('preserves whole-record SWM coverage and sums snapshot-phase counters across catch-up peers', async () => {
+    // Peer A: a LARGER manifest that is still 72 refs short. Peer B: a smaller
+    // manifest that fully converged. This pair is chosen precisely because the
+    // two plausible wrong reductions produce visibly wrong answers:
+    //   - independent field-wise maxima yield 200/250, a state NO peer reported
+    //     and one nothing downstream can detect as synthetic;
+    //   - ranking by resolved/total picks B's 200/200 and reports "0 outstanding"
+    //     on a graph that is 72 Knowledge Assets short.
+    // `selectSwmSnapshotCoverage` ranks by LARGEST manifest, so A must win WHOLE.
+    // Weakening either peer to the same snapshotsTotal would collapse the tie into
+    // the peerIdSuffix tiebreak and stop testing the selection rule at all.
+    const peerACoverage = (): SwmSnapshotCoverage => ({
+      contextGraphId: 'coalesced-cg',
+      peerIdSuffix: PEER_A.slice(-8),
+      snapshotsResolved: 178,
+      snapshotsTotal: 250,
+      manifestComplete: true,
+      // resolved + missing === total, by construction. A fixture that broke this
+      // would be asserting a state the producer cannot emit.
+      missingCount: 72,
+      missingSample: ['swm-ref-a1', 'swm-ref-a2'],
+      // Legal only because missingCount > 0: `materializationFailures > 0` with
+      // `missingCount === 0` is unrepresentable (see SwmSnapshotCoverage docs).
+      materializationFailures: 3,
+      fromAuthority: false,
+    });
+    const peerBCoverage = (): SwmSnapshotCoverage => ({
+      contextGraphId: 'coalesced-cg',
+      peerIdSuffix: PEER_B.slice(-8),
+      snapshotsResolved: 200,
+      snapshotsTotal: 200,
+      manifestComplete: true,
+      missingCount: 0,
+      missingSample: [],
+      materializationFailures: 0,
+      fromAuthority: false,
+    });
+
+    // Distinct NON-ZERO values on both peers for every summed counter, and sums
+    // that equal neither operand. If either peer contributed 0, or the two
+    // contributed the same value, `=` would be indistinguishable from `+=`.
+    // Per-peer `bytesReceived` is kept equal to replay + snapshot so the
+    // aggregate preserves the documented identity
+    // `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
+    const peerARound = {
+      swmCoverage: peerACoverage(),
+      snapshotPlaneIncomplete: 1,
+      replayPhaseBytesReceived: 4_096,
+      snapshotPhaseBytesReceived: 65_536,
+      bytesReceived: 69_632,
+    };
+    const peerBRound = {
+      swmCoverage: peerBCoverage(),
+      snapshotPlaneIncomplete: 2,
+      replayPhaseBytesReceived: 1_024,
+      snapshotPhaseBytesReceived: 16_384,
+      bytesReceived: 17_408,
+    };
+
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const peerA = { toString: () => PEER_A };
+    const peerB = { toString: () => PEER_B };
+    const sharedSyncPeers: string[] = [];
+
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      // No preferred peer and no core peers, so `orderCatchupPeers` returns the
+      // connection order untouched: A is walked first, B last. That ordering is
+      // load-bearing — it is what makes last-writer-wins select B and fail the
+      // whole-record assertion below.
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [
+        { remotePeer: peerA },
+        { remotePeer: peerB },
+      ];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async (remotePeerId: string) => {
+        sharedSyncPeers.push(remotePeerId);
+        // Fresh objects per call: returning a shared const would let an
+        // in-place mutation of the coverage record pass unnoticed, because the
+        // expected value below would mutate with it.
+        return {
+          ...cleanSharedMemorySyncResult(),
+          ...(remotePeerId === PEER_A ? peerARound : peerBRound),
+          swmCoverage: remotePeerId === PEER_A ? peerACoverage() : peerBCoverage(),
+        };
+      };
+
+      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
+        includeSharedMemory: true,
+      });
+
+      // Guard the fixture itself: if the SWM plane were skipped (for example by
+      // a durable result carrying deferredBackpressure), every assertion below
+      // would read zeros and "pass" a broken aggregator by accident.
+      expect(sharedSyncPeers.sort()).toEqual([PEER_A, PEER_B].sort());
+      expect(result.peersTried).toBe(2);
+
+      const swm = result.diagnostics.sharedMemory;
+
+      // WHOLE-RECORD selection. Compared as one object on purpose: a per-field
+      // reduction that took max(resolved)=200 from B and max(total)=250 from A
+      // would satisfy any pair of independent per-field assertions while
+      // describing a round no peer ever ran.
+      expect(swm.swmCoverage).toEqual(peerACoverage());
+      // Spelled out as well, because these three are the fields an operator
+      // reads and the ones a synthetic mix corrupts: all three must come from A.
+      expect(swm.swmCoverage?.snapshotsResolved).toBe(178);
+      expect(swm.swmCoverage?.snapshotsTotal).toBe(250);
+      expect(swm.swmCoverage?.peerIdSuffix).toBe(PEER_A.slice(-8));
+      // B's converged record must not survive anywhere in the selected row.
+      expect(swm.swmCoverage?.missingCount).toBe(72);
+
+      // SUMMATION across both peers. Each expected value differs from both
+      // operands, so neither `=` (last write) nor a dropped forward can produce it.
+      expect(swm.snapshotPlaneIncomplete).toBe(3); // 1 + 2
+      expect(swm.replayPhaseBytesReceived).toBe(5_120); // 4_096 + 1_024
+      expect(swm.snapshotPhaseBytesReceived).toBe(81_920); // 65_536 + 16_384
+      // The documented split identity has to survive aggregation, not just hold
+      // per round: replay + snapshot must still account for every byte received.
+      expect(swm.bytesReceived).toBe(87_040); // 69_632 + 17_408
+      expect(
+        (swm.replayPhaseBytesReceived ?? 0) + (swm.snapshotPhaseBytesReceived ?? 0),
+      ).toBe(swm.bytesReceived);
+    } finally {
+      await agent.stop().catch(() => {});
     }
   });
 });
