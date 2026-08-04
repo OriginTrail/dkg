@@ -66,7 +66,7 @@ completeness claim.
 
 ```mermaid
 flowchart LR
-    P[Profile publisher] -->|existing KA publish/update| KA[Verified profile KA]
+    P[Profile publisher] -->|required sealed graph-scoped migration| KA[Verified profile KA]
     P -->|EVM + peer signed| H[AgentProfileHeadV1]
     H --> T[Bounded COW B+tree]
     T --> R[Capable receiver]
@@ -626,3 +626,12 @@ bytes and two-provider serve leases are unavailable, and record/byte service and
 arrival rates do not exist before Stack C/D. These remain explicit unknowns rather
 than inferred from W1, whose labels intentionally contain no graph or peer
 identifier.
+
+One additional prerequisite is deliberately unresolved: the current profile
+producer publishes unsealed, off-chain collections into the unregistered genesis
+`agents` graph, so no production profile yet satisfies the graph-scoped seal
+predicate above. Stack B/C must size and implement the producer migration to
+sealed graph-scoped profile KAs and decide whether and how `agents` is
+chain-anchored. Activation stops until that migration and authority model are
+proven; the architecture edge above describes the required target state, not the
+current producer path.

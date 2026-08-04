@@ -294,9 +294,7 @@ export function characterizeFixtureV1(fixture: CharacterizationFixtureV1): Chara
   }
 
   const activeQuads = active.map((profile) => profile.quads.length);
-  const activeSubjects = active.map(
-    (profile) => new Set(profile.quads.map((quad) => quad.subject)).size,
-  );
+  const activeSubjects = active.map((profile) => profileOwnedSubjectsV1(profile).size);
   const activeBytes = active.map((profile) => profile.nquadsBytes);
   const activeBundleBytes = active.every((profile) => profile.bundleBytes !== null)
     ? active.reduce((sum, profile) => sum + (profile.bundleBytes as number), 0)
@@ -687,10 +685,13 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
   if ((value.quads as unknown[]).length > SYSTEM_RECORD_LIMITS_V1.maxProfileQuads) {
     throw new TypeError('profile.quads exceeds the V1 per-record limit');
   }
-  const subjects = new Set(
-    (value.quads as Array<{ readonly subject?: unknown }>).map((quad) => quad.subject),
-  );
-  if (subjects.size > SYSTEM_RECORD_LIMITS_V1.maxOwnedSubjects) {
+  const ownedSubjects = new Set<unknown>([
+    value.rootSubject,
+    ...(value.linkedSubjects as string[]),
+    ...(value.derivedSubjects as string[]),
+    ...(value.quads as Array<{ readonly subject?: unknown }>).map((quad) => quad.subject),
+  ]);
+  if (ownedSubjects.size > SYSTEM_RECORD_LIMITS_V1.maxOwnedSubjects) {
     throw new TypeError('profile owned subjects exceed the V1 per-record limit');
   }
   assertFiniteInteger(value.nquadsBytes, 'profile.nquadsBytes', 0, 1024 * 1024);
@@ -780,6 +781,15 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
   if (JSON.stringify(derivedLinks) !== JSON.stringify(value.linkedSubjects)) {
     throw new TypeError('profile.linkedSubjects does not match canonical root-link quads');
   }
+}
+
+function profileOwnedSubjectsV1(profile: RedactedProfileEvidenceV1): ReadonlySet<string> {
+  return new Set([
+    profile.rootSubject,
+    ...profile.linkedSubjects,
+    ...profile.derivedSubjects,
+    ...profile.quads.map((quad) => quad.subject),
+  ]);
 }
 
 function assertProfileSet(profiles: readonly RedactedProfileEvidenceV1[]): void {

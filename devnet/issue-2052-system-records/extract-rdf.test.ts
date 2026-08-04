@@ -23,7 +23,7 @@ import {
 } from './extract-rdf.js';
 import { characterizeFixtureV1 } from './model.js';
 
-const ROOT = 'did:dkg:agent:0x0000000000000000000000000000000000000001';
+const ROOT = 'did:dkg:agent:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const PEER = '12D3KooWTestPeer';
 const PUBLIC_KEY = encodeWorkspaceEncryptionKey(Uint8Array.from({ length: 32 }, (_, index) => index + 1));
 const KEY_ID = workspaceAgentEncryptionKeyId(ROOT.slice('did:dkg:agent:'.length), Buffer.from(PUBLIC_KEY, 'base64url'));
@@ -71,6 +71,10 @@ test('extracts active roots through bounded POST queries and redacts exact times
       systemSyncPath,
     });
     assert.equal(fixture.profilePopulation.activeProfiles, 1);
+    assert.equal(
+      fixture.profiles[0].rootSubject,
+      'did:dkg:agent:0x0000000000000000000000000000000000000001',
+    );
     assert.equal(fixture.profiles[0].disposition, 'candidate');
     assert.equal(fixture.profiles[0].lastSeenAgeBucket, 'under-1h');
     assert.deepEqual(fixture.profiles[0].peerKeys, ['peer:0001']);
@@ -82,6 +86,7 @@ test('extracts active roots through bounded POST queries and redacts exact times
       && quad.objectOwnedSubject === fixture.profiles[0].rootSubject
     )));
     assert.ok(!JSON.stringify(fixture).includes(PEER));
+    assert.ok(!JSON.stringify(fixture).includes(ROOT));
     assert.ok(!JSON.stringify(fixture).includes('2026-08-04T12:30:00'));
     assert.ok(queries.every((query) => !query.includes('FILTER(STR(?seen)')));
     assert.ok(queries.every((query) => query.length < 16_384));
@@ -293,6 +298,19 @@ test('the fixture check fails closed when committed evidence drifts', async () =
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('the committed sanitized source rebuilds the committed fixture byte for byte', async () => {
+  assert.equal(
+    await runBuildFixtureCli([
+      '--source',
+      join(import.meta.dirname, 'inputs/r27-redacted-source-v1.json'),
+      '--output',
+      join(import.meta.dirname, 'fixtures/r27-v1.json'),
+      '--check',
+    ]),
+    0,
+  );
 });
 
 function populationRow(): Record<string, unknown> {

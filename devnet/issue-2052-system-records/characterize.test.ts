@@ -605,10 +605,26 @@ test('loads the committed r27 fixture and keeps baseline activation fail-closed'
   const raw = JSON.parse(
     await readFile(resolve(here, 'fixtures/r27-v1.json'), 'utf8'),
   ) as unknown;
-  const result = characterizeFixtureV1(parseCharacterizationFixtureV1(raw));
+  const fixture = parseCharacterizationFixtureV1(raw);
+  const result = characterizeFixtureV1(fixture);
+  assert.deepEqual(fixture.profilePopulation, {
+    observedRoots: 1_819,
+    observedPeerKeys: 1_807,
+    activeRoots: 4,
+    activeProfiles: 4,
+    candidateProfiles: 3,
+    ambiguousProfiles: 1,
+    staleProfiles: 245,
+    unknownFreshnessProfiles: 1_570,
+    missingPeerRoots: 0,
+    duplicatePeerKeys: 20,
+    sharedRootSubjects: 10,
+    detailedProfileScope: 'active',
+  });
+  assert.equal(result.profileStats.quads.p99, 2_252);
+  assert.equal(result.profileStats.nquadsBytes.p99, 463_357);
+  assert.equal(result.profileStats.subjects.p99, 3);
   assert.equal(result.invalidOwnedSubjects.length, 0);
-  assert.ok(result.activeProfiles > 0);
-  assert.equal(result.ambiguousProfiles, 1);
   assert.equal(result.loadEnvelope.eligible, false);
   assert.ok(result.loadEnvelope.failures.includes('bundle_measurement_unavailable'));
   assert.ok(result.loadEnvelope.failures.includes('load_measurement_unavailable'));

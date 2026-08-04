@@ -16,10 +16,10 @@
     "populationInputSha256": "sha256:806fe1f5ade2bc1a8dc05134237eb0242a69cc75dc71c07fad034380e836d9be",
     "detailInputSha256": "sha256:ca9f2a0ce7bd02bc46774f816317db6f2a42cdcecda78196bd60414dd528fc76",
     "diagnosticsArtifactSha256": "sha256:30d3f690d2cc106f3ce97f872d89291d3d687831637ff19ca035b54779fb7f47",
-    "redactionPolicy": "V1: wallet roots, peer IDs, and referenced key IDs replaced by deterministic fixture-local ordinal aliases; record/root aliases are mutually bound; only exact allowlisted profile subject shapes and predicates retained; unknown or underived nested subjects rejected before serialization; literal values omitted but UTF-8 byte lengths retained; no tokens, keys, multiaddrs, names, raw identifiers, or hashes of identifiers stored",
+    "redactionPolicy": "V1: wallet roots, peer IDs, and referenced key IDs replaced by deterministic fixture-local ordinal aliases that preserve source lexicographic rank; record/root aliases are mutually bound; only exact allowlisted profile subject shapes and predicates retained; unknown or underived nested subjects rejected before serialization; literal values omitted but UTF-8 byte lengths retained; aliases and per-record shape/byte counts may be correlated with the public agents graph; no tokens, keys, multiaddrs, names, raw identifiers, or hashes of identifiers stored",
     "agentsMetaExcluded": true,
     "profileEvidenceSha256": "sha256:6530bfcf954044d835b078821906f4024fbbf0c9018b5bf9a151e1ed5707878a",
-    "manifestSha256": "sha256:53da4c94f0633c997610866be3004baa4d17958ae3de34efb905292a53886aa3"
+    "manifestSha256": "sha256:58ad6fe0d5522a253abcdc2b6bdda9ddd1bded3f29504e0a3d36963cbf2519b0"
   },
   "staleThresholdMs": 86400000,
   "systemSync": [

@@ -20,6 +20,7 @@ protocol does not exist at the captured commit.
 Run:
 
 ```bash
+pnpm --filter @origintrail-official/dkg-core... build
 pnpm --filter @devnet/issue-2052-system-records typecheck
 pnpm --filter @devnet/issue-2052-system-records test
 pnpm --filter @devnet/issue-2052-system-records characterize
@@ -31,7 +32,9 @@ The package test runs the byte-for-byte fixture check before the Node test suite
 the standalone reproducibility gate.
 
 The committed sanitized inputs are sufficient to rebuild and byte-compare the
-fixture without the original node home or diagnostics file:
+fixture without the original node home or diagnostics file. This proves that the
+derived fixture matches its committed sanitized input; it is not independent proof
+that the redacted capture matches a now-unavailable original store:
 
 ```bash
 node --import tsx devnet/issue-2052-system-records/build-fixture.ts --check
@@ -71,7 +74,10 @@ v0.5.8 store. `extract-rdf.ts` accepts only an unauthenticated localhost endpoin
 retains only frozen allowlisted predicate/subject shapes and byte counts, and rejects
 unknown nested subjects or predicates before serialization. It writes no literal,
 wallet, peer-ID, peer-ID hash, name, multiaddr, token, or key values. Fixture-local
-ordinal aliases retain only the duplicate-key relationships needed by the model.
+ordinal aliases preserve source lexicographic rank as well as the duplicate-key
+relationships needed by the model. Their rank and the retained per-record
+shape/byte counts may therefore be correlated with the public `agents` graph; the
+fixture is sanitized evidence, not unlinkable anonymized data.
 Record aliases determine their redacted wallet-root aliases, peer aliases use the
 same canonical ordinal grammar, and referenced x25519 subjects use a distinct
 fixture-only ordinal shape. The parser rejects duplicate aliases, underived key
