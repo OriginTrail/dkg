@@ -51,4 +51,27 @@ describe('DiscoveryClient curator peer pagination', () => {
       await store.close();
     }
   });
+
+  it('matches legacy mixed-case EVM wallet rows case-insensitively', async () => {
+    const store = new OxigraphStore();
+    const lowerAddress = '0xabcdef00000000000000000000000000000000ab';
+    const mixedAddress = '0xAbCdEf00000000000000000000000000000000aB';
+    try {
+      const profile = buildAgentProfile({
+        peerId: 'peer-checksum', name: 'Checksum Curator', agentAddress: lowerAddress, skills: [],
+      });
+      const legacyQuads = profile.quads.map((quad) => (
+        quad.predicate === 'https://dkg.network/ontology#agentAddress'
+          ? { ...quad, object: `"${mixedAddress}"` }
+          : quad
+      ));
+      await store.insert(legacyQuads);
+      const discovery = new DiscoveryClient(new DKGQueryEngine(store));
+
+      await expect(discovery.findAgentPeerIdsByAddress(lowerAddress))
+        .resolves.toEqual(['peer-checksum']);
+    } finally {
+      await store.close();
+    }
+  });
 });

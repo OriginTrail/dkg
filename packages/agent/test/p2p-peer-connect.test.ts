@@ -169,6 +169,59 @@ describe('abortable recovery connection helpers', () => {
     expect(discoveryCalled).toBe(false);
   });
 
+  it('forwards cancellation through discovery after direct dial fails', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const controller = new AbortController();
+    const discoveryStarted = Promise.withResolvers<void>();
+    let observedSignal: AbortSignal | undefined;
+
+    const connection = ensurePeerConnected({
+      getConnections: () => [],
+      dial: async () => { throw new Error('direct dial failed'); },
+      peerStore: { merge: async () => undefined },
+    }, {
+      findAgentByPeerId: async (_peerId: string, options?: { signal?: AbortSignal }) => {
+        observedSignal = options?.signal;
+        discoveryStarted.resolve();
+        return new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('discovery aborted', 'AbortError'));
+          }, { once: true });
+        });
+      },
+    } as any, peerId, { signal: controller.signal });
+
+    await discoveryStarted.promise;
+    controller.abort();
+    await expect(connection).rejects.toMatchObject({ name: 'AbortError' });
+    expect(observedSignal).toBe(controller.signal);
+  });
+
+  it('forwards cancellation to the relay fallback dial', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const dialSignals: Array<AbortSignal | undefined> = [];
+    const merge = recorder(async () => undefined);
+    let dialAttempt = 0;
+    const dial = async (_peer: unknown, options?: { signal?: AbortSignal }) => {
+      dialSignals.push(options?.signal);
+      dialAttempt += 1;
+      if (dialAttempt === 1) throw new Error('direct dial failed');
+    };
+
+    const controller = new AbortController();
+    await ensurePeerConnected({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge },
+    }, {
+      findAgentByPeerId: async () => ({ peerId, relayAddress }),
+    } as any, peerId, { signal: controller.signal });
+
+    expect(dialSignals).toEqual([controller.signal, controller.signal]);
+    expect(merge.calls).toHaveLength(1);
+  });
+
   it('interrupts the real protocol-readiness delay', async () => {
     const controller = new AbortController();
     let reads = 0;

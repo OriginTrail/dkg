@@ -113,6 +113,11 @@ export class DiscoveryClient {
     agentAddress: string,
     options: { afterPeerId?: string; limit?: number; signal?: AbortSignal } = {},
   ): Promise<string[]> {
+    const isEvmAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress);
+    const addressMatch = isEvmAddress
+      ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
+        FILTER(LCASE(STR(?storedAgentAddress)) = "${escapeSparqlLiteral(agentAddress.toLowerCase())}")`
+      : `?agent <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" .`;
     const limit = options.limit === undefined
       ? undefined
       : Math.max(1, Math.floor(options.limit));
@@ -122,8 +127,8 @@ export class DiscoveryClient {
     const result = await this.engine.query(`
       SELECT DISTINCT ?peerId WHERE {
         ?agent a <${DKG}Agent> ;
-               <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" ;
                <${DKG}peerId> ?peerId .
+        ${addressMatch}
         ${afterFilter}
       }
       ORDER BY ASC(STR(?peerId))
