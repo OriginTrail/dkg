@@ -474,6 +474,7 @@ async function select(endpoint: URL, query: string): Promise<SparqlRow[]> {
   const url = new URL('/query', endpoint);
   const response = await fetch(url, {
     method: 'POST',
+    redirect: 'error',
     headers: {
       accept: 'application/sparql-results+json',
       'content-type': 'application/x-www-form-urlencoded',
@@ -547,7 +548,12 @@ function escapeSparqlString(value: string): string {
 }
 
 export function assertLocalEndpoint(endpoint: URL): void {
-  if (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(endpoint.hostname)) {
+  if (
+    endpoint.protocol !== 'http:'
+    || !['127.0.0.1', 'localhost'].includes(endpoint.hostname)
+    || endpoint.username !== ''
+    || endpoint.password !== ''
+  ) {
     throw new TypeError('extractor accepts only an unauthenticated local HTTP endpoint');
   }
 }

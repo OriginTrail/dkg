@@ -131,6 +131,46 @@ test('accepts only unauthenticated localhost HTTP extraction endpoints', () => {
     () => assertLocalEndpoint(new URL('https://localhost:17880')),
     /local HTTP endpoint/,
   );
+  assert.throws(
+    () => assertLocalEndpoint(new URL('http://user:secret@localhost:17880')),
+    /local HTTP endpoint/,
+  );
+});
+
+test('does not follow a localhost SPARQL redirect', async () => {
+  let redirectedRequests = 0;
+  const captureServer = createServer((_request, response) => {
+    redirectedRequests += 1;
+    response.writeHead(500).end();
+  });
+  await new Promise<void>((resolve) => captureServer.listen(0, '127.0.0.1', resolve));
+  const captureAddress = captureServer.address();
+  if (!captureAddress || typeof captureAddress === 'string') {
+    throw new Error('capture server did not bind TCP');
+  }
+  const redirectServer = createServer((_request, response) => {
+    response.writeHead(307, {
+      location: `http://127.0.0.1:${captureAddress.port}/capture`,
+    }).end();
+  });
+  await new Promise<void>((resolve) => redirectServer.listen(0, '127.0.0.1', resolve));
+  const redirectAddress = redirectServer.address();
+  if (!redirectAddress || typeof redirectAddress === 'string') {
+    throw new Error('redirect server did not bind TCP');
+  }
+  try {
+    await assert.rejects(() => extractR27Fixture({
+      endpoint: new URL(`http://127.0.0.1:${redirectAddress.port}`),
+      output: '/tmp/dkg-2052-redirect-must-not-write.json',
+      observationTime: '2026-08-04T13:00:00.000Z',
+      sourceCommit: 'c297a7b6ffb6df82305c1f7eb76864a8b7a77c35',
+      systemSyncPath: '/tmp/dkg-2052-redirect-must-not-read.json',
+    }));
+    assert.equal(redirectedRequests, 0);
+  } finally {
+    redirectServer.close();
+    captureServer.close();
+  }
 });
 
 test('rejects secret-bearing subject paths and predicates before fixture serialization', async () => {
