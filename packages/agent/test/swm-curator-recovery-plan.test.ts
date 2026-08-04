@@ -108,6 +108,92 @@ describe('private SWM curator recovery planning', () => {
     });
   });
 
+  it('stops structural curator discovery when its recovery target becomes stale', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const contextGraphId = `${curator}/stale-curator-plan`;
+    const agent = await createAgent('CuratorRecoveryStaleTarget');
+    const internals = agent as any;
+    internals.localAgents.clear();
+    let releaseLookup!: () => void;
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => { markLookupStarted = resolve; });
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    let lookups = 0;
+    let refreshes = 0;
+    internals.discovery = {
+      findAgents: async () => {
+        lookups += 1;
+        markLookupStarted();
+        await lookupGate;
+        return [];
+      },
+    };
+    internals.refreshMetaFromCurator = async () => {
+      refreshes += 1;
+      return false;
+    };
+    let current = true;
+    const resolution = internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+      isCurrent: () => current,
+    });
+
+    await lookupStarted;
+    current = false;
+    releaseLookup();
+
+    await expect(resolution).rejects.toMatchObject({ name: 'AbortError' });
+    expect(lookups).toBe(1);
+    expect(refreshes).toBe(0);
+  });
+
+  it('walks an oversized structural-curator roster with an exclusive peer cursor', async () => {
+    const curator = ethers.Wallet.createRandom().address.toLowerCase();
+    const contextGraphId = `${curator}/paged-curator-plan`;
+    const agent = await createAgent('CuratorRecoveryPagination');
+    const pages = [
+      ['peer-001', 'peer-002', 'peer-003'],
+      ['peer-002', 'peer-003', 'peer-004'],
+    ];
+    const calls: Array<{ afterPeerId?: string; limit?: number }> = [];
+    const internals = agent as any;
+    internals.localAgents.clear();
+    internals.discovery = {
+      findAgentPeerIdsByAddress: async (
+        _address: string,
+        options: { afterPeerId?: string; limit?: number },
+      ) => {
+        calls.push(options);
+        return pages[calls.length - 1] ?? [];
+      },
+      findAgents: async () => [],
+    };
+
+    const first = await internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+      maxPeerIds: 2,
+      pagePeerIds: 1,
+    });
+    const second = await internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+      maxPeerIds: 2,
+      pagePeerIds: 1,
+      afterPeerId: first.nextPageAfterPeerId,
+    });
+
+    expect(first).toMatchObject({
+      peerIds: ['peer-001'],
+      overflowed: true,
+      nextPageAfterPeerId: 'peer-001',
+    });
+    expect(second).toMatchObject({
+      peerIds: ['peer-002'],
+      overflowed: true,
+      nextPageAfterPeerId: 'peer-002',
+    });
+    expect(calls).toEqual([
+      { limit: 3, signal: undefined },
+      { afterPeerId: 'peer-001', limit: 2, signal: undefined },
+    ]);
+  });
+
   async function createAgent(name: string): Promise<DKGAgent> {
     const agent = await DKGAgent.create({
       name,

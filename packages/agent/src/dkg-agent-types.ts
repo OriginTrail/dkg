@@ -766,7 +766,11 @@ export interface VmReconcileRotationRecord {
   /** Peers physically attempted during the current proof cycle. */
   attemptedPeerIds: Set<string>;
   cleanAbsentPeerIds: Set<string>;
-  /** The cycle was built after a successful curator lookup or from a cached successful roster. */
+  /**
+   * A process-local curator lookup completed (or its bounded cached roster was
+   * reused). This is not cryptographic or network-wide completeness evidence;
+   * observed roster changes invalidate the cycle and backoff is time-bounded.
+   */
   curatorRosterConfirmed: boolean;
   /** Monotonic bound after which a partial clean-absence proof restarts. */
   collectionDeadlineAt: number;

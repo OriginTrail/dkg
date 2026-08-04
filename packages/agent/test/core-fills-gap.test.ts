@@ -87,6 +87,7 @@ interface AgentInternals {
     }>,
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
   ): Promise<PendingOrdinalRecoveryResult>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
   runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
@@ -658,6 +659,39 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(sub!.onChainId).toBe('9');              // rebound to the new graph
     expect(sub!.lastReconciledOrdinal).toBe(0);    // stale watermark dropped
     expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(recentKey)).toBe(false);
+  });
+
+  it('reclaims binding generations when subscription records are deleted', async () => {
+    const internals = await boot();
+    const generations = (internals as any).contextGraphBindingGenerations as Map<string, number>;
+
+    for (let index = 0; index < 32; index += 1) {
+      const localCgId = `deleted-binding-${index}`;
+      const subscription = { subscribed: true };
+      internals.subscribedContextGraphs.set(localCgId, subscription);
+      (internals as any).bindSubscriptionOnChainId(localCgId, subscription, String(index + 1));
+      expect((internals as any).deleteContextGraphSubscription(localCgId)).toBe(true);
+    }
+
+    expect(generations.size).toBe(0);
+
+    const reusedCgId = 'deleted-binding-reused';
+    const oldSubscription = { subscribed: true };
+    internals.subscribedContextGraphs.set(reusedCgId, oldSubscription);
+    (internals as any).bindSubscriptionOnChainId(reusedCgId, oldSubscription, '100');
+    const oldGeneration = (internals as any).captureContextGraphBindingGeneration(reusedCgId);
+    (internals as any).deleteContextGraphSubscription(reusedCgId);
+    const replacement = { subscribed: true };
+    internals.subscribedContextGraphs.set(reusedCgId, replacement);
+    (internals as any).bindSubscriptionOnChainId(reusedCgId, replacement, '101');
+
+    expect(
+      internals.subscribedContextGraphs.get(reusedCgId) === oldSubscription
+      && (internals as any).isContextGraphBindingGenerationCurrent(
+        reusedCgId,
+        oldGeneration,
+      ),
+    ).toBe(false);
   });
 
   it('clears VM reconcile state when stale inactive on-chain ids are re-registered', async () => {
@@ -1870,6 +1904,37 @@ describe('Phase D - VM reconcile damping', () => {
     expect(negativeCache.get(cacheKey)?.nextRetryAt).toBeGreaterThan(now);
   });
 
+  it('bounds durable negative-cache hydration guards and safely reloads evicted keys', async () => {
+    const loads: string[] = [];
+    const internals = await boot({
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (cacheKey) => {
+        loads.push(cacheKey);
+        return undefined;
+      },
+    });
+    const hydrated = (internals as any).vmReconcileNegativeCacheHydrated as Map<string, string>;
+    const cap = DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES;
+
+    for (let index = 0; index < cap + 2; index += 1) {
+      (internals as any).markVmReconcileNegativeCacheHydrated(
+        `hydrated-cg\0ual-${index}#root`,
+        'hydrated-cg',
+      );
+    }
+
+    expect(hydrated.size).toBe(cap);
+    expect(hydrated.has('hydrated-cg\0ual-0#root')).toBe(false);
+    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(
+      'hydrated-cg\0ual-0#root',
+      'hydrated-cg',
+    )).resolves.toBe(false);
+    expect(loads).toEqual(['hydrated-cg\0ual-0#root']);
+    expect(hydrated.size).toBe(cap);
+  });
+
   it('prunes oversized VM reconcile state and clears non-hosted CG state on unsubscribe', async () => {
     const internals = await boot();
     const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
@@ -1883,6 +1948,7 @@ describe('Phase D - VM reconcile damping', () => {
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
     const rotationState = (internals as any).vmReconcileRotationState as Map<string, unknown>;
+    const hydrated = (internals as any).vmReconcileNegativeCacheHydrated as Map<string, string>;
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
     const now = Date.now();
 
@@ -1921,6 +1987,7 @@ describe('Phase D - VM reconcile damping', () => {
       peerTopologyKey: '',
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
+    (internals as any).markVmReconcileNegativeCacheHydrated('cleanup-hydrated', 'cleanup-cg');
     fetchCooldown.set('cleanup-cg', now);
     peerCursor.set('cleanup-cg', 7);
     peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
@@ -1931,6 +1998,7 @@ describe('Phase D - VM reconcile damping', () => {
     recent.add('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01');
     (agent as any).unsubscribeFromContextGraph('cleanup-cg');
     expect(negativeCache.has('cleanup-cache')).toBe(false);
+    expect(hydrated.has('cleanup-hydrated')).toBe(false);
     expect(fetchCooldown.has('cleanup-cg')).toBe(false);
     expect(peerCursor.has('cleanup-cg')).toBe(false);
     expect(peerOrder.has('cleanup-cg')).toBe(false);
@@ -1947,6 +2015,7 @@ describe('Phase D - VM reconcile damping', () => {
       peerTopologyKey: '',
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
+    (internals as any).markVmReconcileNegativeCacheHydrated('hosted-hydrated', 'hosted-cg');
     fetchCooldown.set('hosted-cg', now);
     peerCursor.set('hosted-cg', 3);
     peerOrder.set('hosted-cg', { orderedPeers: ['peer-b'], nextPeerId: 'peer-b' });
@@ -1957,6 +2026,7 @@ describe('Phase D - VM reconcile damping', () => {
     recent.add('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02');
     (agent as any).unsubscribeFromContextGraph('hosted-cg');
     expect(negativeCache.has('hosted-cache')).toBe(true);
+    expect(hydrated.has('hosted-hydrated')).toBe(true);
     expect(fetchCooldown.has('hosted-cg')).toBe(true);
     expect(peerCursor.has('hosted-cg')).toBe(true);
     expect(peerOrder.has('hosted-cg')).toBe(true);
@@ -2324,7 +2394,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId)).toEqual(curators);
   });
 
-  it('treats an oversized curator roster as unconfirmed and never suppresses discovery', async () => {
+  it('rotates a bounded oversized-roster transport window without treating it as absence proof', async () => {
     const rosterDescriptor = Object.getOwnPropertyDescriptor(
       DKGAgentBase,
       'VM_RECONCILE_EXACT_ROSTER_MAX',
@@ -2338,49 +2408,87 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       agent = await DKGAgent.create({ name: 'ExactVmRosterOverflow', chainAdapter: chain });
       const internals = agent as unknown as AgentInternals;
       const localCgId = '0x0000000000000000000000000000000000000001/roster-overflow';
-      const preferred = '12D3KooWRosterOverflowPreferred';
-      const connectedPeer = { toString: () => preferred };
+      const overflowPeers = Array.from({ length: 5 }, (_, i) => `12D3KooWRosterOverflow${i}`);
+      const connectedById = new Map<string, { toString(): string }>();
       (internals as any).node = {
         peerId: '12D3KooWRosterOverflowLocal',
-        libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+        libp2p: {
+          getConnections: () => [...connectedById.values()].map((remotePeer) => ({ remotePeer })),
+        },
       };
-      (internals as any).preferredSyncPeers.set(localCgId, preferred);
       let resolutions = 0;
-      (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      (internals as any).resolveCuratorPeerIdsForCg = async (
+        _cgId: string,
+        options: { afterPeerId?: string },
+      ) => {
         resolutions += 1;
+        const previousIndex = options.afterPeerId
+          ? overflowPeers.indexOf(options.afterPeerId)
+          : -1;
+        const peerId = overflowPeers[(previousIndex + 1) % overflowPeers.length]!;
         return {
-          peerIds: Array.from({ length: 5 }, (_, i) => `12D3KooWRosterOverflow${i}`),
+          peerIds: [peerId],
           curatorIsLocal: false,
           legacyTripleResolved: false,
+          overflowed: true,
+          nextPageAfterPeerId: peerId,
         };
       };
-      (internals as any).ensurePeerConnected = async () => undefined;
+      (internals as any).ensurePeerConnected = async (peerId: string) => {
+        connectedById.set(peerId, { toString: () => peerId });
+      };
       (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
       (internals as any).waitForSyncProtocol = async () => true;
       (internals as any).ensurePeerAdmittedForRecovery = async () => true;
-      const fetch = vi.fn(async () => ({
-        result: {
-          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
-          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
-        },
-        disposition: 'clean-absent' as const,
-      }));
-      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+      const fetches: string[] = [];
       const target = vmRecoveryTarget(localCgId, 0, 'roster-overflow');
-      (internals as any).reconcileChainOrdinal = async () => ({
-        status: 'pending', recovery: target,
-      });
+      const holderPeerId = overflowPeers[4]!;
+      let lastPeerId: string | undefined;
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+        fetches.push(peerId);
+        lastPeerId = peerId;
+        const found = peerId === holderPeerId;
+        return {
+          result: {
+            fetchedDataTriples: found ? 1 : 0,
+            fetchedMetaTriples: found ? 8 : 0,
+            insertedTriples: found ? 9 : 0,
+            failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+          },
+          disposition: found ? 'found' as const : 'clean-absent' as const,
+        };
+      };
+      (internals as any).reconcileChainOrdinal = async () => (
+        lastPeerId === holderPeerId
+          ? { status: 'reconciled', blockNumber: 100 }
+          : { status: 'pending', recovery: target }
+      );
 
-      await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
-      const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
-      expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
-        phase: 'backoff', curatorRosterConfirmed: false,
-      });
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
-      await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+      // Simulate a formerly authoritative prefix cached before the registry
+      // grew beyond the proof cap. The current oversized result must replace it
+      // with rotating transport windows instead of querying that prefix forever.
+      (internals as any).vmReconcileCuratorPeersByCg.set(
+        localCgId,
+        overflowPeers.slice(0, 4),
+      );
 
-      expect(resolutions).toBe(2);
-      expect(fetch).toHaveBeenCalledTimes(2);
+      let result;
+      for (let pass = 0; pass < 5; pass += 1) {
+        result = await internals.recoverVmReconcileBatch(
+          localCgId, 1n, [target], 100, () => true,
+        );
+        if (pass < 4) {
+          const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+          expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+            phase: 'collecting', curatorRosterConfirmed: false,
+          });
+          (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+        }
+      }
+
+      expect(resolutions).toBe(5);
+      expect(fetches).toEqual(overflowPeers);
+      expect(result?.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     } finally {
       Object.defineProperty(
         DKGAgentBase,
@@ -2591,6 +2699,47 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.outcomes.size).toBe(2);
     expect(result.attemptedOrdinals).toEqual([0, 1]);
     expect(result.continuationOrdinal).toBe(2);
+  });
+
+  it('spreads unavailable-peer probes across targets within the global peer budget', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmUnavailableFairness', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peers = [1, 2, 3, 4].map((n) => `12D3KooWUnavailableFairness${n}`);
+    const localCgId = '0x0000000000000000000000000000000000000001/unavailable-fairness';
+    (internals as any).node = {
+      peerId: '12D3KooWUnavailableFairnessLocal',
+      libp2p: { getConnections: () => [] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: peers, curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    const connectionAttempts: string[] = [];
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectionAttempts.push(peerId);
+    };
+    (internals as any).selectCatchupPeers = (candidates: Array<{ toString(): string }>) => candidates;
+    const protocolWaits: string[] = [];
+    (internals as any).waitForSyncProtocol = async (peerId: string) => {
+      protocolWaits.push(peerId);
+      return false;
+    };
+    const fetch = vi.fn();
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    const targets = Array.from({ length: 4 }, (_, ordinal) =>
+      vmRecoveryTarget(localCgId, ordinal, `unavailable-${ordinal}`));
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+
+    expect(connectionAttempts).toEqual(peers.slice(0, 3));
+    // The dial stub deliberately leaves each peer disconnected, so protocol
+    // probing is skipped after each failed connection boundary.
+    expect(protocolWaits).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result.attemptedOrdinals).toEqual([0, 1, 2]);
+    expect(result.continuationOrdinal).toBe(3);
   });
 
   it('tries each pending target once per eligible pass and damps immediate retries', async () => {
@@ -3003,6 +3152,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       status: 'pending', recovery: target,
     });
 
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.attemptedOrdinals).toEqual([0]);
+    expect(networkAttempts).toEqual([]);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
     const result = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
     );
@@ -3293,9 +3448,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
       };
       (internals as any).preferredSyncPeers.set(localCgId, peerA);
-      (internals as any).resolveCuratorPeerIdsForCg = async () => ({
-        peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false,
-      });
+      let curatorResolutions = 0;
+      (internals as any).resolveCuratorPeerIdsForCg = async () => {
+        curatorResolutions += 1;
+        return { peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false };
+      };
       (internals as any).ensurePeerConnected = async () => undefined;
       (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
       (internals as any).waitForSyncProtocol = async () => true;
@@ -3320,7 +3477,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       };
       const first = vmRecoveryTarget(localCgId, 0, '78');
       const overflow = vmRecoveryTarget(localCgId, 1, '79');
-      const byOrdinal = new Map([[first.ordinal, first], [overflow.ordinal, overflow]]);
+      const secondOverflow = vmRecoveryTarget(localCgId, 2, '80');
+      const targets = [first, overflow, secondOverflow];
+      const byOrdinal = new Map(targets.map((target) => [target.ordinal, target]));
       (internals as any).reconcileChainOrdinal = async (
         _lcg: string,
         _ocg: bigint,
@@ -3332,30 +3491,42 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       >;
       const firstKey = (internals as any).vmReconcileRotationSlotKey(first);
       const overflowKey = (internals as any).vmReconcileRotationSlotKey(overflow);
+      const secondOverflowKey = (internals as any).vmReconcileRotationSlotKey(secondOverflow);
 
       await internals.recoverVmReconcileBatch(
-        localCgId, 1n, [first, overflow], 100, () => true,
+        localCgId, 1n, targets, 100, () => true,
       );
       expect(rotationState.size).toBe(1);
       expect(rotationState.get(firstKey)).toMatchObject({ phase: 'collecting' });
       expect([...rotationState.get(firstKey)!.cleanAbsentPeerIds]).toEqual([peerA]);
       expect(attemptsByUal.get(first.ual)).toEqual([peerA]);
       expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
+      expect(attemptsByUal.get(secondOverflow.ual)).toBeUndefined();
 
       (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
       await internals.recoverVmReconcileBatch(
-        localCgId, 1n, [first, overflow], 100, () => true,
+        localCgId, 1n, targets, 100, () => true,
       );
       expect(rotationState.size).toBe(1);
       expect(rotationState.get(firstKey)).toMatchObject({ phase: 'backoff' });
       expect(attemptsByUal.get(first.ual)).toEqual([peerA, peerB]);
       expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
 
+      // A batch containing only an unowned target can be rejected from the
+      // live capacity state without paying curator discovery or transport.
+      const resolutionsBeforeCapacityDeferral = curatorResolutions;
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, [overflow], 100, () => true,
+      );
+      expect(curatorResolutions).toBe(resolutionsBeforeCapacityDeferral);
+      expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
+
       // An unexpired backoff remains installed and the overflow target performs
       // no evidence-free exact request.
       (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
       await internals.recoverVmReconcileBatch(
-        localCgId, 1n, [first, overflow], 100, () => true,
+        localCgId, 1n, targets, 100, () => true,
       );
       expect(rotationState.size).toBe(1);
       expect(rotationState.get(firstKey)).toMatchObject({ phase: 'backoff' });
@@ -3367,12 +3538,143 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       (internals as any).vmReconcileRotationNow = () => firstBackoff.nextRetryAt + 1;
       (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
       await internals.recoverVmReconcileBatch(
-        localCgId, 1n, [overflow], 100, () => true,
+        localCgId, 1n, targets, 100, () => true,
       );
       expect(rotationState.size).toBe(1);
       expect(rotationState.has(firstKey)).toBe(false);
       expect(rotationState.get(overflowKey)).toMatchObject({ phase: 'collecting' });
       expect(attemptsByUal.get(overflow.ual)).toEqual([peerA]);
+
+      // Complete B's roster, expire it, and prove the third stable-order waiter
+      // receives the next slot instead of A/B alternating forever.
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      const overflowBackoff = rotationState.get(overflowKey) as any;
+      expect(overflowBackoff).toMatchObject({ phase: 'backoff' });
+      expect(attemptsByUal.get(overflow.ual)).toEqual([peerA, peerB]);
+
+      (internals as any).vmReconcileRotationNow = () => overflowBackoff.nextRetryAt + 1;
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      expect(rotationState.size).toBe(1);
+      expect(rotationState.has(overflowKey)).toBe(false);
+      expect(rotationState.get(secondOverflowKey)).toMatchObject({ phase: 'collecting' });
+      expect(attemptsByUal.get(secondOverflow.ual)).toEqual([peerA]);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('reserves a live rotation slot for an unrelated CG at the node-wide cache cap', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 3,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmCrossCgCapacity', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWCrossCgCapacityPeer';
+      const dominantCg = '0x0000000000000000000000000000000000000001/dominant-capacity';
+      const waitingCg = '0x0000000000000000000000000000000000000002/waiting-capacity';
+      const dominantTargets = [0, 1, 2]
+        .map((ordinal) => vmRecoveryTarget(dominantCg, ordinal, `dominant-${ordinal}`));
+      for (const target of dominantTargets) {
+        expect((internals as any).prepareVmReconcileRotationTarget(
+          target,
+          [peer],
+          100,
+        ).suppressed).toBe(false);
+      }
+      const state = (internals as any).vmReconcileRotationState as Map<
+        string,
+        { localCgId: string }
+      >;
+      expect(state.size).toBe(3);
+      expect([...state.values()].filter((record) => record.localCgId === dominantCg)).toHaveLength(3);
+
+      const waiting = vmRecoveryTarget(waitingCg, 0, 'waiting');
+      const admitted = (internals as any).prepareVmReconcileRotationTarget(
+        waiting,
+        [peer],
+        100,
+      );
+
+      expect(admitted.suppressed).toBe(false);
+      expect(admitted.record?.localCgId).toBe(waitingCg);
+      expect(state.size).toBe(3);
+      expect([...state.values()].filter((record) => record.localCgId === dominantCg)).toHaveLength(2);
+      expect([...state.values()].filter((record) => record.localCgId === waitingCg)).toHaveLength(1);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('does not evict a cross-CG donor when recovery exits before requester installation', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 3,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmDonationRollback', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWDonationRollbackPeer';
+      const dominantCg = '0x0000000000000000000000000000000000000001/donation-owner';
+      const waitingCg = '0x0000000000000000000000000000000000000002/donation-waiter';
+      (internals as any).vmReconcileRotationNow = () => 100;
+      for (let ordinal = 0; ordinal < 3; ordinal += 1) {
+        const target = vmRecoveryTarget(dominantCg, ordinal, `donor-${ordinal}`);
+        expect((internals as any).prepareVmReconcileRotationTarget(
+          target,
+          [peer],
+          100,
+        ).record).toBeDefined();
+      }
+      const state = (internals as any).vmReconcileRotationState as Map<string, unknown>;
+      const before = [...state.entries()];
+      (internals as any).vmReconcileCuratorPeersByCg.set(waitingCg, [peer]);
+      let current = true;
+      (internals as any).resolveCuratorPeerIdsForCg = async () => {
+        current = false;
+        return {
+          peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+        };
+      };
+      const waiting = vmRecoveryTarget(waitingCg, 0, 'waiting');
+
+      await internals.recoverVmReconcileBatch(
+        waitingCg,
+        1n,
+        [waiting],
+        100,
+        () => current,
+      );
+
+      expect([...state.entries()]).toEqual(before);
+      expect(state.has((internals as any).vmReconcileRotationSlotKey(waiting))).toBe(false);
     } finally {
       Object.defineProperty(
         DKGAgentBase,
@@ -3741,7 +4043,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       target, ordinaryPeer, 'clean-absent', [ordinaryPeer], first.record,
     );
     expect(first.record).toMatchObject({
-      phase: 'backoff',
+      phase: 'collecting',
       curatorRosterConfirmed: false,
     });
 
@@ -3749,7 +4051,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       target, [ordinaryPeer], 101, false,
     );
     expect(retry.suppressed).toBe(false);
-    expect(retry.record).not.toBe(first.record);
+    expect(retry.record).toBe(first.record);
     expect(retry.record).toMatchObject({
       phase: 'collecting',
       curatorRosterConfirmed: false,
@@ -3762,14 +4064,94 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       target, [ordinaryPeer], 102, true,
     );
     expect(confirmed.suppressed).toBe(false);
-    expect(confirmed.record).not.toBe(retry.record);
+    expect(confirmed.record).toBe(retry.record);
     expect(confirmed.record.curatorRosterConfirmed).toBe(true);
+    expect([...confirmed.record.attemptedPeerIds]).toEqual([]);
     (internals as any).settleVmReconcileRotationAttempt(
       target, ordinaryPeer, 'clean-absent', [ordinaryPeer], confirmed.record,
     );
     expect((internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer], 103, true,
     ).suppressed).toBe(true);
+  });
+
+  it('reprobes retained peers when curator proof arrives with roster growth', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCuratorProofGrowth', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/proof-growth';
+    const ordinaryPeer = '12D3KooWProofGrowthOrdinary';
+    const curatorPeer = '12D3KooWProofGrowthCurator';
+    const target = vmRecoveryTarget(localCgId, 0, 'proof-growth');
+    const unconfirmed = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 100, false,
+    );
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], unconfirmed.record,
+    );
+    expect([...unconfirmed.record.cleanAbsentPeerIds]).toEqual([ordinaryPeer]);
+
+    const confirmed = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer, curatorPeer], 101, true,
+    );
+    expect(confirmed.suppressed).toBe(false);
+    expect(confirmed.record).toBe(unconfirmed.record);
+    expect(confirmed.record.curatorRosterConfirmed).toBe(true);
+    expect([...confirmed.record.candidatePeerIds]).toEqual([ordinaryPeer, curatorPeer]);
+    expect([...confirmed.record.attemptedPeerIds]).toEqual([]);
+    expect([...confirmed.record.cleanAbsentPeerIds]).toEqual([]);
+  });
+
+  it('does not persist incomplete-cycle suppression when curator discovery is unconfirmed', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmUnconfirmedIncompleteBackoff', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/unconfirmed-incomplete';
+    const peer = '12D3KooWUnconfirmedIncomplete';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWUnconfirmedIncompleteLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peer);
+    let curatorResolutions = 0;
+    (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      curatorResolutions += 1;
+      return {
+        peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: true,
+      };
+    };
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let fetches = 0;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      fetches += 1;
+      return {
+        result: {
+          fetchedDataTriples: 50_000, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'unconfirmed-incomplete');
+    (internals as any).reconcileChainOrdinal = async () => ({ status: 'pending', recovery: target });
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+      phase: 'collecting', curatorRosterConfirmed: false,
+    });
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const suppressed = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(suppressed.attemptedOrdinals).toEqual([]);
+    expect(curatorResolutions).toBe(2);
+    expect(fetches).toBe(1);
   });
 
   it('retries curator discovery after an unconfirmed clean-absence cycle', async () => {
@@ -4267,11 +4649,330 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     const target = vmRecoveryTarget(localCgId, 0, '7');
 
-    const result = await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.attemptedOrdinals).toEqual([0]);
+    expect(fetches).toEqual([]);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
 
     expect(fetches).toEqual([admittedPeer]);
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     expect(result.attemptedOrdinals).toEqual([0]);
+  });
+
+  it('propagates lifecycle cancellation into an in-flight exact recovery', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLifecycleAbort', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerId = '12D3KooWExactLifecycleAbortPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-abort';
+    const remotePeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWExactLifecycleAbortLocal',
+      libp2p: { getConnections: () => [{ remotePeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerId], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    let receivedSignal: AbortSignal | undefined;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      _cgId: string,
+      _uals: string[],
+      options: { signal?: AbortSignal },
+    ) => {
+      receivedSignal = options.signal;
+      markEntered();
+      await new Promise<void>((_resolve, reject) => {
+        const onAbort = () => reject(new DOMException('aborted', 'AbortError'));
+        if (options.signal?.aborted) onAbort();
+        else options.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      throw new Error('unreachable');
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'exact-abort');
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending', recovery: target,
+    });
+    const controller = new AbortController();
+
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true, controller.signal,
+    );
+    await entered;
+    controller.abort();
+
+    await expect(recovery).resolves.toMatchObject({ outcomes: new Map() });
+    expect(receivedSignal).toBe(controller.signal);
+  });
+
+  it('abandons a same-object context-graph rebind that lands during stranded-KC repair', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillHealBindingFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'heal-binding-fence';
+    const sub = {
+      subscribed: true,
+      onChainId: '321',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, sub);
+    let releaseHeal!: () => void;
+    let markHealStarted!: () => void;
+    const healStarted = new Promise<void>((resolve) => { markHealStarted = resolve; });
+    const healRelease = new Promise<void>((resolve) => { releaseHeal = resolve; });
+    (internals as any).healStrandedScopedKCs = async () => {
+      markHealStarted();
+      await healRelease;
+    };
+    const getCount = vi.fn(async () => 0n);
+    chain.getContextGraphKCCount = getCount;
+
+    const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await healStarted;
+    sub.onChainId = '322';
+    releaseHeal();
+
+    await expect(reconcile).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+    expect(getCount).not.toHaveBeenCalled();
+    expect(sub.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('retires an aborted reconcile even when stranded-KC repair ignores cancellation', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillHealAbortRace', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'heal-abort-race';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      onChainId: '323',
+      lastReconciledOrdinal: 0,
+    });
+    let markHealStarted!: () => void;
+    const healStarted = new Promise<void>((resolve) => { markHealStarted = resolve; });
+    let healCalls = 0;
+    (internals as any).healStrandedScopedKCs = async () => {
+      healCalls += 1;
+      if (healCalls === 1) {
+        markHealStarted();
+        await new Promise<void>(() => undefined);
+      }
+    };
+    chain.getContextGraphKCCount = async () => 0n;
+
+    const abandoned = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await healStarted;
+    (internals as any).closeVmReconcileRotationState();
+    await expect(abandoned).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+
+    (internals as any).openVmReconcileRotationState();
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .resolves.toMatchObject({ status: 'current' });
+    expect(healCalls).toBe(2);
+  });
+
+  it('keeps watermark persistence inside the tracked physical reconcile', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkDrain', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-drain';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      onChainId: '324',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    let markPersistStarted!: () => void;
+    const persistStarted = new Promise<void>((resolve) => { markPersistStarted = resolve; });
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => { releasePersist = resolve; });
+    (internals as any).persistVmReconcileWatermark = async () => {
+      markPersistStarted();
+      await persistGate;
+    };
+
+    const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await persistStarted;
+    expect((internals as any).vmReconcilePhysicalRuns.size).toBe(1);
+    let settled = false;
+    void reconcile.finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    releasePersist();
+    await expect(reconcile).resolves.toMatchObject({ watermarkAfter: 1 });
+    expect((internals as any).vmReconcilePhysicalRuns.size).toBe(0);
+  });
+
+  it('does not expose an advanced watermark when its durable save fails', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkSaveFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-save-failure';
+    const subscription = {
+      subscribed: true,
+      onChainId: '325',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    (internals as any).persistVmReconcileWatermark = async () => {
+      throw new Error('subscription store unavailable');
+    };
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .rejects.toThrow('subscription store unavailable');
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(0);
+  });
+
+  it('flushes reconcile materialization before strictly saving its watermark', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkFlushOrder', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-flush-order';
+    const subscription = {
+      subscribed: true,
+      onChainId: '326',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    const durabilityOrder: string[] = [];
+    internals.store.flush = async () => { durabilityOrder.push('flush'); };
+    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+      durabilityOrder.push('save');
+    };
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .resolves.toMatchObject({ watermarkAfter: 1 });
+    expect(durabilityOrder).toEqual(['flush', 'save']);
+    expect(subscription.lastReconciledOrdinal).toBe(1);
+  });
+
+  it('flushes reconcile materialization while confirmation depth holds the watermark', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillHeldWatermarkFlush', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'held-watermark-flush';
+    const subscription = {
+      subscribed: true,
+      onChainId: '330',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    chain.getBlockNumber = async () => 100;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    const flush = vi.fn(async () => undefined);
+    internals.store.flush = flush;
+    const persistStrict = vi.fn(async () => undefined);
+    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .resolves.toMatchObject({ watermarkAfter: 0, reconciledOrdinals: 1 });
+    expect(flush).toHaveBeenCalledOnce();
+    expect(persistStrict).not.toHaveBeenCalled();
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('does not save or expose a watermark when reconcile materialization flush fails', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkFlushFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-flush-failure';
+    const subscription = {
+      subscribed: true,
+      onChainId: '327',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    internals.store.flush = async () => { throw new Error('triple-store flush failed'); };
+    const persistStrict = vi.fn(async () => undefined);
+    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .rejects.toThrow('triple-store flush failed');
+    expect(persistStrict).not.toHaveBeenCalled();
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(0);
+  });
+
+  it('fences a watermark save continuation across a same-object binding ABA', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkBindingAba', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-binding-aba';
+    const subscription = {
+      subscribed: true,
+      onChainId: '328',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    internals.store.flush = async () => undefined;
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+      markSaveStarted();
+      await saveGate;
+    };
+
+    const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await saveStarted;
+    const originalCursor = (internals as any).reconcileCursors.get(localCgId);
+    (internals as any).bindSubscriptionOnChainId(localCgId, subscription, '329');
+    (internals as any).bindSubscriptionOnChainId(localCgId, subscription, '328');
+    (internals as any).reconcileCursors.set(localCgId, originalCursor);
+    releaseSave();
+
+    await expect(reconcile).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+    expect(subscription.onChainId).toBe('328');
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+    expect(originalCursor.watermark).toBe(0);
   });
 
   it('reports a durable watermark ahead of the chain head without ordinal work', async () => {

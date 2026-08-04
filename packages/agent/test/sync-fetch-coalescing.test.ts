@@ -12,7 +12,10 @@ import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyn
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileShutdownTimeoutError,
+} from '../src/vm-reconcile-service.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -153,7 +156,7 @@ describe('exact VM recovery lifecycle', () => {
     }
   });
 
-  it('quarantines a timed-out dispatcher and admits fresh reconcile work after restart', async () => {
+  it('quarantines a physically active reconcile until shutdown is retried', async () => {
     const timeoutDescriptor = Object.getOwnPropertyDescriptor(
       DKGAgentBase,
       'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
@@ -179,23 +182,20 @@ describe('exact VM recovery lifecycle', () => {
       const oldRun = (agent as any).runVmReconcileForCg('restart-retirement', 'manual');
       const oldOutcome = oldRun.catch((error: unknown) => error);
       await targetEntered.promise;
+      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      expect(oldDispatcher.snapshot()).toMatchObject({ active: 0, closed: true });
+      await expect(oldOutcome).resolves.toBeInstanceOf(VmReconcileQueueClosedError);
+      await expect(agent.start()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+
+      releaseTarget.resolve();
+      await (agent as any).vmReconcileRetirement;
+      expect(heal).not.toHaveBeenCalled();
       await agent.stop();
-      expect(oldDispatcher.snapshot()).toMatchObject({ active: 1, closed: true });
 
       await agent.start();
       const newDispatcher = (agent as any).vmReconcileDispatcher;
       expect(newDispatcher).not.toBe(oldDispatcher);
       expect(newDispatcher.snapshot().closed).toBe(false);
-      const freshResult = { status: 'current', contextGraphId: 'restart-retirement-new' };
-      (agent as any).executeVmReconcileForCg = vi.fn(async () => freshResult);
-      await expect(
-        (agent as any).runVmReconcileForCg('restart-retirement-new', 'manual'),
-      ).resolves.toBe(freshResult);
-
-      releaseTarget.resolve();
-      await expect(oldOutcome).resolves.toBeInstanceOf(VmReconcileQueueClosedError);
-      expect(heal).not.toHaveBeenCalled();
-      expect((agent as any).vmReconcileDispatcher).toBe(newDispatcher);
     } finally {
       releaseTarget.resolve();
       await agent.stop().catch(() => {});

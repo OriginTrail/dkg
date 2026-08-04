@@ -653,7 +653,7 @@ export async function resolveCuratorSyncPeer(
     if (!resolved) {
       try {
         throwIfSyncAuthAborted(options.signal);
-        const agents = await agent.discovery.findAgents();
+        const agents = await agent.discovery.findAgents({ signal: options.signal });
         throwIfSyncAuthAborted(options.signal);
         const matches = agents.filter(
           (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
@@ -789,12 +789,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * ONTOLOGY/_meta count, and storage-backed graph presence also counts so local
    * shared-memory-only survivors are not treated as nonexistent.
    */
-  async contextGraphExists(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+  async contextGraphExists(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
       } LIMIT 1`,
+      { signal: options.signal, source: 'agent.contextGraph.exists' },
     );
     if (result.type === 'bindings' && result.bindings.length > 0) {
       return true;
@@ -822,7 +827,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       graphManager.sharedMemoryMetaUri(contextGraphId),
     ];
     for (const graphUri of survivorGraphUris) {
-      if (await this.store.hasGraph(graphUri)) return true;
+      if (await this.store.hasGraph(graphUri, { signal: options.signal })) return true;
     }
     return false;
   }

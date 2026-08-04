@@ -24,6 +24,7 @@ import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service
 import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
+import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -986,6 +987,17 @@ export class DKGAgentBase {
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** Closed dispatcher retained until every physically active worker settles. */
+  protected vmReconcileRetirement: Promise<void> | null = null;
+  /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
+  protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
+  protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
+  protected graphScopedStoreClosed = false;
+  /** True only after startup has installed every dependency the VM worker uses. */
+  protected vmReconcileRuntimeReady = false;
+  /** A timed-out physical retirement quarantines this instance until stop is retried. */
+  protected vmReconcileShutdownBlocked = false;
   /** Next eligible CG index for bounded periodic-sweep admission. */
   protected vmReconcileSweepCursor = 0;
   /** Deterministically staggered cold-start prime, separate from the interval. */
@@ -1008,13 +1020,21 @@ export class DKGAgentBase {
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
-  /** Keys already consulted in the durable store during this process lifetime. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Set<string>();
+  /** Bounded access-ordered keys already consulted in the durable store. */
+  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Next stable batch index to consider when the bounded rotation cache has waiters. */
+  protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
   protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /** Exclusive peer-id cursor used to walk oversized curator registries. */
+  protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
+  /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
+  protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
+  protected contextGraphMembershipPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
   /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
@@ -1085,6 +1105,8 @@ export class DKGAgentBase {
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
+  protected readonly contextGraphBindingGenerations = new Map<string, number>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();

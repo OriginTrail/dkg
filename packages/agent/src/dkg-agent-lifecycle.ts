@@ -105,6 +105,7 @@ import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync
 import {
   authenticateVerifiedGraphScopedAsset,
   materializeVerifiedGraphScopedAsset,
+  type GraphScopedMaterializationOutcome,
   type VerifiedGraphScopedAsset,
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
@@ -541,7 +542,14 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
+import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  captureContextGraphBindingGeneration,
+  clearContextGraphBindingGeneration,
+  isContextGraphBindingGenerationCurrent,
+} from './context-graph-binding-generation.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -800,6 +808,7 @@ function durableSyncSingleFlightKey(params: {
   hasAccessDeniedCallback: boolean;
   hasSinceBatchIdResolver: boolean;
   hasSignal: boolean;
+  hasCurrentFence: boolean;
   exactAssetUals?: readonly string[];
   priority?: number;
 }): string | null {
@@ -809,6 +818,7 @@ function durableSyncSingleFlightKey(params: {
     || params.hasAccessDeniedCallback
     || params.hasSinceBatchIdResolver
     || params.hasSignal
+    || params.hasCurrentFence
   ) {
     return null;
   }
@@ -1027,6 +1037,8 @@ export type DurableSyncOptions = {
    * materialization check it before any subsequent commit boundary.
    */
   signal?: AbortSignal;
+  /** Internal lifecycle fence for exact VM recovery. */
+  isCurrent?: () => boolean;
   /**
    * Called synchronously after graph-scoped authentication succeeds and
    * immediately before atomic materialization is dispatched. This is a
@@ -1074,6 +1086,7 @@ type LegacyDurableContextGraphOptions = {
   authenticationTimeoutMs?: number;
   operationDeadline?: number;
   signal?: AbortSignal;
+  isCurrent?: () => boolean;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -1430,7 +1443,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   async start(this: DKGAgent): Promise<void> {
+    if (this.vmReconcileShutdownBlocked) {
+      throw new VmReconcileShutdownTimeoutError(DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
+    }
+    if (this.contextGraphMembershipPersistenceShutdownBlocked) {
+      throw new ContextGraphMembershipPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
     if (this.started) return;
+    this.contextGraphMembershipPersistence.reopen();
+    this.vmReconcileRuntimeReady = false;
+    this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
     this.coreHostRecordingsClosed = false;
     const ctx = createOperationContext('connect');
@@ -1475,7 +1499,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.started = true;
     this.openVmReconcileRotationState();
-    this.rearmVmReconcileRuntimeAfterRestart();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
       localNodeIdentityId: this.identityId.toString(),
@@ -3451,42 +3474,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.warmCoreTimer.unref) this.warmCoreTimer.unref();
     }
 
-    // Phase B — chain-driven VM reconciliation. The coalescer collapses a burst
-    // of live KACG nudges for a CG into a single sweep; the periodic timer is
-    // the safety net that backfills missed events / transient fetch failures and
-    // catches up late subscribers (the "Monday Fun Facts" case). Only armed when
-    // the chain adapter exposes the per-CG registration-ordinal reads.
-    if (this.vmReconcileEnabled()) {
-      this.ensureVmReconcileDispatcher();
-      const runSweep = (): void => {
-        this.runVmReconcileSweep().catch((err: unknown) => {
-          this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      };
-      // Prime once after a deterministic per-peer delay. A simultaneous
-      // four-node cold rollout must not turn into four synchronized Oxigraph
-      // scans; keeping this deterministic also makes restart behaviour and
-      // regression tests reproducible.
-      const startupDelayMs = deterministicStartupJitterMs(
-        `${this.node.peerId.toString()}\0${this.chain.chainId}`,
-        DKGAgentBase.VM_RECONCILE_STARTUP_MAX_DELAY_MS,
-      );
-      this.vmReconcileStartupTimer = scheduleAfterStartupJitter(
-        () => {
-          this.vmReconcileStartupTimer = null;
-          runSweep();
-        },
-        startupDelayMs,
-        DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS,
-        (timer) => {
-          this.vmReconcileTimer = timer;
-          if (timer.unref) timer.unref();
-        },
-      );
-      if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
-      this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
-    }
-
     // rc.9 PR-10: dedicated join-approval retry tick removed. The
     // substrate's Messenger.processOutboxTick (set up immediately
     // below) now drives retries for /dkg/10.0.2/join-request the
@@ -3539,6 +3526,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const rsStart = await this.tryStartRandomSamplingProver(ctx, true);
     if (rsStart === 'retryable') {
       this.scheduleRandomSamplingBindRetry(ctx);
+    }
+
+    // Arm VM work only at the final successful-start boundary. Every network,
+    // subscription, protocol, and persistence dependency is now initialized,
+    // and both initial start and same-object restart retain the cold-start
+    // jitter instead of launching an eager sweep against the old runtime.
+    this.vmReconcileRuntimeReady = true;
+    if (this.vmReconcileEnabled()) {
+      this.ensureVmReconcileDispatcher();
+      const runSweep = (): void => {
+        this.runVmReconcileSweep().catch((err: unknown) => {
+          this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      };
+      const startupDelayMs = deterministicStartupJitterMs(
+        `${this.node.peerId.toString()}\0${this.chain.chainId}`,
+        DKGAgentBase.VM_RECONCILE_STARTUP_MAX_DELAY_MS,
+      );
+      this.vmReconcileStartupTimer = scheduleAfterStartupJitter(
+        () => {
+          this.vmReconcileStartupTimer = null;
+          runSweep();
+        },
+        startupDelayMs,
+        DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS,
+        (timer) => {
+          this.vmReconcileTimer = timer;
+          if (timer.unref) timer.unref();
+        },
+      );
+      if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
+      this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
   }
 
@@ -4126,12 +4145,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peerId: string,
     ctx: OperationContext,
     label: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) return true;
     if (this.networkAdmissionCoordinator.isRejectedPeer(peerId)) return false;
     try {
-      return await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx);
+      return await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx, { signal });
     } catch (err: unknown) {
+      if (signal?.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `${label} admission probe failed for ${peerId.slice(-8)}: ${message}`);
       return false;
@@ -4727,6 +4748,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 authenticationTimeoutMs,
                 operationDeadline: operationBoundary.deadline,
                 signal: operationBoundary.signal,
+                isCurrent: options?.isCurrent,
               },
             );
             if (detailed.exactFetchDisposition !== undefined) {
@@ -4807,6 +4829,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasAccessDeniedCallback: Boolean(onAccessDenied),
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
       hasSignal: Boolean(operationBoundary.signal),
+      hasCurrentFence: Boolean(options?.isCurrent),
       exactAssetUals,
       priority: options?.priority,
     });
@@ -4837,11 +4860,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     requestedAssetUals: string[],
+    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
   ): Promise<DurableSyncResult> {
     return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
       contextGraphId,
       requestedAssetUals,
+      options,
     )).result;
   }
 
@@ -4849,6 +4874,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     requestedAssetUals: string[],
+    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const assetUals = requireExactAssetUals(requestedAssetUals);
     const ctx = createOperationContext('sync');
@@ -4864,6 +4890,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
+        signal: options.signal,
+        isCurrent: options.isCurrent,
       },
     );
     return {
@@ -4909,7 +4937,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       authenticationTimeoutMs = fetchTimeoutMs,
       operationDeadline,
       signal,
+      isCurrent,
     } = options;
+    const assertLifecycleCurrent = () => {
+      if (isCurrent?.() === false) {
+        throw asSyncFetchAbortError(new Error(
+          `Exact VM recovery lifecycle for ${contextGraphId} is no longer current`,
+        ));
+      }
+    };
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     // The CG name commitment is immutable for an on-chain slot. Prove a
     // local/on-chain binding once per durable-sync invocation, then reuse the
@@ -5005,60 +5041,136 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           signal: operationSignal,
         });
       },
-      storeGraphScopedAsset: async ({
+      storeGraphScopedAsset: ({
         asset,
         authenticationDeadline,
         signal: operationSignal,
       }) => {
-        const authentication = await authenticateDurableGraphScopedAsset({
-          chain: this.chain,
-          asset,
-          verifyContextGraphBinding,
-          deadline: authenticationDeadline,
-          signal: operationSignal,
-          onRetry: (error, attempt, maxAttempts) => {
-            this.log.warn(
-              ctx,
-              `Retrying graph-scoped durable authentication for ${asset.ual} `
-              + `after transient chain verification failure (${attempt}/${maxAttempts}): `
-              + `${error instanceof Error ? error.message : String(error)}`,
-            );
-          },
-        });
-        if (operationSignal?.aborted) {
-          throw asSyncFetchAbortError(operationSignal.reason);
+        const shutdownError = () => asSyncFetchAbortError(new Error(
+          `Graph-scoped store for ${asset.ual} is closed for node shutdown`,
+        ));
+        if (this.graphScopedStoreClosed) {
+          return Promise.reject(shutdownError());
         }
-        const verifiedOnChainId = authentication.onChainContextGraphId;
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
-        if (verifiedOnChainId && subscription && subscription.onChainId !== verifiedOnChainId) {
-          this.bindSubscriptionOnChainId(
+        let bindingGeneration = captureContextGraphBindingGeneration(
+          this,
+          asset.contextGraphId,
+        );
+        const bindingIsCurrent = () => (
+          this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
+          && isContextGraphBindingGenerationCurrent(
+            this,
             asset.contextGraphId,
-            subscription,
-            verifiedOnChainId,
-          );
-          this.persistContextGraphSubscriptionState(asset.contextGraphId);
-        }
-        if (operationSignal?.aborted) {
-          throw asSyncFetchAbortError(operationSignal.reason);
-        }
-        onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
-        const outcome = await materializeVerifiedGraphScopedAsset({
-          store: this.store,
-          asset: authentication.asset,
-          options: {
-            priority: 'background',
-            source: 'agent.durableSync.graphScopedMaterialization',
+            bindingGeneration,
+          )
+        );
+        const physicalStore = Promise.resolve().then(async (): Promise<GraphScopedMaterializationOutcome> => {
+          const authentication = await authenticateDurableGraphScopedAsset({
+            chain: this.chain,
+            asset,
+            verifyContextGraphBinding,
+            deadline: authenticationDeadline,
             signal: operationSignal,
-          },
-          oversizeHooks: {
-            recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-          },
+            onRetry: (error, attempt, maxAttempts) => {
+              this.log.warn(
+                ctx,
+                `Retrying graph-scoped durable authentication for ${asset.ual} `
+                + `after transient chain verification failure (${attempt}/${maxAttempts}): `
+                + `${error instanceof Error ? error.message : String(error)}`,
+              );
+            },
+          });
+          if (operationSignal?.aborted) {
+            throw asSyncFetchAbortError(operationSignal.reason);
+          }
+          assertLifecycleCurrent();
+          if (this.graphScopedStoreClosed) throw shutdownError();
+          if (!bindingIsCurrent()) {
+            throw asSyncFetchAbortError(new Error(
+              `Context graph binding for ${asset.contextGraphId} changed during authentication`,
+            ));
+          }
+          const verifiedOnChainId = authentication.onChainContextGraphId;
+          assertLifecycleCurrent();
+          if (
+            verifiedOnChainId
+            && subscription?.onChainId
+            && subscription.onChainId !== verifiedOnChainId
+          ) {
+            throw Object.assign(
+              new Error(
+                `Graph-scoped durable sync ${asset.ual} belongs to on-chain context graph `
+                + `${verifiedOnChainId}, but local ${asset.contextGraphId} is already bound to `
+                + `${subscription.onChainId}`,
+              ),
+              { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
+            );
+          }
+          if (verifiedOnChainId && subscription && subscription.onChainId === undefined) {
+            await this.persistContextGraphSubscriptionStrict(
+              asset.contextGraphId,
+              { ...subscription, onChainId: verifiedOnChainId, lastReconciledOrdinal: 0 },
+              undefined,
+              bindingIsCurrent,
+            );
+            assertLifecycleCurrent();
+            if (!bindingIsCurrent()) {
+              throw asSyncFetchAbortError(new Error(
+                `Context graph binding for ${asset.contextGraphId} changed while its authenticated update was persisted`,
+              ));
+            }
+            this.bindSubscriptionOnChainId(
+              asset.contextGraphId,
+              subscription,
+              verifiedOnChainId,
+            );
+            bindingGeneration = captureContextGraphBindingGeneration(
+              this,
+              asset.contextGraphId,
+            );
+            assertLifecycleCurrent();
+          }
+          if (operationSignal?.aborted) {
+            throw asSyncFetchAbortError(operationSignal.reason);
+          }
+          assertLifecycleCurrent();
+          if (!bindingIsCurrent()) {
+            throw asSyncFetchAbortError(new Error(
+              `Context graph binding for ${asset.contextGraphId} changed before materialization`,
+            ));
+          }
+          onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
+          if (this.graphScopedStoreClosed) throw shutdownError();
+          const outcome = await materializeVerifiedGraphScopedAsset({
+            store: this.store,
+            asset: authentication.asset,
+            isCurrent: () => (isCurrent?.() ?? true) && bindingIsCurrent(),
+            shouldQuarantineCommitted: () => {
+              const current = this.subscribedContextGraphs.get(asset.contextGraphId);
+              return verifiedOnChainId !== null
+                && current !== undefined
+                && current.onChainId !== verifiedOnChainId;
+            },
+            options: {
+              priority: 'background',
+              source: 'agent.durableSync.graphScopedMaterialization',
+              signal: operationSignal,
+            },
+            oversizeHooks: {
+              recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+            },
+          });
+          if (outcome === 'applied') {
+            this.invalidateListContextGraphsCache();
+            this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
+          }
+          return outcome;
         });
-        if (outcome === 'applied') {
-          this.invalidateListContextGraphsCache();
-          this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
-        }
-        return outcome;
+        this.graphScopedStorePhysicalRuns.add(physicalStore);
+        return physicalStore.finally(() => {
+          this.graphScopedStorePhysicalRuns.delete(physicalStore);
+        });
       },
       onVerifiedFullSnapshot,
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
@@ -5622,36 +5734,102 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async resolveCuratorPeerIdsForCg(this: DKGAgent,
     contextGraphId: string,
+    options: {
+      maxPeerIds?: number;
+      pagePeerIds?: number;
+      afterPeerId?: string;
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+    } = {},
   ): Promise<{
     peerIds: string[];
     curatorIsLocal: boolean;
     legacyTripleResolved: boolean;
     lookupFailed?: boolean;
+    overflowed?: boolean;
+    nextPageAfterPeerId?: string;
   }> {
+    const assertCurrent = (): void => {
+      if (options.signal?.aborted || options.isCurrent?.() === false) {
+        throw new DOMException('Curator discovery is no longer current', 'AbortError');
+      }
+    };
+    assertCurrent();
     const structuralCuratorDid = deriveCuratorDidFromCgId(contextGraphId);
     if (structuralCuratorDid) {
       const structuralAgent = structuralCuratorDid.slice('did:dkg:agent:'.length).toLowerCase();
       if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
         return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: false };
       }
-      const resolve = async (): Promise<{ peerIds: string[]; lookupFailed: boolean }> => {
-        let agents: Array<{ agentAddress?: string; peerId: string }>;
+      const resolve = async (): Promise<{
+        peerIds: string[];
+        lookupFailed: boolean;
+        overflowed?: boolean;
+        nextPageAfterPeerId?: string;
+      }> => {
+        assertCurrent();
         try {
-          agents = await this.discovery.findAgents();
+          if (options.maxPeerIds !== undefined
+            && typeof this.discovery.findAgentPeerIdsByAddress === 'function') {
+            const pagePeerIds = Math.min(
+              options.maxPeerIds,
+              Math.max(1, Math.floor(options.pagePeerIds ?? options.maxPeerIds)),
+            );
+            const queryPage = (afterPeerId?: string) =>
+              this.discovery.findAgentPeerIdsByAddress(structuralAgent, {
+                ...(afterPeerId ? { afterPeerId } : {}),
+                limit: (afterPeerId ? pagePeerIds : options.maxPeerIds!) + 1,
+                signal: options.signal,
+              });
+            let pageStartedAtBeginning = !options.afterPeerId;
+            let peerIds = await queryPage(options.afterPeerId);
+            assertCurrent();
+            if (options.afterPeerId && peerIds.length === 0) {
+              pageStartedAtBeginning = true;
+              peerIds = await queryPage();
+            }
+            assertCurrent();
+            const overflowed = !pageStartedAtBeginning
+              || peerIds.length > options.maxPeerIds;
+            const bounded = peerIds.slice(0, overflowed ? pagePeerIds : options.maxPeerIds);
+            return {
+              peerIds: bounded,
+              lookupFailed: false,
+              overflowed,
+              ...(overflowed && bounded[0]
+                ? { nextPageAfterPeerId: bounded[bounded.length - 1] }
+                : {}),
+            };
+          }
+
+          const agents = await this.discovery.findAgents({
+            agentAddress: structuralAgent,
+            signal: options.signal,
+          });
+          assertCurrent();
+          const peerIds = [...new Set(agents
+            .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
+            .map((a) => a.peerId))]
+            .sort((left, right) => left.localeCompare(right));
+          return { peerIds, lookupFailed: false, overflowed: false };
         } catch {
+          assertCurrent();
           return { peerIds: [], lookupFailed: true };
         }
-        return {
-          peerIds: agents
-            .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
-            .map((a) => a.peerId),
-          lookupFailed: false,
-        };
       };
       let resolution = await resolve();
+      assertCurrent();
       if (resolution.peerIds.length === 0) {
-        const refreshed = await this.refreshMetaFromCurator(contextGraphId).catch(() => false);
+        assertCurrent();
+        const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
+          signal: options.signal,
+        }).catch((error) => {
+          assertCurrent();
+          return false;
+        });
+        assertCurrent();
         resolution = await resolve();
+        assertCurrent();
         // An empty local query after a failed/cooldown refresh is not an
         // authoritative empty registry. Preserve any caller-side last-known
         // curator roster unless another writer populated the registry.
@@ -5663,17 +5841,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         peerIds: resolution.peerIds,
         curatorIsLocal: false,
         legacyTripleResolved: false,
-        lookupFailed: resolution.lookupFailed,
+        ...(resolution.lookupFailed ? { lookupFailed: true } : {}),
+        ...(resolution.overflowed ? { overflowed: true } : {}),
+        ...(resolution.nextPageAfterPeerId
+          ? { nextPageAfterPeerId: resolution.nextPageAfterPeerId }
+          : {}),
       };
     }
     // Legacy non-wallet-scoped CG: fall back to triple-based curator resolution.
-    if (await this.isCuratorOf(contextGraphId)) {
+    assertCurrent();
+    if (await this.isCuratorOf(contextGraphId, { signal: options.signal })) {
+      assertCurrent();
       return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: true };
     }
-    let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+    assertCurrent();
+    let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId, {
+      signal: options.signal,
+    });
+    assertCurrent();
     if (!curatorPeerId) {
-      await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
-      curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+      assertCurrent();
+      await this.refreshMetaFromCurator(contextGraphId, {
+        signal: options.signal,
+      })
+        .catch((error) => {
+          assertCurrent();
+          return undefined;
+        });
+      assertCurrent();
+      curatorPeerId = await this.resolveCuratorPeerId(contextGraphId, {
+        signal: options.signal,
+      });
+      assertCurrent();
     }
     if (!curatorPeerId) return { peerIds: [], curatorIsLocal: false, legacyTripleResolved: true };
     if (curatorPeerId === this.peerId) return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: true };
@@ -6798,19 +6997,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {
-    await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId);
-    if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, createOperationContext('connect'))) return;
+  async ensurePeerConnected(
+    this: DKGAgent,
+    peerId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId, options);
+    if (await this.networkAdmissionCoordinator.ensureAdmitted(
+      peerId,
+      createOperationContext('connect'),
+      options,
+    )) return;
     throw new NetworkAdmissionRejectedError(peerId);
   }
 
-  async waitForSyncProtocol(this: DKGAgent, pid: { toString(): string }): Promise<boolean> {
+  async waitForSyncProtocol(
+    this: DKGAgent,
+    pid: { toString(): string },
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     return waitForPeerProtocol(
       this.node.libp2p.peerStore as any,
       pid,
       PROTOCOL_SYNC,
       SYNC_PROTOCOL_CHECK_ATTEMPTS,
       SYNC_PROTOCOL_CHECK_DELAY_MS,
+      signal,
     );
   }
 
@@ -7018,6 +7230,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return run;
   }
 
+  enqueueContextGraphMembershipPersistWrite(
+    this: DKGAgent,
+    key: string,
+    write: () => Promise<void>,
+    options?: { strict?: boolean },
+  ): Promise<void> {
+    return this.contextGraphMembershipPersistence.enqueue(key, write, options);
+  }
+
   finishContextGraphSubscriptionPersistRevision(this: DKGAgent, contextGraphId: string, revision?: number): void {
     if (revision == null) return;
     const pending = this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId);
@@ -7148,15 +7369,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
-    return this.subscribedContextGraphs.delete(contextGraphId);
+    const deleted = this.subscribedContextGraphs.delete(contextGraphId);
+    // Every in-flight binding continuation also captures the subscription
+    // object, so deleting this numeric generation cannot revive old work if a
+    // new subscription later reuses the same local id.
+    clearContextGraphBindingGeneration(this, contextGraphId);
+    return deleted;
   }
 
-  persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): void {
+  persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): Promise<void> {
     if (!this.config.contextGraphSubscriptionStore) {
       this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
-      return;
+      return Promise.resolve();
     }
-    this.persistContextGraphSubscription(contextGraphId, {
+    return this.persistContextGraphSubscription(contextGraphId, {
       revision: this.nextContextGraphSubscriptionPersistRevision(contextGraphId),
       updateRehydrationStatus: false,
     });
@@ -7168,12 +7394,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       revision?: number;
       updateRehydrationStatus?: boolean;
     },
-  ): void {
+  ): Promise<void> {
     this.invalidateListContextGraphsCache();
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) {
       this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
-      return;
+      return Promise.resolve();
     }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     // Persist member subscriptions AND (Phase D) public CGs this Core hosts —
@@ -7182,7 +7408,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // row only when the node neither subscribes to nor hosts the CG.
     this.beginContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
     if (!sub?.subscribed && !sub?.coreHosted) {
-      void this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.delete(contextGraphId))
+      return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.delete(contextGraphId))
         .then(() => {
           if (
             options?.updateRehydrationStatus === true &&
@@ -7200,7 +7426,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .finally(() => {
           this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
         });
-      return;
     }
     const record = {
       id: contextGraphId,
@@ -7215,7 +7440,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       coreHosted: sub.coreHosted,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
     };
-    void this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
+    return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
       .then(() => {
         if (
           options?.updateRehydrationStatus === true &&
@@ -7237,6 +7462,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     subscription?: ContextGraphSub,
     syncScoped?: boolean,
+    isCurrent: () => boolean = () => true,
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) {
@@ -7245,10 +7471,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // retains the backward-compatible in-memory approval path.
       return;
     }
-    const sub = subscription ?? this.subscribedContextGraphs.get(contextGraphId);
-    if (!sub?.subscribed) {
+    const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
+    const expectedBindingGeneration = captureContextGraphBindingGeneration(
+      this,
+      contextGraphId,
+    );
+    const sub = subscription ?? expectedLiveSub;
+    if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
-        `Cannot acknowledge join approval for "${contextGraphId}": active subscription state is missing`,
+        `Cannot persist context graph "${contextGraphId}": active subscription or host state is missing`,
       );
     }
     const record = {
@@ -7266,10 +7497,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
-    await this.enqueueContextGraphSubscriptionPersistWrite(
-      contextGraphId,
-      () => store.save(record),
-    );
+    await this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
+      const current = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        !isCurrent()
+        ||
+        current !== expectedLiveSub
+        || (!current?.subscribed && !current?.coreHosted)
+        || !isContextGraphBindingGenerationCurrent(
+          this,
+          contextGraphId,
+          expectedBindingGeneration,
+        )
+      ) {
+        throw asSyncFetchAbortError(new Error(
+          `Context graph "${contextGraphId}" changed before its strict subscription snapshot was persisted`,
+        ));
+      }
+      await store.save(record);
+    });
   }
 
   /**
@@ -7292,93 +7538,101 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       membership.principalType,
       membership.principalId,
     );
-
-    let previousMembership: (ContextGraphMembershipRecord & {
-      firstSeenAt?: number;
-      updatedAt: number;
-    }) | null = null;
-    let previousMembershipKnown = membershipStore === undefined;
-    if (membershipStore?.loadAll) {
-      const rows = await membershipStore.loadAll();
-      previousMembershipKnown = true;
-      previousMembership = rows.find((row) =>
-        row.contextGraphId === contextGraphId &&
-        row.principalType === membership.principalType &&
-        this.normalizeMembershipPrincipal(row.principalType, row.principalId) === normalizedPrincipalId
-      ) ?? null;
-    }
-
-    let previousSubscription: ContextGraphSubscriptionRecord | null = null;
-    if (subscriptionStore) {
-      previousSubscription = subscriptionStore.load
-        ? await subscriptionStore.load(contextGraphId)
-        : (await subscriptionStore.loadAll()).find((row) => row.id === contextGraphId) ?? null;
-    }
-
-    let membershipAttempted = false;
-    let subscriptionAttempted = false;
-    try {
-      // Membership is the prepare record; the subscription row is the durable
-      // activation/rehydration commit marker and must remain last. A legacy
-      // membership store without a read API may retain an idempotent prepared
-      // row after failure, but it can never leave a restart-visible active
-      // subscription without the membership fact it depends on.
-      if (membershipStore) membershipAttempted = true;
-      await this.upsertContextGraphMember(membership, { strict: true });
-      if (subscriptionStore) subscriptionAttempted = true;
-      await this.persistContextGraphSubscriptionStrict(
-        contextGraphId,
-        subscription,
-        true,
-      );
-    } catch (error) {
-      const rollbackFailures: unknown[] = [];
-      // A store may reject after applying a write, so compensate every
-      // attempted operation whose prior value was observable, including the
-      // one that surfaced the failure. Never guess absence for a legacy
-      // membership store without loadAll(): deleting there could erase a
-      // valid pre-existing row after an upsert that rejected before mutation.
-      if (subscriptionAttempted && subscriptionStore) {
-        try {
-          await this.enqueueContextGraphSubscriptionPersistWrite(
-            contextGraphId,
-            () => previousSubscription
-              ? subscriptionStore.save(previousSubscription)
-              : subscriptionStore.delete(contextGraphId),
-          );
-        } catch (rollbackError) {
-          rollbackFailures.push(rollbackError);
+    const membershipKey = `${contextGraphId}\0${membership.principalType}\0${normalizedPrincipalId}`;
+    await this.enqueueContextGraphMembershipPersistWrite(membershipKey, () =>
+      this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
+        let previousMembership: (ContextGraphMembershipRecord & {
+          firstSeenAt?: number;
+          updatedAt: number;
+        }) | null = null;
+        let previousMembershipKnown = membershipStore === undefined;
+        if (membershipStore?.loadAll) {
+          const rows = await membershipStore.loadAll();
+          previousMembershipKnown = true;
+          previousMembership = rows.find((row) =>
+            row.contextGraphId === contextGraphId
+            && row.principalType === membership.principalType
+            && this.normalizeMembershipPrincipal(row.principalType, row.principalId) === normalizedPrincipalId
+          ) ?? null;
         }
-      }
-      if (membershipAttempted && membershipStore && previousMembershipKnown) {
+
+        let previousSubscription: ContextGraphSubscriptionRecord | null = null;
+        if (subscriptionStore) {
+          previousSubscription = subscriptionStore.load
+            ? await subscriptionStore.load(contextGraphId)
+            : (await subscriptionStore.loadAll()).find((row) => row.id === contextGraphId) ?? null;
+        }
+
+        const subscriptionRecord: ContextGraphSubscriptionRecord = {
+          id: contextGraphId,
+          name: subscription.name,
+          subscribed: subscription.subscribed,
+          synced: subscription.synced,
+          sharedMemorySynced: subscription.sharedMemorySynced,
+          metaSynced: subscription.metaSynced,
+          onChainId: subscription.onChainId,
+          onChainHash: subscription.onChainHash,
+          lastReconciledOrdinal: subscription.lastReconciledOrdinal,
+          coreHosted: subscription.coreHosted,
+          syncScoped: true,
+        };
+        let membershipAttempted = false;
+        let subscriptionAttempted = false;
         try {
-          if (previousMembership) {
-            await membershipStore.upsert(previousMembership);
-          } else {
-            await membershipStore.delete(
-              contextGraphId,
-              membership.principalType,
-              normalizedPrincipalId,
+          if (membershipStore) {
+            membershipAttempted = true;
+            await membershipStore.upsert({
+              ...membership,
+              principalId: normalizedPrincipalId,
+              updatedAt: Date.now(),
+            });
+          }
+          if (subscriptionStore) {
+            subscriptionAttempted = true;
+            await subscriptionStore.save(subscriptionRecord);
+          }
+        } catch (error) {
+          const rollbackFailures: unknown[] = [];
+          if (subscriptionAttempted && subscriptionStore) {
+            try {
+              await (previousSubscription
+                ? subscriptionStore.save(previousSubscription)
+                : subscriptionStore.delete(contextGraphId));
+            } catch (rollbackError) {
+              rollbackFailures.push(rollbackError);
+            }
+          }
+          if (membershipAttempted && membershipStore && previousMembershipKnown) {
+            try {
+              if (previousMembership) await membershipStore.upsert(previousMembership);
+              else {
+                await membershipStore.delete(
+                  contextGraphId,
+                  membership.principalType,
+                  normalizedPrincipalId,
+                );
+              }
+            } catch (rollbackError) {
+              rollbackFailures.push(rollbackError);
+            }
+          }
+          if (rollbackFailures.length > 0) {
+            const originalMessage = error instanceof Error ? error.message : String(error);
+            const rollbackMessage = rollbackFailures
+              .map((rollbackError) => rollbackError instanceof Error
+                ? rollbackError.message
+                : String(rollbackError))
+              .join('; ');
+            throw new AggregateError(
+              [error, ...rollbackFailures],
+              `${originalMessage}; join-approval rollback failed: ${rollbackMessage}`,
             );
           }
-        } catch (rollbackError) {
-          rollbackFailures.push(rollbackError);
+          throw error;
         }
-      }
-      if (rollbackFailures.length > 0) {
-        const originalMessage = error instanceof Error ? error.message : String(error);
-        const rollbackMessage = rollbackFailures
-          .map((rollbackError) => rollbackError instanceof Error
-            ? rollbackError.message
-            : String(rollbackError))
-          .join('; ');
-        throw new AggregateError(
-          [error, ...rollbackFailures],
-          `${originalMessage}; join-approval rollback failed: ${rollbackMessage}`,
-        );
-      }
-      throw error;
-    }
+      }),
+      { strict: true },
+    );
   }
 
   async assertAlreadyMemberDelegationRefresh(this: DKGAgent,
@@ -7473,8 +7727,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...record,
       principalId: this.normalizeMembershipPrincipal(record.principalType, record.principalId),
     };
-    const updatedAt = Date.now();
-    const write = store.upsert({ ...normalizedRecord, updatedAt });
+    const key = `${normalizedRecord.contextGraphId}\0${normalizedRecord.principalType}\0${normalizedRecord.principalId}`;
+    const write = this.enqueueContextGraphMembershipPersistWrite(
+      key,
+      () => store.upsert({ ...normalizedRecord, updatedAt: Date.now() }),
+      { strict: options?.strict === true },
+    );
     if (options?.strict === true) return write;
     // Background callers stay log-and-continue; durability-sensitive callers
     // opt into the strict path above and receive the original rejection.
@@ -7494,7 +7752,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const store = this.config.contextGraphMembershipStore;
     if (!store) return;
     const normalizedPrincipalId = this.normalizeMembershipPrincipal(principalType, principalId);
-    void store.delete(contextGraphId, principalType, normalizedPrincipalId).catch((err) => {
+    const key = `${contextGraphId}\0${principalType}\0${normalizedPrincipalId}`;
+    void this.enqueueContextGraphMembershipPersistWrite(
+      key,
+      () => store.delete(contextGraphId, principalType, normalizedPrincipalId),
+    ).catch((err) => {
       this.log.warn(
         createOperationContext('system'),
         `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,

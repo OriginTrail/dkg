@@ -96,6 +96,7 @@ async function captureGraphScopedStore(
     totalTimeoutMs?: number;
     signal?: AbortSignal;
     onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
+    onAgentLike?: (agentLike: any) => void;
   } = {},
 ) {
   const agentLike: any = {
@@ -104,8 +105,10 @@ async function captureGraphScopedStore(
     store: {},
     subscribedContextGraphs: new Map(),
     wireIdToLocalCgId: new Map(),
+    graphScopedStoreClosed: false,
+    graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
     bindSubscriptionOnChainId: vi.fn(),
-    persistContextGraphSubscriptionState: vi.fn(),
+    persistContextGraphSubscriptionStrict: vi.fn(),
     processDurableBatchInWorker: async () => ({}),
     insertSyncedQuadsAndInvalidateListCache: async () => {},
     syncCheckpoints: new Map(),
@@ -120,6 +123,7 @@ async function captureGraphScopedStore(
   ).requireLocalCgMatchesOnChainSlot;
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
+  options.onAgentLike?.(agentLike);
 
   await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
     agentLike,
@@ -297,7 +301,7 @@ describe('durable sync lifecycle chain binding', () => {
       subscribedContextGraphs: new Map(),
       wireIdToLocalCgId: new Map(),
       bindSubscriptionOnChainId: vi.fn(),
-      persistContextGraphSubscriptionState: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
       processDurableBatchInWorker: async () => ({}),
       insertSyncedQuadsAndInvalidateListCache,
       syncCheckpoints: new Map(),
@@ -335,12 +339,14 @@ describe('durable sync lifecycle chain binding', () => {
     }));
     const agentLike = { runLegacyDurableSyncDetailed };
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
+    const controller = new AbortController();
 
     const detailed = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
       agentLike as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/blackbox',
       [exactUal],
+      { signal: controller.signal },
     );
 
     expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
@@ -353,6 +359,7 @@ describe('durable sync lifecycle chain binding', () => {
       // the whole point of the label. Without this line, deleting it from the
       // call site keeps every test green and only the Grafana attribution rots.
       source: 'vm-recovery',
+      signal: controller.signal,
     });
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
     expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
@@ -377,6 +384,7 @@ describe('durable sync lifecycle chain binding', () => {
       '12D3KooWExactProjectionPeer',
       contextGraphId,
       requestedAssetUals,
+      {},
     );
     expect(projected).toBe(result);
   });
@@ -657,7 +665,7 @@ describe('durable sync lifecycle chain binding', () => {
         sub.onChainId = onChainId;
       },
     );
-    const persistContextGraphSubscriptionState = vi.fn();
+    const persistContextGraphSubscriptionStrict = vi.fn();
     const onAtomicCommitStarted = vi.fn();
     const agentLike: any = {
       config: {},
@@ -665,8 +673,10 @@ describe('durable sync lifecycle chain binding', () => {
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
       wireIdToLocalCgId: new Map(),
+      graphScopedStoreClosed: false,
+      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
       bindSubscriptionOnChainId,
-      persistContextGraphSubscriptionState,
+      persistContextGraphSubscriptionStrict,
       processDurableBatchInWorker: async () => ({}),
       insertSyncedQuadsAndInvalidateListCache: async () => {},
       syncCheckpoints: new Map(),
@@ -725,7 +735,7 @@ describe('durable sync lifecycle chain binding', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(getContextGraphNameHash).toHaveBeenCalledTimes(1);
       expect(bindSubscriptionOnChainId).not.toHaveBeenCalled();
-      expect(persistContextGraphSubscriptionState).not.toHaveBeenCalled();
+      expect(persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
       expect(onAtomicCommitStarted).not.toHaveBeenCalled();
       expect(mockedMaterialize).not.toHaveBeenCalled();
       expect(agentLike.invalidateListContextGraphsCache).not.toHaveBeenCalled();
@@ -751,11 +761,16 @@ describe('durable sync lifecycle chain binding', () => {
       '14',
     );
     expect(subscription.onChainId).toBe('14');
-    expect(persistContextGraphSubscriptionState).toHaveBeenCalledWith(contextGraphId);
+    expect(persistContextGraphSubscriptionStrict).toHaveBeenCalledWith(
+      contextGraphId,
+      expect.objectContaining({ onChainId: '14', lastReconciledOrdinal: 0 }),
+      undefined,
+      expect.any(Function),
+    );
     expect(bindSubscriptionOnChainId.mock.invocationCallOrder[0]).toBeLessThan(
       mockedMaterialize.mock.invocationCallOrder[0]!,
     );
-    expect(persistContextGraphSubscriptionState.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(persistContextGraphSubscriptionStrict.mock.invocationCallOrder[0]).toBeLessThan(
       mockedMaterialize.mock.invocationCallOrder[0]!,
     );
     expect(onAtomicCommitStarted.mock.invocationCallOrder[0]).toBeLessThan(
@@ -767,18 +782,79 @@ describe('durable sync lifecycle chain binding', () => {
       unknown
     >;
     expect('verifiedOnChainContextGraphId' in materializedAsset).toBe(false);
+    const shouldQuarantineCommitted = mockedMaterialize.mock.calls[0]![0]
+      .shouldQuarantineCommitted;
+    expect(shouldQuarantineCommitted?.()).toBe(false);
+    subscription.onChainId = undefined;
+    expect(shouldQuarantineCommitted?.()).toBe(true);
+    subscription.onChainId = '14';
+
+    subscription.onChainId = undefined;
+    persistContextGraphSubscriptionStrict.mockRejectedValueOnce(new Error('subscription store unavailable'));
+    const bindsBeforeRejectedSave = bindSubscriptionOnChainId.mock.calls.length;
+    const materializationsBeforeRejectedSave = mockedMaterialize.mock.calls.length;
+    await expect(storeGraphScopedAsset!(
+      graphScopedStoreRequest(asset, Date.now() + 60_000),
+    )).rejects.toThrow('subscription store unavailable');
+    expect(subscription.onChainId).toBeUndefined();
+    expect(bindSubscriptionOnChainId).toHaveBeenCalledTimes(bindsBeforeRejectedSave);
+    expect(mockedMaterialize).toHaveBeenCalledTimes(materializationsBeforeRejectedSave);
   });
 
-  it('does not reuse a binding proof across different on-chain CG slots', async () => {
+  it('does not let a stale strict snapshot overwrite a newer host-only persistence write', async () => {
+    const oldSubscription = { subscribed: true, onChainId: '14' };
+    const hostOnlySubscription = { subscribed: false, coreHosted: true, onChainId: '14' };
+    let durableRecord: Record<string, unknown> | undefined;
+    let releaseHostWrite!: () => void;
+    const hostWriteGate = new Promise<void>((resolve) => { releaseHostWrite = resolve; });
+    let persistChain = Promise.resolve();
+    const enqueueContextGraphSubscriptionPersistWrite = (
+      _contextGraphId: string,
+      write: () => Promise<void>,
+    ) => {
+      const run = persistChain.then(write);
+      persistChain = run.catch(() => undefined);
+      return run;
+    };
+    const agentLike: any = {
+      config: {
+        contextGraphSubscriptionStore: {
+          loadAll: async () => [],
+          save: async (record: Record<string, unknown>) => { durableRecord = { ...record }; },
+          delete: async () => { durableRecord = undefined; },
+        },
+      },
+      subscribedContextGraphs: new Map([[contextGraphId, oldSubscription]]),
+      contextGraphBindingGenerations: new Map(),
+      enqueueContextGraphSubscriptionPersistWrite,
+    };
+
+    const capturedSubscription = oldSubscription;
+    agentLike.subscribedContextGraphs.set(contextGraphId, hostOnlySubscription);
+    const hostWrite = enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
+      await hostWriteGate;
+      durableRecord = { id: contextGraphId, ...hostOnlySubscription };
+    });
+    const staleStrictWrite = LifecycleSyncMethods.prototype.persistContextGraphSubscriptionStrict.call(
+      agentLike,
+      contextGraphId,
+      { ...capturedSubscription, onChainId: '15', lastReconciledOrdinal: 0 },
+      undefined,
+      () => agentLike.subscribedContextGraphs.get(contextGraphId) === capturedSubscription,
+    );
+
+    releaseHostWrite();
+    await hostWrite;
+    await expect(staleStrictWrite).rejects.toThrow(/changed before.*persisted/);
+    expect(durableRecord).toEqual({ id: contextGraphId, ...hostOnlySubscription });
+  });
+
+  it('does not reuse a proof or roll an authoritative binding across same-name CG slots', async () => {
     const root = new Uint8Array(32);
     root[31] = 2;
     const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
     const expectedNameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
-    const getContextGraphNameHash = vi.fn(async (onChainId: bigint) => (
-      onChainId === 14n
-        ? expectedNameHash
-        : ethers.keccak256(ethers.toUtf8Bytes('different-context-graph'))
-    ));
+    const getContextGraphNameHash = vi.fn(async () => expectedNameHash);
     const kaNumberMask = (1n << 96n) - 1n;
     const chain = {
       chainId: 'otp:2043',
@@ -804,12 +880,14 @@ describe('durable sync lifecycle chain binding', () => {
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
       wireIdToLocalCgId: new Map(),
+      graphScopedStoreClosed: false,
+      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
       bindSubscriptionOnChainId: vi.fn(
         (_localId: string, sub: typeof subscription, onChainId: string) => {
           sub.onChainId = onChainId;
         },
       ),
-      persistContextGraphSubscriptionState: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
       processDurableBatchInWorker: async () => ({}),
       insertSyncedQuadsAndInvalidateListCache: async () => {},
       syncCheckpoints: new Map(),
@@ -870,6 +948,9 @@ describe('durable sync lifecycle chain binding', () => {
 
     expect(getContextGraphNameHash).toHaveBeenCalledTimes(2);
     expect(getContextGraphNameHash.mock.calls.map(([id]) => id)).toEqual([14n, 15n]);
+    expect(agentLike.persistContextGraphSubscriptionStrict).toHaveBeenCalledOnce();
+    expect(agentLike.bindSubscriptionOnChainId).toHaveBeenCalledOnce();
+    expect(subscription.onChainId).toBe('14');
     expect(mockedMaterialize).toHaveBeenCalledTimes(1);
   });
 
@@ -925,6 +1006,122 @@ describe('durable sync lifecycle chain binding', () => {
     expect(authenticationSignal?.aborted).toBe(true);
     expect(onAtomicCommitStarted).not.toHaveBeenCalled();
     expect(mockedMaterialize).not.toHaveBeenCalled();
+  });
+
+  it('registers the physical store before invoking a pluggable chain adapter', async () => {
+    const root = new Uint8Array(32);
+    let agentLike: any;
+    let physicalRunsSeenByAdapter = -1;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => {
+        physicalRunsSeenByAdapter = agentLike.graphScopedStorePhysicalRuns.size;
+        return root;
+      },
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain, vi.fn(), {
+      onAgentLike: (captured) => { agentLike = captured; },
+    });
+
+    const pending = storeGraphScopedAsset(graphScopedStoreRequest(
+      graphScopedAsset(root),
+      Date.now() + 120_000,
+    ));
+    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(1);
+    await expect(pending).resolves.toBe('applied');
+    expect(physicalRunsSeenByAdapter).toBe(1);
+    expect(agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
+  });
+
+  it('rejects an ordinary durable asset when its subscription rebinds during authentication', async () => {
+    const root = new Uint8Array(32);
+    let releaseRoot!: () => void;
+    let markRootReadStarted!: () => void;
+    const rootReadStarted = new Promise<void>((resolve) => { markRootReadStarted = resolve; });
+    const rootGate = new Promise<void>((resolve) => { releaseRoot = resolve; });
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => {
+        markRootReadStarted();
+        await rootGate;
+        return root;
+      },
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const subscription = { subscribed: true, onChainId: '14', lastReconciledOrdinal: 9 };
+    const bindSubscriptionOnChainId = vi.fn();
+    const persistContextGraphSubscriptionStrict = vi.fn();
+    const syncCheckpoints = new Map([['unchanged', 17]]);
+    const agentLike: any = {
+      config: {},
+      chain,
+      store: {},
+      subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
+      wireIdToLocalCgId: new Map(),
+      graphScopedStoreClosed: false,
+      graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
+      bindSubscriptionOnChainId,
+      persistContextGraphSubscriptionStrict,
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      syncCheckpoints,
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
+    agentLike.requireLocalCgMatchesOnChainSlot = (
+      DKGAgent.prototype as any
+    ).requireLocalCgMatchesOnChainSlot;
+    agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
+    agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike,
+      ctx,
+      'peer-stale-exact',
+      contextGraphId,
+      1,
+    );
+    const storeGraphScopedAsset = mockedRunDurableSync.mock.calls[0]![0]
+      .storeGraphScopedAsset!;
+    const pending = storeGraphScopedAsset(graphScopedStoreRequest(
+      graphScopedAsset(root),
+      Date.now() + 120_000,
+    ));
+    await rootReadStarted;
+    const reboundSubscription = { subscribed: true, onChainId: '15', lastReconciledOrdinal: 0 };
+    agentLike.subscribedContextGraphs.set(contextGraphId, reboundSubscription);
+    releaseRoot();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+    expect(syncCheckpoints).toEqual(new Map([['unchanged', 17]]));
+    expect(subscription).toEqual({ subscribed: true, onChainId: '14', lastReconciledOrdinal: 9 });
+    expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(reboundSubscription);
   });
 
   it('cancels and retries a hung root read within the graph deadline', async () => {

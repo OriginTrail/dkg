@@ -396,6 +396,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
+import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
+import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -1630,14 +1632,22 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    if (this.chainPoller) {
-      // Await so any in-flight poll (and its HTTP keep-alive socket) settles
-      // BEFORE we tear down the chain adapter — otherwise the RPC connection
-      // closure surfaces as an `ECONNRESET` unhandled rejection from inside
-      // ethers (the same flake that has been hitting `publisher [2/4]` in CI).
-      await this.chainPoller.stop();
-      this.chainPoller = null;
-    }
+    // Fence membership persistence before any network callback can enqueue
+    // more work; the physical drain below completes before store teardown.
+    const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
+      ?? Promise.resolve();
+    // Invalidate VM reconcile callbacks before waiting for the chain poller.
+    // A poll can be inside the KACG nudge's self-prime lookup; aborting the
+    // lifecycle first lets that lookup's bounded race release poller shutdown.
+    this.vmReconcileRuntimeReady = false;
+    this.graphScopedStoreClosed = true;
+    this.closeVmReconcileRotationState();
+    const chainPoller = this.chainPoller;
+    // stop() fences new poll admission synchronously, but its in-flight poll
+    // joins the bounded physical-retirement drain below. An adapter that
+    // ignores cancellation must quarantine shutdown instead of preventing the
+    // retirement timeout from ever being reached.
+    const chainPollerDrain = chainPoller?.stop();
     if (this.swmCleanupTimer) {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
@@ -1676,45 +1686,98 @@ export class DKGAgent extends DKGAgentBase {
     }
     // Close admission before any network/store teardown. Pending reconciles
     // are rejected immediately and therefore can never start after shutdown
-    // begins; an already-active pass gets a bounded grace period because
-    // cancelling midway could strand a partially applied VM transition.
-    // Clear exact-absence rotations first so a late in-flight response cannot
-    // restore process-local suppression while the dispatcher drains.
-    this.closeVmReconcileRotationState();
+    // begins. Active callers receive a bounded grace period; generation and
+    // target fences prevent any late continuation from committing lifecycle
+    // state after the cancellation signal.
+    // Exact-absence rotations were cleared before stopping the chain poller,
+    // so a late in-flight response cannot restore process-local suppression.
     const vmReconcileDispatcher = this.vmReconcileDispatcher;
     const vmReconcileSweep = this.vmReconcileSweepInFlight;
-    if (vmReconcileDispatcher || vmReconcileSweep) {
-      const drains: Promise<unknown>[] = [];
-      if (vmReconcileDispatcher) drains.push(vmReconcileDispatcher.close());
-      if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));
-      const drain = Promise.all(drains);
-      let drainTimedOut = false;
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<void>((resolve) => {
-        timeoutHandle = setTimeout(() => {
-          drainTimedOut = true;
-          resolve();
-        }, DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
-        timeoutHandle.unref?.();
-      });
-      await Promise.race([drain, timeout]);
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      if (drainTimedOut) {
-        this.log.warn(
-          createOperationContext('system'),
-          `DKGAgent.stop: ${vmReconcileDispatcher?.snapshot().active ?? 0} VM reconcile job(s) still active after ${DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS}ms drain bound${vmReconcileSweep ? ' (sweep pending)' : ''} — proceeding with shutdown`,
-        );
+    const priorRetirement = this.vmReconcileRetirement;
+    // close() fences admission synchronously before the physical-set drain is
+    // sampled, so no dispatcher worker can appear behind an observed empty set.
+    const dispatcherDrain = vmReconcileDispatcher?.close();
+    const drainPhysicalRuns = async (): Promise<void> => {
+      while (
+        (this.vmReconcilePhysicalRuns?.size ?? 0) > 0
+        || (this.graphScopedStorePhysicalRuns?.size ?? 0) > 0
+      ) {
+        const snapshot = [
+          ...(this.vmReconcilePhysicalRuns ?? []),
+          ...(this.graphScopedStorePhysicalRuns ?? []),
+        ];
+        await Promise.allSettled(snapshot);
+        for (const settled of snapshot) this.vmReconcilePhysicalRuns?.delete(settled);
+        for (const settled of snapshot) this.graphScopedStorePhysicalRuns?.delete(settled);
       }
+    };
+    const drains: Promise<unknown>[] = [drainPhysicalRuns()];
+    if (chainPollerDrain) drains.push(chainPollerDrain);
+    if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
+    if (dispatcherDrain) drains.push(dispatcherDrain);
+    if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));
+
+    let retirement!: Promise<void>;
+    retirement = Promise.allSettled(drains).then(() => {
+      if (this.vmReconcileDispatcher === vmReconcileDispatcher) {
+        this.vmReconcileDispatcher = undefined;
+      }
+      if (this.vmReconcileSweepInFlight === vmReconcileSweep) {
+        this.vmReconcileSweepInFlight = null;
+      }
+      if (this.chainPoller === chainPoller) {
+        this.chainPoller = null;
+      }
+      if (this.vmReconcileRetirement === retirement) {
+        this.vmReconcileRetirement = null;
+      }
+    });
+    this.vmReconcileRetirement = retirement;
+
+    let drainTimedOut = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        drainTimedOut = true;
+        resolve();
+      }, DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
+      timeoutHandle.unref?.();
+    });
+    await Promise.race([retirement, timeout]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (drainTimedOut) {
+      this.vmReconcileShutdownBlocked = true;
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: graph-scoped sync/reconciliation work did not physically retire within ${DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS}ms; store/network teardown is blocked until stop() is retried`,
+      );
+      throw new VmReconcileShutdownTimeoutError(DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
     }
-    // A timed-out dependency may ignore cancellation forever. Detach the old
-    // runtime by identity after the bounded drain; generation/signal fences
-    // prevent its late continuations from mutating the next node lifecycle.
-    if (this.vmReconcileDispatcher === vmReconcileDispatcher) {
-      this.vmReconcileDispatcher = undefined;
+    this.vmReconcileShutdownBlocked = false;
+    let membershipDrainTimedOut = false;
+    let membershipTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const membershipTimeout = new Promise<void>((resolve) => {
+      membershipTimeoutHandle = setTimeout(() => {
+        membershipDrainTimedOut = true;
+        resolve();
+      }, DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS);
+      membershipTimeoutHandle.unref?.();
+    });
+    await Promise.race([membershipPersistDrain, membershipTimeout]);
+    if (membershipTimeoutHandle) clearTimeout(membershipTimeoutHandle);
+    if (membershipDrainTimedOut) {
+      this.contextGraphMembershipPersistenceShutdownBlocked = true;
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: context-graph membership persistence did not drain within `
+        + `${DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS}ms; `
+        + `store teardown is blocked until stop() is retried`,
+      );
+      throw new ContextGraphMembershipPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
     }
-    if (this.vmReconcileSweepInFlight === vmReconcileSweep) {
-      this.vmReconcileSweepInFlight = null;
-    }
+    this.contextGraphMembershipPersistenceShutdownBlocked = false;
     this.coreHostRecordingsClosed = true;
     await this.drainCoreHostRecordings();
     if (this.messengerOutboxTimer) {

@@ -103,6 +103,55 @@ describe('withMaterializationLock — serialises check + write per (metaGraph, u
     });
     expect(secondRan).toBe(true);
   });
+
+  it('lets an aborted waiter leave without bypassing the active same-key writer', async () => {
+    let releaseOwner!: () => void;
+    const ownerGate = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const owner = withMaterializationLock(LABEL_META, UAL, async () => ownerGate);
+    const controller = new AbortController();
+    let waiterRan = false;
+    const waiter = withMaterializationLock(LABEL_META, UAL, async () => {
+      waiterRan = true;
+    }, { signal: controller.signal });
+
+    await Promise.resolve();
+    controller.abort();
+    await expect(waiter).rejects.toMatchObject({ name: 'AbortError' });
+    expect(waiterRan).toBe(false);
+
+    let successorRan = false;
+    const successor = withMaterializationLock(LABEL_META, UAL, async () => {
+      successorRan = true;
+    });
+    await Promise.resolve();
+    expect(successorRan).toBe(false);
+
+    releaseOwner();
+    await Promise.all([owner, successor]);
+    expect(successorRan).toBe(true);
+  });
+
+  it('waits for an entered atomic writer even when its signal aborts', async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
+    const workGate = new Promise<void>((resolve) => { release = resolve; });
+    let settled = false;
+    const owner = withMaterializationLock(LABEL_META, UAL, async () => {
+      entered();
+      await workGate;
+      return 'committed';
+    }, { signal: controller.signal }).finally(() => { settled = true; });
+
+    await enteredGate;
+    controller.abort();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    release();
+    await expect(owner).resolves.toBe('committed');
+  });
 });
 
 /**

@@ -153,6 +153,20 @@ export interface TeardownStepFailure {
 export interface TeardownOutcome {
   /** Empty on a fully clean teardown. Order matches execution order. */
   failures: TeardownStepFailure[];
+  /** Agent physical work is still alive; backing stores must remain open. */
+  dependencyQuarantined: boolean;
+}
+
+const DEPENDENCY_QUARANTINE_ERROR_CODES = new Set([
+  'VmReconcileShutdownTimeout',
+  'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT',
+]);
+
+function isDependencyQuarantineError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && DEPENDENCY_QUARANTINE_ERROR_CODES.has(String((error as { code?: unknown }).code));
 }
 
 /**
@@ -213,18 +227,58 @@ export async function runProducerQuiescentTeardown(
   log: (message: string) => void = () => {},
 ): Promise<TeardownOutcome> {
   const failures: TeardownStepFailure[] = [];
+  let dependencyQuarantined = false;
   for (const step of TEARDOWN_ORDER) {
     try {
       await steps[step]();
     } catch (error) {
       failures.push({ step, error });
+      if (step === 'stopAgent' && isDependencyQuarantineError(error)) {
+        dependencyQuarantined = true;
+      }
       log(
         `[shutdown] teardown step "${step}" failed: ` +
           `${error instanceof Error ? error.message : String(error)} — continuing with the rest.`,
       );
     }
   }
-  return { failures };
+  return { failures, dependencyQuarantined };
+}
+
+export async function closeDaemonBackingStoresAfterTeardown(
+  outcome: TeardownOutcome,
+  deps: {
+    retryAgentStop: () => Promise<void>;
+    stopManagedOxigraph: () => Promise<void>;
+    closeDashboardDb: () => void;
+    log: (message: string) => void;
+  },
+): Promise<boolean> {
+  if (outcome.dependencyQuarantined) {
+    deps.log(
+      '[shutdown] backing stores remain live because agent physical work did not retire; '
+      + 'retrying retirement until it succeeds or the outer shutdown deadline forces exit',
+    );
+    while (true) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      try {
+        await deps.retryAgentStop();
+        break;
+      } catch (error) {
+        if (isDependencyQuarantineError(error)) continue;
+        deps.log(
+          `[shutdown] agent retirement retry completed with a non-quarantine error: `
+          + `${error instanceof Error ? error.message : String(error)}; continuing backing-store teardown`,
+        );
+        break;
+      }
+    }
+  }
+  await deps.stopManagedOxigraph().catch((error: unknown) => {
+    deps.log(`Managed Oxigraph stop error: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  deps.closeDashboardDb();
+  return true;
 }
 
 /**

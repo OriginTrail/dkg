@@ -189,6 +189,127 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it('does not overwrite a same-object binding that lands during self-prime', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeSameObjectFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-same-object-self-prime';
+    const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, original);
+
+    const lookup = deferred<string | null>();
+    (internals as any).getContextGraphOnChainId = async () => lookup.promise;
+    const persist = vi.fn();
+    (internals as any).persistContextGraphSubscription = persist;
+
+    const prime = internals.selfPrimeSubscriptionOnChainId(localCgId, original);
+    await Promise.resolve();
+    original.onChainId = '9002';
+    lookup.resolve('9001');
+
+    await expect(prime).resolves.toBeNull();
+    expect(original.onChainId).toBe('9002');
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('strict-persists the resolved binding before exposing it to live reconcile state', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeStrictOrdering', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-strict-ordering';
+    const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, original);
+    (internals as any).getContextGraphOnChainId = async () => '9010';
+    const persistStrict = vi.fn(async (
+      _id: string,
+      candidate: { onChainId?: string },
+    ) => {
+      expect(candidate.onChainId).toBe('9010');
+      expect(original.onChainId).toBeUndefined();
+    });
+    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+
+    await expect(internals.selfPrimeSubscriptionOnChainId(localCgId, original))
+      .resolves.toBe('9010');
+
+    expect(persistStrict).toHaveBeenCalledOnce();
+    expect(original.onChainId).toBe('9010');
+  });
+
+  it('leaves self-prime unbound when strict persistence fails', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeStrictFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-strict-failure';
+    const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, original);
+    (internals as any).getContextGraphOnChainId = async () => '9011';
+    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+      throw new Error('subscription store unavailable');
+    };
+
+    await expect(internals.selfPrimeSubscriptionOnChainId(localCgId, original))
+      .resolves.toBeNull();
+    expect(original.onChainId).toBeUndefined();
+  });
+
+  it('rechecks the binding generation after strict self-prime persistence', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeStrictGeneration', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-strict-generation';
+    const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, original);
+    (internals as any).getContextGraphOnChainId = async () => '9012';
+    const persisted = deferred<void>();
+    let markPersistStarted!: () => void;
+    const persistStarted = new Promise<void>((resolve) => { markPersistStarted = resolve; });
+    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+      markPersistStarted();
+      await persisted.promise;
+    };
+
+    const prime = internals.selfPrimeSubscriptionOnChainId(localCgId, original);
+    await persistStarted;
+    (internals as any).bindSubscriptionOnChainId(localCgId, original, '9999');
+    original.onChainId = undefined;
+    persisted.resolve();
+
+    await expect(prime).resolves.toBeNull();
+    expect(original.onChainId).toBeUndefined();
+  });
+
+  it('settles promptly on lifecycle abort even when the lookup ignores its signal', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeAbortRace', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-abort-race';
+    const original = { subscribed: true };
+    internals.subscribedContextGraphs.set(localCgId, original);
+    (internals as any).getContextGraphOnChainId = async () => new Promise<string | null>(() => undefined);
+    const persist = vi.fn();
+    (internals as any).persistContextGraphSubscription = persist;
+    const controller = new AbortController();
+
+    const prime = internals.selfPrimeSubscriptionOnChainId(
+      localCgId,
+      original,
+      undefined,
+      () => !controller.signal.aborted,
+      controller.signal,
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(prime).resolves.toBeNull();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
   it('live KACG nudge handler: with multiple subscribed-unbound CGs, binds + reconciles ONLY the one matching the event id', async () => {
     // Exercises the EXACT branch the live `onKARegisteredToContextGraph` poller
     // hook runs (extracted to `handleKARegisteredNudge`), not just the underlying

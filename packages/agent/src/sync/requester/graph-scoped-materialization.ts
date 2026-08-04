@@ -310,10 +310,27 @@ export async function authenticateVerifiedGraphScopedAsset(
 export async function materializeVerifiedGraphScopedAsset(params: {
   store: TripleStore;
   asset: VerifiedGraphScopedAsset;
+  isCurrent?: () => boolean;
+  shouldQuarantineCommitted?: () => boolean;
   options?: QueryOptions;
   oversizeHooks?: OversizeGuardHooks;
 }): Promise<GraphScopedMaterializationOutcome> {
-  const { store, asset, options = {}, oversizeHooks } = params;
+  const {
+    store,
+    asset,
+    isCurrent,
+    shouldQuarantineCommitted,
+    options = {},
+    oversizeHooks,
+  } = params;
+  const assertCurrent = () => {
+    if (isCurrent?.() === false) {
+      const error = new Error(`Graph-scoped materialization lifecycle for ${asset.ual} is no longer current`);
+      error.name = 'AbortError';
+      throw error;
+    }
+  };
+  assertCurrent();
   const filtered = filterOversizedSyncQuads([
     ...asset.dataQuads,
     ...asset.metadataQuads,
@@ -324,12 +341,14 @@ export async function materializeVerifiedGraphScopedAsset(params: {
   }
 
   return withMaterializationLock(asset.metaGraph, asset.ual, async () => {
+    assertCurrent();
     const currentVersion = await readCurrentAssertionVersion(
       store,
       asset.metaGraph,
       asset.ual,
       options,
     );
+    assertCurrent();
     if (currentVersion !== undefined && currentVersion > asset.assertionVersion) {
       return 'stale';
     }
@@ -347,6 +366,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
           currentMetadata,
         );
       }
+      assertCurrent();
     }
     const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
       store,
@@ -355,6 +375,11 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       replacementMetadata,
       options,
     );
+    // This is the last interruptible boundary. Once the atomic replacement is
+    // dispatched, its real completion owns the materialization lock and stop()
+    // must drain it rather than detaching the writer.
+    assertCurrent();
+    const { signal: _lifecycleSignal, ...commitOptions } = options;
 
     const replaced = await tryReplaceGraphAndSubjectAtomically(
       store,
@@ -363,7 +388,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.metaGraph,
       asset.ual,
       [...replacementMetadata, ...locallyTrustedMetadata],
-      options,
+      commitOptions,
     );
     if (!replaced) {
       throw Object.assign(
@@ -371,8 +396,27 @@ export async function materializeVerifiedGraphScopedAsset(params: {
         { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
       );
     }
+    if (shouldQuarantineCommitted?.() === true) {
+      const quarantined = await tryReplaceGraphAndSubjectAtomically(
+        store,
+        asset.assertionGraph,
+        [],
+        asset.metaGraph,
+        asset.ual,
+        [],
+        commitOptions,
+      );
+      if (!quarantined) {
+        throw Object.assign(
+          new Error('Graph-scoped durable sync requires atomic stale-binding quarantine support'),
+          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
+        );
+      }
+      return 'quarantined';
+    }
+    if (isCurrent?.() === false) return 'quarantined';
     return 'applied';
-  });
+  }, { signal: options.signal });
 }
 
 /** Read the current subject once; publisher metadata helpers own typed merging. */

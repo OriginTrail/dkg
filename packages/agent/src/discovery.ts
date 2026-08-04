@@ -59,10 +59,18 @@ export class DiscoveryClient {
     this.engine = engine;
   }
 
-  async findAgents(options: { framework?: string; limit?: number } = {}): Promise<DiscoveredAgent[]> {
+  async findAgents(options: {
+    framework?: string;
+    agentAddress?: string;
+    limit?: number;
+    signal?: AbortSignal;
+  } = {}): Promise<DiscoveredAgent[]> {
     let filter = '';
     if (options.framework) {
       filter += `\n      ?agent <${SKILL}framework> "${escapeSparqlLiteral(options.framework)}" .`;
+    }
+    if (options.agentAddress) {
+      filter += `\n      ?agent <${DKG}agentAddress> "${escapeSparqlLiteral(options.agentAddress)}" .`;
     }
 
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
@@ -80,7 +88,10 @@ export class DiscoveryClient {
       ${limitClause}
     `;
 
-    const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const result = await this.engine.query(sparql, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
 
     return result.bindings.map((row) => ({
       agentUri: row['agent'],
@@ -91,6 +102,40 @@ export class DiscoveryClient {
       relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
       agentAddress: row['agentAddress'] ? stripQuotes(row['agentAddress']) : undefined,
     }));
+  }
+
+  /**
+   * Deterministic, duplicate-free wallet-to-peer lookup for bounded recovery.
+   * Rich profile rows are deliberately not selected here: OPTIONAL profile
+   * properties can multiply rows before LIMIT and permanently hide a peer.
+   */
+  async findAgentPeerIdsByAddress(
+    agentAddress: string,
+    options: { afterPeerId?: string; limit?: number; signal?: AbortSignal } = {},
+  ): Promise<string[]> {
+    const limit = options.limit === undefined
+      ? undefined
+      : Math.max(1, Math.floor(options.limit));
+    const afterFilter = options.afterPeerId
+      ? `FILTER(STR(?peerId) > "${escapeSparqlLiteral(options.afterPeerId)}")`
+      : '';
+    const result = await this.engine.query(`
+      SELECT DISTINCT ?peerId WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" ;
+               <${DKG}peerId> ?peerId .
+        ${afterFilter}
+      }
+      ORDER BY ASC(STR(?peerId))
+      ${limit === undefined ? '' : `LIMIT ${limit}`}
+    `, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
+
+    return result.bindings
+      .map((row) => stripQuotes(row['peerId'] ?? ''))
+      .filter((peerId) => peerId.length > 0);
   }
 
   async findSkillOfferings(options: SkillSearchOptions = {}): Promise<DiscoveredOffering[]> {
@@ -144,7 +189,10 @@ export class DiscoveryClient {
     }));
   }
 
-  async findAgentByPeerId(peerId: string): Promise<DiscoveredAgent | null> {
+  async findAgentByPeerId(
+    peerId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DiscoveredAgent | null> {
     // Two-query path keeps the existing single-row SELECT semantics
     // for scalar columns (name, framework, nodeRole, relayAddress,
     // lastSeen) while a separate query gathers all `dkg:multiaddr`
@@ -174,7 +222,10 @@ export class DiscoveryClient {
       LIMIT 1
     `;
 
-    const scalarResult = await this.engine.query(scalar, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const scalarResult = await this.engine.query(scalar, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
     if (scalarResult.bindings.length === 0) return null;
 
     const row = scalarResult.bindings[0];
@@ -202,7 +253,10 @@ export class DiscoveryClient {
         ${sparqlIri(safeAgentIri)} <${DKG}multiaddr> ?multiaddr .
       }
     `;
-    const multiResult = await this.engine.query(multiSparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const multiResult = await this.engine.query(multiSparql, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
     const multiaddrs = multiResult.bindings
       .map((r) => (r['multiaddr'] ? stripQuotes(r['multiaddr']) : ''))
       .filter((s) => s.length > 0);

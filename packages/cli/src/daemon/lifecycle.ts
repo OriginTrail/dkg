@@ -218,6 +218,7 @@ import { drainCatchupJobs } from './catchup-telemetry.js';
 import {
   beginGracefulShutdown,
   buildProducerQuiescentTeardownSteps,
+  closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } from './teardown.js';
 import {
@@ -3834,16 +3835,17 @@ export async function runDaemonInner(
           );
         }
 
-        // Stop the managed Oxigraph child AFTER the agent has stopped
-        // issuing store queries, so an in-flight SPARQL request never
-        // races the killed server. No-op when not using oxigraph-server.
-        await managedOxigraph
-          ?.stop()
-          .catch((err: any) =>
-            log(`Managed Oxigraph stop error: ${err?.message ?? String(err)}`),
-          );
-        dashDb.close();
-        log("Stopped.");
+        // Stop backing stores only after physical agent work retired. A typed
+        // retirement timeout is a dependency quarantine, not an ordinary
+        // best-effort cleanup failure: killing Oxigraph/SQLite underneath the
+        // still-running writer would defeat the agent's fail-stop boundary.
+        const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
+          retryAgentStop: () => agent.stop(),
+          stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
+          closeDashboardDb: () => dashDb.close(),
+          log,
+        });
+        if (backingStoresClosed) log("Stopped.");
       } finally {
         await cleanupStateFiles();
       }
