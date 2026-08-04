@@ -118,7 +118,7 @@ function record(runId, nodeName, layer, cgKind, sizeKb, success, clientMs, error
         details: details ?? null,
     });
     const mark = success ? '✅' : '❌';
-    console.log(`${mark} [${cgKind}/${sizeKb}KB] ${layer}${success ? ` ${Math.round(clientMs)}ms` : ` — ${String(error).slice(0, 160)}`}`);
+    console.log(`${mark} [${cgKind}/${sizeKb}KB] ${layer}${success ? ` ${Math.round(clientMs)}ms` : ` — ${String(error).slice(0, 600)}`}`);
 }
 
 async function timed(fn) {
