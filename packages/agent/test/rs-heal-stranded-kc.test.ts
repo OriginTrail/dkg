@@ -37,7 +37,13 @@
  * control below is the honest substitute that proves byte-sensitivity.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  StorePriorityScheduler,
+  StoreSchedulerBusyError,
+  type Quad,
+  type QueryOptions,
+} from '@origintrail-official/dkg-storage';
 import {
   V10MerkleTree,
   contextGraphDataUri,
@@ -48,6 +54,7 @@ import {
 import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling';
 import { writeMaterializedVersion, readMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -100,6 +107,7 @@ async function seedOntology(store: OxigraphStore, localCgId: string, onChainId: 
 function makeAgentLike(store: OxigraphStore): unknown {
   return {
     store,
+    rsHealCursorByCg: new Map<string, string>(),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },
   };
 }
@@ -216,6 +224,266 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       `ASK { GRAPH <${legacyMeta}> { <${TEST_UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
     );
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
+  });
+
+  it('bounds each sweep and resumes the remaining stranded KCs on the next pass', async () => {
+    const batchSize = DKGAgentBase.RS_HEAL_BATCH_SIZE;
+    const total = batchSize + 1;
+    const cg = 'bounded-heal-cg';
+    const onChainId = '23';
+    const legacyMeta = contextGraphMetaUri(cg);
+    const legacyData = contextGraphDataUri(cg);
+    const scopedMeta = contextGraphMetaUri(cg, onChainId);
+    const quads: Quad[] = [];
+    await seedOntology(store, cg, onChainId);
+    for (let i = 1; i <= total; i += 1) {
+      const suffix = String(i).padStart(4, '0');
+      const ual = `did:dkg:hardhat:31337/0xbatch/${suffix}`;
+      const root = `urn:entity:bounded-${suffix}`;
+      quads.push(
+        { subject: ual, predicate: `${DKG}batchId`, object: `"${i}"^^<${XSD}integer>`, graph: legacyMeta },
+        { subject: `${ual}/1`, predicate: `${DKG}partOf`, object: ual, graph: legacyMeta },
+        { subject: `${ual}/1`, predicate: `${DKG}rootEntity`, object: root, graph: legacyMeta },
+        { subject: root, predicate: 'urn:p:value', object: `"${i}"`, graph: legacyData },
+      );
+    }
+    await store.insert(quads);
+    const agentLike = makeAgentLike(store);
+    const run = () => SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      agentLike as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+    );
+    const healedCount = async (): Promise<number> => {
+      const result = await store.query(
+        `SELECT (COUNT(DISTINCT ?ual) AS ?c) WHERE { GRAPH <${scopedMeta}> { ?ual <${DKG}batchId> ?b } }`,
+      );
+      const raw = result.type === 'bindings' ? result.bindings[0]?.['c'] ?? '0' : '0';
+      return Number(/^"?(\d+)/.exec(raw)?.[1] ?? 0);
+    };
+
+    await run();
+    expect(await healedCount()).toBe(batchSize);
+
+    await run();
+    expect(await healedCount()).toBe(total);
+
+    await expect(run()).resolves.toMatchObject({ status: 'skipped', reason: 'no-work' });
+  });
+
+  it('advances past an unhealable full page, repairs a later KC, then wraps to retry gaps', async () => {
+    const batchSize = DKGAgentBase.RS_HEAL_BATCH_SIZE;
+    const cg = 'skipped-page-heal-cg';
+    const onChainId = '24';
+    const legacyMeta = contextGraphMetaUri(cg);
+    const legacyData = contextGraphDataUri(cg);
+    const scopedMeta = contextGraphMetaUri(cg, onChainId);
+    const quads: Quad[] = [];
+    await seedOntology(store, cg, onChainId);
+
+    for (let i = 1; i <= batchSize; i += 1) {
+      const suffix = String(i).padStart(4, '0');
+      const ual = `did:dkg:hardhat:31337/0xskip/${suffix}`;
+      const missingRoot = `urn:entity:missing-${suffix}`;
+      quads.push(
+        { subject: ual, predicate: `${DKG}batchId`, object: `"${i}"^^<${XSD}integer>`, graph: legacyMeta },
+        { subject: `${ual}/1`, predicate: `${DKG}partOf`, object: ual, graph: legacyMeta },
+        { subject: `${ual}/1`, predicate: `${DKG}rootEntity`, object: missingRoot, graph: legacyMeta },
+      );
+    }
+
+    const laterUal = 'did:dkg:hardhat:31337/0xskip/zzzz';
+    const laterRoot = 'urn:entity:later-healable';
+    quads.push(
+      { subject: laterUal, predicate: `${DKG}batchId`, object: `"999"^^<${XSD}integer>`, graph: legacyMeta },
+      { subject: `${laterUal}/1`, predicate: `${DKG}partOf`, object: laterUal, graph: legacyMeta },
+      { subject: `${laterUal}/1`, predicate: `${DKG}rootEntity`, object: laterRoot, graph: legacyMeta },
+      { subject: laterRoot, predicate: 'urn:p:value', object: '"healable"', graph: legacyData },
+    );
+    await store.insert(quads);
+
+    const agentLike = makeAgentLike(store) as any;
+    const cursorKey = `${cg}\u0000${onChainId}`;
+    const run = () => SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      agentLike,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+    );
+    const laterMaterialized = async (): Promise<boolean> => {
+      const result = await store.query(
+        `ASK { GRAPH <${scopedMeta}> { <${laterUal}> <${DKG}materializedVersion> ?version } }`,
+      );
+      return result.type === 'boolean' && result.value;
+    };
+
+    await expect(run()).resolves.toMatchObject({ status: 'completed', inspected: batchSize });
+    expect(await laterMaterialized()).toBe(false);
+    expect(agentLike.rsHealCursorByCg.get(cursorKey)).toBe(
+      `did:dkg:hardhat:31337/0xskip/${String(batchSize).padStart(4, '0')}`,
+    );
+
+    await expect(run()).resolves.toMatchObject({ status: 'completed', inspected: 1 });
+    expect(await laterMaterialized()).toBe(true);
+    expect(agentLike.rsHealCursorByCg.has(cursorKey)).toBe(false);
+
+    // The short later page wrapped the cursor. The next pass revisits the
+    // incomplete first page instead of forgetting it permanently.
+    await expect(run()).resolves.toMatchObject({ status: 'completed', inspected: batchSize });
+    expect(agentLike.rsHealCursorByCg.get(cursorKey)).toBe(
+      `did:dkg:hardhat:31337/0xskip/${String(batchSize).padStart(4, '0')}`,
+    );
+  });
+
+  it('stops the sweep immediately when the background scheduler rejects admission', async () => {
+    const options: QueryOptions[] = [];
+    let queryCalls = 0;
+    const busy = new StoreSchedulerBusyError(
+      'queue_full',
+      'background',
+      'agent.swm.rsHeal.version.readLegacy',
+    );
+    const fakeStore = {
+      update: async () => undefined,
+      query: async (_sparql: string, queryOptions?: QueryOptions) => {
+        queryCalls += 1;
+        options.push(queryOptions ?? {});
+        if (queryCalls === 1) return { type: 'boolean', value: true } as const;
+        if (queryCalls === 2) {
+          return {
+            type: 'bindings',
+            bindings: [{
+              ual: 'did:dkg:hardhat:31337/0xbusy/1',
+              b: `"1"^^<${XSD}integer>`,
+            }],
+          } as const;
+        }
+        throw busy;
+      },
+    };
+    const cursorKey = 'busy-cg\u000029';
+    const cursorMap = new Map<string, string>([[cursorKey, 'did:dkg:hardhat:31337/0xbefore/1']]);
+    const agentLike = {
+      store: fakeStore,
+      rsHealCursorByCg: cursorMap,
+      log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    };
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      agentLike as never,
+      'busy-cg',
+      { subscribed: true, synced: true, onChainId: '29' } as never,
+    )).resolves.toEqual({ status: 'deferred', reason: 'store-busy' });
+
+    expect(queryCalls).toBe(3);
+    expect(cursorMap.get(cursorKey)).toBe('did:dkg:hardhat:31337/0xbefore/1');
+    expect(options).toHaveLength(3);
+    expect(options.every((entry) => entry.priority === 'background')).toBe(true);
+    expect(options.every((entry) => entry.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);
+  });
+
+  it('cancels a queued legacy-version read through the scheduler before teardown completes', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: 2,
+      queueWaitTimeoutMs: 10_000,
+    });
+    let releaseBlocker!: () => void;
+    const blocker = scheduler.run('background', 'test.blocker', async () => {
+      await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    });
+    let legacyReadStarted = false;
+    const fakeStore = {
+      update: async () => undefined,
+      query: async (_sparql: string, options?: QueryOptions) => {
+        if (options?.source === 'agent.swm.rsHeal.guard') {
+          return { type: 'boolean', value: true } as const;
+        }
+        if (options?.source === 'agent.swm.rsHeal.enumerate') {
+          return {
+            type: 'bindings',
+            bindings: [{
+              ual: 'did:dkg:hardhat:31337/0xabort/1',
+              b: `"1"^^<${XSD}integer>`,
+            }],
+          } as const;
+        }
+        if (options?.source === 'agent.swm.rsHeal.version.readLegacy') {
+          return scheduler.run('background', options.source, async () => {
+            legacyReadStarted = true;
+            return { type: 'bindings', bindings: [] } as const;
+          }, options.signal);
+        }
+        throw new Error(`unexpected store operation ${String(options?.source)}`);
+      },
+    };
+    const controller = new AbortController();
+    const cursorMap = new Map<string, string>();
+    const heal = SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: cursorMap,
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      'abort-cg',
+      { subscribed: true, synced: true, onChainId: '30' } as never,
+      () => !controller.signal.aborted,
+      controller.signal,
+    );
+
+    while (scheduler.snapshot.backgroundQueued === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    controller.abort(new Error('lifecycle retired'));
+    await expect(heal).resolves.toEqual({ status: 'skipped', reason: 'not-current' });
+    expect(scheduler.snapshot.backgroundQueued).toBe(0);
+    expect(legacyReadStarted).toBe(false);
+    expect(cursorMap.size).toBe(0);
+
+    releaseBlocker();
+    await blocker;
+  });
+
+  it('returns the primary VM result when the later RS-heal pass is deferred', async () => {
+    const order: string[] = [];
+    const agentLike = makeAgentLike(store) as any;
+    agentLike.subscribedContextGraphs = new Map([[
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN, lastReconciledOrdinal: 0 },
+    ]]);
+    agentLike.contextGraphBindingGenerations = new Map();
+    agentLike.reconcileCursors = new Map();
+    agentLike.vmReconcilePhysicalRuns = new Set();
+    agentLike.vmReconcileEnabled = () => true;
+    agentLike.chain = {
+      getContextGraphKCCount: async () => {
+        order.push('main-reconcile');
+        return 0n;
+      },
+    };
+    agentLike.resolveVmReconcileTarget = SwmHostModeMethods.prototype.resolveVmReconcileTarget;
+    agentLike.createVmReconcileDeps = SwmHostModeMethods.prototype.createVmReconcileDeps;
+    agentLike.toContextGraphReconcileResult = SwmHostModeMethods.prototype.toContextGraphReconcileResult;
+    agentLike.emitVmReconcileTelemetry = () => undefined;
+    agentLike.healStrandedScopedKCs = async () => {
+      order.push('rs-heal-deferred');
+      throw new StoreSchedulerBusyError(
+        'queue_full',
+        'background',
+        'agent.swm.rsHeal.guard',
+      );
+    };
+
+    const result = await SwmHostModeMethods.prototype.executeVmReconcileForCg.call(
+      agentLike,
+      TEST_CG,
+      'manual',
+    );
+
+    expect(result).toMatchObject({ status: 'current', attempted: false });
+    expect(order).toEqual(['main-reconcile', 'rs-heal-deferred']);
   });
 
   it('repairs a stranded KC inside the admitted current-watermark reconcile path', async () => {

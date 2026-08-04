@@ -302,12 +302,35 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     // heal sends through the top of the production stack and assert each INSERT
     // declares its scoped target graph + source tag.
     const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    const operationOptions: Array<{ method: string; options?: QueryOptions }> = [];
     const capturing = new Proxy(store, {
       get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (sparql: string, options?: QueryOptions) => {
+            operationOptions.push({ method: 'query', options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        if (prop === 'insert') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['insert'];
+          return (quads: Quad[], options?: QueryOptions) => {
+            operationOptions.push({ method: 'insert', options });
+            return orig.call(target, quads, options);
+          };
+        }
+        if (prop === 'deleteByPattern') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['deleteByPattern'];
+          return (pattern: Partial<Quad>, options?: QueryOptions) => {
+            operationOptions.push({ method: 'deleteByPattern', options });
+            return orig.call(target, pattern, options);
+          };
+        }
         if (prop === 'update') {
           const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
           return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
             updateCalls.push({ sparql, options });
+            operationOptions.push({ method: 'update', options });
             return orig.call(target, sparql, options);
           };
         }
@@ -316,7 +339,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     }) as TripleStore;
 
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store: capturing, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store: capturing,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       TEST_CG,
       { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
     );
@@ -325,8 +352,19 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
     const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
     const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
-    expect(dataInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedData] });
-    expect(metaInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedMeta] });
+    expect(dataInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedData],
+    });
+    expect(metaInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedMeta],
+    });
+    expect(operationOptions.length).toBeGreaterThan(0);
+    expect(operationOptions.every(({ options }) => options?.priority === 'background')).toBe(true);
+    expect(operationOptions.every(({ options }) => options?.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);
   });
 
   it('labels RS-heal reads by caller operation through the decorator stack', async () => {
@@ -358,10 +396,12 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
     expect(new Set(querySources.filter((source) => source?.startsWith('agent.swm.rsHeal.'))))
       .toEqual(new Set([
-        'agent.swm.rsHeal.findLegacyOnly',
-        'agent.swm.rsHeal.listLegacyOnly',
-        'agent.swm.rsHeal.readRoots',
-        'agent.swm.rsHeal.checkRootData',
+        'agent.swm.rsHeal.guard',
+        'agent.swm.rsHeal.enumerate',
+        'agent.swm.rsHeal.version.readLegacy',
+        'agent.swm.rsHeal.version.checkScoped',
+        'agent.swm.rsHeal.roots',
+        'agent.swm.rsHeal.rootPresent',
       ]));
   });
 

@@ -889,26 +889,49 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const persistedSubscriptionPromise = subscriptionStore?.load
       ? subscriptionStore.load(contextGraphId)
       : Promise.resolve(null);
+    // One bounded point projection over the three trusted metadata sources.
+    // Facts are intentionally collected independently: the established
+    // ContextGraphMetaProjection model permits the declaration to live in one
+    // source and policy/curator/gates in another. Requiring every source to
+    // repeat rdf:type would both reject valid gate-only graphs and, worse,
+    // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
+    // so this path returns at most one gate row per source instead of expanding
+    // a potentially large allowlist.
     const declarationPromise = this.store.query(`
-      SELECT ?access ?curator WHERE {
+      SELECT ?kind ?value WHERE {
+        VALUES (?sourceGraph ?sourceSubject) {
+          (<${ontologyGraph}> <${contextGraphUri}>)
+          (<${agentsGraph}> <${contextGraphUri}>)
+          (<${cgMetaGraph}> <${metaSubjectUri}>)
+        }
         {
-          GRAPH <${ontologyGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          GRAPH ?sourceGraph {
+            ?sourceSubject <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
           }
+          BIND("declared" AS ?kind)
         } UNION {
-          GRAPH <${agentsGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          GRAPH ?sourceGraph {
+            ?sourceSubject <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?value .
           }
+          BIND("access" AS ?kind)
         } UNION {
-          GRAPH <${cgMetaGraph}> {
-            <${metaSubjectUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            OPTIONAL { <${metaSubjectUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
-            OPTIONAL { <${metaSubjectUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          GRAPH ?sourceGraph {
+            ?sourceSubject <${DKG_ONTOLOGY.DKG_CURATOR}> ?value .
           }
+          BIND("curator" AS ?kind)
+        } UNION {
+          FILTER EXISTS {
+            VALUES ?gatePredicate {
+              <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>
+              <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}>
+              <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>
+              <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}>
+            }
+            GRAPH ?sourceGraph {
+              ?sourceSubject ?gatePredicate ?gateValue .
+            }
+          }
+          BIND("gate" AS ?kind)
         }
       }
     `);
@@ -955,26 +978,36 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       : noteStoreFailure(declarationRead.reason);
 
     let accessPolicy: 'public' | 'private' | undefined;
-    // Tri-state: stays `undefined` (unknown) when the declaration read
+    // Tri-state: stays `undefined` (unknown) when the metadata projection read
     // failed, so a store outage can never masquerade as "no declaration".
     let declarationFound: boolean | undefined = declarationResult === undefined ? undefined : false;
     const curators: string[] = [];
     if (declarationResult && declarationResult.type === 'bindings') {
-      declarationFound = declarationResult.bindings.length > 0;
       let sawPublic = false;
       let sawPrivate = false;
+      let sawGate = false;
       for (const row of declarationResult.bindings as Record<string, string>[]) {
-        const access = row['access'];
-        if (typeof access === 'string') {
-          const normalized = stripLiteral(access).trim().toLowerCase();
+        const kind = typeof row['kind'] === 'string'
+          ? stripLiteral(row['kind']).trim().toLowerCase()
+          : '';
+        const value = row['value'];
+        if (kind === 'declared') declarationFound = true;
+        if (kind === 'access' && typeof value === 'string') {
+          const normalized = stripLiteral(value).trim().toLowerCase();
           if (normalized === 'private') sawPrivate = true;
           if (normalized === 'public') sawPublic = true;
         }
-        const curator = row['curator'];
-        if (typeof curator === 'string' && curator.trim()) curators.push(curator);
+        if (kind === 'curator' && typeof value === 'string' && value.trim()) {
+          curators.push(value);
+        }
+        if (kind === 'gate') sawGate = true;
       }
       if (sawPrivate) accessPolicy = 'private';
       else if (sawPublic) accessPolicy = 'public';
+      // Match list/projection semantics: an explicit public policy wins, but
+      // legacy/implicit allowlist gates make a graph private when no policy
+      // literal exists. This is a bounded point query for one canonical id.
+      else if (sawGate) accessPolicy = 'private';
     }
 
     let checksum: string | null = null;

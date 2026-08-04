@@ -4715,7 +4715,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(receivedSignal).toBe(controller.signal);
   });
 
-  it('abandons a same-object context-graph rebind that lands during stranded-KC repair', async () => {
+  it('keeps the main VM slice ahead of repair and abandons a rebind during repair', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillHealBindingFence', chainAdapter: chain });
     stubNode(agent);
@@ -4744,7 +4744,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     releaseHeal();
 
     await expect(reconcile).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
-    expect(getCount).not.toHaveBeenCalled();
+    // The primary reconcile must complete its useful bounded slice before the
+    // best-effort repair begins; the post-repair binding fence still rejects a
+    // stale continuation after the same subscription object is rebound.
+    expect(getCount).toHaveBeenCalledOnce();
+    expect(getCount).toHaveBeenCalledWith(321n);
     expect(sub.lastReconciledOrdinal).toBe(0);
   });
 
