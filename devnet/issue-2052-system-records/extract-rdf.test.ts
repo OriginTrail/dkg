@@ -5,11 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import {
+  encodeWorkspaceEncryptionKey,
+  workspaceAgentEncryptionKeyId,
+} from '@origintrail-official/dkg-core';
 import { runBuildFixtureCli } from './build-fixture.js';
 import { runCharacterizationCli } from './characterize.js';
 import {
+  assertLocalEndpoint,
   classifyProfileDisposition,
   collectPopulation,
+  decodeSparqlResults,
   extractR27Fixture,
   rowToNQuad,
   valuesBatches,
@@ -19,6 +25,8 @@ import { characterizeFixtureV1 } from './model.js';
 
 const ROOT = 'did:dkg:agent:0x0000000000000000000000000000000000000001';
 const PEER = '12D3KooWTestPeer';
+const PUBLIC_KEY = encodeWorkspaceEncryptionKey(Uint8Array.from({ length: 32 }, (_, index) => index + 1));
+const KEY_ID = workspaceAgentEncryptionKeyId(ROOT.slice('did:dkg:agent:'.length), Buffer.from(PUBLIC_KEY, 'base64url'));
 
 test('extracts active roots through bounded POST queries and redacts exact timestamps', async () => {
   const queries: string[] = [];
@@ -66,13 +74,18 @@ test('extracts active roots through bounded POST queries and redacts exact times
     assert.equal(fixture.profiles[0].disposition, 'candidate');
     assert.equal(fixture.profiles[0].lastSeenAgeBucket, 'under-1h');
     assert.deepEqual(fixture.profiles[0].peerKeys, ['peer:0001']);
+    assert.deepEqual(fixture.profiles[0].derivedSubjects, [
+      `${fixture.profiles[0].rootSubject}#fixture-x25519-0001`,
+    ]);
+    assert.ok(fixture.profiles[0].quads.some((quad) => (
+      quad.predicate === 'https://dkg.network/ontology#revokedBy'
+      && quad.objectOwnedSubject === fixture.profiles[0].rootSubject
+    )));
     assert.ok(!JSON.stringify(fixture).includes(PEER));
     assert.ok(!JSON.stringify(fixture).includes('2026-08-04T12:30:00'));
     assert.ok(queries.every((query) => !query.includes('FILTER(STR(?seen)')));
     assert.ok(queries.every((query) => query.length < 16_384));
-    assert.ok(
-      characterizeFixtureV1(fixture).invalidOwnedSubjects.some((value) => value.endsWith(':underived')),
-    );
+    assert.deepEqual(characterizeFixtureV1(fixture).invalidOwnedSubjects, []);
   } finally {
     server.close();
     await rm(directory, { recursive: true, force: true });
@@ -92,6 +105,32 @@ test('rejects blank nodes at the evidence boundary', () => {
     p: uri('https://schema.org/name'),
     o: literal('value'),
   }), /subject must be an IRI/);
+});
+
+test('decodes SPARQL JSON at one validated boundary', () => {
+  assert.deepEqual(
+    decodeSparqlResults({ results: { bindings: [{ root: uri(ROOT) }] } }),
+    [{ root: uri(ROOT) }],
+  );
+  assert.throws(
+    () => decodeSparqlResults({
+      results: { bindings: [{ root: { type: 'uri', value: 123 } }] },
+    }),
+    /SPARQL term is malformed/,
+  );
+});
+
+test('accepts only unauthenticated localhost HTTP extraction endpoints', () => {
+  assert.doesNotThrow(() => assertLocalEndpoint(new URL('http://127.0.0.1:17880')));
+  assert.doesNotThrow(() => assertLocalEndpoint(new URL('http://localhost:17880')));
+  assert.throws(
+    () => assertLocalEndpoint(new URL('http://192.0.2.10:17880')),
+    /local HTTP endpoint/,
+  );
+  assert.throws(
+    () => assertLocalEndpoint(new URL('https://localhost:17880')),
+    /local HTTP endpoint/,
+  );
 });
 
 test('rejects secret-bearing subject paths and predicates before fixture serialization', async () => {
@@ -229,6 +268,7 @@ function rootRows(): Array<Record<string, unknown>> {
     row(ROOT, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', uri('https://dkg.network/ontology#Agent')),
     row(ROOT, 'https://dkg.network/ontology#peerId', literal(PEER)),
     row(ROOT, 'https://dkg.network/ontology#lastSeen', literal('2026-08-04T12:30:00+00:00')),
+    row(ROOT, 'https://dkg.network/ontology#publicEncryptionKey', literal(PUBLIC_KEY)),
     row(ROOT, 'http://www.w3.org/ns/prov#wasGeneratedBy', uri(`${ROOT}/.well-known/genid/registration`)),
   ];
 }
@@ -241,9 +281,14 @@ function nestedRows(): Array<Record<string, unknown>> {
       o: uri('http://www.w3.org/ns/prov#Activity'),
     },
     {
-      s: uri(`${ROOT}#x25519-${'a'.repeat(32)}`),
+      s: uri(KEY_ID),
       p: uri('https://dkg.network/ontology#revokedAt'),
       o: literal('2026-08-04T12:00:00.000Z'),
+    },
+    {
+      s: uri(KEY_ID),
+      p: uri('https://dkg.network/ontology#revokedBy'),
+      o: uri(ROOT),
     },
   ];
 }

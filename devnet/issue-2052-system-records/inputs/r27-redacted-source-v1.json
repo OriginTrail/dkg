@@ -16,7 +16,7 @@
     "populationInputSha256": "sha256:806fe1f5ade2bc1a8dc05134237eb0242a69cc75dc71c07fad034380e836d9be",
     "detailInputSha256": "sha256:ca9f2a0ce7bd02bc46774f816317db6f2a42cdcecda78196bd60414dd528fc76",
     "diagnosticsArtifactSha256": "sha256:30d3f690d2cc106f3ce97f872d89291d3d687831637ff19ca035b54779fb7f47",
-    "redactionPolicy": "V1: wallet roots and peer IDs replaced by deterministic fixture-local ordinal aliases; only exact allowlisted profile subject shapes and predicates retained; unknown nested subjects/predicates rejected before serialization; literal values omitted but UTF-8 byte lengths retained; no tokens, keys, multiaddrs, names, raw peer IDs, or hashes of peer IDs stored",
+    "redactionPolicy": "V1: wallet roots, peer IDs, and referenced key IDs replaced by deterministic fixture-local ordinal aliases; record/root aliases are mutually bound; only exact allowlisted profile subject shapes and predicates retained; unknown or underived nested subjects rejected before serialization; literal values omitted but UTF-8 byte lengths retained; no tokens, keys, multiaddrs, names, raw identifiers, or hashes of identifiers stored",
     "agentsMetaExcluded": true
   },
   "staleThresholdMs": 86400000,
@@ -69,9 +69,7 @@
       "linkedSubjects": [
         "did:dkg:agent:0x0000000000000000000000000000000000000001/.well-known/genid/registration"
       ],
-      "derivedSubjects": [
-        "did:dkg:agent:0x0000000000000000000000000000000000000001#x25519-39d319285f714661a94580685942ba61"
-      ],
+      "derivedSubjects": [],
       "quads": [
         {
           "subject": "did:dkg:agent:0x0000000000000000000000000000000000000001",
@@ -225,24 +223,7 @@
         "did:dkg:agent:0x0000000000000000000000000000000000000002/.well-known/genid/hosting",
         "did:dkg:agent:0x0000000000000000000000000000000000000002/.well-known/genid/registration"
       ],
-      "derivedSubjects": [
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-067989410adf8c69b7498d5cd386c79d",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-0685b061796d43998a5567b82f96590c",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-10dad08c115a741c66edca0252a26e5a",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-13be2e2c4346679aab39eed88a4fdbf3",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-172574ca834f6e015035f97cd542aa23",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-26521340bd5d44f9b239f1f81f46166e",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-33efcfa93cd66502e92ba17819bec0ce",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-42f70f3f36e3be53582a2384d7196c79",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-52253d44cda7cd10efe425ab39b6ca67",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-5c6431b07ccf97754244fb6cbcfd0fd1",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-69d34a5a47b7513c315dd5f166a0e3fa",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-6fd370e25fa5a68095c6a0ea3670593c",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-8c3d755a5be26673c1139dd18d46dced",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-8f23459bdb1776f4e09a85ef1eba9c59",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-deac877c44ad18760b5b26630536e40a",
-        "did:dkg:agent:0x0000000000000000000000000000000000000002#x25519-eb635bc1957b71f96fa8e1fe565d1880"
-      ],
+      "derivedSubjects": [],
       "quads": [
         {
           "subject": "did:dkg:agent:0x0000000000000000000000000000000000000002",
@@ -11953,17 +11934,7 @@
         "did:dkg:agent:0x0000000000000000000000000000000000000003/.well-known/genid/hosting",
         "did:dkg:agent:0x0000000000000000000000000000000000000003/.well-known/genid/registration"
       ],
-      "derivedSubjects": [
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-073448310e6952af04bcca1915c2feaa",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-0de88e7f5a25fe20b45af15e2b63e650",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-4803c74428f596cbfedda830a95dc190",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-5863ad54861305099edc5f737eb433a5",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-8fa7846c80457ea9943acede60195029",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-a7ea8a387a960829122519cba1faa45d",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-c78e1a1d9f072850a87f920eac9353b4",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-d11fe4bb3db0efcb6d352ae1fdc172cf",
-        "did:dkg:agent:0x0000000000000000000000000000000000000003#x25519-e12a6b8e0e7e881163210f2826846482"
-      ],
+      "derivedSubjects": [],
       "quads": [
         {
           "subject": "did:dkg:agent:0x0000000000000000000000000000000000000003",
@@ -27748,9 +27719,7 @@
         "did:dkg:agent:0x0000000000000000000000000000000000000004/.well-known/genid/hosting",
         "did:dkg:agent:0x0000000000000000000000000000000000000004/.well-known/genid/registration"
       ],
-      "derivedSubjects": [
-        "did:dkg:agent:0x0000000000000000000000000000000000000004#x25519-7dfe4957d88e31258b31448b0b15d784"
-      ],
+      "derivedSubjects": [],
       "quads": [
         {
           "subject": "did:dkg:agent:0x0000000000000000000000000000000000000004",

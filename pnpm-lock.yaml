@@ -175,6 +175,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../../packages/rdf-utils
 
   devnet/ka-lifecycle-cli:
     dependencies:

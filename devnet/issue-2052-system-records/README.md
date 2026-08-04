@@ -72,3 +72,8 @@ retains only frozen allowlisted predicate/subject shapes and byte counts, and re
 unknown nested subjects or predicates before serialization. It writes no literal,
 wallet, peer-ID, peer-ID hash, name, multiaddr, token, or key values. Fixture-local
 ordinal aliases retain only the duplicate-key relationships needed by the model.
+Record aliases determine their redacted wallet-root aliases, peer aliases use the
+same canonical ordinal grammar, and referenced x25519 subjects use a distinct
+fixture-only ordinal shape. The parser rejects duplicate aliases, underived key
+subjects, disposition summaries that contradict the detailed evidence, unknown
+JSON fields, and provenance URLs outside the fixed public issue evidence allowlist.

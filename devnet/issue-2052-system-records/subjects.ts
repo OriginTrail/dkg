@@ -1,7 +1,8 @@
-import { createHash } from 'node:crypto';
-
 const ROOT_RE = /^did:dkg:agent:0x[0-9a-f]{40}$/;
 const X25519_RE = /#x25519-[0-9a-f]{32}$/;
+const RECORD_ALIAS_RE = /^record:([0-9]{4,})$/;
+const PEER_ALIAS_RE = /^peer:([0-9]{4,})$/;
+const FIXTURE_X25519_RE = /#fixture-x25519-([0-9]{4,})$/;
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'https://schema.org/';
@@ -24,6 +25,9 @@ export const PROFILE_LINK_PREDICATES_V1 = Object.freeze({
   registration: `${PROV}wasGeneratedBy`,
   hosting: `${SKILL}hostingProfile`,
 } as const);
+const PROFILE_LINK_PREDICATE_SET_V1: ReadonlySet<string> = new Set(
+  Object.values(PROFILE_LINK_PREDICATES_V1),
+);
 
 const ALLOWED_PROFILE_PREDICATES_V1: Readonly<
   Record<OwnedProfileSubjectKindV1, ReadonlySet<string>>
@@ -91,13 +95,48 @@ export function classifyOwnedSubjectV1(
   rootSubject: string,
   subject: string,
 ): OwnedProfileSubjectKindV1 | null {
-  return ROOT_RE.test(rootSubject)
-    ? classifyProfileSubjectShapeV1(rootSubject, subject)
-    : null;
+  if (!ROOT_RE.test(rootSubject)) return null;
+  if (subject === rootSubject) return 'root';
+  const sourceKind = classifyProfileSubjectShapeV1(rootSubject, subject);
+  if (sourceKind !== 'x25519') return sourceKind;
+  return null;
 }
 
 export function isCanonicalProfileRootV1(rootSubject: string): boolean {
   return ROOT_RE.test(rootSubject);
+}
+
+export function expectedRedactedProfileRootV1(recordId: string): string | null {
+  const ordinal = canonicalAliasOrdinal(recordId, RECORD_ALIAS_RE);
+  return ordinal === null
+    ? null
+    : `did:dkg:agent:0x${ordinal.toString(16).padStart(40, '0')}`;
+}
+
+export function isCanonicalPeerAliasV1(peerKey: string): boolean {
+  return canonicalAliasOrdinal(peerKey, PEER_ALIAS_RE) !== null;
+}
+
+export function peerAliasOrdinalV1(peerKey: string): number | null {
+  return canonicalAliasOrdinal(peerKey, PEER_ALIAS_RE);
+}
+
+export function redactedX25519SubjectV1(rootSubject: string, ordinal: number): string {
+  if (!Number.isSafeInteger(ordinal) || ordinal < 1) {
+    throw new TypeError('x25519 alias ordinal must be a positive safe integer');
+  }
+  return `${rootSubject}#fixture-x25519-${String(ordinal).padStart(4, '0')}`;
+}
+
+export function classifyRedactedOwnedSubjectV1(
+  rootSubject: string,
+  subject: string,
+): OwnedProfileSubjectKindV1 | null {
+  const kind = classifyOwnedSubjectV1(rootSubject, subject);
+  if (kind !== null) return kind;
+  if (!subject.startsWith(`${rootSubject}#fixture-x25519-`)) return null;
+  const suffix = subject.slice(rootSubject.length);
+  return canonicalAliasOrdinal(suffix, FIXTURE_X25519_RE) === null ? null : 'x25519';
 }
 
 export function isAllowedProfilePredicateV1(
@@ -114,6 +153,34 @@ export function expectedProfileLinkPredicateV1(
     return PROFILE_LINK_PREDICATES_V1[kind];
   }
   return null;
+}
+
+export function isAllowedOwnedObjectRelationshipV1(
+  rootSubject: string,
+  subject: string,
+  predicate: string,
+  objectOwnedSubject: string,
+): boolean {
+  const objectKind = classifyRedactedOwnedSubjectV1(rootSubject, objectOwnedSubject);
+  if (
+    objectKind === 'capability'
+    || objectKind === 'offering'
+    || objectKind === 'registration'
+    || objectKind === 'hosting'
+  ) {
+    return subject === rootSubject && expectedProfileLinkPredicateV1(objectKind) === predicate;
+  }
+  return objectKind === 'root'
+    && classifyRedactedOwnedSubjectV1(rootSubject, subject) === 'x25519'
+    && predicate === `${DKG}revokedBy`;
+}
+
+export function requiresOwnedObjectRelationshipV1(
+  subjectKind: OwnedProfileSubjectKindV1,
+  predicate: string,
+): boolean {
+  return (subjectKind === 'root' && PROFILE_LINK_PREDICATE_SET_V1.has(predicate))
+    || (subjectKind === 'x25519' && predicate === `${DKG}revokedBy`);
 }
 
 /** Prefixes used only to bound the source query; exact admission uses the classifier above. */
@@ -133,18 +200,29 @@ export function redactProfileSubjectV1(
   rootSubject: string,
   redactedRootSubject: string,
   subject: string,
+  x25519Ordinal?: number,
 ): string {
   const kind = classifyProfileSubjectShapeV1(rootSubject, subject);
   if (kind === null) throw new TypeError('profile subject is outside the frozen owned grammar');
   if (kind === 'root') return redactedRootSubject;
   if (kind === 'x25519') {
-    return `${redactedRootSubject}#x25519-${sha256Hex(subject).slice(0, 32)}`;
+    if (x25519Ordinal === undefined) {
+      throw new TypeError('x25519 source subjects require a fixture-local ordinal');
+    }
+    return redactedX25519SubjectV1(redactedRootSubject, x25519Ordinal);
   }
   return `${redactedRootSubject}${subject.slice(rootSubject.length)}`;
 }
 
-function sha256Hex(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+function canonicalAliasOrdinal(value: string, pattern: RegExp): number | null {
+  const match = pattern.exec(value);
+  if (!match) return null;
+  const ordinal = Number(match[1]);
+  return Number.isSafeInteger(ordinal)
+    && ordinal >= 1
+    && match[1] === String(ordinal).padStart(4, '0')
+    ? ordinal
+    : null;
 }
 
 function escapeRegex(value: string): string {

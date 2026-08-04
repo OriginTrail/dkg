@@ -14,6 +14,8 @@
     "extract-rdf.test.ts",
     "characterize.ts",
     "extract-rdf.ts",
-    "model.ts"
+    "model.ts",
+    "population.ts",
+    "subjects.ts"
   ]
 }

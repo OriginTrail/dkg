@@ -1,17 +1,27 @@
 import { createHash } from 'node:crypto';
 
 import {
-  classifyOwnedSubjectV1,
+  classifyRedactedOwnedSubjectV1,
+  expectedRedactedProfileRootV1,
   expectedProfileLinkPredicateV1,
+  isAllowedOwnedObjectRelationshipV1,
   isAllowedProfilePredicateV1,
-  isCanonicalProfileRootV1,
+  isCanonicalPeerAliasV1,
+  peerAliasOrdinalV1,
+  redactedX25519SubjectV1,
+  requiresOwnedObjectRelationshipV1,
 } from './subjects.js';
 
 export {
-  classifyOwnedSubjectV1,
+  classifyRedactedOwnedSubjectV1 as classifyOwnedSubjectV1,
+  expectedRedactedProfileRootV1,
   expectedProfileLinkPredicateV1,
+  isAllowedOwnedObjectRelationshipV1,
   isAllowedProfilePredicateV1,
-  isCanonicalProfileRootV1,
+  isCanonicalPeerAliasV1,
+  peerAliasOrdinalV1,
+  redactedX25519SubjectV1,
+  requiresOwnedObjectRelationshipV1,
   PROFILE_LINK_PREDICATES_V1,
 } from './subjects.js';
 export type { OwnedProfileSubjectKindV1 } from './subjects.js';
@@ -174,16 +184,32 @@ export interface QuantilesV1 {
   readonly max: number;
 }
 
+export function assertEvidenceSourceUrlV1(value: string): void {
+  if (!/^https:\/\/github\.com\/OriginTrail\/dkg\/issues\/2052(?:#issuecomment-[1-9][0-9]*)?$/.test(value)) {
+    throw new TypeError('evidence source URL is outside the fixed public allowlist');
+  }
+}
+
 export function parseCharacterizationFixtureV1(input: unknown): CharacterizationFixtureV1 {
   if (!isRecord(input) || input.schemaVersion !== 1 || typeof input.fixtureId !== 'string') {
     throw new TypeError('characterization fixture must be a V1 object');
   }
+  assertExactKeys(input, [
+    'schemaVersion',
+    'fixtureId',
+    'provenance',
+    'staleThresholdMs',
+    'systemSync',
+    'profilePopulation',
+    'profiles',
+    'loadMeasurement',
+  ], 'characterization fixture');
   const provenance = decodeProvenance(input.provenance);
   const staleThresholdMs = input.staleThresholdMs;
   assertFiniteInteger(staleThresholdMs, 'staleThresholdMs', 1);
   const systemSync = decodeSystemObservations(input.systemSync);
   const profiles = decodeProfiles(input.profiles);
-  const profilePopulation = decodeProfilePopulation(input.profilePopulation, profiles.length);
+  const profilePopulation = decodeProfilePopulation(input.profilePopulation, profiles);
   const loadMeasurement = decodeLoadMeasurement(input.loadMeasurement);
   const fixture: CharacterizationFixtureV1 = {
     schemaVersion: 1,
@@ -251,7 +277,7 @@ export function characterizeFixtureV1(fixture: CharacterizationFixtureV1): Chara
     const derived = new Set(profile.derivedSubjects);
     for (const quad of profile.quads) {
       const subject = quad.subject;
-      const kind = classifyOwnedSubjectV1(profile.rootSubject, subject);
+      const kind = classifyRedactedOwnedSubjectV1(profile.rootSubject, subject);
       if (kind === null) {
         invalidOwnedSubjects.push(`${profile.recordId}:${subject}`);
       } else if (
@@ -498,17 +524,19 @@ function decodeSystemObservations(value: unknown): readonly SystemSyncObservatio
 
 function decodeProfiles(value: unknown): readonly RedactedProfileEvidenceV1[] {
   if (!Array.isArray(value)) throw new TypeError('profiles must be an array');
-  return value.map((profile) => {
+  const profiles = value.map((profile) => {
     assertProfile(profile);
     return profile;
   });
+  assertProfileSet(profiles);
+  return profiles;
 }
 
 function decodeProfilePopulation(
   value: unknown,
-  detailedProfiles: number,
+  profiles: readonly RedactedProfileEvidenceV1[],
 ): CharacterizationFixtureV1['profilePopulation'] {
-  assertProfilePopulation(value, detailedProfiles);
+  assertProfilePopulation(value, profiles);
   return value;
 }
 
@@ -519,6 +547,23 @@ function decodeLoadMeasurement(value: unknown): CharacterizationFixtureV1['loadM
 
 function assertProvenance(value: unknown): asserts value is CharacterizationFixtureV1['provenance'] {
   if (!isRecord(value)) throw new TypeError('provenance must be an object');
+  assertExactKeys(value, [
+    'sourceCommit',
+    'network',
+    'captureStartedAt',
+    'captureEndedAt',
+    'observationTime',
+    'profileSnapshotKind',
+    'sourceUrls',
+    'extractionQuerySha256',
+    'populationInputSha256',
+    'detailInputSha256',
+    'diagnosticsArtifactSha256',
+    'profileEvidenceSha256',
+    'manifestSha256',
+    'redactionPolicy',
+    'agentsMetaExcluded',
+  ], 'provenance');
   for (const key of [
     'sourceCommit',
     'network',
@@ -544,6 +589,7 @@ function assertProvenance(value: unknown): asserts value is CharacterizationFixt
   if (!Array.isArray(value.sourceUrls) || value.sourceUrls.some((url) => typeof url !== 'string')) {
     throw new TypeError('provenance.sourceUrls must be a string array');
   }
+  for (const sourceUrl of value.sourceUrls as string[]) assertEvidenceSourceUrlV1(sourceUrl);
   if (value.agentsMetaExcluded !== true) {
     throw new TypeError('agentsMetaExcluded must be true');
   }
@@ -572,18 +618,36 @@ function assertProvenance(value: unknown): asserts value is CharacterizationFixt
 
 function assertProfile(value: unknown): asserts value is RedactedProfileEvidenceV1 {
   if (!isRecord(value)) throw new TypeError('profile must be an object');
+  assertExactKeys(value, [
+    'recordId',
+    'peerKeys',
+    'rootSubject',
+    'disposition',
+    'sourceRootShape',
+    'lastSeenAgeBucket',
+    'authorityKind',
+    'capability',
+    'linkedSubjects',
+    'derivedSubjects',
+    'quads',
+    'nquadsBytes',
+    'bundleBytes',
+  ], 'profile');
   for (const key of ['recordId', 'rootSubject']) {
     if (typeof value[key] !== 'string' || value[key].length === 0) {
       throw new TypeError(`profile.${key} must be a non-empty string`);
     }
   }
-  if (!isCanonicalProfileRootV1(value.rootSubject as string)) {
-    throw new TypeError(`profile ${value.recordId as string} has a noncanonical redacted root`);
+  if (expectedRedactedProfileRootV1(value.recordId as string) !== value.rootSubject) {
+    throw new TypeError('profile record/root aliases are not canonical or do not match');
   }
   if (!Array.isArray(value.peerKeys) || value.peerKeys.some((key) => typeof key !== 'string')) {
     throw new TypeError('profile.peerKeys must be a string array');
   }
   assertSortedUniqueStrings(value.peerKeys as string[], 'profile.peerKeys');
+  if ((value.peerKeys as string[]).some((peerKey) => !isCanonicalPeerAliasV1(peerKey))) {
+    throw new TypeError('profile.peerKeys must contain only fixture-local ordinal aliases');
+  }
   if (!['candidate', 'missing-peer', 'multi-peer-root', 'peer-multi-root'].includes(value.disposition as string)) {
     throw new TypeError('profile.disposition is invalid');
   }
@@ -615,6 +679,11 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
   }
   assertSortedUniqueStrings(value.linkedSubjects as string[], 'profile.linkedSubjects');
   assertSortedUniqueStrings(value.derivedSubjects as string[], 'profile.derivedSubjects');
+  for (const subject of value.derivedSubjects as string[]) {
+    if (classifyRedactedOwnedSubjectV1(value.rootSubject as string, subject) !== 'x25519') {
+      throw new TypeError('profile.derivedSubjects must contain only redacted x25519 subjects');
+    }
+  }
   if ((value.quads as unknown[]).length > SYSTEM_RECORD_LIMITS_V1.maxProfileQuads) {
     throw new TypeError('profile.quads exceeds the V1 per-record limit');
   }
@@ -628,8 +697,16 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
   if (value.bundleBytes !== null) {
     assertFiniteInteger(value.bundleBytes, 'profile.bundleBytes', 0, 1024 * 1024);
   }
+  const referencedX25519 = new Set<string>();
   for (const quad of value.quads as unknown[]) {
     if (!isRecord(quad)) throw new TypeError('profile quad must be an object');
+    assertExactKeys(quad, [
+      'subject',
+      'predicate',
+      'objectKind',
+      'objectBytes',
+      'objectOwnedSubject',
+    ], 'profile quad');
     if (typeof quad.subject !== 'string' || typeof quad.predicate !== 'string') {
       throw new TypeError('profile quad subject and predicate must be strings');
     }
@@ -642,12 +719,60 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
     if (quad.objectKind !== 'iri' && quad.objectOwnedSubject !== null) {
       throw new TypeError('only an IRI object may reference an owned subject');
     }
+    const subjectKind = classifyRedactedOwnedSubjectV1(value.rootSubject as string, quad.subject);
+    if (subjectKind === null) {
+      throw new TypeError('profile quad subject is outside the redacted owned grammar');
+    }
+    if (!isAllowedProfilePredicateV1(subjectKind, quad.predicate)) {
+      throw new TypeError('profile quad predicate is outside the frozen allowlist');
+    }
+    if (
+      requiresOwnedObjectRelationshipV1(subjectKind, quad.predicate)
+      && quad.objectOwnedSubject === null
+    ) {
+      throw new TypeError('profile quad relationship predicate requires an owned IRI target');
+    }
+    if (subjectKind === 'x25519') referencedX25519.add(quad.subject);
+    if (quad.objectOwnedSubject !== null) {
+      const objectKind = classifyRedactedOwnedSubjectV1(
+        value.rootSubject as string,
+        quad.objectOwnedSubject,
+      );
+      if (
+        objectKind === null
+        || !isAllowedOwnedObjectRelationshipV1(
+          value.rootSubject as string,
+          quad.subject,
+          quad.predicate,
+          quad.objectOwnedSubject,
+        )
+      ) {
+        throw new TypeError('profile quad owned-object relationship is invalid');
+      }
+      if (objectKind === 'x25519') referencedX25519.add(quad.objectOwnedSubject);
+    }
     assertFiniteInteger(quad.objectBytes, 'profile quad objectBytes', 0, 1024 * 1024);
+  }
+  const derivedX25519 = new Set(value.derivedSubjects as string[]);
+  if (
+    derivedX25519.size !== referencedX25519.size
+    || [...derivedX25519].some((subject) => !referencedX25519.has(subject))
+  ) {
+    throw new TypeError('profile derived and referenced x25519 aliases must match exactly');
+  }
+  const expectedDerivedAliases = (value.derivedSubjects as string[]).map((_, index) => (
+    redactedX25519SubjectV1(value.rootSubject as string, index + 1)
+  ));
+  if (JSON.stringify(expectedDerivedAliases) !== JSON.stringify(value.derivedSubjects)) {
+    throw new TypeError('profile x25519 aliases must be dense fixture-local ordinals');
   }
   const derivedLinks = [...new Set((value.quads as RedactedProfileQuadV1[])
     .filter((quad) => quad.subject === value.rootSubject && quad.objectOwnedSubject !== null)
     .filter((quad) => {
-      const kind = classifyOwnedSubjectV1(value.rootSubject as string, quad.objectOwnedSubject as string);
+      const kind = classifyRedactedOwnedSubjectV1(
+        value.rootSubject as string,
+        quad.objectOwnedSubject as string,
+      );
       return kind !== null && expectedProfileLinkPredicateV1(kind) === quad.predicate;
     })
     .map((quad) => quad.objectOwnedSubject as string))]
@@ -657,10 +782,46 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
   }
 }
 
+function assertProfileSet(profiles: readonly RedactedProfileEvidenceV1[]): void {
+  const recordIds = new Set<string>();
+  const roots = new Set<string>();
+  const peerToProfiles = new Map<string, RedactedProfileEvidenceV1[]>();
+  for (const [index, profile] of profiles.entries()) {
+    const expectedRecordId = `record:${String(index + 1).padStart(4, '0')}`;
+    if (profile.recordId !== expectedRecordId) {
+      throw new TypeError('profile record/root aliases must form the dense fixture ordinal sequence');
+    }
+    if (recordIds.has(profile.recordId) || roots.has(profile.rootSubject)) {
+      throw new TypeError('profile record and root aliases must be unique');
+    }
+    recordIds.add(profile.recordId);
+    roots.add(profile.rootSubject);
+    for (const peerKey of profile.peerKeys) {
+      const owners = peerToProfiles.get(peerKey) ?? [];
+      owners.push(profile);
+      peerToProfiles.set(peerKey, owners);
+    }
+  }
+  for (const owners of peerToProfiles.values()) {
+    if (owners.length > 1 && owners.some((profile) => profile.disposition === 'candidate')) {
+      throw new TypeError('candidate profile peer alias is shared by another active root');
+    }
+  }
+}
+
 function assertSystemObservation(value: unknown): asserts value is SystemSyncObservationV1 {
   if (!isRecord(value) || (value.graph !== 'agents' && value.graph !== 'ontology')) {
     throw new TypeError('system sync observation graph is invalid');
   }
+  assertExactKeys(value, [
+    'graph',
+    'topLevelAttempts',
+    'distinctPeers',
+    'pageRetries',
+    'failedAttempts',
+    'verifiedTriples',
+    'insertedTriples',
+  ], 'system sync observation');
   for (const key of [
     'topLevelAttempts',
     'distinctPeers',
@@ -676,6 +837,13 @@ function assertSystemObservation(value: unknown): asserts value is SystemSyncObs
 
 function assertLoadMeasurement(value: unknown): asserts value is CharacterizationFixtureV1['loadMeasurement'] {
   if (!isRecord(value)) throw new TypeError('loadMeasurement must be an object');
+  assertExactKeys(value, [
+    'serviceRecordsPerMinuteP10',
+    'serviceBytesPerMinuteP10',
+    'arrivalRecordsPerMinuteP99',
+    'arrivalBytesPerMinuteP99',
+    'backlogSlope',
+  ], 'load measurement');
   for (const key of [
     'serviceRecordsPerMinuteP10',
     'serviceBytesPerMinuteP10',
@@ -695,11 +863,25 @@ function assertLoadMeasurement(value: unknown): asserts value is Characterizatio
 
 function assertProfilePopulation(
   value: unknown,
-  detailedProfiles: number,
+  profiles: readonly RedactedProfileEvidenceV1[],
 ): asserts value is CharacterizationFixtureV1['profilePopulation'] {
   if (!isRecord(value) || value.detailedProfileScope !== 'active') {
     throw new TypeError('profilePopulation must be an active-scope object');
   }
+  assertExactKeys(value, [
+    'observedRoots',
+    'observedPeerKeys',
+    'activeRoots',
+    'activeProfiles',
+    'candidateProfiles',
+    'ambiguousProfiles',
+    'staleProfiles',
+    'unknownFreshnessProfiles',
+    'missingPeerRoots',
+    'duplicatePeerKeys',
+    'sharedRootSubjects',
+    'detailedProfileScope',
+  ], 'profile population');
   for (const key of [
     'observedRoots',
     'observedPeerKeys',
@@ -715,11 +897,59 @@ function assertProfilePopulation(
   ]) {
     assertFiniteInteger(value[key], `profilePopulation.${key}`, 0);
   }
-  if (value.activeProfiles !== detailedProfiles) {
-    throw new TypeError('active detailed profile count does not match profilePopulation');
+  if (value.activeProfiles !== profiles.length || value.activeRoots !== profiles.length) {
+    throw new TypeError('active root/profile counts do not match detailed profile evidence');
   }
-  if ((value.candidateProfiles as number) + (value.ambiguousProfiles as number) !== value.activeProfiles) {
-    throw new TypeError('candidate and ambiguous profile counts do not sum to activeProfiles');
+  const candidateProfiles = profiles.filter((profile) => profile.disposition === 'candidate').length;
+  const ambiguousProfiles = profiles.length - candidateProfiles;
+  if (
+    value.candidateProfiles !== candidateProfiles
+    || value.ambiguousProfiles !== ambiguousProfiles
+  ) {
+    throw new TypeError('candidate and ambiguous profile counts contradict profile evidence');
+  }
+  const detailedPeerAliases = new Set(profiles.flatMap((profile) => [...profile.peerKeys]));
+  if (
+    detailedPeerAliases.size > (value.observedPeerKeys as number)
+    || [...detailedPeerAliases].some((peerKey) => (
+      (peerAliasOrdinalV1(peerKey) ?? Number.MAX_SAFE_INTEGER) > (value.observedPeerKeys as number)
+    ))
+  ) {
+    throw new TypeError('profile peer aliases exceed the observed peer population');
+  }
+  const activeMissingPeerRoots = profiles.filter(
+    (profile) => profile.disposition === 'missing-peer',
+  ).length;
+  const activeSharedRootSubjects = profiles.filter(
+    (profile) => profile.disposition === 'multi-peer-root',
+  ).length;
+  const peerOccurrences = new Map<string, number>();
+  for (const profile of profiles) {
+    for (const peerKey of profile.peerKeys) {
+      peerOccurrences.set(peerKey, (peerOccurrences.get(peerKey) ?? 0) + 1);
+    }
+  }
+  const activeDuplicatePeerKeys = new Set([
+    ...[...peerOccurrences.entries()]
+      .filter(([, occurrences]) => occurrences > 1)
+      .map(([peerKey]) => peerKey),
+    ...profiles
+      .filter((profile) => profile.disposition === 'peer-multi-root')
+      .flatMap((profile) => [...profile.peerKeys]),
+  ]);
+  if (
+    (value.missingPeerRoots as number) < activeMissingPeerRoots
+    || (value.sharedRootSubjects as number) < activeSharedRootSubjects
+    || (value.duplicatePeerKeys as number) < activeDuplicatePeerKeys.size
+  ) {
+    throw new TypeError('profile population totals contradict active detailed evidence');
+  }
+  if (
+    (value.duplicatePeerKeys as number) > (value.observedPeerKeys as number)
+    || (value.missingPeerRoots as number) + (value.sharedRootSubjects as number)
+      > (value.observedRoots as number)
+  ) {
+    throw new TypeError('profile population relationship counts exceed the observed population');
   }
   if (
     (value.activeRoots as number) +
@@ -734,6 +964,18 @@ function assertProfilePopulation(
 function assertOptionalNonnegativeRate(value: number | null, label: string): void {
   if (value !== null && (!Number.isFinite(value) || value < 0)) {
     throw new TypeError(`${label} must be non-negative and finite or null`);
+  }
+}
+
+function assertExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const canonicalExpected = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(canonicalExpected)) {
+    throw new TypeError(`${label} must contain exactly the declared schema fields`);
   }
 }
 
