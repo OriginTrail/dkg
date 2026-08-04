@@ -54,6 +54,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const autoPublish = this.config.rfc64PublicCatalogAutoPublish;
     if (autoPublish === undefined) return null;
+    if (!autoPublish.contextGraphIds.includes(params.contextGraphId)) return null;
     if (params.subGraphName !== undefined && params.subGraphName !== null) return null;
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing

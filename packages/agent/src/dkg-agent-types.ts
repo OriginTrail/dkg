@@ -1124,6 +1124,8 @@ export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
  * pointer remains the correctness source for pull discovery.
  */
 export interface Rfc64PublicCatalogAutoPublishConfigV1 {
+  /** Exact bounded allowlist; confirmed publishes outside it stay on the legacy path. */
+  readonly contextGraphIds: readonly ContextGraphIdV1[];
   readonly peers: readonly string[];
   readonly catalogIssuerDelegationEffectiveAt?: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;

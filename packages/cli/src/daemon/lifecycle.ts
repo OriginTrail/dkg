@@ -128,6 +128,7 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
+  resolveRfc64PublicCatalogActivation,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -1303,10 +1304,12 @@ export async function runDaemonInner(
     for (const message of genesisValidation.messages) log(message);
     process.exit(1);
   }
+  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(config);
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
+      ...rfc64PublicCatalog.selectedContextGraphs,
     ]),
   ];
 
@@ -1743,6 +1746,9 @@ export async function runDaemonInner(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
+    rfc64CatalogDeploymentProfile: rfc64PublicCatalog.deploymentProfile,
+    rfc64PublicCatalogAutoPublish: rfc64PublicCatalog.autoPublish,
+    rfc64PublicCatalogBootstrap: rfc64PublicCatalog.bootstrap,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext

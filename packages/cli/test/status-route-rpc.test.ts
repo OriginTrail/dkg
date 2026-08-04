@@ -52,6 +52,7 @@ const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
 
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
+  configOverrides: Record<string, unknown> = {},
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -66,6 +67,7 @@ async function requestStatusWithAgent(
         name: 'status-finalization-recovery-test',
         nodeRole: 'edge',
         chain: { type: 'mock' },
+        ...configOverrides,
       },
       startedAt: Date.now(),
       agent: {
@@ -217,6 +219,70 @@ describe('/api/status finalization recovery health', () => {
       stateCounts: {},
       livePayloadBytes: 0,
       dueEntries: 0,
+    });
+  });
+});
+
+describe('/api/status RFC-64 selected-public activation', () => {
+  it('reports the fail-closed disabled state without invoking catalog controls', async () => {
+    const response = await requestStatusWithAgent({});
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+      autoPublishEnabled: false,
+      service: null,
+      bootstrap: null,
+    });
+  });
+
+  it('exposes selected scopes and exact per-target applied-head evidence', async () => {
+    const service = {
+      started: true,
+      acceptedPolicies: 1,
+      receiver: { queued: 0, applied: 1, failed: 0 },
+    };
+    const bootstrap = {
+      running: false,
+      pass: 2,
+      retryIntervalMs: 30_000,
+      targets: [{
+        scope: { contextGraphId: 'selected-public-cg', authorAddress: `0x${'22'.repeat(20)}` },
+        outcome: 'applied',
+        appliedHeadDigest: `0x${'33'.repeat(32)}`,
+        inventoryRowCount: '50',
+      }],
+    };
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => service,
+        readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          autoPublish: {
+            peers: ['12D3KooReceiver'],
+            catalogIssuerDelegationExpiresAt: '1893456000000',
+          },
+          bootstrap: {
+            acceptedPublicPolicies: [{
+              policyEnvelope: { payload: { contextGraphId: 'selected-public-cg' } },
+              targets: [],
+            }],
+          },
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toEqual({
+      enabled: true,
+      selectedContextGraphs: ['selected-public-cg'],
+      autoPublishEnabled: true,
+      service,
+      bootstrap,
     });
   });
 });

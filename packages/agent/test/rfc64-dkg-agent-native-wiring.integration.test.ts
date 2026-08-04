@@ -377,22 +377,38 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
   it('snapshots the opt-in normal-publication catalog producer configuration', () => {
     const callerOwned = {
+      contextGraphIds: [CONTEXT_GRAPH_ID],
       peers: ['12D3KooReceiver'],
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     };
     const snapshot = snapshotRfc64PublicCatalogAutoPublishConfigV1(callerOwned)!;
+    callerOwned.contextGraphIds.push(
+      '0x2222222222222222222222222222222222222222/late-mutation' as ContextGraphIdV1,
+    );
     callerOwned.peers.push('hostile-late-mutation');
     expect(snapshot).toEqual({
+      contextGraphIds: [CONTEXT_GRAPH_ID],
       peers: ['12D3KooReceiver'],
       catalogIssuerDelegationEffectiveAt: '0',
       catalogIssuerDelegationExpiresAt: '1893456000000',
     });
     expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.contextGraphIds)).toBe(true);
     expect(Object.isFrozen(snapshot.peers)).toBe(true);
     expect(() => snapshotRfc64PublicCatalogAutoPublishConfigV1({
+      contextGraphIds: [CONTEXT_GRAPH_ID],
       peers: ['duplicate', 'duplicate'],
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     })).toThrow(/duplicated/u);
+    expect(() => snapshotRfc64PublicCatalogAutoPublishConfigV1({
+      contextGraphIds: [CONTEXT_GRAPH_ID, CONTEXT_GRAPH_ID],
+      peers: [],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    })).toThrow(/contextGraphIds must be unique/u);
+    expect(() => snapshotRfc64PublicCatalogAutoPublishConfigV1({
+      peers: [],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    } as never)).toThrow(/unknown or missing fields/u);
   });
 
   it('snapshots a bounded public-root bootstrap manifest', () => {
@@ -455,6 +471,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [receiver.peerId],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -470,6 +487,27 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await connectBothWays(author, receiver);
 
     const seal = assertionSealFromCanonical(await authorSeal(11n));
+    const ignored = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: 'not-selected-by-operator' as ContextGraphIdV1,
+      assertionCoordinate: 'ordinary-confirmed-publication-other-cg' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: '',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        },
+      ],
+      seal,
+    });
+    expect(ignored).toBeNull();
+
     const first = await author.recordConfirmedRfc64PublicCatalogAssetV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'ordinary-confirmed-publication' as never,
@@ -575,6 +613,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -608,6 +647,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -666,6 +706,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -721,6 +762,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [receiver.peerId],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -797,6 +839,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -907,6 +950,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -1047,6 +1091,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -1088,6 +1133,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
@@ -1855,6 +1901,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture),
       },
       {
+        contextGraphIds: [CONTEXT_GRAPH_ID],
         peers: [warm.peerId],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },

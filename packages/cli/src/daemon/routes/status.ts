@@ -94,6 +94,7 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
+  resolveRfc64PublicCatalogActivation,
   resolveNetworkConfigName,
   resolveSharedMemoryTtlMs,
   repoDir,
@@ -689,6 +690,15 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
+    const rfc64PublicCatalogActivation = resolveRfc64PublicCatalogActivation(config);
+    const rfc64PublicCatalogService =
+      typeof agent.rfc64PublicCatalogStatsV1 === 'function'
+        ? agent.rfc64PublicCatalogStatsV1()
+        : null;
+    const rfc64PublicCatalogBootstrap =
+      typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
+        ? agent.readRfc64PublicCatalogBootstrapStatusV1()
+        : null;
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
       closed: false,
@@ -789,6 +799,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       hasIdentity: identityId > 0n,
       asyncPublisher: publisherState.availability,
       finalizationRecovery,
+      rfc64PublicCatalog: {
+        enabled: rfc64PublicCatalogActivation.enabled,
+        selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
+        autoPublishEnabled: rfc64PublicCatalogActivation.autoPublish !== undefined,
+        service: rfc64PublicCatalogService,
+        bootstrap: rfc64PublicCatalogBootstrap,
+      },
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),

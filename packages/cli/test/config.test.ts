@@ -35,8 +35,79 @@ import {
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveRfc64PublicCatalogActivation,
   resolveStorageAckTiming,
 } from '../src/config.js';
+
+describe('resolveRfc64PublicCatalogActivation', () => {
+  const policy = (contextGraphId: string) => ({
+    policyEnvelope: { payload: { contextGraphId } },
+    targets: [],
+  });
+
+  it('is fail-closed when omitted or explicitly disabled', () => {
+    expect(resolveRfc64PublicCatalogActivation({})).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: { enabled: false },
+    })).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+  });
+
+  it('derives the exact durable and auto-publish allowlist from the pinned manifest', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a'), policy('selected-b')],
+          retryIntervalMs: 30_000,
+        },
+      } as any,
+    });
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-a', 'selected-b'],
+      autoPublish: {
+        contextGraphIds: ['selected-a', 'selected-b'],
+        peers: ['12D3KooReceiver'],
+      },
+    });
+  });
+
+  it('rejects activation without a selected policy and rejects a second allowlist', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: { enabled: true },
+    })).toThrow(/non-empty bootstrap/u);
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          contextGraphIds: ['different-selection'],
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: { acceptedPublicPolicies: [policy('selected-a')] },
+      } as any,
+    })).toThrow(/derived from the bootstrap manifest/u);
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a'), policy('selected-a')],
+        },
+      } as any,
+    })).toThrow(/selected context graphs must be unique/u);
+  });
+});
 
 describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', () => {
   const npmHome = '/home/u/.dkg';

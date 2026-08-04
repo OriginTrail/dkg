@@ -207,6 +207,56 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     ]);
   });
 
+  it('activates only manifest-selected RFC-64 public CGs and forwards the exact controls', async () => {
+    const deploymentProfile = {
+      networkId: 'test-network',
+      assertedAtChainId: '20430',
+      assertedAtKav10Address: `0x${'11'.repeat(20)}`,
+    };
+    const bootstrap = {
+      acceptedPublicPolicies: [
+        { policyEnvelope: { payload: { contextGraphId: 'rfc64-selected-a' } }, targets: [] },
+        { policyEnvelope: { payload: { contextGraphId: 'rfc64-selected-b' } }, targets: [] },
+      ],
+      retryIntervalMs: 30_000,
+    };
+    const createArg = await captureCreateArg({
+      contextGraphs: ['ordinary-selection'],
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile,
+        autoPublish: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap,
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toEqual([
+      'ordinary-selection',
+      'rfc64-selected-a',
+      'rfc64-selected-b',
+    ]);
+    expect(createArg.rfc64CatalogDeploymentProfile).toBe(deploymentProfile);
+    expect(createArg.rfc64PublicCatalogAutoPublish).toEqual({
+      contextGraphIds: ['rfc64-selected-a', 'rfc64-selected-b'],
+      peers: ['12D3KooReceiver'],
+      catalogIssuerDelegationExpiresAt: '1893456000000',
+    });
+    expect(createArg.rfc64PublicCatalogBootstrap).toBe(bootstrap);
+  });
+
+  it('keeps RFC-64 activation fully absent from agent inputs when disabled', async () => {
+    const createArg = await captureCreateArg({
+      rfc64PublicCatalog: { enabled: false },
+    });
+
+    expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
   it('passes configured StorageACK timing into DKGAgent.create', async () => {
     const createArg = await captureCreateArg({
       storageAck: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },

@@ -15,6 +15,7 @@ import {
   isDkgMonorepoRoot,
   resolveDkgConfigHome,
   SELECTABLE_SETUP_NETWORKS,
+  type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
 import {
   resolveStorageAckTiming,
@@ -477,6 +478,37 @@ export interface GraphSetIndexConfig {
   revalidateMs?: number;
 }
 
+type Rfc64CatalogDeploymentProfileConfig = NonNullable<
+  DKGAgentConfig['rfc64CatalogDeploymentProfile']
+>;
+type Rfc64CatalogAutoPublishConfig = NonNullable<
+  DKGAgentConfig['rfc64PublicCatalogAutoPublish']
+>;
+type Rfc64CatalogBootstrapConfig = NonNullable<
+  DKGAgentConfig['rfc64PublicCatalogBootstrap']
+>;
+
+/**
+ * Explicit selected-public RFC-64 activation. Omitted or `enabled: false`
+ * leaves the catalog data plane fail-closed with no accepted policies and no
+ * ordinary-publication hook. The bootstrap manifest is the selected CG set;
+ * the daemon adds only those graph IDs to durable synchronization.
+ */
+export interface Rfc64PublicCatalogActivationConfig {
+  readonly enabled?: boolean;
+  readonly deploymentProfile?: Rfc64CatalogDeploymentProfileConfig;
+  readonly autoPublish?: Omit<Rfc64CatalogAutoPublishConfig, 'contextGraphIds'>;
+  readonly bootstrap?: Rfc64CatalogBootstrapConfig;
+}
+
+export interface ResolvedRfc64PublicCatalogActivationConfig {
+  readonly enabled: boolean;
+  readonly selectedContextGraphs: readonly string[];
+  readonly deploymentProfile?: Rfc64CatalogDeploymentProfileConfig;
+  readonly autoPublish?: Rfc64CatalogAutoPublishConfig;
+  readonly bootstrap?: Rfc64CatalogBootstrapConfig;
+}
+
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
@@ -570,6 +602,8 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /** Opt-in, bounded RFC-64 catalog activation for explicitly selected public CGs. */
+  rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
    * Explicitly trusted context graphs that daemon startup may create locally
    * instead of treating as remote subscription targets. Intended for local
@@ -976,6 +1010,67 @@ export function resolveContextGraphs(config: DkgConfig): string[] {
 /** Resolve context graphs from network config. */
 export function resolveNetworkDefaultContextGraphs(network: NetworkConfig | null | undefined): string[] {
   return network?.defaultContextGraphs ?? [];
+}
+
+/** Resolve the fail-closed operator activation into exact agent inputs. */
+export function resolveRfc64PublicCatalogActivation(
+  config: Pick<DkgConfig, 'rfc64PublicCatalog'>,
+): ResolvedRfc64PublicCatalogActivationConfig {
+  const activation = config.rfc64PublicCatalog;
+  if (activation === undefined || activation.enabled === false) {
+    return Object.freeze({
+      enabled: false,
+      selectedContextGraphs: Object.freeze([]),
+    });
+  }
+  if (activation.enabled !== true) {
+    throw new TypeError('rfc64PublicCatalog.enabled must be a boolean');
+  }
+  const bootstrap = activation.bootstrap;
+  if (
+    bootstrap === undefined
+    || !Array.isArray(bootstrap.acceptedPublicPolicies)
+    || bootstrap.acceptedPublicPolicies.length === 0
+  ) {
+    throw new TypeError(
+      'enabled rfc64PublicCatalog requires a non-empty bootstrap.acceptedPublicPolicies manifest',
+    );
+  }
+  const selectedContextGraphs = bootstrap.acceptedPublicPolicies.map((entry, index) => {
+    const contextGraphId = entry?.policyEnvelope?.payload?.contextGraphId;
+    if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
+      throw new TypeError(
+        `rfc64PublicCatalog.bootstrap.acceptedPublicPolicies[${index}] has no context graph id`,
+      );
+    }
+    // The agent snapshots and canonically validates the complete policy before
+    // any transport starts; this early resolver only extracts its graph key so
+    // daemon subscription selection and agent activation share one source.
+    return contextGraphId as ContextGraphIdV1;
+  });
+  if (new Set(selectedContextGraphs).size !== selectedContextGraphs.length) {
+    throw new TypeError('rfc64PublicCatalog selected context graphs must be unique');
+  }
+  if (
+    activation.autoPublish !== undefined
+    && Object.prototype.hasOwnProperty.call(activation.autoPublish, 'contextGraphIds')
+  ) {
+    throw new TypeError(
+      'rfc64PublicCatalog.autoPublish.contextGraphIds is derived from the bootstrap manifest',
+    );
+  }
+  return Object.freeze({
+    enabled: true,
+    selectedContextGraphs: Object.freeze(selectedContextGraphs),
+    deploymentProfile: activation.deploymentProfile,
+    autoPublish: activation.autoPublish === undefined
+      ? undefined
+      : Object.freeze({
+          ...activation.autoPublish,
+          contextGraphIds: Object.freeze([...selectedContextGraphs]),
+        }),
+    bootstrap,
+  });
 }
 
 type NetworkReadinessValidation =
