@@ -94,6 +94,69 @@ test('rejects blank nodes at the evidence boundary', () => {
   }), /subject must be an IRI/);
 });
 
+test('rejects secret-bearing subject paths and predicates before fixture serialization', async () => {
+  const secret = '12D3KooW-secret-token-abc123';
+  let maliciousRow: Record<string, unknown> = {
+    s: uri(`${ROOT}/.well-known/${secret}`),
+    p: uri('https://schema.org/name'),
+    o: literal('hidden'),
+  };
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const query = new URLSearchParams(Buffer.concat(chunks).toString('utf8')).get('query') ?? '';
+    const bindings = query.includes('SELECT ?root ?peer ?seen')
+      ? [populationRow()]
+      : query.includes('SELECT ?root ?s ?p ?o')
+        ? rootRows()
+        : query.includes('SELECT ?s ?p ?o')
+          ? [maliciousRow]
+          : [];
+    response.writeHead(200, { 'content-type': 'application/sparql-results+json' });
+    response.end(JSON.stringify({ head: { vars: [] }, results: { bindings } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('mock server did not bind TCP');
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-2052-redaction-'));
+  const systemSyncPath = join(directory, 'system-sync.json');
+  await writeFile(systemSyncPath, JSON.stringify({
+    schemaVersion: 1,
+    captureStartedAt: '2026-08-04T11:00:00.000Z',
+    captureEndedAt: '2026-08-04T13:00:00.000Z',
+    diagnosticsArtifactSha256: `sha256:${'a'.repeat(64)}`,
+    sourceUrls: ['https://github.com/OriginTrail/dkg/issues/2052'],
+    observations: [],
+  }), 'utf8');
+  const extract = () => extractR27Fixture({
+    endpoint: new URL(`http://127.0.0.1:${address.port}`),
+    output: join(directory, 'fixture.json'),
+    observationTime: '2026-08-04T13:00:00.000Z',
+    sourceCommit: 'c297a7b6ffb6df82305c1f7eb76864a8b7a77c35',
+    systemSyncPath,
+  });
+  try {
+    await assert.rejects(extract, (error: Error) => {
+      assert.match(error.message, /outside the frozen owned grammar/);
+      assert.ok(!error.message.includes(secret));
+      return true;
+    });
+    maliciousRow = {
+      s: uri(`${ROOT}/.well-known/genid/hosting`),
+      p: uri(`https://example.invalid/${secret}`),
+      o: literal('hidden'),
+    };
+    await assert.rejects(extract, (error: Error) => {
+      assert.match(error.message, /outside the frozen allowlist/);
+      assert.ok(!error.message.includes(secret));
+      return true;
+    });
+  } finally {
+    server.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('models missing/multiple peer identities and bounded root batches', () => {
   const missing = collectPopulation([{
     root: uri(`${ROOT.slice(0, -1)}2`),

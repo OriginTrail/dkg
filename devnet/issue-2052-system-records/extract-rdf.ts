@@ -10,13 +10,20 @@ import { formatCanonicalRdfLiteralTerm } from '../../packages/rdf-utils/src/inde
 import {
   buildCharacterizationFixtureV1,
   characterizationSourceFromFixtureV1,
-  expectedProfileLinkPredicateV1,
   type CharacterizationSourceV1,
   type CharacterizationFixtureV1,
-  type OwnedProfileSubjectKindV1,
   type RedactedProfileEvidenceV1,
   type RedactedProfileQuadV1,
 } from './model.js';
+import { deriveProfilePopulationV1 } from './population.js';
+import {
+  classifyProfileSubjectShapeV1,
+  expectedProfileLinkPredicateV1,
+  findProfileSubjectOwnerV1,
+  isAllowedProfilePredicateV1,
+  profileNestedQueryPrefixesV1,
+  redactProfileSubjectV1,
+} from './subjects.js';
 
 const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
 const PEER_ID = 'https://dkg.network/ontology#peerId';
@@ -100,10 +107,9 @@ ORDER BY ?root ?s ?p ?o`.trim(),
 SELECT ?s ?p ?o WHERE {
   GRAPH <${AGENTS_GRAPH}> {
     ?s ?p ?o .
-    FILTER(${roots.flatMap((root) => [
-      `STRSTARTS(STR(?s), "${escapeSparqlString(`${root}/.well-known/`)}")`,
-      `STRSTARTS(STR(?s), "${escapeSparqlString(`${root}#x25519-`)}")`,
-    ]).join(' || ')})
+    FILTER(${roots.flatMap((root) => profileNestedQueryPrefixesV1(root).map(
+      (prefix) => `STRSTARTS(STR(?s), "${escapeSparqlString(prefix)}")`,
+    )).join(' || ')})
   }
 }
 ORDER BY ?s ?p ?o`.trim(),
@@ -115,15 +121,15 @@ ORDER BY ?s ?p ?o`.trim(),
         select(options.endpoint, plan.nestedQuery),
       ]);
       return [
-        ...rootRows,
+        ...rootRows.map((row) => assertProfileEvidenceRow(requiredTerm(row, 'root').value, row)),
         ...nestedRows.map((row) => {
           const subject = requiredTerm(row, 's').value;
-          const root = plan.roots.find(
-            (candidate) => subject.startsWith(`${candidate}/.well-known/`)
-              || subject.startsWith(`${candidate}#x25519-`),
-          );
-          if (!root) throw new Error('nested profile subject did not match its bounded root batch');
-          return { ...row, root: { type: 'uri' as const, value: root } };
+          const root = findProfileSubjectOwnerV1(plan.roots, subject);
+          if (!root) throw new Error('nested profile subject is outside the frozen owned grammar');
+          return assertProfileEvidenceRow(root, {
+            ...row,
+            root: { type: 'uri' as const, value: root },
+          });
         }),
       ];
     }))
@@ -136,25 +142,22 @@ ORDER BY ?s ?p ?o`.trim(),
     JSON.parse(await readFile(options.systemSyncPath, 'utf8')) as unknown,
   );
   const systemSync = systemSyncInput.observations;
-  const profilePopulation: CharacterizationFixtureV1['profilePopulation'] = {
-    observedRoots: population.size,
-    observedPeerKeys: peerToRoots.size,
-    activeRoots: activeRoots.length,
-    activeProfiles: profiles.length,
-    candidateProfiles: profiles.filter((profile) => profile.disposition === 'candidate').length,
-    ambiguousProfiles: profiles.filter((profile) => profile.disposition !== 'candidate').length,
-    staleProfiles: [...population.values()].filter((record) => {
+  const cutoffMs = Date.parse(cutoff);
+  const profilePopulation = deriveProfilePopulationV1(
+    [...population.values()].map((record) => {
       const newest = newestTimestamp(record.lastSeen);
-      return newest !== Number.NEGATIVE_INFINITY && newest < Date.parse(cutoff);
-    }).length,
-    unknownFreshnessProfiles: [...population.values()].filter(
-      (record) => record.lastSeen.length === 0,
-    ).length,
-    missingPeerRoots: [...population.values()].filter((record) => record.peers.size === 0).length,
-    duplicatePeerKeys: [...peerToRoots.values()].filter((roots) => roots.size > 1).length,
-    sharedRootSubjects: [...population.values()].filter((record) => record.peers.size > 1).length,
-    detailedProfileScope: 'active',
-  };
+      return {
+        root: record.root,
+        peerKeys: [...record.peers],
+        freshness: newest === Number.NEGATIVE_INFINITY
+          ? 'unknown' as const
+          : newest >= cutoffMs
+            ? 'active' as const
+            : 'stale' as const,
+      };
+    }),
+    profiles,
+  );
   const loadMeasurement: CharacterizationFixtureV1['loadMeasurement'] = {
     serviceRecordsPerMinuteP10: null,
     serviceBytesPerMinuteP10: null,
@@ -179,7 +182,7 @@ ORDER BY ?s ?p ?o`.trim(),
       populationInputSha256: sha256Text(populationInputLines.join('\n')),
       detailInputSha256: sha256Text(detailInputLines.join('\n')),
       diagnosticsArtifactSha256: systemSyncInput.diagnosticsArtifactSha256,
-      redactionPolicy: 'V1: wallet roots and peer IDs replaced by deterministic fixture-local ordinal aliases; literal values omitted but UTF-8 byte lengths retained; predicates and subject shape retained; no tokens, keys, multiaddrs, names, raw peer IDs, or hashes of peer IDs stored',
+      redactionPolicy: 'V1: wallet roots and peer IDs replaced by deterministic fixture-local ordinal aliases; only exact allowlisted profile subject shapes and predicates retained; unknown nested subjects/predicates rejected before serialization; literal values omitted but UTF-8 byte lengths retained; no tokens, keys, multiaddrs, names, raw peer IDs, or hashes of peer IDs stored',
       agentsMetaExcluded: true,
     },
     staleThresholdMs: STALE_THRESHOLD_MS,
@@ -233,7 +236,7 @@ function buildProfiles(
       const redactSubject = (subject: string) => {
         const existing = subjectMap.get(subject);
         if (existing) return existing;
-        const redacted = redactOwnedSubject(root, redactedRoot, subject);
+        const redacted = redactProfileSubjectV1(root, redactedRoot, subject);
         subjectMap.set(subject, redacted);
         return redacted;
       };
@@ -266,12 +269,12 @@ function buildProfiles(
         const object = requiredTerm(row, 'o');
         const redactedSubject = redactSubject(subject.value);
         const linkedKind = object.type === 'uri'
-          ? classifySourceNestedKind(root, object.value)
+          ? classifyProfileSubjectShapeV1(root, object.value)
           : null;
         if (
           subject.value === root &&
           object.type === 'uri' &&
-          linkedKind !== null &&
+          linkedKind !== null && linkedKind !== 'root' && linkedKind !== 'x25519' &&
           expectedProfileLinkPredicateV1(linkedKind) === predicate.value
         ) {
           linkedSubjects.add(redactSubject(object.value));
@@ -282,10 +285,9 @@ function buildProfiles(
           predicate: predicate.value,
           objectKind: object.type === 'uri' ? 'iri' : 'literal',
           objectBytes: Buffer.byteLength(objectTerm),
-          objectOwnedSubject: object.type === 'uri' && (
-            object.value.startsWith(`${root}/.well-known/`)
-            || object.value.startsWith(`${root}#x25519-`)
-          )
+          objectOwnedSubject: object.type === 'uri'
+            && classifyProfileSubjectShapeV1(root, object.value) !== null
+            && object.value !== root
             ? redactSubject(object.value)
             : null,
         });
@@ -355,21 +357,6 @@ function buildPeerToRoots(
   return result;
 }
 
-function classifySourceNestedKind(
-  root: string,
-  subject: string,
-): OwnedProfileSubjectKindV1 | null {
-  if (/\/\.well-known\/genid\/cap[1-9][0-9]*$/.test(subject) && subject.startsWith(root)) {
-    return 'capability';
-  }
-  if (/\/\.well-known\/genid\/offering[1-9][0-9]*$/.test(subject) && subject.startsWith(root)) {
-    return 'offering';
-  }
-  if (subject === `${root}/.well-known/genid/registration`) return 'registration';
-  if (subject === `${root}/.well-known/genid/hosting`) return 'hosting';
-  return null;
-}
-
 function ageBucket(lastSeenMs: number, observationMs: number): RedactedProfileEvidenceV1['lastSeenAgeBucket'] {
   const ageHours = Math.max(0, observationMs - lastSeenMs) / (60 * 60 * 1000);
   if (ageHours < 1) return 'under-1h';
@@ -383,6 +370,21 @@ export function valuesBatches<T>(values: readonly T[], size: number): T[][] {
     result.push(values.slice(index, index + size));
   }
   return result;
+}
+
+function assertProfileEvidenceRow(root: string, row: SparqlRow): SparqlRow {
+  const subject = requiredTerm(row, 's');
+  const predicate = requiredTerm(row, 'p');
+  const object = requiredTerm(row, 'o');
+  if (subject.type !== 'uri' || predicate.type !== 'uri' || object.type === 'bnode') {
+    throw new TypeError('profile evidence row contains a non-IRI subject/predicate or blank node');
+  }
+  const kind = classifyProfileSubjectShapeV1(root, subject.value);
+  if (kind === null) throw new TypeError('profile subject is outside the frozen owned grammar');
+  if (!isAllowedProfilePredicateV1(kind, predicate.value)) {
+    throw new TypeError('profile predicate is outside the frozen allowlist');
+  }
+  return row;
 }
 
 function rowToPopulationLine(row: SparqlRow): string {
@@ -423,21 +425,6 @@ function parseSystemSyncInput(value: unknown): SanitizedSystemSyncInputV1 {
     throw new TypeError('system sync sourceUrls must be strings');
   }
   return input as SanitizedSystemSyncInputV1;
-}
-
-function redactOwnedSubject(root: string, redactedRoot: string, subject: string): string {
-  if (subject === root) return redactedRoot;
-  if (subject.startsWith(`${root}/.well-known/`)) {
-    const suffix = subject.slice(root.length);
-    if (/^\/\.well-known\/[A-Za-z0-9._~!$&'()*+,;=:@/-]+$/.test(suffix)) {
-      return `${redactedRoot}${suffix}`;
-    }
-  }
-  const keyMatch = /^.*#x25519-([0-9a-f]{32})$/.exec(subject);
-  if (subject.startsWith(`${root}#x25519-`) && keyMatch) {
-    return `${redactedRoot}#x25519-${sha256Hex(subject).slice(0, 32)}`;
-  }
-  return `urn:redacted:external:${sha256Hex(subject).slice(0, 32)}`;
 }
 
 export function rowToNQuad(row: SparqlRow): string {

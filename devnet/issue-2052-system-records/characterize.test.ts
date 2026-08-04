@@ -18,6 +18,7 @@ import {
   type CharacterizationFixtureV1,
   type RedactedProfileEvidenceV1,
 } from './model.js';
+import { deriveProfilePopulationV1 } from './population.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -302,63 +303,30 @@ function baseFixture(): Omit<CharacterizationFixtureV1, 'profiles'> & { profiles
   };
 }
 
-function withDigest<T extends CharacterizationFixtureV1>(fixture: T): T {
-  const peerCounts = frequencies(fixture.profiles.flatMap((profile) => profile.peerKeys));
-  const rootCounts = frequencies(fixture.profiles.map((profile) => profile.rootSubject));
-  return {
+function withDigest(fixture: CharacterizationFixtureV1): CharacterizationFixtureV1 {
+  const profilePopulation = deriveProfilePopulationV1(
+    fixture.profiles.map((profile) => ({
+      root: profile.rootSubject,
+      peerKeys: profile.peerKeys,
+      freshness: 'active',
+    })),
+    fixture.profiles,
+  );
+  const profileEvidenceSha256 = sha256Canonical(fixture.profiles);
+  const draft: CharacterizationFixtureV1 = {
     ...fixture,
-    profilePopulation: {
-      observedRoots: rootCounts.size,
-      observedPeerKeys: peerCounts.size,
-      activeRoots: new Set(fixture.profiles.map((profile) => profile.rootSubject)).size,
-      activeProfiles: fixture.profiles.length,
-      candidateProfiles: fixture.profiles.filter((profile) => profile.disposition === 'candidate').length,
-      ambiguousProfiles: fixture.profiles.filter((profile) => profile.disposition !== 'candidate').length,
-      staleProfiles: 0,
-      unknownFreshnessProfiles: 0,
-      missingPeerRoots: fixture.profiles.filter((profile) => profile.disposition === 'missing-peer').length,
-      duplicatePeerKeys: [...peerCounts.values()].filter((count) => count > 1).length,
-      sharedRootSubjects: fixture.profiles.filter((profile) => profile.peerKeys.length > 1).length,
-      detailedProfileScope: 'active',
+    profilePopulation,
+    provenance: {
+      ...fixture.provenance,
+      profileEvidenceSha256,
+      manifestSha256: '',
     },
-    provenance: (() => {
-      const profileEvidenceSha256 = sha256Canonical(fixture.profiles);
-      const updated = {
-        ...fixture,
-        profilePopulation: {
-          ...fixture.profilePopulation,
-          observedRoots: rootCounts.size,
-          observedPeerKeys: peerCounts.size,
-          activeRoots: rootCounts.size,
-          activeProfiles: fixture.profiles.length,
-          candidateProfiles: fixture.profiles.filter((profile) => profile.disposition === 'candidate').length,
-          ambiguousProfiles: fixture.profiles.filter((profile) => profile.disposition !== 'candidate').length,
-          staleProfiles: 0,
-          unknownFreshnessProfiles: 0,
-          missingPeerRoots: fixture.profiles.filter((profile) => profile.disposition === 'missing-peer').length,
-          duplicatePeerKeys: [...peerCounts.values()].filter((count) => count > 1).length,
-          sharedRootSubjects: fixture.profiles.filter((profile) => profile.peerKeys.length > 1).length,
-          detailedProfileScope: 'active' as const,
-        },
-      };
-      return {
-        ...fixture.provenance,
-        profileEvidenceSha256,
-        manifestSha256: sha256Canonical(manifestDigestInput({
-          ...updated,
-          provenance: {
-            ...fixture.provenance,
-            profileEvidenceSha256,
-            manifestSha256: '',
-          },
-        })),
-      };
-    })(),
   };
-}
-
-function frequencies(values: readonly string[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  return counts;
+  return {
+    ...draft,
+    provenance: {
+      ...draft.provenance,
+      manifestSha256: sha256Canonical(manifestDigestInput(draft)),
+    },
+  };
 }

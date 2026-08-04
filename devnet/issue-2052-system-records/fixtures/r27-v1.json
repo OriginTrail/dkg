@@ -16,10 +16,10 @@
     "populationInputSha256": "sha256:806fe1f5ade2bc1a8dc05134237eb0242a69cc75dc71c07fad034380e836d9be",
     "detailInputSha256": "sha256:ca9f2a0ce7bd02bc46774f816317db6f2a42cdcecda78196bd60414dd528fc76",
     "diagnosticsArtifactSha256": "sha256:30d3f690d2cc106f3ce97f872d89291d3d687831637ff19ca035b54779fb7f47",
-    "redactionPolicy": "V1: wallet roots and peer IDs replaced by deterministic fixture-local ordinal aliases; literal values omitted but UTF-8 byte lengths retained; predicates and subject shape retained; no tokens, keys, multiaddrs, names, raw peer IDs, or hashes of peer IDs stored",
+    "redactionPolicy": "V1: wallet roots and peer IDs replaced by deterministic fixture-local ordinal aliases; only exact allowlisted profile subject shapes and predicates retained; unknown nested subjects/predicates rejected before serialization; literal values omitted but UTF-8 byte lengths retained; no tokens, keys, multiaddrs, names, raw peer IDs, or hashes of peer IDs stored",
     "agentsMetaExcluded": true,
     "profileEvidenceSha256": "sha256:396b4e86ea7c118231de43d431e1c4543d858ba8c4b7851b82d2532fef02518c",
-    "manifestSha256": "sha256:5cb93c6c2892159d46da66994076cfacf92603965c11e1ebb09bd4ee99c6513d"
+    "manifestSha256": "sha256:a8a6349e78756bd8d893cfb71e64afc1838739cf695e5fcbfe36cadcc41be3ea"
   },
   "staleThresholdMs": 86400000,
   "systemSync": [

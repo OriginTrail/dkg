@@ -1,5 +1,21 @@
 import { createHash } from 'node:crypto';
 
+import {
+  classifyOwnedSubjectV1,
+  expectedProfileLinkPredicateV1,
+  isAllowedProfilePredicateV1,
+  isCanonicalProfileRootV1,
+} from './subjects.js';
+
+export {
+  classifyOwnedSubjectV1,
+  expectedProfileLinkPredicateV1,
+  isAllowedProfilePredicateV1,
+  isCanonicalProfileRootV1,
+  PROFILE_LINK_PREDICATES_V1,
+} from './subjects.js';
+export type { OwnedProfileSubjectKindV1 } from './subjects.js';
+
 export const SYSTEM_RECORD_LIMITS_V1 = Object.freeze({
   activationRecords: 1_024,
   activationBundleBytes: 128 * 1024 * 1024,
@@ -158,71 +174,27 @@ export interface QuantilesV1 {
   readonly max: number;
 }
 
-const ROOT_RE = /^did:dkg:agent:0x[0-9a-f]{40}$/;
-const X25519_RE = /#x25519-[0-9a-f]{32}$/;
-
-export type OwnedProfileSubjectKindV1 =
-  | 'root'
-  | 'capability'
-  | 'offering'
-  | 'registration'
-  | 'hosting'
-  | 'x25519';
-
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const SCHEMA = 'https://schema.org/';
-const DKG = 'https://dkg.network/ontology#';
-const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
-const PROV = 'http://www.w3.org/ns/prov#';
-const SKILL = 'https://dkg.origintrail.io/skill#';
-
-export const PROFILE_LINK_PREDICATES_V1 = Object.freeze({
-  capability: `${ERC8004}capabilities`,
-  offering: `${SKILL}offersSkill`,
-  registration: `${PROV}wasGeneratedBy`,
-  hosting: `${SKILL}hostingProfile`,
-} as const);
-
-const ALLOWED_PROFILE_PREDICATES_V1: Readonly<Record<OwnedProfileSubjectKindV1, ReadonlySet<string>>> = {
-  root: new Set([
-    RDF_TYPE,
-    `${SCHEMA}name`, `${SCHEMA}description`,
-    `${DKG}peerId`, `${DKG}nodeRole`, `${DKG}publicKey`, `${DKG}relayAddress`,
-    `${DKG}agentAddress`, `${DKG}multiaddr`, `${DKG}lastSeen`,
-    `${DKG}publicEncryptionKey`, `${DKG}encryptionKeyAlgorithm`, `${DKG}encryptionKeyProof`,
-    `${SKILL}framework`,
-    ...Object.values(PROFILE_LINK_PREDICATES_V1),
-  ]),
-  capability: new Set([RDF_TYPE, `${SCHEMA}name`]),
-  offering: new Set([
-    RDF_TYPE, `${SKILL}skill`, `${SKILL}pricePerCall`, `${SKILL}currency`,
-    `${SKILL}successRate`, `${SKILL}pricing`,
-  ]),
-  registration: new Set([RDF_TYPE, `${PROV}atTime`]),
-  hosting: new Set([
-    RDF_TYPE, `${SKILL}contextGraphsServed`,
-    // Existing active testnet profiles still carry the pre-rename predicate.
-    `${SKILL}paranetsServed`,
-  ]),
-  x25519: new Set([
-    `${DKG}revokedAt`, `${DKG}revokedBy`, `${DKG}encryptionKeyRevocationProof`,
-  ]),
-};
-
 export function parseCharacterizationFixtureV1(input: unknown): CharacterizationFixtureV1 {
   if (!isRecord(input) || input.schemaVersion !== 1 || typeof input.fixtureId !== 'string') {
     throw new TypeError('characterization fixture must be a V1 object');
   }
-  const fixture = input as unknown as CharacterizationFixtureV1;
-  assertProvenance(fixture.provenance);
-  assertFiniteInteger(fixture.staleThresholdMs, 'staleThresholdMs', 1);
-  if (!Array.isArray(fixture.systemSync) || !Array.isArray(fixture.profiles)) {
-    throw new TypeError('systemSync and profiles must be arrays');
-  }
-  for (const observation of fixture.systemSync) assertSystemObservation(observation);
-  assertProfilePopulation(fixture.profilePopulation, fixture.profiles.length);
-  for (const profile of fixture.profiles) assertProfile(profile);
-  assertLoadMeasurement(fixture.loadMeasurement);
+  const provenance = decodeProvenance(input.provenance);
+  const staleThresholdMs = input.staleThresholdMs;
+  assertFiniteInteger(staleThresholdMs, 'staleThresholdMs', 1);
+  const systemSync = decodeSystemObservations(input.systemSync);
+  const profiles = decodeProfiles(input.profiles);
+  const profilePopulation = decodeProfilePopulation(input.profilePopulation, profiles.length);
+  const loadMeasurement = decodeLoadMeasurement(input.loadMeasurement);
+  const fixture: CharacterizationFixtureV1 = {
+    schemaVersion: 1,
+    fixtureId: input.fixtureId,
+    provenance,
+    staleThresholdMs,
+    systemSync,
+    profilePopulation,
+    profiles,
+    loadMeasurement,
+  };
 
   const actualDigest = sha256Canonical(fixture.profiles);
   if (actualDigest !== fixture.provenance.profileEvidenceSha256) {
@@ -330,39 +302,6 @@ export function characterizeFixtureV1(fixture: CharacterizationFixtureV1): Chara
     }),
     systemSync: fixture.systemSync,
   };
-}
-
-export function classifyOwnedSubjectV1(
-  rootSubject: string,
-  subject: string,
-): OwnedProfileSubjectKindV1 | null {
-  if (!ROOT_RE.test(rootSubject)) return null;
-  if (subject === rootSubject) return 'root';
-  const escapedRoot = escapeRegex(rootSubject);
-  if (new RegExp(`^${escapedRoot}/\\.well-known/genid/cap[1-9][0-9]*$`).test(subject)) return 'capability';
-  if (new RegExp(`^${escapedRoot}/\\.well-known/genid/offering[1-9][0-9]*$`).test(subject)) return 'offering';
-  if (subject === `${rootSubject}/.well-known/genid/registration`) return 'registration';
-  if (subject === `${rootSubject}/.well-known/genid/hosting`) return 'hosting';
-  if (subject.startsWith(`${rootSubject}#x25519-`) && X25519_RE.test(subject)) {
-    return 'x25519';
-  }
-  return null;
-}
-
-export function isAllowedProfilePredicateV1(
-  kind: OwnedProfileSubjectKindV1,
-  predicate: string,
-): boolean {
-  return ALLOWED_PROFILE_PREDICATES_V1[kind].has(predicate);
-}
-
-export function expectedProfileLinkPredicateV1(
-  kind: OwnedProfileSubjectKindV1,
-): string | null {
-  if (kind === 'capability' || kind === 'offering' || kind === 'registration' || kind === 'hosting') {
-    return PROFILE_LINK_PREDICATES_V1[kind];
-  }
-  return null;
 }
 
 export function referenceBTreeBoundsV1(records: number): BTreeBoundsV1 {
@@ -544,6 +483,40 @@ function countEnum<
   return Object.freeze(result);
 }
 
+function decodeProvenance(value: unknown): CharacterizationFixtureV1['provenance'] {
+  assertProvenance(value);
+  return value;
+}
+
+function decodeSystemObservations(value: unknown): readonly SystemSyncObservationV1[] {
+  if (!Array.isArray(value)) throw new TypeError('systemSync must be an array');
+  return value.map((observation) => {
+    assertSystemObservation(observation);
+    return observation;
+  });
+}
+
+function decodeProfiles(value: unknown): readonly RedactedProfileEvidenceV1[] {
+  if (!Array.isArray(value)) throw new TypeError('profiles must be an array');
+  return value.map((profile) => {
+    assertProfile(profile);
+    return profile;
+  });
+}
+
+function decodeProfilePopulation(
+  value: unknown,
+  detailedProfiles: number,
+): CharacterizationFixtureV1['profilePopulation'] {
+  assertProfilePopulation(value, detailedProfiles);
+  return value;
+}
+
+function decodeLoadMeasurement(value: unknown): CharacterizationFixtureV1['loadMeasurement'] {
+  assertLoadMeasurement(value);
+  return value;
+}
+
 function assertProvenance(value: unknown): asserts value is CharacterizationFixtureV1['provenance'] {
   if (!isRecord(value)) throw new TypeError('provenance must be an object');
   for (const key of [
@@ -604,7 +577,7 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
       throw new TypeError(`profile.${key} must be a non-empty string`);
     }
   }
-  if (!ROOT_RE.test(value.rootSubject as string)) {
+  if (!isCanonicalProfileRootV1(value.rootSubject as string)) {
     throw new TypeError(`profile ${value.recordId as string} has a noncanonical redacted root`);
   }
   if (!Array.isArray(value.peerKeys) || value.peerKeys.some((key) => typeof key !== 'string')) {
@@ -773,10 +746,6 @@ function assertSortedUniqueStrings(values: readonly string[], label: string): vo
       throw new TypeError(`${label} must be sorted and duplicate-free`);
     }
   }
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function assertFiniteInteger(

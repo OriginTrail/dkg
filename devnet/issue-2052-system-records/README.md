@@ -68,6 +68,7 @@ substitute for the encoded transferable bundle size used by the activation gate.
 
 The fixture was generated from an isolated copy of the stopped node's Oxigraph
 v0.5.8 store. `extract-rdf.ts` accepts only an unauthenticated localhost endpoint,
-retains public predicate/subject shape and byte counts, and writes no literal,
+retains only frozen allowlisted predicate/subject shapes and byte counts, and rejects
+unknown nested subjects or predicates before serialization. It writes no literal,
 wallet, peer-ID, peer-ID hash, name, multiaddr, token, or key values. Fixture-local
 ordinal aliases retain only the duplicate-key relationships needed by the model.
