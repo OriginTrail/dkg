@@ -98,7 +98,15 @@ export interface CatchupPassDecision {
  * routinely true at once. `reason` reports the FIRST match in the order written,
  * which is chosen by how actionable it is rather than by severity:
  *
- *   1. `plane-proven` — a success, and it outranks everything else.
+ *   1. `plane-proven` — a success, and it outranks everything else, but ONLY
+ *      once no capable peer is left. The plane is proven by an aggregate over
+ *      every peer, so a member serving its own shared-memory rows and no
+ *      snapshot refs proves it — the ordinary shape in a multi-member public
+ *      Context Graph. Stopping on that alone abandons a peer that reported a
+ *      complete manifest with refs still unresolved, which is the abandonment
+ *      #2050 exists to remove; the aggregate would make the fix inert exactly
+ *      where it was aimed. Proof of the plane says the graph is reachable, not
+ *      that this peer has nothing left to give.
  *   2. `coverage-stalled` — the walk is not converging. Reported ahead of the
  *      hard bounds because it changes what an operator should do: a stalled run
  *      that also hit the budget would otherwise read as "raise the budget", and
@@ -111,7 +119,10 @@ export function shouldRunAnotherCatchupPass(input: CatchupPassPolicyInput): Catc
   const stop = (reason: CatchupPassDecisionReason): CatchupPassDecision =>
     ({ continue: false, peers: [], reason });
 
-  if (input.planeProven) return stop('plane-proven');
+  // Gated on the capable set: proof-by-data is an aggregate over every peer, so
+  // an unrelated clean round must not end the walk while a peer that declared a
+  // complete manifest still has refs outstanding.
+  if (input.planeProven && input.capablePeers.length === 0) return stop('plane-proven');
   // Strictly greater: a pass that resolved exactly as much as every pass before
   // it moved nothing, however large the number is.
   if (input.lastPassCoverage <= input.coverageHighWaterMark) return stop('coverage-stalled');

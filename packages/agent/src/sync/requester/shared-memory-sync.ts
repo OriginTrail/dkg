@@ -365,8 +365,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       snapshotsTotal: walk.totalSnapshots,
       manifestComplete,
       missingCount: walk.totalSnapshots - snapshotsResolved,
-      // Never-retrieved refs first, then retrieved-but-unwritten ones.
-      missingSample: [...walk.missingSample, ...unwrittenRefSample]
+      // Never-retrieved refs first, then retrieved-but-unwritten ones. Deduped
+      // across BOTH sources so the sample can never exceed `missingCount`, which
+      // is what the renderer subtracts it from to size its "(+N more)" suffix.
+      missingSample: [...new Set([...walk.missingSample, ...unwrittenRefSample])]
         .slice(0, PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT),
       materializationFailures,
     });
@@ -686,7 +688,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // that would otherwise certify a graph that was never written.
             materializationFailures += 1;
             refMaterialized = false;
-            if (unresolvedRefSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
+            // Deduped by ref, not merely capped: `materializationFailures`
+            // increments per DESCRIPTOR, so one ref carrying several descriptors
+            // pushed itself once per failure and the sample read
+            // "including refX, refX, refX". The count it is a sample OF is per
+            // REF, so an undeduped sample can also grow longer than
+            // `missingCount`, driving the renderer's `missingCount - sample.length`
+            // negative and silently suppressing the "(+N more)" suffix.
+            if (
+              unresolvedRefSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT
+              && !unresolvedRefSample.includes(snapshotRef)
+            ) {
               unresolvedRefSample.push(snapshotRef);
               // Mirrored outside the `try`, like the counters, so a later throw
               // cannot lose refs we already know failed to write.

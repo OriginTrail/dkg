@@ -188,18 +188,38 @@ function describeCoverage(coverage: SwmSnapshotCoverage | undefined): string {
 }
 
 /**
- * The walk's coverage high-water reading: the best any single peer reported.
+ * The walk's progress reading: the sum of every peer's OWN high-water resolved
+ * count.
  *
  * A progress signal, never a correctness denominator — peers describe different
- * manifests, and the completion proof stays `catchupPlaneProvenByData`. Taken as a
- * max over whole per-peer records so no synthetic pair is ever formed.
+ * manifests, and the completion proof stays `catchupPlaneProvenByData`.
+ *
+ * Why a per-peer ledger rather than a max over `lastCoverageByPeer`: the two
+ * gates read different peer sets. `capablePeersForNextPass` retries only peers
+ * with `resolved < total`, while a fleet-wide max includes peers the pass will
+ * never contact again. A peer sitting at `400/400` therefore pinned the reading,
+ * and a capable peer converging `30 -> 55` against a 120-ref manifest could
+ * never clear that bar — its whole manifest is smaller than the pinned number —
+ * so it got exactly one continuation pass however well it was doing, and the
+ * stop was reported as `coverage-stalled`, whose text tells an operator more
+ * passes would not help. That is the abandonment #2050 exists to remove.
+ *
+ * Summing per-peer high-waters, rather than maxing the capable set, is what
+ * makes the reading monotone. Filtering the max to capable peers inverts the
+ * bug: the capable set SHRINKS as peers finish, so a peer completing `200/200`
+ * and dropping out would make the reading FALL and stall the loop from the other
+ * direction. `snapshotsResolved` is also a per-round count — `materializedRefs`
+ * is rebuilt each round — so a pass that yields earlier can legitimately report
+ * a LOWER number for the same peer; taking each peer's max absorbs that.
+ *
+ * With a monotone total, `lastPassCoverage <= coverageHighWaterMark` means
+ * exactly "no peer beat its own record", which is the signal the policy
+ * docstring describes.
  */
-function highestResolvedCoverage(coverageByPeer: Map<string, SwmSnapshotCoverage>): number {
-  let highest = 0;
-  for (const coverage of coverageByPeer.values()) {
-    if (coverage.snapshotsResolved > highest) highest = coverage.snapshotsResolved;
-  }
-  return highest;
+function totalPeerProgress(progressByPeer: Map<string, number>): number {
+  let total = 0;
+  for (const resolved of progressByPeer.values()) total += resolved;
+  return total;
 }
 
 function emptyShared(): CatchupSharedMemoryResult {
@@ -256,6 +276,16 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   const peersSucceeded = new Set<string>();
   /** Each peer's own coverage from its LAST round; the capability gate's input. */
   const lastCoverageByPeer = new Map<string, SwmSnapshotCoverage>();
+  /**
+   * Each peer's own HIGH-WATER `snapshotsResolved`; the progress gate's input.
+   *
+   * Separate from `lastCoverageByPeer` on both axes that map varies on: this one
+   * only ever rises, and nothing removes an entry. The forgetting branch below
+   * deletes a peer's coverage after a clean empty round, which would make a sum
+   * over that map fall and report `coverage-stalled` for what was really a peer
+   * dropping out. See `totalPeerProgress`.
+   */
+  const peerProgressHighWater = new Map<string, number>();
   let deferredBackpressure = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
@@ -507,14 +537,20 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // the authority-answering logic below uses, so the two cannot disagree, and
       // it already counts a deferred plane as not completed.
       //
-      // For whoever reads a stop reason later: `highestResolvedCoverage` is a max
-      // over this map, so any forgetting can make the reading DECREASE between
-      // passes, which trips the stalled check and reports `coverage-stalled` for
-      // what was really a transport failure. Requiring a clean round removes the
-      // common cause; a decrease stays reachable when a barren round follows a
-      // productive one against a different peer.
+      // For whoever reads a stop reason later: the progress gate no longer reads
+      // this map at all — it reads `peerProgressHighWater`, which is monotone and
+      // never forgotten, so the forgetting below can no longer make the reading
+      // DECREASE between passes and report `coverage-stalled` for what was really
+      // a transport failure or a peer dropping out. This map now feeds only the
+      // capability gate, where forgetting is the intended behaviour.
       if (shared.swmCoverage) {
         lastCoverageByPeer.set(peerId, shared.swmCoverage);
+        // Max, never assign: `snapshotsResolved` is a per-round count, so a pass
+        // that yields earlier can report a lower number for the same peer.
+        const seen = peerProgressHighWater.get(peerId) ?? 0;
+        if (shared.swmCoverage.snapshotsResolved > seen) {
+          peerProgressHighWater.set(peerId, shared.swmCoverage.snapshotsResolved);
+        }
       } else if (catchupPlaneCompletedWithoutFailure(shared)) {
         lastCoverageByPeer.delete(peerId);
       }
@@ -717,7 +753,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   if (request.includeSharedMemory) {
     const passDeadlineMs = catchupPassNowMs() + SWM_CATCHUP_PASS_BUDGET_MS;
     for (;;) {
-      const lastPassCoverage = highestResolvedCoverage(lastCoverageByPeer);
+      const lastPassCoverage = totalPeerProgress(peerProgressHighWater);
       const decision = shouldRunAnotherCatchupPass({
         nowMs: catchupPassNowMs(),
         deadlineMs: passDeadlineMs,
@@ -757,7 +793,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // converging, and that is not visible from either number alone.
       await logPassLine(`Catch-up SWM pass ${1 + continuationPasses} for `
         + `"${request.contextGraphId}": ${decision.peers.length} capable peer(s), coverage `
-        + `${lastPassCoverage} -> ${highestResolvedCoverage(lastCoverageByPeer)} resolved, `
+        + `${lastPassCoverage} -> ${totalPeerProgress(peerProgressHighWater)} resolved, `
         + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
         + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
     }

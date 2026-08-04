@@ -737,8 +737,8 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
 
   it('names the counts, the peer, the pass count and the outstanding work', () => {
     expect(swmShortfallClause(r26, 2)).toBe(
-      ' (Shared memory: 178/250 snapshots fetched from peer …abcd1234 after 3 passes;'
-      + ' 72 not retrieved, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
+      ' (Shared memory: 178/250 snapshots materialized from peer …abcd1234 after 3 passes;'
+      + ' 72 not materialized, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
     );
   });
 
@@ -779,7 +779,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
       0,
     );
 
-    expect(clause).toContain('2 not retrieved, including did:dkg:ka:one, did:dkg:ka:two.)');
+    expect(clause).toContain('2 not materialized, including did:dkg:ka:one, did:dkg:ka:two.)');
     expect(clause).not.toContain('more)');
   });
 
@@ -809,7 +809,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     // Whole-string equality: the prefix pin in T16 cannot see the append.
     expect(c.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
     expect(c.error).toContain('178/250');
-    expect(c.error).toContain('72 not retrieved');
+    expect(c.error).toContain('72 not materialized');
   });
 
   it('says why continuation stopped, in words that match the reason', () => {
@@ -910,8 +910,12 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     r.dataSynced = 5;
     r.diagnostics!.durable.insertedDataTriples = 5;
     r.diagnostics!.durable.timedOutPhases = 1;
-    const sm = r.diagnostics!.sharedMemory as Record<string, unknown>;
-    sm['swmCoverage'] = {
+    // Typed, NOT an untyped literal behind the Record cast. The cast is needed
+    // to assign onto the diagnostics bag, but letting it swallow the literal too
+    // meant this fixture omitted `materializationFailures` — a required field —
+    // and would have kept compiling if the production shape grew another one.
+    // The cast belongs on the assignment target, never on the value.
+    const coverage: SwmSnapshotCoverage = {
       contextGraphId: 'cg-under-test',
       peerIdSuffix: 'abcd1234',
       snapshotsResolved: over.resolved ?? 178,
@@ -919,7 +923,10 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
       manifestComplete: over.manifestComplete ?? true,
       missingCount: over.missingCount ?? 72,
       missingSample: over.missingSample ?? ['ref-a', 'ref-b'],
+      materializationFailures: 0,
     };
+    const sm = r.diagnostics!.sharedMemory as Record<string, unknown>;
+    sm['swmCoverage'] = coverage;
     sm['continuationPasses'] = over.continuationPasses ?? 2;
     return r;
   }
@@ -961,8 +968,8 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     // it — the producer caps the sample at 10, so a clause without a marker
     // would silently understate every shortfall larger than the cap.
     expect(error.slice(PREFIX.length)).toBe(
-      ' (Shared memory: 178/250 snapshots fetched from peer …abcd1234'
-      + ' after 3 passes; 72 not retrieved, including ref-a, ref-b (+70 more).)',
+      ' (Shared memory: 178/250 snapshots materialized from peer …abcd1234'
+      + ' after 3 passes; 72 not materialized, including ref-a, ref-b (+70 more).)',
     );
   });
 
@@ -970,7 +977,7 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     const error = errorFor(shortfallResult());
     expect(error).toContain('178/250');
     expect(error).toContain('…abcd1234');
-    expect(error).toContain('72 not retrieved');
+    expect(error).toContain('72 not materialized');
     // Never a synthetic pair, and never the durable plane: continuation passes
     // repeat the shared-memory walk only.
     expect(error).not.toContain('200/250');
@@ -1017,37 +1024,58 @@ describe('T16c — retrieval and write shortfalls are reported separately', () =
     materializationFailures: 0,
   };
 
-  it('speaks up when everything fetched but some writes failed', () => {
+  it('speaks up when refs fetched cleanly but their writes failed', () => {
     // Pre-fix this returned '' — the one case where shared memory WAS the
     // problem was the one case the message said nothing about.
-    const clause = swmShortfallClause({ ...base, materializationFailures: 12 }, 0);
+    //
+    // The fixture is a REPRESENTABLE record, which the original was not: it
+    // paired `missingCount: 0` with 12 write failures, and the producer cannot
+    // emit that. A ref whose descriptor throws is excluded from the materialized
+    // set, so `snapshotsResolved` falls and `missingCount` rises with it. Pinning
+    // an impossible pair meant this row could not have caught the producer
+    // drifting away from it.
+    const clause = swmShortfallClause(
+      { ...base, snapshotsResolved: 238, missingCount: 12, materializationFailures: 12 },
+      0,
+    );
 
     expect(clause).not.toBe('');
-    expect(clause).toContain('12 retrieved but not written to the store');
+    expect(clause).toContain('238/250 snapshots materialized');
+    expect(clause).toContain('12 not materialized');
+    expect(clause).toContain('12 store write failure(s)');
   });
 
-  it('never claims snapshots were "verified" when none were written', () => {
-    // `snapshotsResolved` counts refs present and digest-valid in the blob
-    // cache, NOT Knowledge Assets written. Calling that "verified" would report
-    // "250/250 snapshots verified" on a graph where every write failed — wrong
-    // in the flattering direction and undetectable by the reader.
-    const clause = swmShortfallClause({ ...base, materializationFailures: 250 }, 0);
+  it('never claims snapshots were fetched or verified when none were written', () => {
+    // `snapshotsResolved` counts Knowledge Assets WRITTEN, so a round that
+    // cached all 250 blobs and wrote none reports 0, not 250. Reporting either
+    // "250/250 fetched" or "verified" here would be wrong in the flattering
+    // direction and undetectable by the reader.
+    const clause = swmShortfallClause(
+      { ...base, snapshotsResolved: 0, missingCount: 250, materializationFailures: 250 },
+      0,
+    );
 
-    expect(clause).toContain('250/250 snapshots fetched');
+    expect(clause).toContain('0/250 snapshots materialized');
     expect(clause).not.toContain('verified');
+    expect(clause).not.toContain('fetched');
   });
 
-  it('reports both axes distinctly when both fail', () => {
+  it('names the outstanding work and the store cause as separate facts', () => {
     const clause = swmShortfallClause(
       { ...base, snapshotsResolved: 200, missingCount: 50, missingSample: ['ref-x'], materializationFailures: 7 },
       1,
     );
 
-    expect(clause).toContain('50 not retrieved, including ref-x');
-    expect(clause).toContain('7 retrieved but not written to the store');
-    // Separate clauses, not one conflated number: a retrieval shortfall sends
-    // an operator to the network, a write shortfall to the store.
-    expect(clause).toContain('50 not retrieved, including ref-x (+49 more); 7 retrieved but not written');
+    expect(clause).toContain('50 not materialized, including ref-x');
+    expect(clause).toContain('7 store write failure(s)');
+    // Separate clauses, and deliberately NOT phrased as "50, of which 7":
+    // `missingCount` counts REFS while `materializationFailures` counts
+    // DESCRIPTORS, so neither is a subset count of the other. The write count is
+    // a CAUSE indicator — it says the shortfall is the store, not the network.
+    expect(clause).toContain('50 not materialized, including ref-x (+49 more); 7 store write failure(s)');
+    // The two are never added: 50 is the whole shortfall, already including
+    // every unwritten ref.
+    expect(clause).not.toContain('57');
   });
 
   it('still says nothing when both axes are clean', () => {

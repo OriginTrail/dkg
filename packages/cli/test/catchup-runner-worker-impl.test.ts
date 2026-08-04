@@ -2025,6 +2025,27 @@ describe('#2050 capability gate — which peers earn a second pass', () => {
     expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(1);
   });
 
+  it('keeps retrying a converging peer that a FINISHED peer would otherwise pin', async () => {
+    // The progress gate and the capability gate read different peer sets, and
+    // that is the whole bug: a peer at `400/400` is not capable, so it is never
+    // re-contacted and its record can never move — but a fleet-wide max over all
+    // retained records still counts it. The converging peer's entire manifest is
+    // 9 refs, so it can NEVER exceed 400 however well it does, and the loop
+    // stopped at `coverage-stalled` after exactly one continuation pass, which
+    // renders as "more passes would not help" — the opposite of true.
+    //
+    // Summing each peer's OWN high-water makes the reading move whenever any peer
+    // advances. Under the fleet-wide max this row sees exactly 2 contacts and
+    // `coverage-stalled`; the assertions below are chosen to fail in that case.
+    const PINNED = 'peer-finished-4444';
+    const { shared, result } = await walkWith(PINNED, () => round(PINNED, 400, 400));
+
+    expect(shared.filter((p) => p === PINNED)).toHaveLength(1);
+    expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(2);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason)
+      .not.toBe('coverage-stalled');
+  });
+
   it('does not re-contact a peer whose MANIFEST was truncated', async () => {
     // Resolved < total, so the resolved/total clause alone would call it capable.
     // Only `manifestComplete` excludes it — and it must be excluded, because a

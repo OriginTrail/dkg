@@ -41,13 +41,30 @@ describe('shouldRunAnotherCatchupPass', () => {
     });
   });
 
-  it('stops once a clean peer round has proven the plane', () => {
+  it('stops once a clean peer round has proven the plane and nobody is left to ask', () => {
     // r26's shape ends here on the pass that finally completes: coverage is still
-    // advancing and budget remains, but there is nothing left to fetch.
-    expect(shouldRunAnotherCatchupPass(base({ planeProven: true }))).toEqual({
+    // advancing and budget remains, but there is nothing left to fetch. Note the
+    // empty capable set is what makes this a stop — see the row below.
+    expect(shouldRunAnotherCatchupPass(base({ planeProven: true, capablePeers: [] }))).toEqual({
       continue: false,
       peers: [],
       reason: 'plane-proven',
+    });
+  });
+
+  it('keeps going for a capable peer even once another peer has proven the plane', () => {
+    // The plane is proven by an aggregate over EVERY peer, so a member serving
+    // its own shared-memory rows and no snapshot refs proves it — the ordinary
+    // shape in a multi-member public CG. Letting that stop the walk abandons the
+    // peer that declared a complete manifest with refs still outstanding, which
+    // is the abandonment #2050 exists to remove: the repeat loop would contribute
+    // zero passes in exactly the topology it was written for.
+    expect(shouldRunAnotherCatchupPass(base({
+      planeProven: true, capablePeers: ['peer-big'],
+    }))).toEqual({
+      continue: true,
+      peers: ['peer-big'],
+      reason: 'continue',
     });
   });
 
@@ -115,8 +132,13 @@ describe('shouldRunAnotherCatchupPass', () => {
     // of budget must not read as "raise the budget", because raising it buys
     // nothing. Each case below satisfies BOTH stops and pins which is reported.
     expect(shouldRunAnotherCatchupPass(base({
-      planeProven: true, coverageHighWaterMark: 178, lastPassCoverage: 178,
+      planeProven: true, capablePeers: [], coverageHighWaterMark: 178, lastPassCoverage: 178,
     })).reason).toBe('plane-proven');
+    // Same two stops, but a capable peer is left: plane-proven no longer applies
+    // at all, so the honest reason is the one that actually held.
+    expect(shouldRunAnotherCatchupPass(base({
+      planeProven: true, coverageHighWaterMark: 178, lastPassCoverage: 178,
+    })).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(base({
       coverageHighWaterMark: 178, lastPassCoverage: 178, nowMs: 999_999,
     })).reason).toBe('coverage-stalled');

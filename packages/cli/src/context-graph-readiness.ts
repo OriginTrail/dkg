@@ -73,13 +73,19 @@ export function swmShortfallClause(
   stopReason?: CatchupPassDecisionReason,
 ): string {
   if (!coverage) return '';
-  // TWO independent shortfalls, and gating on retrieval alone went silent on
-  // the second. `missingCount` measures FETCH completeness only: a round can
-  // retrieve every declared ref and still fail to WRITE some of them — a store
-  // error inside the KA write lock, which is the G7 failure class and is
-  // likeliest under exactly the store pressure that produces incomplete rounds.
-  // Gating on `missingCount` alone printed nothing at all about shared memory
-  // in the one case where shared memory was the thing that failed.
+  // `missingCount` is MATERIALIZATION completeness, not fetch completeness: the
+  // producer derives it as `snapshotsTotal - min(materializedRefCount, total)`,
+  // so a ref that was fetched and digest-verified but failed to write to the
+  // store raises it exactly like a ref that never arrived. The two are NOT
+  // independent axes and must never be added together — `missingCount` already
+  // includes every unwritten ref.
+  //
+  // `materializationFailures` is kept as the CAUSE indicator: it says the
+  // shortfall is a store problem rather than a network one, which is the whole
+  // reason the distinction is worth printing. It counts failing DESCRIPTORS
+  // while `missingCount` counts REFS, so the two are not in the same unit and
+  // neither is a subset count of the other — phrase them as separate facts, and
+  // never as "N of which".
   // Defaulted, not trusted: this record crosses a worker RPC boundary, and an
   // absent counter must read as "none known" rather than making `<= 0` false
   // and forcing a clause onto a round with nothing to report.
@@ -93,15 +99,21 @@ export function swmShortfallClause(
   const named = sample.length > 0
     ? `, including ${sample.join(', ')}${unnamed > 0 ? ` (+${unnamed} more)` : ''}`
     : '';
-  // The two failures are reported as separate clauses because they send an
-  // operator to different places: a retrieval shortfall is a network and
-  // peer-set problem, a write shortfall is a store problem. Conflating them
-  // wastes the hour the stop-reason wording exists to save.
-  const retrieval = coverage.missingCount > 0
-    ? ` ${coverage.missingCount} not retrieved${named}`
+  // Reported as separate clauses because they send an operator to different
+  // places: the outstanding count is what is still missing locally, the write
+  // failures say the store is why. Conflating them wastes the hour the
+  // stop-reason wording exists to save.
+  //
+  // "not materialized", NOT "not retrieved": these refs are the ones absent from
+  // the local store, and under a store fault they were fetched and digest-valid
+  // before they failed. Naming a ref that arrived intact as "not retrieved"
+  // sends the reader to the network and the peer set when the fault is entirely
+  // local — the one misdirection this clause exists to prevent.
+  const outstanding = coverage.missingCount > 0
+    ? ` ${coverage.missingCount} not materialized${named}`
     : '';
   const writes = failedToWrite > 0
-    ? `${retrieval ? ';' : ''} ${failedToWrite} retrieved but not written to the store`
+    ? `${outstanding ? ';' : ''} ${failedToWrite} store write failure(s)`
     : '';
   // An incomplete manifest means the denominator is only what this peer managed
   // to advertise before its metadata phase ran out, not what the graph holds —
@@ -124,15 +136,18 @@ export function swmShortfallClause(
   // Scoped to "Shared memory" throughout: continuation passes repeat the
   // shared-memory peer walk only, and the wording must not suggest the durable
   // plane was retried.
-  // "fetched", NOT "verified": `snapshotsResolved` counts refs retrieved and
-  // digest-valid in the blob cache, which is not the same as Knowledge Assets
-  // WRITTEN. Rendering it as "verified" would report "250/250 snapshots
-  // verified" on a graph where every write failed and nothing landed — the
-  // flattering direction, and undetectable by the reader.
+  // "materialized", NOT "fetched": `snapshotsResolved` counts refs whose
+  // Knowledge Assets are WRITTEN and locally visible, not refs sitting valid in
+  // the blob cache. Rendering it as "fetched" reported "250/250 snapshots
+  // fetched" on a graph where every write failed and nothing landed — the
+  // flattering direction, and undetectable by the reader. The word has to track
+  // the producer: `snapshotsResolved` was redefined to mean materialized so the
+  // capability gate could not be fooled by a cached-but-unwritten round, and
+  // this sentence is the same number's operator-facing face.
   return ` (Shared memory: ${coverage.snapshotsResolved}/${coverage.snapshotsTotal}`
-    + ` snapshots fetched from peer …${coverage.peerIdSuffix}`
+    + ` snapshots materialized from peer …${coverage.peerIdSuffix}`
     + ` after ${passes} ${passes === 1 ? 'pass' : 'passes'};`
-    + `${retrieval}${writes}.)${lowerBound}${stopped}`;
+    + `${outstanding}${writes}.)${lowerBound}${stopped}`;
 }
 
 export type ContextGraphReadinessStore = Pick<

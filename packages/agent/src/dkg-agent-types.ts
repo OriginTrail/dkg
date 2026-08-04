@@ -1026,7 +1026,17 @@ export interface SwmSnapshotCoverage {
   contextGraphId: string;
   /** Last 8 chars of the peer id this whole record came from. */
   peerIdSuffix: string;
-  /** Snapshot refs already valid locally or fetched in this round. */
+  /**
+   * Snapshot refs whose Knowledge Assets are MATERIALIZED — written and locally
+   * visible — either already present before this round or made visible by it.
+   *
+   * Not "fetched". A ref sitting valid in the blob cache whose write failed does
+   * NOT count here, and that is deliberate: the capability gate reads this field
+   * to decide whether a peer still owes us anything, and a round that cached
+   * every ref while writing none would otherwise report `N/N`, drop the peer as
+   * satisfied, and disable the retry loop in exactly the failure class it exists
+   * for.
+   */
   snapshotsResolved: number;
   /** Snapshot refs declared by this peer's verified SWM metadata. */
   snapshotsTotal: number;
@@ -1036,26 +1046,41 @@ export interface SwmSnapshotCoverage {
    * denominator is a lower bound.
    */
   manifestComplete: boolean;
+  /**
+   * Refs NOT materialized: `snapshotsTotal - snapshotsResolved`, by
+   * construction, so `resolved + missing === total` always holds.
+   *
+   * Covers both causes at once — never fetched, and fetched-but-unwritten. It is
+   * NOT a retrieval-only count, and it must never be added to
+   * `materializationFailures`; every unwritten ref is already in here.
+   */
   missingCount: number;
   /**
    * Bounded identifiers for the shortfall — a public peer controls manifest
    * size, so this is a sample, never the full inventory. Always drawn from the
-   * same round as the counts above.
+   * same round as the counts above, and deduplicated, so it can never exceed
+   * `missingCount`.
    */
   missingSample: string[];
   /**
-   * Snapshots that FETCHED and digest-verified but could not be written to the
-   * store.
+   * Descriptor writes that FAILED after their snapshot fetched and
+   * digest-verified — a store error inside the KA write lock, the failure class
+   * the G7 repair exists for, likeliest under the same store pressure that
+   * produces incomplete rounds.
    *
-   * A separate axis from `missingCount`, which measures retrieval only. A round
-   * can retrieve every declared ref (`missingCount === 0`) and still fail to
-   * materialize some of them — a store error inside the KA write lock — which
-   * is exactly the failure class the G7 repair exists for, and is likeliest
-   * under the same store pressure that produces incomplete rounds.
+   * A CAUSE indicator for `missingCount`, not a second disjoint count. Those
+   * refs are already counted as missing; this field says the shortfall is a
+   * store problem rather than a network one, which is what sends an operator to
+   * the right place.
    *
-   * Kept separate because the two send an operator to different places: "we
-   * could not fetch it" is a network and peer-set problem; "we fetched it and
-   * could not write it" is a store problem.
+   * Note the unit: this counts failing DESCRIPTORS while `missingCount` counts
+   * REFS, and one ref can carry several descriptors. Neither is a subset count
+   * of the other, so never render them as "N of which K".
+   *
+   * `materializationFailures > 0` with `missingCount === 0` is unrepresentable:
+   * a ref with a failing descriptor is excluded from the materialized set, which
+   * forces `resolved < total`. A fixture asserting that pair is testing a state
+   * the producer cannot emit.
    */
   materializationFailures: number;
   /**
