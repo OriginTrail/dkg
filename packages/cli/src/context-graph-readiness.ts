@@ -1,4 +1,4 @@
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, SwmSnapshotCoverage } from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type {
   ContextGraphReadinessProvenance,
@@ -17,6 +17,57 @@ import {
 export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
 
 export const CONTEXT_GRAPH_READINESS_VERSION = 1;
+
+/**
+ * Identifiers named in the terminal shortfall clause. The producer already caps
+ * the sample; this bounds the SENTENCE independently, so a future producer
+ * change cannot silently grow an operator-facing error string.
+ */
+const SWM_SHORTFALL_SAMPLE_LIMIT = 10;
+
+/**
+ * The shared-memory shortfall clause appended to the incomplete-progress
+ * terminal message.
+ *
+ * Every figure comes from ONE {@link SwmSnapshotCoverage} record — the counts,
+ * the peer they are attributed to, and the sample — so the sentence can never
+ * describe a graph state no peer reported, and the named Knowledge Assets
+ * always belong to the manifest the counts came from.
+ *
+ * Returns `''` whenever there is nothing to add, which is what keeps the base
+ * sentence byte-identical on every other path. Two cases qualify: no snapshot
+ * inventory was observed at all, and a selected manifest that was fully
+ * resolved — in the latter the shortfall lies on another plane, and reporting
+ * "0 outstanding" beside an `unreachable` verdict would misdirect the reader.
+ */
+export function swmShortfallClause(
+  coverage: SwmSnapshotCoverage | undefined,
+  continuationPasses: number | undefined,
+): string {
+  if (!coverage || coverage.missingCount <= 0) return '';
+
+  // `continuationPasses` counts the REPEATS, so the walk itself is one more.
+  const passes = (continuationPasses ?? 0) + 1;
+  const sample = coverage.missingSample.slice(0, SWM_SHORTFALL_SAMPLE_LIMIT);
+  const unnamed = coverage.missingCount - sample.length;
+  const named = sample.length > 0
+    ? `, including ${sample.join(', ')}${unnamed > 0 ? ` (+${unnamed} more)` : ''}`
+    : '';
+  // An incomplete manifest means the denominator is only what this peer managed
+  // to advertise before its metadata phase ran out, not what the graph holds.
+  // Presenting it as the total would understate the shortfall.
+  const lowerBound = coverage.manifestComplete
+    ? ''
+    : ` The peer's snapshot manifest was itself incomplete, so ${coverage.snapshotsTotal} is a lower bound.`;
+
+  // Scoped to "Shared memory" throughout: continuation passes repeat the
+  // shared-memory peer walk only, and the wording must not suggest the durable
+  // plane was retried.
+  return ` (Shared memory: ${coverage.snapshotsResolved}/${coverage.snapshotsTotal}`
+    + ` snapshots verified from peer …${coverage.peerIdSuffix}`
+    + ` after ${passes} ${passes === 1 ? 'pass' : 'passes'};`
+    + ` ${coverage.missingCount} outstanding${named}.)${lowerBound}`;
+}
 
 export type ContextGraphReadinessStore = Pick<
   DashboardDB,
@@ -373,7 +424,16 @@ export function classifyContextGraphCatchupReadiness(input: {
     if (missingGraphProof || missingRequestedSharedMemory) {
       jobStatus = 'unreachable';
       if (madeIncompleteProgress) {
-        error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+        // The base sentence is byte-identical to what it has always been; the
+        // shortfall is APPENDED. This is the r26 terminal — "some verified data
+        // landed, the plane is still unready" — and it was the one message that
+        // could not say WHAT was missing even though the answer was computable
+        // in memory at the moment the round gave up.
+        error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.'
+          + swmShortfallClause(
+            result.diagnostics?.sharedMemory?.swmCoverage,
+            result.diagnostics?.sharedMemory?.continuationPasses,
+          );
       } else if (input.isPrivate && missingGraphProof) {
         error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
       } else if (input.isPrivate) {

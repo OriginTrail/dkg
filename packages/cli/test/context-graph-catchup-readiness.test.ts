@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
+import type { SwmSnapshotCoverage } from '@origintrail-official/dkg-agent';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
   classifyContextGraphCatchupReadiness,
+  swmShortfallClause,
 } from '../src/context-graph-readiness.js';
 
 function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
@@ -702,4 +704,138 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
     expect(c.jobStatus).toBe('done');
     expect(c.error).toBeUndefined();
   });
+});
+
+/**
+ * The shortfall clause Chunk 5 appends. Kept separate from T16 above, which
+ * pins the ten base strings: T16 asserts the incomplete-progress message as a
+ * PREFIX, so it is satisfied by that prefix followed by anything at all — it
+ * cannot see whether this clause is correct, malformed, or absent. These rows
+ * are the ones that can.
+ */
+describe('T16b — the shared-memory shortfall clause (#2050)', () => {
+  const INCOMPLETE_PROGRESS = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+
+  const r26: SwmSnapshotCoverage = {
+    contextGraphId: 'medical-research',
+    peerIdSuffix: 'abcd1234',
+    snapshotsResolved: 178,
+    snapshotsTotal: 250,
+    manifestComplete: true,
+    missingCount: 72,
+    missingSample: ['did:dkg:ka:one', 'did:dkg:ka:two'],
+  };
+
+  it('names the counts, the peer, the pass count and the outstanding work', () => {
+    expect(swmShortfallClause(r26, 2)).toBe(
+      ' (Shared memory: 178/250 snapshots verified from peer …abcd1234 after 3 passes;'
+      + ' 72 outstanding, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
+    );
+  });
+
+  it('says "1 pass" when the walk was never repeated', () => {
+    // `continuationPasses` counts the REPEATS, so zero repeats is still one walk.
+    expect(swmShortfallClause(r26, 0)).toContain('after 1 pass;');
+    expect(swmShortfallClause(r26, undefined)).toContain('after 1 pass;');
+  });
+
+  it('adds nothing when there is no shortfall to report', () => {
+    // Both must be exactly '' or the base sentence stops being byte-identical
+    // on every path that has nothing to say. The second case matters most: a
+    // fully-resolved manifest beside an `unreachable` verdict means the
+    // shortfall is on another plane, and "0 outstanding" would misdirect.
+    expect(swmShortfallClause(undefined, 3)).toBe('');
+    expect(swmShortfallClause({ ...r26, missingCount: 0, missingSample: [] }, 3)).toBe('');
+  });
+
+  it('calls an incomplete manifest a lower bound rather than a total', () => {
+    expect(swmShortfallClause({ ...r26, manifestComplete: false }, 0))
+      .toContain("The peer's snapshot manifest was itself incomplete, so 250 is a lower bound.");
+  });
+
+  it('caps the named identifiers and accounts for the ones it omits', () => {
+    const many = Array.from({ length: 25 }, (_, i) => `did:dkg:ka:${i}`);
+    const clause = swmShortfallClause({ ...r26, missingCount: 90, missingSample: many }, 1);
+
+    // Exactly ten named — ka:0 through ka:9, the tenth followed by the marker
+    // rather than a comma — and the marker accounts for the other eighty.
+    expect(clause).toContain('did:dkg:ka:9 (+80 more)');
+    expect(clause).not.toContain('did:dkg:ka:10');
+    expect(clause.match(/did:dkg:ka:\d+/g)).toHaveLength(10);
+  });
+
+  it('drops the marker when every outstanding ref is named', () => {
+    const clause = swmShortfallClause(
+      { ...r26, missingCount: 2, missingSample: ['did:dkg:ka:one', 'did:dkg:ka:two'] },
+      0,
+    );
+
+    expect(clause).toContain('2 outstanding, including did:dkg:ka:one, did:dkg:ka:two.)');
+    expect(clause).not.toContain('more)');
+  });
+
+  it('scopes every figure to shared memory, never implying a durable retry', () => {
+    // Continuation passes repeat the shared-memory peer walk ONLY. A reader
+    // must not infer the durable plane was retried three times.
+    const clause = swmShortfallClause(r26, 2);
+
+    expect(clause).toContain('Shared memory:');
+    expect(clause.toLowerCase()).not.toContain('durable');
+  });
+
+  it('appends to the incomplete-progress terminal, leaving its sentence byte-identical', () => {
+    const result = swmIncompleteProgress();
+    result.diagnostics!.sharedMemory.swmCoverage = r26;
+    result.diagnostics!.sharedMemory.continuationPasses = 2;
+
+    const c = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup: { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 },
+    });
+
+    expect(c.jobStatus).toBe('unreachable');
+    // Whole-string equality: the prefix pin in T16 cannot see the append.
+    expect(c.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
+    expect(c.error).toContain('178/250');
+    expect(c.error).toContain('72 outstanding');
+  });
+
+  it('leaves that terminal byte-identical when the round reported no coverage', () => {
+    const c = classifyContextGraphCatchupReadiness({
+      result: swmIncompleteProgress(),
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup: { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 },
+    });
+
+    expect(c.error).toBe(INCOMPLETE_PROGRESS);
+  });
+
+  /** A responding round that stored verified SWM data without completing the plane. */
+  function swmIncompleteProgress(): CatchupJobResult {
+    const plane = () => ({
+      fetchedMetaTriples: 0, fetchedDataTriples: 0, insertedMetaTriples: 0,
+      insertedDataTriples: 0, bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
+      completedPhases: 0, checkpointAdvances: 0, emptyResponses: 0, metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0, rejectedKcs: 0, droppedDataTriples: 0,
+      failedPeers: 0, failedPhases: 0, deniedPhases: 0,
+    });
+    const result = {
+      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+      peersTried: 1, peersResponded: 1, peersSucceeded: 1,
+      dataSynced: 0, sharedMemorySynced: 5, denied: false, deniedPeers: 0,
+      cleanPlaneCompletions: {
+        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+      },
+      diagnostics: { noProtocolPeers: 0, durable: plane(), sharedMemory: plane() },
+    } as unknown as CatchupJobResult;
+    // Progress without proof: this is what `madeIncompleteProgress` reads.
+    result.diagnostics!.sharedMemory.insertedDataTriples = 5;
+    return result;
+  }
 });
