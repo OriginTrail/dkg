@@ -3649,18 +3649,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     const fingerprint = this.vmReconcileRotationFingerprint(target);
     let record = this.vmReconcileRotationState.get(slotKey);
+    if (record && record.fingerprint !== fingerprint) {
+      this.vmReconcileRotationState.delete(slotKey);
+      record = undefined;
+    }
     if (candidatePeerIds.length === 0) {
-      // An empty observed roster cannot prove absence. Drop all partial credit
-      // so a later connection begins a genuinely fresh cycle.
+      // A transient empty socket view cannot invalidate a completed proof: doing
+      // so would redial and refetch every sweep after ordinary disconnects.
+      // Partial evidence is different and remains fail-open; drop it so the next
+      // non-empty roster starts a genuinely fresh cycle.
+      if (record?.phase === 'backoff' && now < record.nextRetryAt) {
+        this.touchVmReconcileRotationRecord(slotKey, record);
+        return { slotKey, record, suppressed: true };
+      }
       this.vmReconcileRotationState.delete(slotKey);
       return { slotKey, suppressed: false };
     }
 
-    if (!record || record.fingerprint !== fingerprint) {
-      const replacingSlot = record !== undefined;
-      if (replacingSlot) {
-        this.vmReconcileRotationState.delete(slotKey);
-      } else if (!this.makeRoomForVmReconcileRotationRecord()) {
+    if (!record) {
+      if (!this.makeRoomForVmReconcileRotationRecord()) {
         // Stable-capacity overflow remains fail-open. It still participates in
         // ordinary exact recovery, but owns no cursor/absence evidence and can
         // neither suppress nor evict an in-progress collection.
@@ -4255,18 +4262,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (usedPeerIds.has(candidatePeerId) || unavailablePeerIds.has(candidatePeerId)) continue;
         const connectedPeer = connectedByPeerId.get(candidatePeerId);
         recoveryWorkRan = true;
-        if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) {
+        const protocolReady = connectedPeer
+          ? await this.waitForSyncProtocol(connectedPeer)
+          : false;
+        if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+        if (!connectedPeer || !protocolReady) {
           unavailablePeerIds.add(candidatePeerId);
           continue;
         }
         // Network boundary: a merely-connected peer is not necessarily
         // admitted to this DKG network. Never send an authenticated exact
         // request to an unverified or rejected peer.
-        if (!(await this.ensurePeerAdmittedForRecovery(
+        const peerAdmitted = await this.ensurePeerAdmittedForRecovery(
           candidatePeerId,
           ctx,
           'VM exact fetch',
-        ))) {
+        );
+        if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+        if (!peerAdmitted) {
           unavailablePeerIds.add(candidatePeerId);
           continue;
         }
@@ -4294,6 +4307,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // item rotates behind untouched work so one unavailable KA cannot spend
       // every peer budget and starve the rest of the queue.
       if (attemptedOrdinals.has(target.ordinal)) break;
+      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
       this.emitReplication({
         contextGraphId: localCgId,
         onChainCgId: onChainCgId.toString(),
@@ -4332,7 +4346,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
 
-      if (!isTargetCurrent()) break;
+      // The exact request may have completed after unsubscribe, rebind, or
+      // shutdown. Its authenticated materialization is already fail-closed,
+      // but no process-local evidence or cooldown may outlive that lifecycle.
+      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
       const outcome = await this.reconcileChainOrdinal(
         localCgId,
         onChainCgId,
@@ -4340,6 +4357,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         headBlock,
         { isTargetCurrent, deferActiveFetch: true },
       );
+      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
       outcomes.set(target.ordinal, outcome);
       if (outcome.status === 'pending' && outcome.recovery) {
         if (!installedRecord) continue;
@@ -4384,6 +4402,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Only a batch that reached a peer and recovered nothing retains the
     // cooldown. Re-anchor that short damper at completion: a slow or legacy
     // response may already have outlived the timestamp taken before transfer.
+    if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (!recoveryWorkRan || recoveredAny) {

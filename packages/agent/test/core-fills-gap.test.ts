@@ -3305,6 +3305,35 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileRotationState.size).toBe(0);
   });
 
+  it('closes exact-recovery rotation state through the public stop path', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRotationPublicStop', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const target = vmRecoveryTarget('rotation-public-stop', 0, 'stop');
+    const peer = '12D3KooWRotationPublicStop';
+    (internals as any).started = true;
+    (internals as any).node = {
+      peerId: '12D3KooWRotationPublicStopLocal',
+      libp2p: { getPeers: () => [] },
+      stop: vi.fn(async () => undefined),
+    };
+    (internals as any).messenger = { stopOutboxDrain: vi.fn(async () => undefined) };
+    const record = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peer], 100,
+    ).record;
+    expect((internals as any).vmReconcileRotationState.size).toBe(1);
+
+    await agent.stop();
+
+    expect((internals as any).vmReconcileRotationClosed).toBe(true);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, peer, 'clean-absent', [peer], record,
+    );
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    agent = null;
+  });
+
   it('clears the complete proof cycle across capped-roster replacement and rejoin', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmRotationReplacement', chainAdapter: chain });
@@ -3402,6 +3431,65 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(shrunkBackoff.record).toMatchObject({ phase: 'collecting', failures: 1 });
     expect([...shrunkBackoff.record.attemptedPeerIds]).toEqual([]);
     expect([...shrunkBackoff.record.cleanAbsentPeerIds]).toEqual([]);
+  });
+
+  it('preserves active backoff across an empty socket view but drops partial evidence', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmEmptyRoster', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peer = '12D3KooWEmptyRosterPeer';
+    const otherPeer = '12D3KooWEmptyRosterOther';
+    const localCgId = '0x0000000000000000000000000000000000000001/empty-roster';
+    (internals as any).node = {
+      peerId: '12D3KooWEmptyRosterLocal',
+      libp2p: { getConnections: () => [] },
+    };
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+
+    const partialTarget = vmRecoveryTarget(localCgId, 0, 'partial-empty');
+    const partial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [peer, otherPeer], now,
+    ).record;
+    (internals as any).settleVmReconcileRotationAttempt(
+      partialTarget, peer, 'incomplete', [peer, otherPeer], partial,
+    );
+    expect([...partial.attemptedPeerIds]).toEqual([peer]);
+    const partialKey = (internals as any).vmReconcileRotationSlotKey(partialTarget);
+    const emptyPartial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [], now + 1,
+    );
+    expect(emptyPartial.suppressed).toBe(false);
+    expect((internals as any).vmReconcileRotationState.has(partialKey)).toBe(false);
+    const rejoinedPartial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [peer], now + 2,
+    ).record;
+    expect([...rejoinedPartial.attemptedPeerIds]).toEqual([]);
+    expect([...rejoinedPartial.cleanAbsentPeerIds]).toEqual([]);
+
+    const backoffTarget = vmRecoveryTarget(localCgId, 1, 'backoff-empty');
+    const backoff = (internals as any).prepareVmReconcileRotationTarget(
+      backoffTarget, [peer], now,
+    ).record;
+    (internals as any).settleVmReconcileRotationAttempt(
+      backoffTarget, peer, 'clean-absent', [peer], backoff,
+    );
+    expect(backoff.phase).toBe('backoff');
+    now += 1;
+
+    const resolveCurators = vi.fn();
+    (internals as any).resolveCuratorPeerIdsForCg = resolveCurators;
+    const fetch = vi.fn();
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [backoffTarget], 100, () => true,
+    );
+    expect(result.attemptedOrdinals).toEqual([]);
+    expect(resolveCurators).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect((internals as any).vmReconcileRotationState.get(
+      (internals as any).vmReconcileRotationSlotKey(backoffTarget),
+    )).toBe(backoff);
   });
 
   it('ignores stale exact-recovery targets before creating state or fetching', async () => {
@@ -3540,6 +3628,112 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
     expect(fetch.calls).toEqual([]);
     expect((internals as any).vmReconcileCuratorPeersByCg.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it.each(['protocol', 'admission'] as const)(
+    'does not start stale transport after invalidation during the %s wait',
+    async (stage) => {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmBoundaryInvalidation', chainAdapter: chain });
+      const internals = agent as unknown as AgentInternals;
+      const localCgId = `0x0000000000000000000000000000000000000001/${stage}-invalidation`;
+      const peer = `12D3KooW${stage}InvalidationPeer`;
+      const connectedPeer = { toString: () => peer };
+      (internals as any).node = {
+        peerId: '12D3KooWBoundaryInvalidationLocal',
+        libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+      };
+      (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+        peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+      });
+      (internals as any).ensurePeerConnected = async () => undefined;
+      (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+      let releaseBoundary!: () => void;
+      let markBoundaryStarted!: () => void;
+      const boundaryStarted = new Promise<void>((resolve) => { markBoundaryStarted = resolve; });
+      const boundaryRelease = new Promise<void>((resolve) => { releaseBoundary = resolve; });
+      (internals as any).waitForSyncProtocol = async () => {
+        if (stage === 'protocol') {
+          markBoundaryStarted();
+          await boundaryRelease;
+        }
+        return true;
+      };
+      (internals as any).ensurePeerAdmittedForRecovery = async () => {
+        if (stage === 'admission') {
+          markBoundaryStarted();
+          await boundaryRelease;
+        }
+        return true;
+      };
+      const fetch = vi.fn();
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+      let current = true;
+      const target = vmRecoveryTarget(localCgId, 0, `${stage}-invalidation`);
+      const recovery = internals.recoverVmReconcileBatch(
+        localCgId, 1n, [target], 100, () => current,
+      );
+      await boundaryStarted;
+      current = false;
+      (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+      releaseBoundary();
+
+      await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+      expect(fetch).not.toHaveBeenCalled();
+      expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
+      expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    },
+  );
+
+  it('does not restore cooldown after invalidation during exact transport', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmTransportInvalidation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/transport-invalidation';
+    const peer = '12D3KooWTransportInvalidationPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWTransportInvalidationLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let releaseFetch!: () => void;
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
+    const fetchRelease = new Promise<void>((resolve) => { releaseFetch = resolve; });
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      markFetchStarted();
+      await fetchRelease;
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'clean-absent',
+      };
+    };
+    const reconcile = vi.fn();
+    (internals as any).reconcileChainOrdinal = reconcile;
+    let current = true;
+    const target = vmRecoveryTarget(localCgId, 0, 'transport-invalidation');
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => current,
+    );
+    await fetchStarted;
+    current = false;
+    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+    releaseFetch();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(reconcile).not.toHaveBeenCalled();
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
     expect((internals as any).vmReconcileRotationState.size).toBe(0);
   });
 
