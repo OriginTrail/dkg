@@ -149,6 +149,34 @@ function capablePeersForNextPass(coverageByPeer: Map<string, SwmSnapshotCoverage
 }
 
 /**
+ * Emit one observability line through the host, and NEVER let it affect the job.
+ *
+ * The Worker has no logger, so the line travels as an RPC — and an RPC can
+ * reject. A catch-up that failed because a log line could not be delivered would
+ * be a strictly worse outcome than a catch-up with a missing log line, so the
+ * rejection is swallowed here rather than unwinding `runCatchup`. This is also
+ * what keeps a host that does not implement the method (older host, or a test
+ * double that rejects unknown invokes) from turning observability into a
+ * dependency.
+ */
+async function logPassLine(message: string): Promise<void> {
+  await invoke<null>('logCatchupPass', message).catch(() => {});
+}
+
+/**
+ * Render the reported coverage for the per-pass log line, naming the peer it came
+ * from. Coverage is always attributed: the record is selected whole from one
+ * round, so `178/250` and the peer that said it belong together, and a line that
+ * printed the counts without the peer would invite reading them as a fleet total.
+ */
+function describeCoverage(coverage: SwmSnapshotCoverage | undefined): string {
+  if (!coverage) return 'no peer reported snapshot coverage';
+  const manifest = coverage.manifestComplete ? '' : ' (manifest truncated; total is a lower bound)';
+  return `${coverage.snapshotsResolved}/${coverage.snapshotsTotal} snapshots from `
+    + `...${coverage.peerIdSuffix}${manifest}`;
+}
+
+/**
  * The walk's coverage high-water reading: the best any single peer reported.
  *
  * A progress signal, never a correctness denominator — peers describe different
@@ -693,10 +721,28 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // stop" is the question a partial catch-up actually raises, and Chunk 5's
       // terminal message renders this.
       diagnostics.sharedMemory.continuationStopReason = decision.reason;
-      if (!decision.continue) break;
+      if (!decision.continue) {
+        // Logged even when no extra pass ran. "Why did it stop" is the question a
+        // partial catch-up raises, and the answer is otherwise only reconstructable
+        // from counters — `no-capable-peers` after a converged walk and after an
+        // abandoned one look identical in the numbers.
+        await logPassLine(`Catch-up SWM pass loop for "${request.contextGraphId}" `
+          + `stopped after ${1 + continuationPasses} pass(es): ${decision.reason}; `
+          + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
+        break;
+      }
       coverageHighWaterMark = lastPassCoverage;
       continuationPasses += 1;
+      const passStartedMs = catchupPassNowMs();
       await runWalk(decision.peers, { sharedMemoryOnly: true, deadlineMs: passDeadlineMs });
+      // Coverage BEFORE and AFTER on one line: a pass whose elapsed time is large
+      // and whose coverage did not move is the signature of a job that is not
+      // converging, and that is not visible from either number alone.
+      await logPassLine(`Catch-up SWM pass ${1 + continuationPasses} for `
+        + `"${request.contextGraphId}": ${decision.peers.length} capable peer(s), coverage `
+        + `${lastPassCoverage} -> ${highestResolvedCoverage(lastCoverageByPeer)} resolved, `
+        + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
+        + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
     }
     if (continuationPasses > 0) {
       diagnostics.sharedMemory.continuationPasses = continuationPasses;

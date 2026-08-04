@@ -14,7 +14,7 @@ import {
   type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -1142,6 +1142,16 @@ class WorkerCatchupRunner implements CatchupRunner {
             ),
           },
         );
+      }
+      case 'logCatchupPass': {
+        // The pass loop runs inside the Worker, which has no logger of its own,
+        // so the line is FORMATTED there — where the coverage records live — and
+        // only emitted here. Deliberately `info`: an operator diagnosing a job
+        // that will not converge needs this without raising the log level, and a
+        // catch-up emits at most a handful of these.
+        const [message] = args as [string];
+        agent.log.info(createOperationContext('sync'), message);
+        return null;
       }
       case 'finalizeCatchup': {
         const [contextGraphId] = args as [string, number, number];
