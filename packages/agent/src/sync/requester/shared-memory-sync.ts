@@ -16,6 +16,13 @@ import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializ
 
 const DKG = 'http://dkg.io/ontology/';
 
+/**
+ * Cap on identifiers reported for an unresolved manifest. A public peer chooses
+ * how many snapshots it advertises, so an unbounded list would let it size a
+ * structure on this node; the exact figure travels as `missingCount`.
+ */
+const PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT = 10;
+
 export interface SharedMemorySyncSummary {
   insertedTriples: number;
   fetchedMetaTriples: number;
@@ -503,9 +510,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       //
       // Across a MULTI-CG call the reduction keeps exactly ONE graph's record,
       // named by its `contextGraphId`; the others are dropped. Foreground
-      // catch-up always passes a single CG (`dkg-agent-lifecycle.ts:5982`), so
-      // that only bites the on-connect fan-out, where this field is a
-      // diagnostic rather than a decision input.
+      // catch-up always passes a single CG (`syncPublicContextGraph` in
+      // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
+      // only bites the on-connect fan-out, where this field is a diagnostic
+      // rather than a decision input.
       if (snapshotSync.totalSnapshots > 0) {
         summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
           contextGraphId: pid,
@@ -516,9 +524,22 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           // also the state in which `snapshotDescriptorsByRef` is empty (:270)
           // so nothing materializes at all.
           manifestComplete: wsMetaResult.completed,
-          missingCount: snapshotSync.totalSnapshots - snapshotSync.readySnapshots,
-          missingSample: [],
+          // Both come from the snapshot walk itself, so the sample always
+          // names refs counted by `missingCount` in this same round.
+          missingCount: snapshotSync.missingCount,
+          missingSample: snapshotSync.missingSample,
         });
+      }
+      // A voluntary yield is OUR budget decision, not the peer's fault. It is
+      // recorded here and deliberately kept out of `timedOutPhases`, which
+      // feeds `backoffWorthyFailure` and would back the peer off for it. It is
+      // NOT kept out of `failedPhases` below: the round really did not complete
+      // the plane, and without that the round classifies as clean and reports
+      // the graph `done` while Knowledge Assets are still missing.
+      if (snapshotSync.yieldedAtDeadline) {
+        summary.snapshotPlaneIncomplete += 1;
+        logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
+          + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
       }
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       // A snapshot that verified but could not be written must be treated
@@ -826,7 +847,16 @@ export async function syncPublicSnapshotsForMeta(params: {
     checkpointAdvances,
     readySnapshots,
     totalSnapshots: snapshots.length,
-    completed: true,
+    // The ONLY completion expression, and it is derived rather than asserted.
+    // Every path that gives up on a ref — the deadline yield, a fetch that did
+    // not complete, and the skipped short prefix — routes through
+    // `noteMissing`, so a round can no longer fall out of the loop claiming
+    // success while having abandoned work. A hardcoded `true` here is exactly
+    // how skip-and-continue would have silently reported a complete manifest.
+    completed: missingCount === 0,
+    missingCount,
+    missingSample,
+    yieldedAtDeadline,
   };
 }
 

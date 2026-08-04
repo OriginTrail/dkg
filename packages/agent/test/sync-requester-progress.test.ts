@@ -1596,7 +1596,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
       snapshotsTotal: 2,
       manifestComplete: true,
       missingCount: 1,
-      missingSample: [],
+      // The ref that was never served, named — not an empty placeholder. The
+      // sample and the count come from the same walk, so they cannot disagree.
+      missingSample: ['digest-never-served'],
     });
   });
 });
