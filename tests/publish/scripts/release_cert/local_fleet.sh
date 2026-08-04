@@ -14,7 +14,7 @@
 #   RC_FLEET_CG             CG to publish into (default: this week's public CG)
 set -euo pipefail
 
-BASE_PORT="${RC_FLEET_BASE_PORT:-9411}"
+BASE_PORT="${RC_FLEET_BASE_PORT:-$((21000 + RANDOM % 15000))}"
 WS="${WORKSPACE:-$(pwd)}/rc-fleet"
 HARNESS_DIR="$(cd "$(dirname "$0")/../.." && pwd)"   # tests/publish
 
@@ -57,14 +57,18 @@ EOF
   echo "• $role starting (v$version, port $port)"
 }
 
-wait_node() { # role
-  local role="$1" port="${PORT_OF[$1]}"
+wait_node() { # role — accepts only OUR node (name check guards against port squatters)
+  local role="$1"
+  local port="${PORT_OF[$role]}"
   for _ in $(seq 1 72); do
-    if curl -sf -m 4 "http://127.0.0.1:$port/api/status" > /dev/null; then
+    local got
+    got="$(curl -sf -m 4 "http://127.0.0.1:$port/api/status" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).name||"")}catch{console.log("")}})' 2>/dev/null || true)"
+    if [ "${got#rc-fleet-$role-}" != "$got" ]; then
       TOKEN_OF[$role]="$(grep -v "^#" "${HOME_OF[$role]}/auth.token" | grep -v "^$" | tail -1)"
       echo "✅ $role up on :$port"
       return 0
     fi
+    if [ -n "$got" ]; then echo "❌ port $port occupied by foreign node '$got' — collision on host network"; return 1; fi
     sleep 5
   done
   echo "❌ $role never came up"; tail -30 "$WS/$role.log"; return 1
