@@ -1044,6 +1044,21 @@ export interface SwmSnapshotCoverage {
    */
   missingSample: string[];
   /**
+   * Snapshots that FETCHED and digest-verified but could not be written to the
+   * store.
+   *
+   * A separate axis from `missingCount`, which measures retrieval only. A round
+   * can retrieve every declared ref (`missingCount === 0`) and still fail to
+   * materialize some of them — a store error inside the KA write lock — which
+   * is exactly the failure class the G7 repair exists for, and is likeliest
+   * under the same store pressure that produces incomplete rounds.
+   *
+   * Kept separate because the two send an operator to different places: "we
+   * could not fetch it" is a network and peer-set problem; "we fetched it and
+   * could not write it" is a store problem.
+   */
+  materializationFailures: number;
+  /**
    * This round came from the metadata-resolved curator. Set only by the
    * catch-up walk, which knows peer roles; the agent-side sync does not.
    */

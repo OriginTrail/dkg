@@ -728,8 +728,8 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
 
   it('names the counts, the peer, the pass count and the outstanding work', () => {
     expect(swmShortfallClause(r26, 2)).toBe(
-      ' (Shared memory: 178/250 snapshots verified from peer …abcd1234 after 3 passes;'
-      + ' 72 outstanding, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
+      ' (Shared memory: 178/250 snapshots fetched from peer …abcd1234 after 3 passes;'
+      + ' 72 not retrieved, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
     );
   });
 
@@ -770,7 +770,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
       0,
     );
 
-    expect(clause).toContain('2 outstanding, including did:dkg:ka:one, did:dkg:ka:two.)');
+    expect(clause).toContain('2 not retrieved, including did:dkg:ka:one, did:dkg:ka:two.)');
     expect(clause).not.toContain('more)');
   });
 
@@ -800,7 +800,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     // Whole-string equality: the prefix pin in T16 cannot see the append.
     expect(c.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
     expect(c.error).toContain('178/250');
-    expect(c.error).toContain('72 outstanding');
+    expect(c.error).toContain('72 not retrieved');
   });
 
   it('says why continuation stopped, in words that match the reason', () => {
@@ -952,8 +952,8 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     // it — the producer caps the sample at 10, so a clause without a marker
     // would silently understate every shortfall larger than the cap.
     expect(error.slice(PREFIX.length)).toBe(
-      ' (Shared memory: 178/250 snapshots verified from peer …abcd1234'
-      + ' after 3 passes; 72 outstanding, including ref-a, ref-b (+70 more).)',
+      ' (Shared memory: 178/250 snapshots fetched from peer …abcd1234'
+      + ' after 3 passes; 72 not retrieved, including ref-a, ref-b (+70 more).)',
     );
   });
 
@@ -961,7 +961,7 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     const error = errorFor(shortfallResult());
     expect(error).toContain('178/250');
     expect(error).toContain('…abcd1234');
-    expect(error).toContain('72 outstanding');
+    expect(error).toContain('72 not retrieved');
     // Never a synthetic pair, and never the durable plane: continuation passes
     // repeat the shared-memory walk only.
     expect(error).not.toContain('200/250');
@@ -986,5 +986,69 @@ describe('T16b — the shortfall clause reaches the terminal message', () => {
     const error = errorFor(shortfallResult({ manifestComplete: false }));
     expect(error).toContain('is a lower bound');
     expect(error).toContain('not retried');
+  });
+});
+
+/**
+ * The two shortfall AXES (#2050). `missingCount` measures retrieval; writes are
+ * a separate counter. Gating the clause on retrieval alone made it go silent in
+ * exactly the failure class the G7 repair exists for — every ref fetched
+ * cleanly, some could not be written to the store — so the operator got the
+ * base sentence and nothing at all about shared memory.
+ */
+describe('T16c — retrieval and write shortfalls are reported separately', () => {
+  const base: SwmSnapshotCoverage = {
+    contextGraphId: 'medical-research',
+    peerIdSuffix: 'abcd1234',
+    snapshotsResolved: 250,
+    snapshotsTotal: 250,
+    manifestComplete: true,
+    missingCount: 0,
+    missingSample: [],
+    materializationFailures: 0,
+  };
+
+  it('speaks up when everything fetched but some writes failed', () => {
+    // Pre-fix this returned '' — the one case where shared memory WAS the
+    // problem was the one case the message said nothing about.
+    const clause = swmShortfallClause({ ...base, materializationFailures: 12 }, 0);
+
+    expect(clause).not.toBe('');
+    expect(clause).toContain('12 retrieved but not written to the store');
+  });
+
+  it('never claims snapshots were "verified" when none were written', () => {
+    // `snapshotsResolved` counts refs present and digest-valid in the blob
+    // cache, NOT Knowledge Assets written. Calling that "verified" would report
+    // "250/250 snapshots verified" on a graph where every write failed — wrong
+    // in the flattering direction and undetectable by the reader.
+    const clause = swmShortfallClause({ ...base, materializationFailures: 250 }, 0);
+
+    expect(clause).toContain('250/250 snapshots fetched');
+    expect(clause).not.toContain('verified');
+  });
+
+  it('reports both axes distinctly when both fail', () => {
+    const clause = swmShortfallClause(
+      { ...base, snapshotsResolved: 200, missingCount: 50, missingSample: ['ref-x'], materializationFailures: 7 },
+      1,
+    );
+
+    expect(clause).toContain('50 not retrieved, including ref-x');
+    expect(clause).toContain('7 retrieved but not written to the store');
+    // Separate clauses, not one conflated number: a retrieval shortfall sends
+    // an operator to the network, a write shortfall to the store.
+    expect(clause).toContain('50 not retrieved, including ref-x (+49 more); 7 retrieved but not written');
+  });
+
+  it('still says nothing when both axes are clean', () => {
+    expect(swmShortfallClause(base, 3)).toBe('');
+  });
+
+  it('treats an absent write counter as none known, not as a shortfall', () => {
+    // The record crosses a worker RPC boundary; an older or partial payload
+    // must not force a clause onto a round with nothing to report.
+    const { materializationFailures: _omitted, ...withoutCounter } = base;
+    expect(swmShortfallClause(withoutCounter as SwmSnapshotCoverage, 0)).toBe('');
   });
 });

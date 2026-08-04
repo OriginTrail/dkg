@@ -321,12 +321,48 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     logInfo(ctx, `Stopping SWM sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
     return true;
   };
+  /**
+   * The ONE place a coverage record is built. Both the success path and the
+   * throw path go through it, so a record can never be reassembled in a catch
+   * block from scalars that did not travel together — the failure mode the
+   * whole-record contract exists to prevent.
+   *
+   * `walk` supplies every count as one coherent group; only the round-level
+   * attribution is added here.
+   */
+  const recordSnapshotCoverage = (
+    walk: PublicSnapshotWalkProgress,
+    manifestComplete: boolean,
+    materializationFailures: number,
+    contextGraphId: string,
+  ): void => {
+    // No record for a graph that declared no snapshot refs. `0/0` is not a
+    // shortfall, and a peer with nothing to offer must not look like a peer
+    // that still owes us KAs — an absent record reads as "not capable".
+    if (walk.totalSnapshots <= 0) return;
+    summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
+      contextGraphId,
+      peerIdSuffix: remotePeerId.slice(-8),
+      // Refs FETCHED and digest-valid, which is not the same as Knowledge
+      // Assets written — see `materializationFailures`.
+      snapshotsResolved: walk.readySnapshots,
+      snapshotsTotal: walk.totalSnapshots,
+      manifestComplete,
+      missingCount: walk.missingCount,
+      missingSample: walk.missingSample,
+      materializationFailures,
+    });
+  };
+
   for (const [index, pid] of contextGraphIds.entries()) {
     let peerRespondedForContextGraph = false;
     // Hoisted out of the `try` so the `catch` can still say whether this peer's
     // manifest was whole. Without it a throwing round could only report a
     // denominator with no way to mark it a lower bound.
     let manifestComplete = false;
+    // Likewise: materialization failures recorded before the throw are real and
+    // must reach the coverage record, not be lost with the stack.
+    let materializedFailuresForCg = 0;
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
@@ -620,6 +656,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // the caller keeps the phase incomplete and withholds the metadata
             // that would otherwise certify a graph that was never written.
             materializationFailures += 1;
+            // Mirrored outside the `try` so a later throw cannot lose it.
+            materializedFailuresForCg = materializationFailures;
             logWarn(ctx, `SWM sync failed to materialize snapshot ${snapshotRef} for "${pid}": `
               + `${err instanceof Error ? err.message : String(err)}`);
           }
@@ -672,22 +710,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
       // only bites the on-connect fan-out, where this field is a diagnostic
       // rather than a decision input.
-      if (snapshotSync.totalSnapshots > 0) {
-        summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
-          contextGraphId: pid,
-          peerIdSuffix: remotePeerId.slice(-8),
-          snapshotsResolved: snapshotSync.readySnapshots,
-          snapshotsTotal: snapshotSync.totalSnapshots,
-          // A truncated meta phase makes `totalSnapshots` a lower bound, and is
-          // also the state in which `snapshotDescriptorsByRef` is empty (:270)
-          // so nothing materializes at all.
-          manifestComplete: wsMetaResult.completed,
-          // Both come from the snapshot walk itself, so the sample always
-          // names refs counted by `missingCount` in this same round.
-          missingCount: snapshotSync.missingCount,
-          missingSample: snapshotSync.missingSample,
-        });
-      }
+      recordSnapshotCoverage(snapshotSync, wsMetaResult.completed, materializationFailures, pid);
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -792,16 +815,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `snapshotsResolved`, so it would see a converging peer as stalled and
       // drop it. Recover the walk's own counts and record them here.
       const thrownProgress = readPublicSnapshotWalkProgress(err);
-      if (thrownProgress && thrownProgress.totalSnapshots > 0) {
-        summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
-          contextGraphId: pid,
-          peerIdSuffix: remotePeerId.slice(-8),
-          snapshotsResolved: thrownProgress.readySnapshots,
-          snapshotsTotal: thrownProgress.totalSnapshots,
-          manifestComplete,
-          missingCount: thrownProgress.missingCount,
-          missingSample: thrownProgress.missingSample,
-        });
+      if (thrownProgress) {
+        // Same builder as the success path — the counts arrive as one coherent
+        // group attached by the walk, never reassembled here.
+        recordSnapshotCoverage(thrownProgress, manifestComplete, materializedFailuresForCg, pid);
       }
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
       if (isSyncPermanentRejection(err)) {

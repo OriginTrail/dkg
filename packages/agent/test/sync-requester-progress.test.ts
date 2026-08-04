@@ -1599,6 +1599,8 @@ describe('public SWM snapshot coverage (#2050)', () => {
       // The ref that was never served, named — not an empty placeholder. The
       // sample and the count come from the same walk, so they cannot disagree.
       missingSample: ['digest-never-served'],
+      // Fetch shortfall only — every ref that DID arrive was written.
+      materializationFailures: 0,
     });
   });
 });
@@ -1786,6 +1788,7 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
       manifestComplete: true,
       missingCount: 1,
       missingSample: ['digest-that-throws'],
+      materializationFailures: 0,
     });
     // The walk's invariant survives the failure path too.
     expect(summary.swmCoverage!.snapshotsResolved + summary.swmCoverage!.missingCount)
