@@ -41,14 +41,16 @@ import {
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
 
 describe('resolveRfc64PublicCatalogActivation', () => {
+  const chainIdentity = { chainId: 'otp:20430' };
+
   it('is fail-closed when omitted or explicitly disabled', () => {
-    expect(resolveRfc64PublicCatalogActivation({})).toEqual({
+    expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
       enabled: false,
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: { enabled: false },
-    })).toEqual({
+    }, chainIdentity)).toEqual({
       enabled: false,
       selectedContextGraphs: [],
     });
@@ -67,7 +69,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
           retryIntervalMs: 30_000,
         },
       } as any,
-    });
+    }, chainIdentity);
 
     expect(resolved).toMatchObject({
       enabled: true,
@@ -87,7 +89,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
           acceptedPublicPolicies: [policy('selected-receiver')],
         },
       },
-    });
+    }, chainIdentity);
 
     expect(resolved).toMatchObject({
       enabled: true,
@@ -101,7 +103,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
   it('rejects activation without a selected policy and rejects a second allowlist', () => {
     expect(() => resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: { enabled: true },
-    })).toThrow(/non-empty bootstrap/u);
+    }, chainIdentity)).toThrow(/non-empty bootstrap/u);
     expect(() => resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: {
         enabled: true,
@@ -112,7 +114,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
         },
         bootstrap: { acceptedPublicPolicies: [policy('selected-a')] },
       } as any,
-    })).toThrow(/derived from the bootstrap manifest/u);
+    }, chainIdentity)).toThrow(/derived from the bootstrap manifest/u);
     expect(() => resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: {
         enabled: true,
@@ -120,7 +122,63 @@ describe('resolveRfc64PublicCatalogActivation', () => {
           acceptedPublicPolicies: [policy('selected-a'), policy('selected-a')],
         },
       } as any,
-    })).toThrow(/policies must be unique by graph/u);
+    }, chainIdentity)).toThrow(/policies must be unique by graph/u);
+  });
+
+  it('rejects manifests and deployment overrides for another network', () => {
+    const activation = {
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    };
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      { chainId: undefined },
+    )).toThrow(/requires an effective chain id/u);
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      { chainId: 'none' },
+    )).toThrow(/namespaced numeric EVM chain id/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a', 'base:84532')],
+        },
+      },
+    }, chainIdentity)).toThrow(/policy network differs/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile: {
+          networkId: 'base:84532',
+          assertedAtChainId: '84532',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    }, chainIdentity)).toThrow(/deployment network differs/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile: {
+          networkId: 'otp:20430',
+          assertedAtChainId: '20431',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    }, chainIdentity)).toThrow(/deployment EVM chain id differs/u);
   });
 });
 

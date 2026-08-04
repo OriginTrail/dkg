@@ -36,7 +36,7 @@ Add the following shape to `~/.dkg/config.json`:
             "issuer": "0x...verified-policy-issuer",
             "objectType": "ContextGraphPolicyV1",
             "payload": {
-              "networkId": "otp:...",
+              "networkId": "base:84532",
               "contextGraphId": "0x.../selected-public-cg",
               "governanceChainId": "...",
               "governanceContractAddress": "0x...",
@@ -80,7 +80,8 @@ The example shows structure only. Do not invent or copy placeholder control
 values. The complete `policyEnvelope` must be the output of an independent
 finality/policy verifier. The daemon validates the canonical policy before the
 network transport starts and rejects non-public policies, duplicate selections,
-unknown fields, non-canonical identifiers, and oversized manifests.
+unknown fields, non-canonical identifiers, oversized manifests, and any policy
+whose `networkId` differs from the daemon's effective `chain.chainId`.
 
 `autoPublish` is optional. Configure it on a publisher that should advance its
 catalog after a confirmed public KA mint. A receiver can omit `autoPublish` and
@@ -92,6 +93,8 @@ KA result into a publication failure.
 is omitted, the agent resolves the chain ID and Knowledge Assets Lifecycle
 address from its trusted chain adapter. An explicit override is intended for a
 deterministic harness and must exactly match the selected network.
+Its `networkId` and numeric `assertedAtChainId` are checked against the same
+effective chain identity before subscriptions, stores, or agent startup begin.
 
 ## Verify activation
 

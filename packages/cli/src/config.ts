@@ -513,6 +513,11 @@ export interface ResolvedRfc64PublicCatalogActivationConfig {
   readonly bootstrap?: Rfc64CatalogBootstrapConfig;
 }
 
+export interface Rfc64PublicCatalogActivationChainIdentity {
+  /** Effective chain-adapter network identifier, for example `base:84532`. */
+  readonly chainId: string | undefined;
+}
+
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
@@ -1019,6 +1024,7 @@ export function resolveNetworkDefaultContextGraphs(network: NetworkConfig | null
 /** Resolve the fail-closed operator activation into exact agent inputs. */
 export function resolveRfc64PublicCatalogActivation(
   config: Pick<DkgConfig, 'rfc64PublicCatalog'>,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
 ): ResolvedRfc64PublicCatalogActivationConfig {
   const activation = config.rfc64PublicCatalog;
   if (activation === undefined || activation.enabled === false) {
@@ -1036,6 +1042,23 @@ export function resolveRfc64PublicCatalogActivation(
       'enabled rfc64PublicCatalog requires a non-empty bootstrap.acceptedPublicPolicies manifest',
     );
   }
+  const selectedNetworkId = chainIdentity.chainId;
+  if (typeof selectedNetworkId !== 'string' || selectedNetworkId.length === 0) {
+    throw new TypeError('enabled rfc64PublicCatalog requires an effective chain id');
+  }
+  const selectedEvmChainId = selectedNetworkId.match(/:(0|[1-9][0-9]*)$/u)?.[1];
+  if (selectedEvmChainId === undefined) {
+    throw new TypeError(
+      'enabled rfc64PublicCatalog requires a namespaced numeric EVM chain id',
+    );
+  }
+  for (const { policyEnvelope } of bootstrap.acceptedPublicPolicies) {
+    if (policyEnvelope.payload.networkId !== selectedNetworkId) {
+      throw new TypeError(
+        'rfc64PublicCatalog policy network differs from the daemon effective chain id',
+      );
+    }
+  }
   // Derive daemon subscriptions only from the same canonical, immutable
   // manifest snapshot the agent consumes. The snapshotter owns policy shape,
   // public-access, canonical codec, bounds, and uniqueness validation.
@@ -1050,6 +1073,21 @@ export function resolveRfc64PublicCatalogActivation(
       'rfc64PublicCatalog.autoPublish.contextGraphIds is derived from the bootstrap manifest',
     );
   }
+  const deploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
+    activation.deploymentProfile,
+  );
+  if (deploymentProfile !== undefined) {
+    if (deploymentProfile.networkId !== selectedNetworkId) {
+      throw new TypeError(
+        'rfc64PublicCatalog deployment network differs from the daemon effective chain id',
+      );
+    }
+    if (deploymentProfile.assertedAtChainId !== selectedEvmChainId) {
+      throw new TypeError(
+        'rfc64PublicCatalog deployment EVM chain id differs from the daemon effective chain id',
+      );
+    }
+  }
   const autoPublish = activation.autoPublish === undefined
     ? undefined
     : snapshotRfc64PublicCatalogAutoPublishConfigV1({
@@ -1059,7 +1097,7 @@ export function resolveRfc64PublicCatalogActivation(
   return Object.freeze({
     enabled: true,
     selectedContextGraphs: Object.freeze(selectedContextGraphs),
-    deploymentProfile: snapshotRfc64CatalogDeploymentProfileV1(activation.deploymentProfile),
+    deploymentProfile,
     autoPublish,
     bootstrap,
   });

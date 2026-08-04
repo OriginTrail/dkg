@@ -210,14 +210,14 @@ describe('runDaemonInner StorageACK timing wiring', () => {
 
   it('activates only manifest-selected RFC-64 public CGs and forwards the exact controls', async () => {
     const deploymentProfile = {
-      networkId: 'otp:20430',
-      assertedAtChainId: '20430',
+      networkId: 'evm:100',
+      assertedAtChainId: '100',
       assertedAtKav10Address: `0x${'11'.repeat(20)}`,
     };
     const bootstrap = {
       acceptedPublicPolicies: [
-        rfc64PublicCatalogPolicy('rfc64-selected-a'),
-        rfc64PublicCatalogPolicy('rfc64-selected-b'),
+        rfc64PublicCatalogPolicy('rfc64-selected-a', 'evm:100'),
+        rfc64PublicCatalogPolicy('rfc64-selected-b', 'evm:100'),
       ],
       retryIntervalMs: 30_000,
     };
@@ -254,7 +254,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       rfc64PublicCatalog: {
         enabled: true,
         bootstrap: {
-          acceptedPublicPolicies: [rfc64PublicCatalogPolicy('rfc64-receiver-only')],
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-receiver-only', 'evm:100'),
+          ],
         },
       },
     });
@@ -265,6 +267,31 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       createArg.rfc64PublicCatalogBootstrap.acceptedPublicPolicies[0]
         .policyEnvelope.payload.contextGraphId,
     ).toBe('rfc64-receiver-only');
+  });
+
+  it('rejects a cross-network RFC-64 manifest before DKGAgent.create', async () => {
+    await expect(runDaemonInner(true, {
+      name: 'storage-ack-timing-core-test',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      nodeRole: 'core',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-wrong-network', 'base:84532'),
+          ],
+        },
+      },
+    } as any, Date.now())).rejects.toThrow(/policy network differs/u);
+
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
   });
 
   it('keeps RFC-64 activation fully absent from agent inputs when disabled', async () => {

@@ -12,9 +12,12 @@ const TEST_NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const TEST_OWNER = `0x${'11'.repeat(20)}` as EvmAddressV1;
 
 /** Canonical public policy fixture accepted by the production RFC-64 snapshotter. */
-export function rfc64PublicCatalogPolicy(contextGraphId: string) {
+export function rfc64PublicCatalogPolicy(
+  contextGraphId: string,
+  networkId = TEST_NETWORK_ID as string,
+) {
   const policy = buildOpenOwnerContextGraphPolicyV1({
-    networkId: TEST_NETWORK_ID,
+    networkId: networkId as NetworkIdV1,
     contextGraphId: contextGraphId as ContextGraphIdV1,
     ownerAddress: TEST_OWNER,
   });

@@ -690,12 +690,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
     // Runtime projection only: lifecycle owns the single canonical activation
-    // snapshot. Hand-built legacy test/plugin contexts without the new field
-    // remain observably fail-closed rather than reparsing mutable config here.
-    const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog ?? {
-      enabled: false,
-      selectedContextGraphs: [],
-    };
+    // snapshot. A missing field is broken request-context wiring, not a disabled
+    // feature, so keep the RequestContext contract strict here.
+    const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog;
     const rfc64PublicCatalogService =
       typeof agent.rfc64PublicCatalogStatsV1 === 'function'
         ? agent.rfc64PublicCatalogStatsV1()

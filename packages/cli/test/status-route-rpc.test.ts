@@ -53,6 +53,10 @@ const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
     operatorActionRequired: true,
   },
 };
+const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
+  enabled: false,
+  selectedContextGraphs: [],
+};
 
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
@@ -74,7 +78,10 @@ async function requestStatusWithAgent(
       url,
       network: null,
       config,
-      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(config as never),
+      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
+        config as never,
+        { chainId: 'otp:20430' },
+      ),
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-test',
@@ -341,6 +348,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'mock' },
         },
+        rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
@@ -412,6 +420,7 @@ describe('/api/status selected overlay details', () => {
               chainId: 'evm:31337',
             },
           },
+          rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
           startedAt: Date.now(),
           agent: {
             peerId: 'peer-status-test',
@@ -472,6 +481,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
         },
+        rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },
         nodeVersion: '0.0.0-test',

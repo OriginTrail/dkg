@@ -1304,7 +1304,13 @@ export async function runDaemonInner(
     for (const message of genesisValidation.messages) log(message);
     process.exit(1);
   }
-  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(config);
+  // Resolve the effective chain before activating RFC-64 so a stale/cross-
+  // network manifest fails before subscriptions, stores, wallets, or agent
+  // runtime construction begin. The same immutable chainBase is reused below.
+  const chainBase = resolveChainConfig(config, network);
+  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(config, {
+    chainId: chainBase?.chainId,
+  });
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
@@ -1526,7 +1532,6 @@ export async function runDaemonInner(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const chainBase = resolveChainConfig(config, network);
   const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
