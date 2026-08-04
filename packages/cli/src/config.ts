@@ -3,14 +3,16 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import type {
+  DKGAgentConfig,
+  SyncContextGraphPriorityConfig,
+  SyncResponderSnapshotLimitsConfig,
+} from '@origintrail-official/dkg-agent';
 import {
   snapshotRfc64CatalogDeploymentProfileV1,
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
-  type DKGAgentConfig,
-  type SyncContextGraphPriorityConfig,
-  type SyncResponderSnapshotLimitsConfig,
-} from '@origintrail-official/dkg-agent';
+} from '@origintrail-official/dkg-agent/dist/rfc64/public-catalog-activation-config-v1.js';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
