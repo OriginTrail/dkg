@@ -934,6 +934,22 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
+  static readonly RS_HEAL_BATCH_MAX = 64;
+  /**
+   * Maximum stranded KCs one RS-heal pass may inspect before yielding. RS heal
+   * is periodic repair work, so bounding each pass keeps foreground publish,
+   * SWM and gossip operations from competing with an entire historical backlog.
+  */
+  static readonly RS_HEAL_BATCH_SIZE = Math.min(
+    DKGAgentBase.RS_HEAL_BATCH_MAX,
+    readPositiveSafeIntegerEnv('DKG_RS_HEAL_BATCH_SIZE', 8),
+  );
+  /** Bounded per-CG keyset cursor retention for the independent RS-heal pager. */
+  static readonly RS_HEAL_CG_STATE_MAX_ENTRIES = Math.min(
+    10_000,
+    readPositiveSafeIntegerEnv('DKG_RS_HEAL_CG_STATE_MAX_ENTRIES', 1_000),
+  );
   /**
    * Parallel ordinal work per CG. Combined with the default two-CG dispatcher
    * concurrency this caps chain/store pressure at ten in-flight ordinals.
@@ -1043,6 +1059,8 @@ export class DKGAgentBase {
   protected vmReconcileLifecycleController = new AbortController();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** Last stranded UAL visited by the bounded RS-heal sweep for each CG. */
+  protected readonly rsHealCursorByCg = new Map<string, string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
   protected readonly vmReconcileCatchupPeerOrder = new Map<string, {

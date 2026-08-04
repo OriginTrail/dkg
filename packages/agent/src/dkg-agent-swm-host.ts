@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -250,6 +250,81 @@ import {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+
+function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
+  return {
+    priority: 'background',
+    source: `agent.swm.rsHeal.${operation}`,
+    ...(signal ? { signal } : {}),
+  };
+}
+
+function isStoreSchedulerBusyError(err: unknown): boolean {
+  return err instanceof StoreSchedulerBusyError || (
+    typeof err === 'object' && err !== null &&
+    (err as { code?: unknown }).code === 'STORE_SCHEDULER_BUSY'
+  );
+}
+
+export type RsHealPassResult =
+  | { status: 'completed'; inspected: number }
+  | { status: 'skipped'; reason: 'not-current' | 'unsupported-store' | 'no-work' | 'invalid-result' | 'failed' }
+  | { status: 'deferred'; reason: 'store-busy' };
+
+async function readRsHealStrandedPage(
+  store: TripleStore,
+  legacyMeta: string,
+  scopedMeta: string,
+  dkgNamespace: string,
+  cursor: string | undefined,
+  batchSize: number,
+  signal?: AbortSignal,
+): Promise<SelectResult | null> {
+  const result = await store.query(
+    `SELECT ?ual ?b WHERE {
+       GRAPH <${legacyMeta}> { ?ual <${dkgNamespace}batchId> ?b }
+       FILTER(isIRI(?ual))
+       FILTER NOT EXISTS {
+         GRAPH <${scopedMeta}> {
+           ?ual <${dkgNamespace}batchId> ?b ; <${dkgNamespace}materializedVersion> ?version
+         }
+       }
+       ${cursor ? `FILTER(STR(?ual) > ${sparqlString(cursor)})` : ''}
+     }
+     ORDER BY STR(?ual)
+     LIMIT ${batchSize}`,
+    rsHealStoreOptions('enumerate', signal),
+  );
+  return result.type === 'bindings' ? result : null;
+}
+
+function advanceRsHealCursor(
+  cursorMap: Map<string, string>,
+  cursorKey: string,
+  bindings: SelectResult['bindings'],
+  batchSize: number,
+  maxEntries: number,
+): void {
+  if (bindings.length === 0 || bindings.length < batchSize) {
+    cursorMap.delete(cursorKey);
+    return;
+  }
+  const lastUal = stripBindingQuotes(bindings[bindings.length - 1]?.['ual'] ?? '');
+  if (!lastUal || !isSafeIri(lastUal)) {
+    // The query constrains ?ual to an IRI, but fail open to a fresh scan rather
+    // than pinning a corrupt cursor if an adapter returns malformed bindings.
+    cursorMap.delete(cursorKey);
+    return;
+  }
+  cursorMap.delete(cursorKey);
+  cursorMap.set(cursorKey, lastUal);
+  while (cursorMap.size > maxEntries) {
+    const oldest = cursorMap.keys().next().value;
+    if (oldest === undefined) break;
+    cursorMap.delete(oldest);
+  }
+}
+
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -2894,16 +2969,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && this.reconcileCursors.get(localCgId) === target.cursor;
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
 
-      // Keep the legacy-label -> scoped-VM migration in the admitted lane and
-      // before the evidence gate. A current watermark can still need this repair.
-      await this.healStrandedScopedKCs(
-        localCgId,
-        target.sub,
-        isTargetCurrent,
-        lifecycleSignal,
-      );
-      if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-
       // Reconcile on a private cursor snapshot. The caller-facing abort race may
       // finish before an adapter physically settles; a stale continuation must
       // never mutate the live cursor or persist a watermark into a new binding.
@@ -2954,8 +3019,31 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // Queue one trailing slice while this key is still active. The dispatcher
       // places it behind already-waiting live CGs, so a large graph makes steady
       // progress without monopolising the only VM worker.
-      if (isLifecycleCurrent() && (result.hasMore || result.staleTarget)) {
+      const hasImmediateTrailingWork = result.hasMore || result.staleTarget;
+      if (isLifecycleCurrent() && hasImmediateTrailingWork) {
         this.vmReconcileDispatcher?.triggerLive(localCgId);
+      } else if (isTargetCurrent()) {
+        // RS heal is bounded, best-effort maintenance. Run it only after the
+        // useful VM slice completed and only when that slice has no urgent
+        // continuation. Store pressure must defer maintenance, never erase the
+        // main reconcile result or prevent foreground ordinal progress.
+        try {
+          await this.healStrandedScopedKCs(
+            localCgId,
+            target.sub,
+            isTargetCurrent,
+            lifecycleSignal,
+          );
+        } catch (err) {
+          // Defensive isolation at the dispatcher boundary: the heal method
+          // reduces known pressure to a deferred result, but a future repair
+          // regression must still never erase an already-computed VM result.
+          this.log.warn(
+            createOperationContext('system'),
+            `RS heal after VM reconcile for "${localCgId}" was skipped: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       }
       return response;
     })();
@@ -3225,17 +3313,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     sub: ContextGraphSub,
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<RsHealPassResult> {
     try {
       const capturedOnChainId = sub.onChainId;
       const canApply = () => isCurrent()
         && (!(this.subscribedContextGraphs instanceof Map)
           || this.subscribedContextGraphs.get(localCgId) === sub)
         && sub.onChainId === capturedOnChainId;
-      if (!canApply() || !capturedOnChainId) return;
+      if (!canApply() || !capturedOnChainId) {
+        return { status: 'skipped', reason: 'not-current' };
+      }
       // Server-side byte-safe copy is the ONLY safe relocation mechanism; if the
       // backend can't do SPARQL UPDATE we bail rather than risk a lossy JS round-trip.
-      if (typeof this.store.update !== 'function') return;
+      if (typeof this.store.update !== 'function') {
+        return { status: 'skipped', reason: 'unsupported-store' };
+      }
       // #1549: every server-side INSERT in this RS-heal path has a statically-known
       // target graph, so `touchedGraphs` is REQUIRED — the index then maintains
       // itself incrementally (a bounded `hasGraph`) instead of marking the whole
@@ -3247,7 +3339,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           this.store,
           sparql,
           touchedGraphs,
-          { signal, source: 'agent.swm.rsHeal.materialize' },
+          rsHealStoreOptions('materialize', signal),
         );
         if (!updated) throw new Error('RS heal requires server-side update() support');
       };
@@ -3277,26 +3369,42 @@ export class SwmHostModeMethods extends DKGAgentBase {
              }
            }
          }`,
-        { signal, source: 'agent.swm.rsHeal.findLegacyOnly' },
+        rsHealStoreOptions('guard', signal),
       );
-      if (!canApply() || askGuard.type !== 'boolean' || !askGuard.value) return;
+      if (!canApply()) return { status: 'skipped', reason: 'not-current' };
+      if (askGuard.type !== 'boolean') return { status: 'skipped', reason: 'invalid-result' };
+      if (!askGuard.value) return { status: 'skipped', reason: 'no-work' };
 
-      // 2b: enumerate the stranded UALs.
-      const stranded = await this.store.query(
-        `SELECT ?ual ?b WHERE {
-           GRAPH <${legacyMeta}> { ?ual <${DKG}batchId> ?b }
-           FILTER NOT EXISTS {
-             GRAPH <${scopedMeta}> {
-               ?ual <${DKG}batchId> ?b ; <${DKG}materializedVersion> ?version
-             }
-           }
-         }`,
-        { signal, source: 'agent.swm.rsHeal.listLegacyOnly' },
+      // 2b: enumerate one bounded page. A per-CG lexical cursor means a
+      // permanently incomplete KC cannot pin the first page forever; after the
+      // final page the cursor wraps and the next sweep retries earlier gaps.
+      const cursorKey = `${localCgId}\u0000${sub.onChainId}`;
+      const cursorMap = this.rsHealCursorByCg ?? new Map<string, string>();
+      const cursor = cursorMap.get(cursorKey);
+      const stranded = await readRsHealStrandedPage(
+        this.store,
+        legacyMeta,
+        scopedMeta,
+        DKG,
+        cursor,
+        DKGAgentBase.RS_HEAL_BATCH_SIZE,
+        signal,
       );
-      if (!canApply() || stranded.type !== 'bindings') return;
+      if (!canApply()) return { status: 'skipped', reason: 'not-current' };
+      if (!stranded) return { status: 'skipped', reason: 'invalid-result' };
+      if (stranded.bindings.length === 0) {
+        advanceRsHealCursor(
+          cursorMap,
+          cursorKey,
+          stranded.bindings,
+          DKGAgentBase.RS_HEAL_BATCH_SIZE,
+          DKGAgentBase.RS_HEAL_CG_STATE_MAX_ENTRIES,
+        );
+        return { status: 'skipped', reason: 'no-work' };
+      }
 
       for (const row of stranded.bindings) {
-        if (!canApply()) return;
+        if (!canApply()) return { status: 'skipped', reason: 'not-current' };
         // Bindings come back stripped to bare values by the store adapters
         // (oxigraph/sparql-http both emit IRIs unwrapped); strip + validate
         // exactly as the extractor does for its `ual`.
@@ -3331,10 +3439,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // stamping the LOWEST version {0,0}: the GH#842 ordering guard then
             // lets any real update (block>0) win over this floor and never the
             // reverse, so it can never clobber a genuine update.
-            const version = (await readMaterializedVersion(this.store, legacyMeta, ual))
+            const version = (await readMaterializedVersion(
+              this.store,
+              legacyMeta,
+              ual,
+              rsHealStoreOptions('version.readLegacy', signal),
+            ))
               ?? { blockNumber: 0, txIndex: 0 };
             if (!canApply()) return;
-            if (!(await shouldApplyMaterialization(this.store, scopedMeta, ual, version))) return; // idempotent
+            if (!(await shouldApplyMaterialization(
+              this.store,
+              scopedMeta,
+              ual,
+              version,
+              undefined,
+              rsHealStoreOptions('version.checkScoped', signal),
+            ))) return; // idempotent
             if (!canApply()) return;
 
             assertSafeIri(ual);
@@ -3348,7 +3468,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                    { <${ual}> <${DKG}rootEntity> ?root . }
                  }
                }`,
-              { signal, source: 'agent.swm.rsHeal.readRoots' },
+              rsHealStoreOptions('roots', signal),
             );
             if (!canApply() || rootsRes.type !== 'bindings') return;
             const roots: string[] = [];
@@ -3382,7 +3502,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                      }
                    }
                  }`,
-                { signal, source: 'agent.swm.rsHeal.checkRootData' },
+                rsHealStoreOptions('rootPresent', signal),
               );
               if (!canApply() || present.type !== 'boolean' || !present.value) return;
             }
@@ -3459,17 +3579,36 @@ export class SwmHostModeMethods extends DKGAgentBase {
             }
           }, { signal });
         } catch (err) {
+          if (isStoreSchedulerBusyError(err)) throw err;
+          if (signal?.aborted || !canApply()) {
+            return { status: 'skipped', reason: 'not-current' };
+          }
           this.log.warn(
             createOperationContext('system'),
             `RS heal: relocate failed for ${ual} (cg=${capturedOnChainId}): ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
+      advanceRsHealCursor(
+        cursorMap,
+        cursorKey,
+        stranded.bindings,
+        DKGAgentBase.RS_HEAL_BATCH_SIZE,
+        DKGAgentBase.RS_HEAL_CG_STATE_MAX_ENTRIES,
+      );
+      return { status: 'completed', inspected: stranded.bindings.length };
     } catch (err) {
       this.log.warn(
         createOperationContext('system'),
         `RS heal sweep for "${localCgId}" failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      // A scheduler rejection means this maintenance sweep has lost admission.
+      // Stop immediately; the periodic reconciler will retry on its next tick
+      // instead of flooding the remaining backlog into the queue.
+      if (isStoreSchedulerBusyError(err)) {
+        return { status: 'deferred', reason: 'store-busy' };
+      }
+      return { status: 'skipped', reason: 'failed' };
     }
   }
 

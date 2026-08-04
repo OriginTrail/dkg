@@ -1230,11 +1230,13 @@ export async function readMaterializedVersion(
   store: TripleStore,
   metaGraph: string,
   ual: string,
+  options: QueryOptions = {},
 ): Promise<MaterializedVersion | null> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
   const res = await store.query(
     `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${MATERIALIZED_VERSION_PRED}> ?v } } LIMIT 1`,
+    options,
   );
   if (res.type !== 'bindings' || res.bindings.length === 0) return null;
   return parseMaterializedVersion(res.bindings[0]['v']);
@@ -1251,12 +1253,14 @@ export async function shouldApplyMaterialization(
   ual: string,
   incoming: MaterializedVersion,
   incomingAssertionVersion?: bigint,
+  options: QueryOptions = {},
 ): Promise<boolean> {
   if (incomingAssertionVersion !== undefined) {
     assertSafeGraphIriForSparql(metaGraph);
     assertSafeGraphIriForSparql(ual);
     const assertionVersions = await store.query(
       `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${ASSERTION_VERSION_PRED}> ?v } }`,
+      options,
     );
     if (assertionVersions.type === 'bindings') {
       for (const row of assertionVersions.bindings) {
@@ -1269,7 +1273,7 @@ export async function shouldApplyMaterialization(
       }
     }
   }
-  const current = await readMaterializedVersion(store, metaGraph, ual);
+  const current = await readMaterializedVersion(store, metaGraph, ual, options);
   if (!current) return true;
   return compareMaterializedVersion(incoming, current) >= 0;
 }
@@ -1279,11 +1283,15 @@ export async function writeMaterializedVersion(
   metaGraph: string,
   ual: string,
   version: MaterializedVersion,
+  options: QueryOptions = {},
 ): Promise<void> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
-  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED });
-  await store.insert([materializedVersionQuad(metaGraph, ual, version)]);
+  await store.deleteByPattern(
+    { graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED },
+    options,
+  );
+  await store.insert([materializedVersionQuad(metaGraph, ual, version)], options);
 }
 
 export function materializedVersionQuad(
