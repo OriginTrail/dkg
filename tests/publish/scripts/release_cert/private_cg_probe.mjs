@@ -52,6 +52,22 @@ async function main() {
     const sub = await api(recvUrl, '/api/context-graph/subscribe', recvToken, { contextGraphId: cgId, includeSharedMemory: true });
     console.log(`• receiver subscribe: ${JSON.stringify(sub).slice(0, 160)}`);
 
+    // Encrypted SWM needs each allowlisted agent's ENCRYPTION profile to be
+    // discoverable — otherwise the sender-key handshake is rejected
+    // ("SWM Sender Key setup rejected by N agent(s)"). Publish both profiles
+    // and give discovery a moment before the first curated share.
+    for (const [label, url, tok] of [['curator', pubUrl, pubToken], ['receiver', recvUrl, recvToken]]) {
+        try {
+            const r = await api(url, '/api/agent/publish-profile', tok, {});
+            console.log(`• ${label} profile published: ${JSON.stringify(r).slice(0, 140)}`);
+        } catch (e) {
+            console.warn(`⚠️ ${label} profile publish failed: ${e.message} (sender-key handshake may be rejected)`);
+        }
+    }
+    const settleMs = Number(process.env.RC_PROBE_PROFILE_SETTLE_MS || 20000);
+    console.log(`• waiting ${settleMs}ms for agent-profile discovery`);
+    await new Promise((r) => setTimeout(r, settleMs));
+
     // One layered iteration against ONLY this CG (kind=private).
     const layered = path.join(path.dirname(fileURLToPath(import.meta.url)), 'layered_suite.mjs');
     const child = spawn(process.execPath, [layered], {
