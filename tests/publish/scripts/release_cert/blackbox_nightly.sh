@@ -68,8 +68,9 @@ for attempt in 1 2 3 4 5 6; do
   RESP="$(curl -s -m 30 -X POST "$CURATOR_API/api/context-graph/create" \
     -H "Authorization: Bearer $CURATOR_TOKEN" -H 'Content-Type: application/json' \
     -d "{\"id\":\"$CG_NAME\",\"name\":\"$CG_NAME\",\"accessPolicy\":0,\"publishPolicy\":1,\"register\":false}")"
-  CG_ID="$(printf %s "$RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log(j.canonicalId||j.contextGraphId||j.id||"")}catch{console.log("")}})')"
+  CG_ID="$(printf %s "$RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log(j.created||j.canonicalId||j.contextGraphId||j.id||"")}catch{console.log("")}})')"
   if [ -n "$CG_ID" ]; then break; fi
+  if printf %s "$RESP" | grep -q "already exists"; then CG_ID="$CG_NAME"; break; fi
   echo "• CG create attempt $attempt got: $(printf %s "$RESP" | head -c 300)"
   sleep 10
 done
