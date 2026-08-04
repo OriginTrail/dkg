@@ -408,15 +408,14 @@ import { EndorseVerifyMethods } from './dkg-agent-endorse.js';
 import {
   Rfc64CatalogMethods,
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
-  snapshotRfc64CatalogDeploymentProfileV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
 import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
-  snapshotRfc64PublicCatalogAutoPublishConfigV1,
-  snapshotRfc64PublicCatalogBootstrapConfigV1,
-} from './rfc64/catalog-authority-config-v1.js';
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogControlsV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
@@ -609,7 +608,33 @@ function throwStorageAckTimingConflict(): never {
   );
 }
 
-function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConfig {
+type StorageAckNormalizedDKGAgentConfig = Omit<
+  DKGAgentConfig,
+  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
+> & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
+
+/**
+ * Resolve the chain id that agent construction will expose before any durable
+ * RFC-64 bootstrap state is opened. This mirrors the adapter construction
+ * branch once, so activation validation and the final network identity cannot
+ * choose different config sources.
+ */
+function resolveConfiguredAgentChainId(config: DKGAgentConfig): string | undefined {
+  if (config.chainAdapter !== undefined) {
+    return config.chainAdapter.chainId === 'none'
+      ? config.networkIdentity?.chainId
+      : config.chainAdapter.chainId;
+  }
+  if (config.chainConfig !== undefined && config.chainConfig.operationalKeys?.length) {
+    // EVMChainAdapter uses the local Hardhat identity when callers omit the
+    // optional chain id. Mirror that construction default here so activation
+    // validation and the final network identity still consume one value.
+    return config.chainConfig.chainId ?? 'evm:31337';
+  }
+  return config.networkIdentity?.chainId;
+}
+
+function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
   const hasLegacyTiming =
     config.ackHandlerDeadlineMs !== undefined ||
@@ -704,10 +729,18 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const activationInput = inputConfig.rfc64PublicCatalogActivation;
+    const configuredAgentChainId = resolveConfiguredAgentChainId(inputConfig);
+    const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
+      activation: activationInput,
+      legacyDeploymentProfile: inputConfig.rfc64CatalogDeploymentProfile,
+      legacyAutoPublish: inputConfig.rfc64PublicCatalogAutoPublish,
+      legacyBootstrap: inputConfig.rfc64PublicCatalogBootstrap,
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(configuredAgentChainId));
     // RFC-64 bootstrap owns durable catalog and control-object state. Reject
     // an impossible ephemeral configuration before constructing a store or
     // node so start() can never fail after leaving libp2p half-running.
-    if (inputConfig.rfc64PublicCatalogBootstrap !== undefined && !inputConfig.dataDir) {
+    if (rfc64PublicCatalogControls.requiresDataDir && !inputConfig.dataDir) {
       throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
     }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
@@ -717,18 +750,13 @@ export class DKGAgent extends DKGAgentBase {
         inputConfig.syncContextGraphPriorities,
       ),
     });
-    const rfc64CatalogDeploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
-      config.rfc64CatalogDeploymentProfile,
-    );
+    const rfc64CatalogDeploymentProfile = rfc64PublicCatalogControls.deploymentProfile;
     const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
       config.rfc64CatalogAccessPolicyAuthority,
     );
-    const rfc64PublicCatalogAutoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
-      config.rfc64PublicCatalogAutoPublish,
-    );
-    const rfc64PublicCatalogBootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(
-      config.rfc64PublicCatalogBootstrap,
-    );
+    const rfc64PublicCatalogAutoPublishPolicy =
+      rfc64PublicCatalogControls.autoPublishPolicy;
+    const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -823,19 +851,28 @@ export class DKGAgent extends DKGAgentBase {
         `must match the chain adapter id (${adapterChainId})`,
       );
     }
+    const constructedAgentChainId = adapterChainId ?? config.networkIdentity?.chainId;
+    if (constructedAgentChainId !== configuredAgentChainId) {
+      throw new Error('DKGAgent chain identity changed during construction');
+    }
     const networkIdentity = {
       ...config.networkIdentity,
       genesisId,
       networkId: computedNetworkId,
-      chainId: adapterChainId ?? config.networkIdentity?.chainId,
+      chainId: configuredAgentChainId,
     };
+    const configWithoutRfc64CatalogControls = { ...config };
+    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
+    delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
+    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
+    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
     const resolvedConfig: ResolvedDKGAgentConfig = {
-      ...config,
+      ...configWithoutRfc64CatalogControls,
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
-      rfc64PublicCatalogAutoPublish,
+      rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
     };
 

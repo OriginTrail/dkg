@@ -239,14 +239,20 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       'rfc64-selected-a',
       'rfc64-selected-b',
     ]);
-    expect(createArg.rfc64CatalogDeploymentProfile).toEqual(deploymentProfile);
-    expect(createArg.rfc64PublicCatalogAutoPublish).toEqual({
-      contextGraphIds: ['rfc64-selected-a', 'rfc64-selected-b'],
-      peers: ['12D3KooReceiver'],
-      catalogIssuerDelegationEffectiveAt: '0',
-      catalogIssuerDelegationExpiresAt: '1893456000000',
+    expect(createArg.rfc64PublicCatalogActivation).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['rfc64-selected-a', 'rfc64-selected-b'],
+      deploymentProfile,
+      autoPublish: {
+        peers: ['12D3KooReceiver'],
+        catalogIssuerDelegationEffectiveAt: '0',
+        catalogIssuerDelegationExpiresAt: '1893456000000',
+      },
+      bootstrap,
     });
-    expect(createArg.rfc64PublicCatalogBootstrap).toEqual(bootstrap);
+    expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
   });
 
   it('keeps receiver-only RFC-64 bootstrap active without enabling auto-publish', async () => {
@@ -262,9 +268,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
 
     expect(createArg.syncContextGraphs).toContain('rfc64-receiver-only');
-    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogActivation.autoPublish).toBeUndefined();
     expect(
-      createArg.rfc64PublicCatalogBootstrap.acceptedPublicPolicies[0]
+      createArg.rfc64PublicCatalogActivation.bootstrap.acceptedPublicPolicies[0]
         .policyEnvelope.payload.contextGraphId,
     ).toBe('rfc64-receiver-only');
   });
@@ -292,6 +298,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     } as any, Date.now())).rejects.toThrow(/policy network differs/u);
 
     expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(mocks.chainResetWipe).not.toHaveBeenCalled();
+    expect(mocks.loadOpWallets).not.toHaveBeenCalled();
+    expect(mocks.startPublisherRuntimeWithOutcome).not.toHaveBeenCalled();
+    expect(mocks.createServer).not.toHaveBeenCalled();
   });
 
   it('keeps RFC-64 activation fully absent from agent inputs when disabled', async () => {
@@ -299,6 +309,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       rfc64PublicCatalog: { enabled: false },
     });
 
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();

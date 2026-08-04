@@ -3,7 +3,6 @@
 import {
   assertCanonicalChainId,
   assertCanonicalEvmAddress,
-  assertContextGraphIdV1,
   assertNetworkIdV1,
   canonicalizeUnsignedContextGraphPolicyEnvelopeBytesV1,
   parseCanonicalUnsignedContextGraphPolicyEnvelopeV1,
@@ -24,7 +23,6 @@ import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v
 const MAX_RFC64_BOOTSTRAP_POLICIES_V1 = 64;
 const MAX_RFC64_BOOTSTRAP_TARGETS_V1 = 256;
 const MAX_RFC64_BOOTSTRAP_PROVIDERS_V1 = 8;
-const MAX_RFC64_AUTO_PUBLISH_CONTEXT_GRAPHS_V1 = 64;
 const DEFAULT_RFC64_BOOTSTRAP_RETRY_INTERVAL_MS_V1 = 30_000;
 const MAX_RFC64_BOOTSTRAP_RETRY_INTERVAL_MS_V1 = 3_600_000;
 
@@ -125,36 +123,14 @@ export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
   const allowed = new Set([
     'catalogIssuerDelegationEffectiveAt',
     'catalogIssuerDelegationExpiresAt',
-    'contextGraphIds',
     'peers',
   ]);
   if (
     keys.some((key) => !allowed.has(key))
-    || !keys.includes('contextGraphIds')
     || !keys.includes('peers')
     || !keys.includes('catalogIssuerDelegationExpiresAt')
   ) {
     throw new TypeError('rfc64PublicCatalogAutoPublish has unknown or missing fields');
-  }
-  if (
-    !Array.isArray(input.contextGraphIds)
-    || input.contextGraphIds.length === 0
-    || input.contextGraphIds.length > MAX_RFC64_AUTO_PUBLISH_CONTEXT_GRAPHS_V1
-  ) {
-    throw new TypeError(
-      `rfc64PublicCatalogAutoPublish.contextGraphIds must contain 1..`
-      + `${MAX_RFC64_AUTO_PUBLISH_CONTEXT_GRAPHS_V1} context graphs`,
-    );
-  }
-  const contextGraphIds = input.contextGraphIds.map((contextGraphId, index) => {
-    assertContextGraphIdV1(
-      contextGraphId,
-      `rfc64PublicCatalogAutoPublish.contextGraphIds[${index}]`,
-    );
-    return contextGraphId;
-  });
-  if (new Set(contextGraphIds).size !== contextGraphIds.length) {
-    throw new TypeError('rfc64PublicCatalogAutoPublish.contextGraphIds must be unique');
   }
   const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
   const effectiveAt = snapshotTimestamp(
@@ -171,7 +147,6 @@ export function snapshotRfc64PublicCatalogAutoPublishConfigV1(
     );
   }
   return Object.freeze({
-    contextGraphIds: Object.freeze(contextGraphIds),
     peers,
     catalogIssuerDelegationEffectiveAt: effectiveAt,
     catalogIssuerDelegationExpiresAt: expiresAt,

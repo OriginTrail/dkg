@@ -36,12 +36,13 @@ import {
   resolveChainConfig,
   resolveReadyChainConfig,
   resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveStorageAckTiming,
 } from '../src/config.js';
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
 
 describe('resolveRfc64PublicCatalogActivation', () => {
-  const chainIdentity = { chainId: 'otp:20430' };
+  const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430');
 
   it('is fail-closed when omitted or explicitly disabled', () => {
     expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
@@ -75,7 +76,6 @@ describe('resolveRfc64PublicCatalogActivation', () => {
       enabled: true,
       selectedContextGraphs: ['selected-a', 'selected-b'],
       autoPublish: {
-        contextGraphIds: ['selected-a', 'selected-b'],
         peers: ['12D3KooReceiver'],
       },
     });
@@ -125,6 +125,21 @@ describe('resolveRfc64PublicCatalogActivation', () => {
     }, chainIdentity)).toThrow(/policies must be unique by graph/u);
   });
 
+  it('rejects unknown root activation fields instead of silently changing mode', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublsih: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/unknown fields/u);
+  });
+
   it('rejects manifests and deployment overrides for another network', () => {
     const activation = {
       rfc64PublicCatalog: {
@@ -136,12 +151,20 @@ describe('resolveRfc64PublicCatalogActivation', () => {
     };
     expect(() => resolveRfc64PublicCatalogActivation(
       activation,
-      { chainId: undefined },
-    )).toThrow(/requires an effective chain id/u);
+      resolveRfc64PublicCatalogActivationChainIdentityV1(undefined),
+    )).toThrow(/requires an effective network id/u);
     expect(() => resolveRfc64PublicCatalogActivation(
       activation,
-      { chainId: 'none' },
-    )).toThrow(/namespaced numeric EVM chain id/u);
+      resolveRfc64PublicCatalogActivationChainIdentityV1('none'),
+    )).toThrow(/requires a numeric EVM chain id/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      {
+        networkId: chainIdentity.networkId,
+        evmChainId: '20431' as typeof chainIdentity.evmChainId,
+      },
+    )).toThrow(/network and EVM chain ids differ/u);
 
     expect(() => resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: {

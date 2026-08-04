@@ -129,6 +129,7 @@ import {
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
   resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -1308,9 +1309,10 @@ export async function runDaemonInner(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
-  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(config, {
-    chainId: chainBase?.chainId,
-  });
+  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(
+    config,
+    resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
+  );
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
@@ -1751,9 +1753,7 @@ export async function runDaemonInner(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    rfc64CatalogDeploymentProfile: rfc64PublicCatalog.deploymentProfile,
-    rfc64PublicCatalogAutoPublish: rfc64PublicCatalog.autoPublish,
-    rfc64PublicCatalogBootstrap: rfc64PublicCatalog.bootstrap,
+    rfc64PublicCatalogActivation: rfc64PublicCatalog,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext

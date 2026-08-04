@@ -9,6 +9,7 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   type ResolvedRfc64PublicCatalogActivationConfigV1,
   type Rfc64PublicCatalogActivationChainIdentityV1,
@@ -1008,6 +1009,8 @@ export function resolveRfc64PublicCatalogActivation(
     chainIdentity,
   );
 }
+
+export { resolveRfc64PublicCatalogActivationChainIdentityV1 };
 
 type NetworkReadinessValidation =
   | { ok: true; messages: [] }

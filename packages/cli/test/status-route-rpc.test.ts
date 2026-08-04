@@ -36,6 +36,7 @@ import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import {
   loadNetworkConfig,
   resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/config.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -80,7 +81,7 @@ async function requestStatusWithAgent(
       config,
       rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
         config as never,
-        { chainId: 'otp:20430' },
+        resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
       ),
       startedAt: Date.now(),
       agent: {
@@ -238,7 +239,16 @@ describe('/api/status finalization recovery health', () => {
 
 describe('/api/status RFC-64 selected-public activation', () => {
   it('reports the fail-closed disabled state without invoking catalog controls', async () => {
-    const response = await requestStatusWithAgent({});
+    const catalogStats = vi.fn(() => {
+      throw new Error('disabled status must not read catalog service state');
+    });
+    const bootstrapStatus = vi.fn(() => {
+      throw new Error('disabled status must not read catalog bootstrap state');
+    });
+    const response = await requestStatusWithAgent({
+      rfc64PublicCatalogStatsV1: catalogStats,
+      readRfc64PublicCatalogBootstrapStatusV1: bootstrapStatus,
+    });
 
     expect(response.status).toBe(200);
     expect(response.body.rfc64PublicCatalog).toEqual({
@@ -248,6 +258,8 @@ describe('/api/status RFC-64 selected-public activation', () => {
       service: null,
       bootstrap: null,
     });
+    expect(catalogStats).not.toHaveBeenCalled();
+    expect(bootstrapStatus).not.toHaveBeenCalled();
   });
 
   it('exposes selected scopes and exact per-target applied-head evidence', async () => {

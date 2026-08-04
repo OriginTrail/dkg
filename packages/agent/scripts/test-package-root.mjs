@@ -76,6 +76,15 @@ if (packageManifest.name !== '@origintrail-official/dkg-agent') {
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
 }
+if (
+  typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationChainIdentityV1
+  !== 'function'
+) {
+  throw new Error('public RFC-64 activation subpath did not expose the chain-identity resolver');
+}
+if (typeof publicCatalogActivation.resolveRfc64PublicCatalogControlsV1 !== 'function') {
+  throw new Error('public RFC-64 activation subpath did not expose catalog-control normalization');
+}
 
 const digestAuthor = '0x1111111111111111111111111111111111111111';
 const digestRows = [10, 2].map((number) => ({

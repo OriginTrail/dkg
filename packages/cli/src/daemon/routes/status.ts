@@ -694,11 +694,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // feature, so keep the RequestContext contract strict here.
     const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog;
     const rfc64PublicCatalogService =
-      typeof agent.rfc64PublicCatalogStatsV1 === 'function'
+      rfc64PublicCatalogActivation.enabled
+      && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
         ? agent.rfc64PublicCatalogStatsV1()
         : null;
     const rfc64PublicCatalogBootstrap =
-      typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
+      rfc64PublicCatalogActivation.enabled
+      && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
     const unavailableFinalizationRecovery = (reason: string) => ({
