@@ -54,10 +54,16 @@ async function main() {
     // otherwise its catch-up reports `unreachable` and it never learns the
     // agent gate ("not-agent-gated" on the sender-key handshake).
     try {
-        const jr = await api(recvUrl, `/api/context-graph/${encodeURIComponent(cgId)}/request-join`, recvToken, { curatorPeerId: pubIdent.peerId });
+        // sign-join produces the signed delegation that request-join forwards.
+        const signed = await api(recvUrl, `/api/context-graph/${encodeURIComponent(cgId)}/sign-join`, recvToken, {});
+        console.log(`• receiver sign-join: agent ${signed?.agentAddress ?? '?'}`);
+        const jr = await api(recvUrl, `/api/context-graph/${encodeURIComponent(cgId)}/request-join`, recvToken, {
+            curatorPeerId: pubIdent.peerId,
+            delegation: signed?.delegation,
+        });
         console.log(`• receiver request-join: ${JSON.stringify(jr).slice(0, 220)}`);
     } catch (e) {
-        console.warn(`⚠️ request-join failed: ${e.message}${e.body ? ' ' + JSON.stringify(e.body).slice(0, 200) : ''}`);
+        console.warn(`⚠️ join request failed: ${e.message}${e.body ? ' ' + JSON.stringify(e.body).slice(0, 220) : ''}`);
     }
     await new Promise((r) => setTimeout(r, 5000));
     try {
