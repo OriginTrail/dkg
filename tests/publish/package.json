@@ -29,7 +29,10 @@
     "rc:coldstart": "node scripts/release_cert/cold_start_sync.mjs",
     "rc:capture": "node scripts/release_cert/capture_incident.mjs",
     "rc:rollback-drill": "node scripts/release_cert/rollback_drill.mjs",
-    "rc:canary-gate": "node scripts/release_cert/canary_gate.mjs"
+    "rc:canary-gate": "node scripts/release_cert/canary_gate.mjs",
+    "rc:mainnet-scorecard": "node scripts/release_cert/mainnet_scorecard.mjs",
+    "rc:queue-conformance": "node scripts/release_cert/queue_conformance.mjs",
+    "rc:private-probe": "node scripts/release_cert/private_cg_probe.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

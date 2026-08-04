@@ -230,11 +230,15 @@ async function main() {
     const receiverPeerId = process.env.RC_RECEIVER_PEER_ID || recvStatus?.peerId || null;
     const version = pubStatus?.version ?? null;
     const names = weeklyCgNames();
-    const cgs = [{ id: process.env.RC_CG_PUBLIC || names.public, kind: 'public' }];
-    if (process.env.RC_CG_PRIVATE) cgs.push({ id: process.env.RC_CG_PRIVATE, kind: 'private' });
-    // Keep the permanent aging CG actually growing: one extra publish every 6 hours.
-    if (new Date().getUTCHours() % 6 === 0 && new Date().getUTCMinutes() < 30) {
-        cgs.push({ id: names.aging, kind: 'aging' });
+    const cgs = process.env.RC_ONLY_CG
+        ? [{ id: process.env.RC_ONLY_CG, kind: process.env.RC_ONLY_KIND || 'private' }]
+        : [{ id: process.env.RC_CG_PUBLIC || names.public, kind: 'public' }];
+    if (!process.env.RC_ONLY_CG) {
+        if (process.env.RC_CG_PRIVATE) cgs.push({ id: process.env.RC_CG_PRIVATE, kind: 'private' });
+        // Keep the permanent aging CG actually growing: one extra publish every 6 hours.
+        if (new Date().getUTCHours() % 6 === 0 && new Date().getUTCMinutes() < 30) {
+            cgs.push({ id: names.aging, kind: 'aging' });
+        }
     }
 
     const sizeKb = pickSizeKb();
