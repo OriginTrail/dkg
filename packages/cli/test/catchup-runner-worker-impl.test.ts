@@ -1866,6 +1866,54 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
     expect(result.peersNotAttempted).toBe(0);
   });
 
+  it('emits one per-pass log line carrying the coverage transition', async () => {
+    // The per-pass line is the only PER-PASS observability an operator gets:
+    // the terminal record reports the FINAL state, so without it a job that
+    // converged in four passes is indistinguishable from one that converged in
+    // one. It travels as a fire-and-forget RPC whose rejection is deliberately
+    // swallowed, so a line that stops being emitted fails completely silently
+    // — which is exactly the shape that needs a row rather than a reader.
+    const sharedCalls: string[] = [];
+    const passLines: string[] = [];
+
+    await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            sharedCalls.push(String(args[0]));
+            return sharedCalls.length === 1
+              ? partialSharedRound(2, 3)
+              : partialSharedRound(3, 3);
+          }
+          case 'logCatchupPass':
+            passLines.push(String(args[0]));
+            return null;
+          default:
+            return null;
+        }
+      },
+    );
+
+    // Two shared rounds ran, so exactly one CONTINUATION pass was logged —
+    // numbered 2, because the first round is not a continuation.
+    const continuationLines = passLines.filter((line) => line.startsWith('Catch-up SWM pass 2'));
+    expect(continuationLines).toHaveLength(1);
+
+    // The TRANSITION, not just the endpoint. A line reporting only the final
+    // `3` could not distinguish a pass that advanced coverage from one that ran
+    // and achieved nothing — which is the single fact this line exists to give
+    // an operator.
+    expect(continuationLines[0]).toContain('2 -> 3');
+    expect(continuationLines[0]).toContain(CG);
+  });
+
   it('does NOT run a second pass when the first pass resolved nothing', async () => {
     // The high-water mark starts at 0, so a pass that resolved zero has not
     // advanced it — a peer that just demonstrated it can deliver nothing does not
