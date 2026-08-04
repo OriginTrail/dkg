@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const publicCatalogActivation = await import(
+  '@origintrail-official/dkg-agent/dist/rfc64/public-catalog-activation-config-v1.js'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const expectedRfc64PolicyCells = [
@@ -69,6 +72,9 @@ if (
 }
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
+}
+if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !== 'function') {
+  throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
 }
 
 const digestAuthor = '0x1111111111111111111111111111111111111111';

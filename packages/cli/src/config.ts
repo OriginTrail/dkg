@@ -9,9 +9,10 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
-  snapshotRfc64CatalogDeploymentProfileV1,
-  snapshotRfc64PublicCatalogAutoPublishConfigV1,
-  snapshotRfc64PublicCatalogBootstrapConfigV1,
+  resolveRfc64PublicCatalogActivationConfigV1,
+  type ResolvedRfc64PublicCatalogActivationConfigV1,
+  type Rfc64PublicCatalogActivationChainIdentityV1,
+  type Rfc64PublicCatalogActivationConfigV1,
 } from '@origintrail-official/dkg-agent/dist/rfc64/public-catalog-activation-config-v1.js';
 import {
   blueGreenSlotEntryPoint,
@@ -482,41 +483,17 @@ export interface GraphSetIndexConfig {
   revalidateMs?: number;
 }
 
-type Rfc64CatalogDeploymentProfileConfig = NonNullable<
-  DKGAgentConfig['rfc64CatalogDeploymentProfile']
->;
-type Rfc64CatalogAutoPublishConfig = NonNullable<
-  DKGAgentConfig['rfc64PublicCatalogAutoPublish']
->;
-type Rfc64CatalogBootstrapConfig = NonNullable<
-  DKGAgentConfig['rfc64PublicCatalogBootstrap']
->;
-
 /**
  * Explicit selected-public RFC-64 activation. Omitted or `enabled: false`
  * leaves the catalog data plane fail-closed with no accepted policies and no
  * ordinary-publication hook. The bootstrap manifest is the selected CG set;
  * the daemon adds only those graph IDs to durable synchronization.
  */
-export interface Rfc64PublicCatalogActivationConfig {
-  readonly enabled?: boolean;
-  readonly deploymentProfile?: Rfc64CatalogDeploymentProfileConfig;
-  readonly autoPublish?: Omit<Rfc64CatalogAutoPublishConfig, 'contextGraphIds'>;
-  readonly bootstrap?: Rfc64CatalogBootstrapConfig;
-}
-
-export interface ResolvedRfc64PublicCatalogActivationConfig {
-  readonly enabled: boolean;
-  readonly selectedContextGraphs: readonly string[];
-  readonly deploymentProfile?: Rfc64CatalogDeploymentProfileConfig;
-  readonly autoPublish?: Rfc64CatalogAutoPublishConfig;
-  readonly bootstrap?: Rfc64CatalogBootstrapConfig;
-}
-
-export interface Rfc64PublicCatalogActivationChainIdentity {
-  /** Effective chain-adapter network identifier, for example `base:84532`. */
-  readonly chainId: string | undefined;
-}
+export type Rfc64PublicCatalogActivationConfig = Rfc64PublicCatalogActivationConfigV1;
+export type ResolvedRfc64PublicCatalogActivationConfig =
+  ResolvedRfc64PublicCatalogActivationConfigV1;
+export type Rfc64PublicCatalogActivationChainIdentity =
+  Rfc64PublicCatalogActivationChainIdentityV1;
 
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
@@ -1026,81 +1003,10 @@ export function resolveRfc64PublicCatalogActivation(
   config: Pick<DkgConfig, 'rfc64PublicCatalog'>,
   chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
 ): ResolvedRfc64PublicCatalogActivationConfig {
-  const activation = config.rfc64PublicCatalog;
-  if (activation === undefined || activation.enabled === false) {
-    return Object.freeze({
-      enabled: false,
-      selectedContextGraphs: Object.freeze([]),
-    });
-  }
-  if (activation.enabled !== true) {
-    throw new TypeError('rfc64PublicCatalog.enabled must be a boolean');
-  }
-  const bootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(activation.bootstrap);
-  if (bootstrap === undefined || bootstrap.acceptedPublicPolicies.length === 0) {
-    throw new TypeError(
-      'enabled rfc64PublicCatalog requires a non-empty bootstrap.acceptedPublicPolicies manifest',
-    );
-  }
-  const selectedNetworkId = chainIdentity.chainId;
-  if (typeof selectedNetworkId !== 'string' || selectedNetworkId.length === 0) {
-    throw new TypeError('enabled rfc64PublicCatalog requires an effective chain id');
-  }
-  const selectedEvmChainId = selectedNetworkId.match(/:(0|[1-9][0-9]*)$/u)?.[1];
-  if (selectedEvmChainId === undefined) {
-    throw new TypeError(
-      'enabled rfc64PublicCatalog requires a namespaced numeric EVM chain id',
-    );
-  }
-  for (const { policyEnvelope } of bootstrap.acceptedPublicPolicies) {
-    if (policyEnvelope.payload.networkId !== selectedNetworkId) {
-      throw new TypeError(
-        'rfc64PublicCatalog policy network differs from the daemon effective chain id',
-      );
-    }
-  }
-  // Derive daemon subscriptions only from the same canonical, immutable
-  // manifest snapshot the agent consumes. The snapshotter owns policy shape,
-  // public-access, canonical codec, bounds, and uniqueness validation.
-  const selectedContextGraphs = bootstrap.acceptedPublicPolicies.map(
-    ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+  return resolveRfc64PublicCatalogActivationConfigV1(
+    config.rfc64PublicCatalog,
+    chainIdentity,
   );
-  if (
-    activation.autoPublish !== undefined
-    && Object.prototype.hasOwnProperty.call(activation.autoPublish, 'contextGraphIds')
-  ) {
-    throw new TypeError(
-      'rfc64PublicCatalog.autoPublish.contextGraphIds is derived from the bootstrap manifest',
-    );
-  }
-  const deploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
-    activation.deploymentProfile,
-  );
-  if (deploymentProfile !== undefined) {
-    if (deploymentProfile.networkId !== selectedNetworkId) {
-      throw new TypeError(
-        'rfc64PublicCatalog deployment network differs from the daemon effective chain id',
-      );
-    }
-    if (deploymentProfile.assertedAtChainId !== selectedEvmChainId) {
-      throw new TypeError(
-        'rfc64PublicCatalog deployment EVM chain id differs from the daemon effective chain id',
-      );
-    }
-  }
-  const autoPublish = activation.autoPublish === undefined
-    ? undefined
-    : snapshotRfc64PublicCatalogAutoPublishConfigV1({
-        ...activation.autoPublish,
-        contextGraphIds: selectedContextGraphs,
-      });
-  return Object.freeze({
-    enabled: true,
-    selectedContextGraphs: Object.freeze(selectedContextGraphs),
-    deploymentProfile,
-    autoPublish,
-    bootstrap,
-  });
 }
 
 type NetworkReadinessValidation =
