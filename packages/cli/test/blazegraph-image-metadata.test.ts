@@ -63,6 +63,7 @@ describe('Blazegraph image metadata contract', () => {
     expect(result.stdout.trim().split('\t')).toEqual([
       metadata.image,
       String(metadata.containerPort),
+      metadata.dataPath,
     ]);
   });
 });

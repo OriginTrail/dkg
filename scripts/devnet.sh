@@ -395,12 +395,12 @@ start_blazegraph() {
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
   fi
 
-  local blazegraph_metadata blazegraph_image blazegraph_container_port
+  local blazegraph_metadata blazegraph_image blazegraph_container_port _blazegraph_data_path
   if ! blazegraph_metadata="$(read_blazegraph_metadata)"; then
     log "ERROR: Could not read the pinned Blazegraph image metadata"
     return 1
   fi
-  IFS=$'\t' read -r blazegraph_image blazegraph_container_port <<< "$blazegraph_metadata"
+  IFS=$'\t' read -r blazegraph_image blazegraph_container_port _blazegraph_data_path <<< "$blazegraph_metadata"
 
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \

@@ -45,7 +45,7 @@ function readBlazegraphImageMetadata(filePath) {
 
 function formatBlazegraphImageMetadata(metadata) {
   const parsed = parseBlazegraphImageMetadata(metadata);
-  return `${parsed.image}\t${parsed.containerPort}`;
+  return `${parsed.image}\t${parsed.containerPort}\t${parsed.dataPath}`;
 }
 
 module.exports = {
