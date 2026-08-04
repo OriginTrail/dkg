@@ -10,7 +10,7 @@ set -euo pipefail
 
 HARNESS_DIR="${HARNESS_DIR:-blackbox-harness}"
 RUN_ID="nightly-$(date -u +%Y%m%d-%H%M)"
-BASE_PORT="${RC_BB_BASE_PORT:-9351}"
+BASE_PORT="${RC_BB_BASE_PORT:-$((21000 + RANDOM % 15000))}"
 WS="${WORKSPACE:-$(pwd)}/bb-run"
 rm -rf "$WS"; mkdir -p "$WS"
 
@@ -30,13 +30,18 @@ EOF
   echo $! > "$WS/$role.pid"
 }
 
-wait_api() { # role
-  local port="${PORTS[$1]}"
+wait_api() { # role — accepts only OUR node (name check guards against port squatters on host network)
+  local role="$1"
+  local port="${PORTS[$role]}"
+  local expect="rc-bb-$role-$RUN_ID"
   for _ in $(seq 1 60); do
-    curl -sf -m 4 "http://127.0.0.1:$port/api/status" > /dev/null && return 0
+    local got
+    got="$(curl -sf -m 4 "http://127.0.0.1:$port/api/status" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).name||"")}catch{console.log("")}})' 2>/dev/null || true)"
+    if [ "$got" = "$expect" ]; then echo "✅ $role up on :$port"; return 0; fi
+    if [ -n "$got" ]; then echo "❌ port $port is occupied by foreign node '$got' — port collision on host network"; return 1; fi
     sleep 5
   done
-  echo "❌ $1 never came up"; tail -40 "$WS/$1.log"; return 1
+  echo "❌ $role never came up"; tail -40 "$WS/$role.log"; return 1
 }
 
 cleanup() {
