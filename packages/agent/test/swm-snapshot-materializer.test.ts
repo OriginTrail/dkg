@@ -41,6 +41,7 @@ import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const CG = 'ws00-materializer-real-store';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
@@ -66,51 +67,23 @@ class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
  * count with different content: only a digest-binding guard can tell them
  * apart.
  */
+/**
+ * Thin adapters over the shared builders in `swm-descriptor-fixtures.ts`.
+ *
+ * The bodies moved so the throw-path row in `sync-requester-progress.test.ts`
+ * can build DESCRIPTOR-shaped metadata from the same known-good source instead
+ * of hand-rolling a fourth SWM fixture. The positional signatures are kept so
+ * every existing call site here is untouched — the 13 pre-existing tests are
+ * re-proven behaviourally identical by RUN, not by reading this diff.
+ */
+const swmFx = swmFixtures(CG);
+
 function share(version: number, operationId: string, marker: string, ual: string = UAL, payloadCount = 2) {
-  const scope = createGraphKnowledgeAssetScope(ual, version);
-  const assertionGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
-  const operationSubject = `urn:dkg:share:${CG}:${operationId}`;
-  const headSubject = `${ual}#dkg-swm-head`;
-  // `ual`/`payloadCount` default to the original single-KA values, so `v1`/`v2`
-  // and every test built on them are behaviourally unchanged. The multi-KA
-  // manifest below varies both: distinct UALs give distinct head subjects, and
-  // distinct payload SIZES mean a KA materialized in place of another shows up
-  // in the counters instead of cancelling out.
-  const payload: Quad[] = Array.from({ length: payloadCount }, (_, i) => ({
-    subject: `urn:snap:${marker}:${i}`, predicate: 'http://schema.org/status', object: `"${marker}"`, graph: '',
-  }));
-  const digest = workspacePublicQuadsDigest(payload);
-  const meta: Quad[] = [
-    ...generateKnowledgeAssetShareMetadata({
-      shareOperationId: operationId,
-      contextGraphId: CG,
-      kaUal: ual,
-      assertionVersion: version,
-      publicTripleCount: payload.length,
-      privateTripleCount: 0,
-      publisherPeerId: 'peer-source',
-      timestamp: new Date(0),
-    }, WS_META),
-    { subject: operationSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
-    { subject: operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"${digest}"`, graph: WS_META },
-    { subject: headSubject, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`, graph: WS_META },
-    { subject: headSubject, predicate: `${DKG}kaUal`, object: ual, graph: WS_META },
-    { subject: headSubject, predicate: `${DKG}assertionVersion`, object: `"${version}"^^<${XSD_INTEGER}>`, graph: WS_META },
-    { subject: headSubject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: WS_META },
-    { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: WS_META },
-  ];
-  return { version, operationId, operationSubject, headSubject, assertionGraph, payload, digest, meta };
+  return swmFx.share({ version, operationId, marker, ual, payloadCount });
 }
 
-/** N independent KAs — distinct UAL, operation and payload size each. */
 function manifest(count: number) {
-  return Array.from({ length: count }, (_, i) => share(
-    1,
-    `op-ka-${i + 1}`,
-    `ka-${i + 1}`,
-    `did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/${i + 1}`,
-    2 + i,
-  ));
+  return swmFx.manifest(count);
 }
 
 const v1 = share(1, 'op-v1', 'version-one');
