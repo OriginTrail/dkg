@@ -49,6 +49,28 @@ async function main() {
     const created = await api(pubUrl, '/api/context-graph/create', pubToken, createBody);
     console.log(`✅ created private CG: ${JSON.stringify(created).slice(0, 200)}`);
 
+    // CURATED-CG JOIN FLOW — subscribing alone is not enough. The receiver
+    // must request to join (signed delegation) and the curator must approve,
+    // otherwise its catch-up reports `unreachable` and it never learns the
+    // agent gate ("not-agent-gated" on the sender-key handshake).
+    try {
+        const jr = await api(recvUrl, `/api/context-graph/${encodeURIComponent(cgId)}/request-join`, recvToken, { curatorPeerId: pubIdent.peerId });
+        console.log(`• receiver request-join: ${JSON.stringify(jr).slice(0, 220)}`);
+    } catch (e) {
+        console.warn(`⚠️ request-join failed: ${e.message}${e.body ? ' ' + JSON.stringify(e.body).slice(0, 200) : ''}`);
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+    try {
+        const pending = await api(pubUrl, `/api/context-graph/${encodeURIComponent(cgId)}/join-requests`, pubToken);
+        console.log(`• curator sees join requests: ${JSON.stringify(pending).slice(0, 220)}`);
+    } catch (e) { console.warn(`⚠️ join-requests read failed: ${e.message}`); }
+    try {
+        const ap = await api(pubUrl, `/api/context-graph/${encodeURIComponent(cgId)}/approve-join`, pubToken, { agentAddress: recvIdent.agentAddress });
+        console.log(`• curator approve-join: ${JSON.stringify(ap).slice(0, 220)}`);
+    } catch (e) {
+        console.warn(`⚠️ approve-join failed: ${e.message}${e.body ? ' ' + JSON.stringify(e.body).slice(0, 200) : ''}`);
+    }
+
     const sub = await api(recvUrl, '/api/context-graph/subscribe', recvToken, { contextGraphId: cgId, includeSharedMemory: true });
     console.log(`• receiver subscribe: ${JSON.stringify(sub).slice(0, 160)}`);
 
