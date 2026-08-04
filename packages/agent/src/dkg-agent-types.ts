@@ -760,6 +760,8 @@ export interface VmReconcileRotationRecord {
   ordinal: number;
   fingerprint: string;
   phase: 'collecting' | 'backoff';
+  /** Retry suppression is distinct from authenticated clean-absence proof. */
+  backoffKind?: 'clean-absence' | 'incomplete-cycle';
   candidatePeerIds: Set<string>;
   /** Peers physically attempted during the current proof cycle. */
   attemptedPeerIds: Set<string>;

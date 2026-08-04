@@ -1682,8 +1682,12 @@ export class DKGAgent extends DKGAgentBase {
     // restore process-local suppression while the dispatcher drains.
     this.closeVmReconcileRotationState();
     const vmReconcileDispatcher = this.vmReconcileDispatcher;
-    if (vmReconcileDispatcher) {
-      const drain = vmReconcileDispatcher.close();
+    const vmReconcileSweep = this.vmReconcileSweepInFlight;
+    if (vmReconcileDispatcher || vmReconcileSweep) {
+      const drains: Promise<unknown>[] = [];
+      if (vmReconcileDispatcher) drains.push(vmReconcileDispatcher.close());
+      if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));
+      const drain = Promise.all(drains);
       let drainTimedOut = false;
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<void>((resolve) => {
@@ -1698,9 +1702,18 @@ export class DKGAgent extends DKGAgentBase {
       if (drainTimedOut) {
         this.log.warn(
           createOperationContext('system'),
-          `DKGAgent.stop: ${vmReconcileDispatcher.snapshot().active} VM reconcile job(s) still active after ${DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS}ms drain bound — proceeding with shutdown`,
+          `DKGAgent.stop: ${vmReconcileDispatcher?.snapshot().active ?? 0} VM reconcile job(s) still active after ${DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS}ms drain bound${vmReconcileSweep ? ' (sweep pending)' : ''} — proceeding with shutdown`,
         );
       }
+    }
+    // A timed-out dependency may ignore cancellation forever. Detach the old
+    // runtime by identity after the bounded drain; generation/signal fences
+    // prevent its late continuations from mutating the next node lifecycle.
+    if (this.vmReconcileDispatcher === vmReconcileDispatcher) {
+      this.vmReconcileDispatcher = undefined;
+    }
+    if (this.vmReconcileSweepInFlight === vmReconcileSweep) {
+      this.vmReconcileSweepInFlight = null;
     }
     this.coreHostRecordingsClosed = true;
     await this.drainCoreHostRecordings();

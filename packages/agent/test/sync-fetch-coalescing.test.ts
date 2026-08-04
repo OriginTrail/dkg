@@ -153,7 +153,7 @@ describe('exact VM recovery lifecycle', () => {
     }
   });
 
-  it('retires a timed-out dispatcher before admitting reconcile work after restart', async () => {
+  it('quarantines a timed-out dispatcher and admits fresh reconcile work after restart', async () => {
     const timeoutDescriptor = Object.getOwnPropertyDescriptor(
       DKGAgentBase,
       'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
@@ -177,28 +177,25 @@ describe('exact VM recovery lifecycle', () => {
       (agent as any).healStrandedScopedKCs = heal;
 
       const oldRun = (agent as any).runVmReconcileForCg('restart-retirement', 'manual');
+      const oldOutcome = oldRun.catch((error: unknown) => error);
       await targetEntered.promise;
       await agent.stop();
       expect(oldDispatcher.snapshot()).toMatchObject({ active: 1, closed: true });
 
       await agent.start();
-      expect((agent as any).vmReconcileDispatcher).toBe(oldDispatcher);
+      const newDispatcher = (agent as any).vmReconcileDispatcher;
+      expect(newDispatcher).not.toBe(oldDispatcher);
+      expect(newDispatcher.snapshot().closed).toBe(false);
+      const freshResult = { status: 'current', contextGraphId: 'restart-retirement-new' };
+      (agent as any).executeVmReconcileForCg = vi.fn(async () => freshResult);
       await expect(
         (agent as any).runVmReconcileForCg('restart-retirement-new', 'manual'),
-      ).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
-
-      await agent.stop();
-      await agent.start();
-      expect((agent as any).vmReconcileDispatcher).toBe(oldDispatcher);
-      expect((agent as any).vmReconcileRetiringDispatcher).toBe(oldDispatcher);
+      ).resolves.toBe(freshResult);
 
       releaseTarget.resolve();
-      await expect(oldRun).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+      await expect(oldOutcome).resolves.toBeInstanceOf(VmReconcileQueueClosedError);
       expect(heal).not.toHaveBeenCalled();
-      await waitFor(() => (
-        (agent as any).vmReconcileDispatcher !== oldDispatcher
-        && (agent as any).vmReconcileDispatcher?.snapshot().closed === false
-      ));
+      expect((agent as any).vmReconcileDispatcher).toBe(newDispatcher);
     } finally {
       releaseTarget.resolve();
       await agent.stop().catch(() => {});

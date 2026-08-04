@@ -10,7 +10,7 @@
  * ontology OnChainId quad is locally present gets bound + persisted, and the
  * sweep then triggers its reconcile. Hermetic — MockChainAdapter, no network.
  */
-import { afterEach, describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
@@ -21,12 +21,23 @@ import {
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 interface AgentInternals {
   runVmReconcileSweep(): Promise<void>;
   selfPrimeSubscriptionOnChainId(
     localCgId: string,
     sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
     targetOnChainId?: bigint,
+    isCurrent?: () => boolean,
+    signal?: AbortSignal,
   ): Promise<string | null>;
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
@@ -132,6 +143,50 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const matched = await internals.selfPrimeSubscriptionOnChainId(CG_MATCH, internals.subscribedContextGraphs.get(CG_MATCH)!, BigInt(ON_MATCH));
     expect(matched).toBe(ON_MATCH);
     expect(internals.subscribedContextGraphs.get(CG_MATCH)?.onChainId).toBe(ON_MATCH);
+  });
+
+  it('does not bind or persist a replacement subscription after delayed self-prime is invalidated', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeLifecycleFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'gh1098-stale-self-prime';
+    const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
+    const replacement = { subscribed: true, onChainId: '9002' };
+    internals.subscribedContextGraphs.set(localCgId, original);
+
+    const lookup = deferred<string | null>();
+    let receivedSignal: AbortSignal | undefined;
+    (internals as any).getContextGraphOnChainId = async (
+      _id: string,
+      options: { signal?: AbortSignal },
+    ) => {
+      receivedSignal = options.signal;
+      return lookup.promise;
+    };
+    const persist = vi.fn();
+    (internals as any).persistContextGraphSubscription = persist;
+    let current = true;
+    const controller = new AbortController();
+
+    const prime = internals.selfPrimeSubscriptionOnChainId(
+      localCgId,
+      original,
+      undefined,
+      () => current,
+      controller.signal,
+    );
+    await Promise.resolve();
+    current = false;
+    controller.abort();
+    internals.subscribedContextGraphs.set(localCgId, replacement);
+    lookup.resolve('9001');
+
+    await expect(prime).resolves.toBeNull();
+    expect(receivedSignal).toBe(controller.signal);
+    expect(original.onChainId).toBeUndefined();
+    expect(internals.subscribedContextGraphs.get(localCgId)).toBe(replacement);
+    expect(persist).not.toHaveBeenCalled();
   });
 
   it('live KACG nudge handler: with multiple subscribed-unbound CGs, binds + reconciles ONLY the one matching the event id', async () => {
