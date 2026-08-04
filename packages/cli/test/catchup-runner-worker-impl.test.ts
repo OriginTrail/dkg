@@ -1901,3 +1901,91 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
     expect(result.diagnostics?.sharedMemory?.continuationStopReason).toBe('coverage-stalled');
   });
 });
+
+/**
+ * The two capability-gate clauses, each pinned by WHICH peers a second pass
+ * contacts rather than by whether one happens.
+ *
+ * That shape is deliberate. The obvious fixture — one peer, barren — cannot see
+ * either clause: with `snapshotsResolved: 0` the high-water mark has not advanced,
+ * so the loop stops at `coverage-stalled` before the gate is consulted, and the
+ * row passes whether the guard exists or not. It is the T14 fixture-collapse
+ * pattern exactly, and it is why these clauses were unpinned.
+ *
+ * Pairing a productive peer with the peer under test fixes it: the productive one
+ * advances coverage so the loop genuinely reaches the gate, and the assertion is
+ * the *membership* of the second pass.
+ */
+describe('#2050 capability gate — which peers earn a second pass', () => {
+  const CG = 'gate-cg';
+  const PRODUCTIVE = 'peer-productive-1111';
+
+  function round(peerId: string, resolved: number, total: number, manifestComplete = true) {
+    return {
+      ...sharedResult(),
+      failedPhases: 1,
+      swmCoverage: {
+        contextGraphId: CG,
+        peerIdSuffix: peerId.slice(-8),
+        snapshotsResolved: resolved,
+        snapshotsTotal: total,
+        manifestComplete,
+        missingCount: Math.max(0, total - resolved),
+        missingSample: [],
+        materializationFailures: 0,
+      },
+    };
+  }
+
+  /** Runs a walk over the productive peer plus one peer under test. */
+  async function walkWith(other: string, otherRound: () => ReturnType<typeof round>) {
+    const shared: string[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PRODUCTIVE, other], connectedPeers: 2 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            const peerId = String(args[0]);
+            shared.push(peerId);
+            if (peerId !== PRODUCTIVE) return otherRound();
+            // Advances coverage every pass, so the loop keeps reaching the gate
+            // instead of stopping at `coverage-stalled`.
+            const seen = shared.filter((p) => p === PRODUCTIVE).length;
+            return round(PRODUCTIVE, seen, 9);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+    return { shared, result };
+  }
+
+  it('does not re-contact a BARREN peer (snapshotsTotal === 0)', async () => {
+    const BARREN = 'peer-barren-2222';
+    const { shared } = await walkWith(BARREN, () => round(BARREN, 0, 0));
+
+    // Pass 1 contacts both; every later pass contacts only the productive peer.
+    expect(shared.slice(0, 2).sort()).toEqual([BARREN, PRODUCTIVE].sort());
+    expect(shared.filter((p) => p === BARREN)).toHaveLength(1);
+    expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(1);
+  });
+
+  it('does not re-contact a peer whose MANIFEST was truncated', async () => {
+    // Resolved < total, so the resolved/total clause alone would call it capable.
+    // Only `manifestComplete` excludes it — and it must be excluded, because a
+    // truncated round advances `snapshotsResolved` while materializing nothing.
+    const TRUNCATED = 'peer-truncated-3333';
+    const { shared } = await walkWith(TRUNCATED, () => round(TRUNCATED, 1, 5, false));
+
+    expect(shared.slice(0, 2).sort()).toEqual([PRODUCTIVE, TRUNCATED].sort());
+    expect(shared.filter((p) => p === TRUNCATED)).toHaveLength(1);
+    expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(1);
+  });
+});
