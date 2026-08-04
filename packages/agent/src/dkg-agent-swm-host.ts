@@ -3672,7 +3672,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ordinal: target.ordinal,
         fingerprint,
         phase: 'collecting',
-        backoffReason: undefined,
         candidatePeerIds: new Set(candidatePeerIds),
         attemptedPeerIds: new Set(),
         cleanAbsentPeerIds: new Set(),
@@ -3703,7 +3702,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Any removal/replacement invalidates the whole cycle so shrink can
         // never manufacture exhaustion or preserve an active suppression.
         record.phase = 'collecting';
-        record.backoffReason = undefined;
         record.nextRetryAt = 0;
         record.attemptedPeerIds.clear();
         record.cleanAbsentPeerIds.clear();
@@ -3714,7 +3712,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Pure growth preserves valid credits for retained identities, but the
         // newly observed peer is uncredited and immediately breaks backoff.
         record.phase = 'collecting';
-        record.backoffReason = undefined;
         record.nextRetryAt = 0;
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
@@ -3727,21 +3724,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // A deadline only opens a new collection cycle. It never earns another
       // failure/backoff without fresh clean-absence evidence from every peer.
       record.phase = 'collecting';
-      record.backoffReason = undefined;
       record.attemptedPeerIds.clear();
       record.cleanAbsentPeerIds.clear();
       record.collectionDeadlineAt = now
         + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       record.nextRetryAt = 0;
     } else if (now >= record.collectionDeadlineAt) {
-      // A partial rotation must not pin already-credited peers forever when a
-      // stable sibling repeatedly fails protocol/admission or returns an
-      // incomplete response. Start a fresh proof cycle without treating the
-      // incomplete cycle as a failure or scheduling a timer.
-      record.attemptedPeerIds.clear();
-      record.cleanAbsentPeerIds.clear();
-      record.collectionDeadlineAt = now
-        + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+      // Expired partial evidence fails open and releases its cache slot. Return
+      // evidence-free for this pass so a repeatedly ineligible roster cannot
+      // refresh all collecting entries just before capacity admission runs.
+      this.vmReconcileRotationState.delete(slotKey);
+      return { slotKey, suppressed: false };
     }
 
     this.touchVmReconcileRotationRecord(slotKey, record);
@@ -3752,7 +3745,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     slotKey: string,
     record: VmReconcileRotationRecord,
-    reason: 'clean-absence' | 'no-progress',
   ): void {
     record.failures += 1;
     const exponentialBackoff = Math.min(
@@ -3769,7 +3761,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
     );
     record.phase = 'backoff';
-    record.backoffReason = reason;
     record.collectionDeadlineAt = 0;
     record.nextRetryAt = this.vmReconcileRotationNow() + backoff;
   }
@@ -3794,12 +3785,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.vmReconcileRotationState.size < DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
       return true;
     }
-    // Map order is LRU order. A completed backoff record is replaceable: the
-    // evicted slot merely retries fail-open. Collecting records stay installed
-    // until they finish or are invalidated, preventing cap+1 churn from making
-    // every partial rotation useless.
+    // Map order is LRU order. Completed backoff and expired collecting records
+    // are replaceable: eviction merely retries fail-open. Live collectors stay
+    // installed so cap+1 churn cannot make every partial rotation useless.
+    const now = this.vmReconcileRotationNow();
     for (const [key, record] of this.vmReconcileRotationState) {
-      if (record.phase !== 'backoff') continue;
+      if (
+        record.phase !== 'backoff'
+        && (record.phase !== 'collecting' || now < record.collectionDeadlineAt)
+      ) continue;
       this.vmReconcileRotationState.delete(key);
       return true;
     }
@@ -3840,10 +3834,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
   settleVmReconcileRotationAttempt(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
-    peerId: string,
+    peerId: string | undefined,
     disposition: 'found' | 'clean-absent' | 'incomplete',
     expectedCandidatePeerIds: readonly string[],
     capturedRecord: VmReconcileRotationRecord,
+    unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
     if (this.vmReconcileRotationClosed) return;
     const slotKey = this.vmReconcileRotationSlotKey(target);
@@ -3852,26 +3847,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       capturedRecord.candidatePeerIds,
       expectedCandidatePeerIds,
     )) return;
-    if (!capturedRecord.candidatePeerIds.has(peerId)) return;
+    if (peerId !== undefined && !capturedRecord.candidatePeerIds.has(peerId)) return;
 
-    capturedRecord.attemptedPeerIds.add(peerId);
-    if (disposition === 'clean-absent') capturedRecord.cleanAbsentPeerIds.add(peerId);
-    const attemptedEveryPeer = [...capturedRecord.candidatePeerIds]
-      .every((candidatePeerId) => capturedRecord.attemptedPeerIds.has(candidatePeerId));
+    if (peerId !== undefined) {
+      capturedRecord.attemptedPeerIds.add(peerId);
+      if (disposition === 'clean-absent') capturedRecord.cleanAbsentPeerIds.add(peerId);
+      // Preserve fairly accumulated proof progress while other targets share
+      // the bounded peer budget. A cycle expires only after this slot itself
+      // stops making physical progress for the effective maximum.
+      capturedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
+        + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+    }
+    const scheduledEveryPeer = [...capturedRecord.candidatePeerIds]
+      .every((candidatePeerId) => capturedRecord.attemptedPeerIds.has(candidatePeerId)
+        || unavailablePeerIds.has(candidatePeerId));
     const cleanAbsentFromEveryPeer = [...capturedRecord.candidatePeerIds]
       .every((candidatePeerId) => capturedRecord.cleanAbsentPeerIds.has(candidatePeerId));
     if (cleanAbsentFromEveryPeer) {
-      this.enterVmReconcileRotationBackoff(slotKey, capturedRecord, 'clean-absence');
-    } else if (attemptedEveryPeer) {
-      // An incomplete, failed, or still-pending result is not absence proof.
-      // It still needs completion-anchored retry damping: an exact transfer can
-      // outlast the start-anchored per-CG cooldown, and legacy responders may
-      // return the whole CG while never covering the requested descriptor.
-      // Keep the cause explicit so this backoff can never be mistaken for a
-      // clean-absence proof or advance VM state.
-      capturedRecord.attemptedPeerIds.clear();
-      capturedRecord.cleanAbsentPeerIds.clear();
-      this.enterVmReconcileRotationBackoff(slotKey, capturedRecord, 'no-progress');
+      this.enterVmReconcileRotationBackoff(slotKey, capturedRecord);
+    } else if (scheduledEveryPeer) {
+      // A physically incomplete result or an ineligible candidate is not
+      // absence proof. It may finish the scheduling cycle, but only by dropping
+      // all evidence. The per-CG cooldown below provides the short retry damper.
+      this.vmReconcileRotationState.delete(slotKey);
     }
     this.touchVmReconcileRotationRecord(slotKey, capturedRecord);
   }
@@ -4231,7 +4229,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const attemptedOrdinals = new Set<number>();
     const usedPeerIds = new Set<string>();
     const unavailablePeerIds = new Set<string>();
-    let attemptedFetch = false;
+    let recoveryWorkRan = false;
 
     for (const entry of eligible) {
       if (!isTargetCurrent()) break;
@@ -4256,6 +4254,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       for (const candidatePeerId of candidateOrder) {
         if (usedPeerIds.has(candidatePeerId) || unavailablePeerIds.has(candidatePeerId)) continue;
         const connectedPeer = connectedByPeerId.get(candidatePeerId);
+        recoveryWorkRan = true;
         if (!connectedPeer || !(await this.waitForSyncProtocol(connectedPeer))) {
           unavailablePeerIds.add(candidatePeerId);
           continue;
@@ -4274,7 +4273,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
         peerId = candidatePeerId;
         break;
       }
-      if (!peerId) continue;
+      if (!peerId) {
+        if (installedRecord) {
+          this.settleVmReconcileRotationAttempt(
+            target,
+            undefined,
+            'incomplete',
+            candidatePeerIds,
+            installedRecord,
+            unavailablePeerIds,
+          );
+        }
+        continue;
+      }
       usedPeerIds.add(peerId);
 
       // A recovery target can approach the frame budget by itself. Each peer
@@ -4295,7 +4306,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       let disposition: 'found' | 'clean-absent' | 'incomplete' = 'incomplete';
       try {
-        attemptedFetch = true;
         attemptedOrdinals.add(target.ordinal);
         if (installedRecord) {
           installedRecord.lastAttemptedPeerId = peerId;
@@ -4359,6 +4369,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             disposition,
             candidatePeerIds,
             installedRecord,
+            unavailablePeerIds,
           );
         }
       } else {
@@ -4366,15 +4377,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     }
 
-    // Mirror the inline path's cooldown policy: an unreachable network must
-    // not consume the fetch budget, and completed work resets the damper so
-    // the trailing `hasMore` slice of a draining backlog fetches immediately.
-    // Only a batch that reached a peer and recovered nothing leaves the
-    // cooldown standing.
+    // Mirror the inline path's cooldown policy: a pass that performs no
+    // protocol/admission/transport work must not consume the fetch budget, and
+    // completed work resets the damper so the trailing `hasMore` slice of a
+    // draining backlog fetches immediately.
+    // Only a batch that reached a peer and recovered nothing retains the
+    // cooldown. Re-anchor that short damper at completion: a slow or legacy
+    // response may already have outlived the timestamp taken before transfer.
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
-    if (!attemptedFetch || recoveredAny) {
+    if (!recoveryWorkRan || recoveredAny) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
+    } else {
+      this.vmReconcileFetchCooldownAt.delete(localCgId);
+      this.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
     }
     return {
       outcomes,
