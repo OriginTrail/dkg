@@ -33,7 +33,8 @@ PORT_OF[receiver]=$((BASE_PORT+1))
 PORT_OF[control]=$((BASE_PORT+2))
 
 install_version() { # version -> prints bin path
-  local v="$1" dir="$WS/pkg-$v"
+  local v="$1"
+  local dir="$WS/pkg-$v"
   if [ ! -x "$dir/node_modules/.bin/dkg" ]; then
     mkdir -p "$dir"; ( cd "$dir" && npm install --no-audit --no-fund --loglevel=error "@origintrail-official/dkg@$v" >/dev/null 2>&1 )
   fi
@@ -41,7 +42,10 @@ install_version() { # version -> prints bin path
 }
 
 start_node() { # role version
-  local role="$1" version="$2" home="$WS/home-$role" port="${PORT_OF[$role]}"
+  local role="$1"
+  local version="$2"
+  local home="$WS/home-$role"
+  local port="${PORT_OF[$role]}"
   local bin; bin="$(install_version "$version")"
   mkdir -p "$home"
   cat > "$home/config.json" <<EOF
