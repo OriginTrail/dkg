@@ -1,4 +1,8 @@
-import type { DKGAgent, SwmSnapshotCoverage } from '@origintrail-official/dkg-agent';
+import type {
+  CatchupPassDecisionReason,
+  DKGAgent,
+  SwmSnapshotCoverage,
+} from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type {
   ContextGraphReadinessProvenance,
@@ -26,6 +30,29 @@ export const CONTEXT_GRAPH_READINESS_VERSION = 1;
 const SWM_SHORTFALL_SAMPLE_LIMIT = 10;
 
 /**
+ * Why the continuation loop stopped, in operator-facing words.
+ *
+ * An exhaustive `Record` rather than a `switch` with a default: the vocabulary
+ * is closed precisely so this message stays testable, and a new reason should
+ * fail the build here rather than silently render nothing.
+ *
+ * `coverage-stalled` deliberately outranks `budget-exhausted` in the policy, so
+ * a run that stalled AND ran out of time reports the stall. Its wording must
+ * therefore never mention time: "ran out of time" would send an operator to
+ * raise a budget that buys nothing, which is the precise misdirection that
+ * precedence exists to prevent.
+ */
+const SWM_STOP_REASON_TEXT: Record<CatchupPassDecisionReason, string> = {
+  // Not a stop at all — the loop was still willing to continue.
+  continue: '',
+  'plane-proven': 'the plane was proven by another peer',
+  'coverage-stalled': 'a further pass stopped making progress, so more passes would not help',
+  'no-capable-peers': 'no remaining peer reported holding the missing snapshots',
+  'max-passes-reached': 'the pass limit was reached',
+  'budget-exhausted': 'the time budget was exhausted',
+};
+
+/**
  * The shared-memory shortfall clause appended to the incomplete-progress
  * terminal message.
  *
@@ -43,6 +70,7 @@ const SWM_SHORTFALL_SAMPLE_LIMIT = 10;
 export function swmShortfallClause(
   coverage: SwmSnapshotCoverage | undefined,
   continuationPasses: number | undefined,
+  stopReason?: CatchupPassDecisionReason,
 ): string {
   if (!coverage || coverage.missingCount <= 0) return '';
 
@@ -54,11 +82,22 @@ export function swmShortfallClause(
     ? `, including ${sample.join(', ')}${unnamed > 0 ? ` (+${unnamed} more)` : ''}`
     : '';
   // An incomplete manifest means the denominator is only what this peer managed
-  // to advertise before its metadata phase ran out, not what the graph holds.
-  // Presenting it as the total would understate the shortfall.
+  // to advertise before its metadata phase ran out, not what the graph holds —
+  // presenting it as the total would understate the shortfall. It is also why
+  // this peer got no further passes: the capability gate requires a complete
+  // manifest, because a truncated round advances `snapshotsResolved` against a
+  // truncated denominator while materializing nothing. Both facts belong here;
+  // "the count is a lower bound" and "we stopped asking" are different things
+  // for the person reading it.
   const lowerBound = coverage.manifestComplete
     ? ''
-    : ` The peer's snapshot manifest was itself incomplete, so ${coverage.snapshotsTotal} is a lower bound.`;
+    : ` The peer's snapshot manifest was itself incomplete, so ${coverage.snapshotsTotal}`
+      + ' is a lower bound and that peer was not retried.';
+  // Absent whenever the continuation loop did not run — shared memory was not
+  // requested, or no decision was reached.
+  const stopped = stopReason && SWM_STOP_REASON_TEXT[stopReason]
+    ? ` Continuation stopped because ${SWM_STOP_REASON_TEXT[stopReason]}.`
+    : '';
 
   // Scoped to "Shared memory" throughout: continuation passes repeat the
   // shared-memory peer walk only, and the wording must not suggest the durable
@@ -66,7 +105,7 @@ export function swmShortfallClause(
   return ` (Shared memory: ${coverage.snapshotsResolved}/${coverage.snapshotsTotal}`
     + ` snapshots verified from peer …${coverage.peerIdSuffix}`
     + ` after ${passes} ${passes === 1 ? 'pass' : 'passes'};`
-    + ` ${coverage.missingCount} outstanding${named}.)${lowerBound}`;
+    + ` ${coverage.missingCount} outstanding${named}.)${lowerBound}${stopped}`;
 }
 
 export type ContextGraphReadinessStore = Pick<
@@ -433,6 +472,7 @@ export function classifyContextGraphCatchupReadiness(input: {
           + swmShortfallClause(
             result.diagnostics?.sharedMemory?.swmCoverage,
             result.diagnostics?.sharedMemory?.continuationPasses,
+            result.diagnostics?.sharedMemory?.continuationStopReason,
           );
       } else if (input.isPrivate && missingGraphProof) {
         error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';

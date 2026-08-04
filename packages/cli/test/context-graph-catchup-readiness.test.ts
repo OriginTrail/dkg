@@ -750,7 +750,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
 
   it('calls an incomplete manifest a lower bound rather than a total', () => {
     expect(swmShortfallClause({ ...r26, manifestComplete: false }, 0))
-      .toContain("The peer's snapshot manifest was itself incomplete, so 250 is a lower bound.");
+      .toContain("The peer's snapshot manifest was itself incomplete, so 250 is a lower bound");
   });
 
   it('caps the named identifiers and accounts for the ones it omits', () => {
@@ -803,6 +803,39 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     expect(c.error).toContain('72 outstanding');
   });
 
+  it('says why continuation stopped, in words that match the reason', () => {
+    expect(swmShortfallClause(r26, 2, 'budget-exhausted'))
+      .toContain('Continuation stopped because the time budget was exhausted.');
+    expect(swmShortfallClause(r26, 2, 'max-passes-reached'))
+      .toContain('Continuation stopped because the pass limit was reached.');
+    expect(swmShortfallClause(r26, 2, 'no-capable-peers'))
+      .toContain('Continuation stopped because no remaining peer reported holding the missing snapshots.');
+  });
+
+  it('never blames the clock for a stall, since a stall outranks the budget', () => {
+    // `coverage-stalled` outranks `budget-exhausted` in the policy, so a run
+    // that stalled AND expired reports the stall. If this text mentioned time
+    // it would send an operator to raise a budget that buys nothing — the
+    // precise misdirection that precedence exists to prevent.
+    const clause = swmShortfallClause(r26, 3, 'coverage-stalled');
+
+    expect(clause).toContain('a further pass stopped making progress, so more passes would not help');
+    expect(clause).not.toMatch(/budget|time|timed out|expired/i);
+  });
+
+  it('omits the stop reason when the continuation loop never ran', () => {
+    // Absent when shared memory was not requested; `continue` is not a stop.
+    expect(swmShortfallClause(r26, 0, undefined)).not.toContain('Continuation stopped');
+    expect(swmShortfallClause(r26, 0, 'continue')).not.toContain('Continuation stopped');
+  });
+
+  it('says an incomplete manifest was not retried, not merely that it is a bound', () => {
+    // Two distinct facts: the count understates the shortfall, AND that peer
+    // was dropped from later passes by the capability gate.
+    expect(swmShortfallClause({ ...r26, manifestComplete: false }, 1))
+      .toContain('250 is a lower bound and that peer was not retried.');
+  });
+
   it('leaves that terminal byte-identical when the round reported no coverage', () => {
     const c = classifyContextGraphCatchupReadiness({
       result: swmIncompleteProgress(),
@@ -838,4 +871,120 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     result.diagnostics!.sharedMemory.insertedDataTriples = 5;
     return result;
   }
+});
+
+/**
+ * T16b (#2050) — the shortfall clause reaches the USER-VISIBLE error.
+ *
+ * Deliberately complementary to the implementer's own T16b, which asserts
+ * `swmShortfallClause` directly. This one never calls the formatter: it drives
+ * `classifyContextGraphCatchupReadiness` and asserts the composed terminal
+ * string, so it covers the SEAM — that the clause is actually appended, from
+ * the right fields, on the right branch.
+ *
+ * That seam is exactly what T16's prefix pin cannot see. Mutating the clause to
+ * return `''` leaves `startsWith(...)` green, because a prefix is satisfied by
+ * the prefix followed by nothing; these rows die. Two independent tests of an
+ * operator-facing string is not redundancy — the formatter test is the floor,
+ * this is the check.
+ */
+describe('T16b — the shortfall clause reaches the terminal message', () => {
+  const before = { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 };
+  const PREFIX = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+
+  /** The r26 shape: data inserted, plane unproven, coverage 72 short. */
+  function shortfallResult(over: Partial<{
+    resolved: number; total: number; missingCount: number; missingSample: string[];
+    manifestComplete: boolean; continuationPasses: number;
+  }> = {}): CatchupJobResult {
+    const r = unresponsiveBase();
+    r.dataSynced = 5;
+    r.diagnostics!.durable.insertedDataTriples = 5;
+    r.diagnostics!.durable.timedOutPhases = 1;
+    const sm = r.diagnostics!.sharedMemory as Record<string, unknown>;
+    sm['swmCoverage'] = {
+      contextGraphId: 'cg-under-test',
+      peerIdSuffix: 'abcd1234',
+      snapshotsResolved: over.resolved ?? 178,
+      snapshotsTotal: over.total ?? 250,
+      manifestComplete: over.manifestComplete ?? true,
+      missingCount: over.missingCount ?? 72,
+      missingSample: over.missingSample ?? ['ref-a', 'ref-b'],
+    };
+    sm['continuationPasses'] = over.continuationPasses ?? 2;
+    return r;
+  }
+
+  function unresponsiveBase(): CatchupJobResult {
+    const plane = () => ({
+      fetchedMetaTriples: 0, fetchedDataTriples: 0, insertedMetaTriples: 0,
+      insertedDataTriples: 0, bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
+      completedPhases: 0, checkpointAdvances: 0, emptyResponses: 0, metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0, rejectedKcs: 0, droppedDataTriples: 0,
+      failedPeers: 0, failedPhases: 0, deniedPhases: 0,
+    });
+    return {
+      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+      peersTried: 1, peersResponded: 1, peersSucceeded: 1,
+      dataSynced: 0, sharedMemorySynced: 0, denied: false, deniedPeers: 0,
+      cleanPlaneCompletions: {
+        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0 },
+      },
+      diagnostics: { noProtocolPeers: 0, durable: plane(), sharedMemory: plane() },
+    };
+  }
+
+  const errorFor = (result: CatchupJobResult) => classifyContextGraphCatchupReadiness({
+    result, includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: false,
+    readinessBeforeCatchup: before,
+  }).error ?? '';
+
+  it('appends the shortfall AFTER the byte-identical existing sentence', () => {
+    const error = errorFor(shortfallResult());
+    expect(error.startsWith(PREFIX)).toBe(true);
+    // The part `startsWith` cannot see. A clause mutated to '' leaves the
+    // assertion above green and kills this one.
+    expect(error.length).toBeGreaterThan(PREFIX.length);
+    // The `(+70 more)` marker is not incidental: 72 outstanding against a
+    // 2-ref sample leaves 70 unnamed, and the reader must not mistake the named
+    // refs for the whole inventory. An earlier draft of this expectation omitted
+    // it — the producer caps the sample at 10, so a clause without a marker
+    // would silently understate every shortfall larger than the cap.
+    expect(error.slice(PREFIX.length)).toBe(
+      ' (Shared memory: 178/250 snapshots verified from peer …abcd1234'
+      + ' after 3 passes; 72 outstanding, including ref-a, ref-b (+70 more).)',
+    );
+  });
+
+  it('names the peer, the counts and the outstanding total from ONE record', () => {
+    const error = errorFor(shortfallResult());
+    expect(error).toContain('178/250');
+    expect(error).toContain('…abcd1234');
+    expect(error).toContain('72 outstanding');
+    // Never a synthetic pair, and never the durable plane: continuation passes
+    // repeat the shared-memory walk only.
+    expect(error).not.toContain('200/250');
+    expect(error.slice(PREFIX.length)).not.toContain('durable');
+  });
+
+  it('reports the WALK plus its repeats, not the repeat count alone', () => {
+    // `continuationPasses` counts repeats, so the text must read passes + 1.
+    expect(errorFor(shortfallResult({ continuationPasses: 0 }))).toContain('after 1 pass;');
+    expect(errorFor(shortfallResult({ continuationPasses: 1 }))).toContain('after 2 passes;');
+  });
+
+  it('emits NO clause when nothing is outstanding', () => {
+    // With largest-manifest ordering, `missingCount === 0` means the SWM plane
+    // resolved everything the best-informed peer knew of and the `unreachable`
+    // came from elsewhere. "0 outstanding" beside a failure verdict would
+    // misdirect, so the sentence must end byte-identical to pre-fix.
+    expect(errorFor(shortfallResult({ resolved: 250, missingCount: 0 }))).toBe(PREFIX);
+  });
+
+  it('flags a truncated manifest as a lower bound and says the peer was not retried', () => {
+    const error = errorFor(shortfallResult({ manifestComplete: false }));
+    expect(error).toContain('is a lower bound');
+    expect(error).toContain('not retried');
+  });
 });
