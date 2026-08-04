@@ -717,11 +717,17 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         planeProven: catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
         capablePeers: capablePeersForNextPass(lastCoverageByPeer),
       });
-      // Recorded on every decision, the stopping one included — "why did it
-      // stop" is the question a partial catch-up actually raises, and Chunk 5's
-      // terminal message renders this.
-      diagnostics.sharedMemory.continuationStopReason = decision.reason;
       if (!decision.continue) {
+        // Published ONLY on the decision that stops the loop, so `'continue'` is
+        // structurally unrepresentable in this field rather than merely
+        // unreachable-by-inspection. Assigning on every decision left the field
+        // transiently holding `'continue'` and one added exit path — a
+        // cancellation `break` after a pass, say — from publishing it. The
+        // terminal message absorbs that value today (`SWM_STOP_REASON_TEXT.continue`
+        // is `''`, which is falsy and omits the clause), so it would have degraded
+        // quietly instead of rendering malformed text; this makes the defensive
+        // entry provably dead rather than load-bearing.
+        diagnostics.sharedMemory.continuationStopReason = decision.reason;
         // Logged even when no extra pass ran. "Why did it stop" is the question a
         // partial catch-up raises, and the answer is otherwise only reconstructable
         // from counters — `no-capable-peers` after a converged walk and after an
