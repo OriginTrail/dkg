@@ -1602,3 +1602,193 @@ describe('public SWM snapshot coverage (#2050)', () => {
     });
   });
 });
+
+/**
+ * T13 (#2050) — the coverage reduction reduces COHERENTLY and selects the
+ * record that names the shortfall.
+ *
+ * Two properties, and the second is the one that matters. Every return in
+ * `selectSwmSnapshotCoverage` yields `a` or `b` — it never constructs — so a
+ * whole-record assertion is satisfied BY CONSTRUCTION and cannot fail for any
+ * mutation confined to the comparison logic. It dies only under a mutant that
+ * SYNTHESIZES a record. That is real coverage of the no-synthesis property and
+ * it is worth keeping, but it is not what AC-5 depends on.
+ *
+ * The defect it cannot see: ranking by `resolved/total` returns `200/200` with
+ * `missingCount: 0` for a job 72 Knowledge Assets short — a real record, from a
+ * real peer, internally self-consistent, and wrong. Assert selection too, or the
+ * ordering is untested.
+ */
+function t13Coverage(over: Partial<SwmSnapshotCoverage> & {
+  peerIdSuffix: string; snapshotsResolved: number; snapshotsTotal: number;
+}): SwmSnapshotCoverage {
+  return {
+    contextGraphId: 'cg-t13',
+    manifestComplete: true,
+    missingCount: over.snapshotsTotal - over.snapshotsResolved,
+    missingSample: [],
+    ...over,
+  };
+}
+
+describe('T13 — swmCoverage reduction', () => {
+  /** The r26 shape: the peer that actually holds the graph, 72 short. */
+  const shortfallPeer = t13Coverage({ peerIdSuffix: 'aaaa1111', snapshotsResolved: 178, snapshotsTotal: 250 });
+  /** A peer hosting a SMALLER view of the same graph, fully resolved against it. */
+  const smallerPeer = t13Coverage({ peerIdSuffix: 'bbbb2222', snapshotsResolved: 200, snapshotsTotal: 200 });
+
+  it('never synthesizes a pair: the result is always one whole input record', () => {
+    for (const [a, b] of [[shortfallPeer, smallerPeer], [smallerPeer, shortfallPeer]] as const) {
+      expect([a, b]).toContainEqual(selectSwmSnapshotCoverage(a, b));
+    }
+  });
+
+  it('selects the record that NAMES THE SHORTFALL, not the best-looking fraction', () => {
+    for (const [a, b] of [[shortfallPeer, smallerPeer], [smallerPeer, shortfallPeer]] as const) {
+      const selected = selectSwmSnapshotCoverage(a, b);
+      expect(selected).toEqual(shortfallPeer);
+      expect(selected?.missingCount).toBe(72);
+      expect(selected?.peerIdSuffix).toBe('aaaa1111');
+    }
+  });
+
+  it('prefers a large partial manifest over a tiny complete one', () => {
+    // The residual the original implementation accepted in its own doc comment:
+    // `1/1` is complete and fully resolved, and reporting it would tell the
+    // operator the graph had converged.
+    const tiny = t13Coverage({ peerIdSuffix: 'cccc3333', snapshotsResolved: 1, snapshotsTotal: 1 });
+    expect(selectSwmSnapshotCoverage(tiny, shortfallPeer)).toEqual(shortfallPeer);
+    expect(selectSwmSnapshotCoverage(shortfallPeer, tiny)).toEqual(shortfallPeer);
+  });
+
+  it('prefers a complete manifest over an incomplete one, whatever the counts', () => {
+    // An incomplete manifest's denominator is only a lower bound, so its
+    // shortfall is not comparable. Completeness outranks size.
+    const truncatedButBigger = t13Coverage({
+      peerIdSuffix: 'dddd4444', snapshotsResolved: 250, snapshotsTotal: 400, manifestComplete: false,
+    });
+    expect(selectSwmSnapshotCoverage(truncatedButBigger, shortfallPeer)).toEqual(shortfallPeer);
+    expect(selectSwmSnapshotCoverage(shortfallPeer, truncatedButBigger)).toEqual(shortfallPeer);
+  });
+
+  it('lets authority evidence outrank everything below it', () => {
+    // Residual, stated deliberately: a stale or smaller CURATOR manifest still
+    // reports converged. Accepted — the curator is definitionally authoritative
+    // about its own graph's inventory — but it is a property of trusting the
+    // curator, not an artefact of the reduction.
+    const curator = t13Coverage({ peerIdSuffix: '9999cccc', snapshotsResolved: 5, snapshotsTotal: 5, fromAuthority: true });
+    expect(selectSwmSnapshotCoverage(curator, shortfallPeer)).toEqual(curator);
+    expect(selectSwmSnapshotCoverage(shortfallPeer, curator)).toEqual(curator);
+  });
+
+  it('is order-independent across records with DISTINCT peer suffixes', () => {
+    // Scoped to distinct suffixes, which is what this asserts and all it
+    // asserts — the final tiebreak is only asymmetric when they differ.
+    const records = [shortfallPeer, smallerPeer,
+      t13Coverage({ peerIdSuffix: 'cccc3333', snapshotsResolved: 1, snapshotsTotal: 1 }),
+      t13Coverage({ peerIdSuffix: 'dddd4444', snapshotsResolved: 250, snapshotsTotal: 400, manifestComplete: false }),
+    ];
+    for (const a of records) {
+      for (const b of records) {
+        expect(selectSwmSnapshotCoverage(a, b)).toEqual(selectSwmSnapshotCoverage(b, a));
+      }
+    }
+  });
+
+  it('passes absent operands through rather than erasing the known record', () => {
+    expect(selectSwmSnapshotCoverage(undefined, shortfallPeer)).toEqual(shortfallPeer);
+    expect(selectSwmSnapshotCoverage(shortfallPeer, undefined)).toEqual(shortfallPeer);
+    expect(selectSwmSnapshotCoverage(undefined, undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * T14 (#2050) — a throw must not erase the progress the round actually made.
+ *
+ * This is a CONVERGENCE property, not a diagnostics one. The continuation loop
+ * reads `swmCoverage.snapshotsResolved` as its progress signal, and that record
+ * is assembled from `syncPublicSnapshotsForMeta`'s RETURN value. A snapshot-
+ * phase transport failure throws, so before this fix the return never happened,
+ * no coverage record was built, the high-water mark did not move, and the loop
+ * declared `coverage-stalled` and abandoned a peer that had just materialized
+ * real Knowledge Assets — the r26 shape, and the exact behaviour #2050 exists
+ * to remove.
+ */
+describe('T14 — a throwing snapshot round still reports what it resolved', () => {
+  const T14_CG = 'throwing-swm';
+  const T14_META = `did:dkg:context-graph:${T14_CG}/_shared_memory_meta`;
+
+  function snapshotRow(subject: string, digest: string, count: number): Quad[] {
+    return [
+      { subject, predicate: 'http://dkg.io/ontology/publicQuadsDigest', object: `"${digest}"`, graph: T14_META } as Quad,
+      { subject, predicate: 'http://dkg.io/ontology/publicQuadsCount', object: `"${count}"`, graph: T14_META } as Quad,
+    ];
+  }
+
+  it('carries the resolved count out through the throw instead of reporting zero', async () => {
+    // Two snapshots cached and resolvable, then one whose fetch blows up.
+    const cachedA = [quad('t14-a')];
+    const cachedB = [quad('t14-b')];
+    const digestA = workspacePublicQuadsDigest(cachedA);
+    const digestB = workspacePublicQuadsDigest(cachedB);
+    const meta = [
+      ...snapshotRow('did:dkg:assertion:a', digestA, cachedA.length),
+      ...snapshotRow('did:dkg:assertion:b', digestB, cachedB.length),
+      ...snapshotRow('did:dkg:assertion:boom', 'digest-that-throws', 4),
+    ];
+
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-throwing-99887766',
+      contextGraphIds: [T14_CG],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: OperationContext,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: string,
+      ) => {
+        if (phase === 'snapshot') throw transportError('snapshot stream reset');
+        return pageResult(contextGraphId, phase);
+      },
+      processSharedMemoryBatch: async () => ({
+        ...sharedMemoryProcessResult(),
+        emptyResponses: 0,
+        verifiedMeta: meta,
+        totalFetchedMetaQuads: meta.length,
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      publicSnapshotStore: {
+        getSnapshot: async (ref: string) => {
+          if (ref === digestA) return cachedA;
+          if (ref === digestB) return cachedB;
+          return null;
+        },
+        putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    // Pre-fix this was `undefined` — the throw unwound past the record, the
+    // pass looked non-advancing, and the peer was dropped.
+    expect(summary.swmCoverage).toEqual({
+      contextGraphId: T14_CG,
+      peerIdSuffix: '99887766',
+      snapshotsResolved: 2,
+      snapshotsTotal: 3,
+      manifestComplete: true,
+      missingCount: 1,
+      missingSample: ['digest-that-throws'],
+    });
+    // The walk's invariant survives the failure path too.
+    expect(summary.swmCoverage!.snapshotsResolved + summary.swmCoverage!.missingCount)
+      .toBe(summary.swmCoverage!.snapshotsTotal);
+  });
+});
