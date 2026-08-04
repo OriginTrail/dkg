@@ -3659,6 +3659,7 @@ export async function runDaemonInner(
         publisherControl,
         publisherState,
         config,
+        rfc64PublicCatalog,
         startedAt,
         dashDb,
         opWallets,

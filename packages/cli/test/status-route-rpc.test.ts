@@ -33,10 +33,14 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
-import { loadNetworkConfig } from '../src/config.js';
+import {
+  loadNetworkConfig,
+  resolveRfc64PublicCatalogActivation,
+} from '../src/config.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
+import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
@@ -56,6 +60,12 @@ async function requestStatusWithAgent(
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const config = {
+      name: 'status-finalization-recovery-test',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+      ...configOverrides,
+    };
     await handleStatusRoutes({
       req,
       res,
@@ -63,12 +73,8 @@ async function requestStatusWithAgent(
       path: url.pathname,
       url,
       network: null,
-      config: {
-        name: 'status-finalization-recovery-test',
-        nodeRole: 'edge',
-        chain: { type: 'mock' },
-        ...configOverrides,
-      },
+      config,
+      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(config as never),
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-test',
@@ -267,10 +273,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
             catalogIssuerDelegationExpiresAt: '1893456000000',
           },
           bootstrap: {
-            acceptedPublicPolicies: [{
-              policyEnvelope: { payload: { contextGraphId: 'selected-public-cg' } },
-              targets: [],
-            }],
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')],
           },
         },
       },
@@ -282,6 +285,37 @@ describe('/api/status RFC-64 selected-public activation', () => {
       selectedContextGraphs: ['selected-public-cg'],
       autoPublishEnabled: true,
       service,
+      bootstrap,
+    });
+  });
+
+  it('reports receiver-only activation without claiming auto-publish is enabled', async () => {
+    const bootstrap = {
+      running: true,
+      pass: 1,
+      retryIntervalMs: 30_000,
+      targets: [],
+    };
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({ started: true }),
+        readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('receiver-only-cg')],
+          },
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['receiver-only-cg'],
+      autoPublishEnabled: false,
       bootstrap,
     });
   });

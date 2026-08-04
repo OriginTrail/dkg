@@ -38,13 +38,9 @@ import {
   resolveRfc64PublicCatalogActivation,
   resolveStorageAckTiming,
 } from '../src/config.js';
+import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
 
 describe('resolveRfc64PublicCatalogActivation', () => {
-  const policy = (contextGraphId: string) => ({
-    policyEnvelope: { payload: { contextGraphId } },
-    targets: [],
-  });
-
   it('is fail-closed when omitted or explicitly disabled', () => {
     expect(resolveRfc64PublicCatalogActivation({})).toEqual({
       enabled: false,
@@ -83,6 +79,25 @@ describe('resolveRfc64PublicCatalogActivation', () => {
     });
   });
 
+  it('keeps receiver-only activation selected while leaving auto-publish absent', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-receiver')],
+        },
+      },
+    });
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-receiver'],
+      autoPublish: undefined,
+    });
+    expect(resolved.bootstrap?.acceptedPublicPolicies[0]?.policyEnvelope.payload.contextGraphId)
+      .toBe('selected-receiver');
+  });
+
   it('rejects activation without a selected policy and rejects a second allowlist', () => {
     expect(() => resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: { enabled: true },
@@ -105,7 +120,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
           acceptedPublicPolicies: [policy('selected-a'), policy('selected-a')],
         },
       } as any,
-    })).toThrow(/selected context graphs must be unique/u);
+    })).toThrow(/policies must be unique by graph/u);
   });
 });
 

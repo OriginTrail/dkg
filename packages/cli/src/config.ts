@@ -3,10 +3,13 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import type {
-  DKGAgentConfig,
-  SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
+import {
+  snapshotRfc64CatalogDeploymentProfileV1,
+  snapshotRfc64PublicCatalogAutoPublishConfigV1,
+  snapshotRfc64PublicCatalogBootstrapConfigV1,
+  type DKGAgentConfig,
+  type SyncContextGraphPriorityConfig,
+  type SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
   blueGreenSlotEntryPoint,
@@ -15,7 +18,6 @@ import {
   isDkgMonorepoRoot,
   resolveDkgConfigHome,
   SELECTABLE_SETUP_NETWORKS,
-  type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
 import {
   resolveStorageAckTiming,
@@ -1026,31 +1028,18 @@ export function resolveRfc64PublicCatalogActivation(
   if (activation.enabled !== true) {
     throw new TypeError('rfc64PublicCatalog.enabled must be a boolean');
   }
-  const bootstrap = activation.bootstrap;
-  if (
-    bootstrap === undefined
-    || !Array.isArray(bootstrap.acceptedPublicPolicies)
-    || bootstrap.acceptedPublicPolicies.length === 0
-  ) {
+  const bootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(activation.bootstrap);
+  if (bootstrap === undefined || bootstrap.acceptedPublicPolicies.length === 0) {
     throw new TypeError(
       'enabled rfc64PublicCatalog requires a non-empty bootstrap.acceptedPublicPolicies manifest',
     );
   }
-  const selectedContextGraphs = bootstrap.acceptedPublicPolicies.map((entry, index) => {
-    const contextGraphId = entry?.policyEnvelope?.payload?.contextGraphId;
-    if (typeof contextGraphId !== 'string' || contextGraphId.length === 0) {
-      throw new TypeError(
-        `rfc64PublicCatalog.bootstrap.acceptedPublicPolicies[${index}] has no context graph id`,
-      );
-    }
-    // The agent snapshots and canonically validates the complete policy before
-    // any transport starts; this early resolver only extracts its graph key so
-    // daemon subscription selection and agent activation share one source.
-    return contextGraphId as ContextGraphIdV1;
-  });
-  if (new Set(selectedContextGraphs).size !== selectedContextGraphs.length) {
-    throw new TypeError('rfc64PublicCatalog selected context graphs must be unique');
-  }
+  // Derive daemon subscriptions only from the same canonical, immutable
+  // manifest snapshot the agent consumes. The snapshotter owns policy shape,
+  // public-access, canonical codec, bounds, and uniqueness validation.
+  const selectedContextGraphs = bootstrap.acceptedPublicPolicies.map(
+    ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
+  );
   if (
     activation.autoPublish !== undefined
     && Object.prototype.hasOwnProperty.call(activation.autoPublish, 'contextGraphIds')
@@ -1059,16 +1048,17 @@ export function resolveRfc64PublicCatalogActivation(
       'rfc64PublicCatalog.autoPublish.contextGraphIds is derived from the bootstrap manifest',
     );
   }
+  const autoPublish = activation.autoPublish === undefined
+    ? undefined
+    : snapshotRfc64PublicCatalogAutoPublishConfigV1({
+        ...activation.autoPublish,
+        contextGraphIds: selectedContextGraphs,
+      });
   return Object.freeze({
     enabled: true,
     selectedContextGraphs: Object.freeze(selectedContextGraphs),
-    deploymentProfile: activation.deploymentProfile,
-    autoPublish: activation.autoPublish === undefined
-      ? undefined
-      : Object.freeze({
-          ...activation.autoPublish,
-          contextGraphIds: Object.freeze([...selectedContextGraphs]),
-        }),
+    deploymentProfile: snapshotRfc64CatalogDeploymentProfileV1(activation.deploymentProfile),
+    autoPublish,
     bootstrap,
   });
 }

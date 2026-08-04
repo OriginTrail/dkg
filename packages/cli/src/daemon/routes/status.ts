@@ -94,7 +94,6 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
-  resolveRfc64PublicCatalogActivation,
   resolveNetworkConfigName,
   resolveSharedMemoryTtlMs,
   repoDir,
@@ -690,7 +689,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
-    const rfc64PublicCatalogActivation = resolveRfc64PublicCatalogActivation(config);
+    // Runtime projection only: lifecycle owns the single canonical activation
+    // snapshot. Hand-built legacy test/plugin contexts without the new field
+    // remain observably fail-closed rather than reparsing mutable config here.
+    const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog ?? {
+      enabled: false,
+      selectedContextGraphs: [],
+    };
     const rfc64PublicCatalogService =
       typeof agent.rfc64PublicCatalogStatsV1 === 'function'
         ? agent.rfc64PublicCatalogStatsV1()
