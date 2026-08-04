@@ -733,6 +733,7 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     manifestComplete: true,
     missingCount: 72,
     missingSample: ['did:dkg:ka:one', 'did:dkg:ka:two'],
+    materializationFailures: 0,
   };
 
   it('names the counts, the peer, the pass count and the outstanding work', () => {

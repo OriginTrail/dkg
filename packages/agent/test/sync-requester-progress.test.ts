@@ -1467,6 +1467,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
     manifestComplete: true,
     missingCount: 72,
     missingSample: ['did:dkg:ka:from-the-large-manifest'],
+    materializationFailures: 0,
   };
   const completeSmaller: SwmSnapshotCoverage = {
     contextGraphId: COVERAGE_CG,
@@ -1476,6 +1477,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
     manifestComplete: true,
     missingCount: 0,
     missingSample: [],
+    materializationFailures: 0,
   };
 
   it('reports the shortfall against the largest manifest, not the best fraction', () => {
@@ -1521,6 +1523,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       manifestComplete: false,
       missingCount: 291,
       missingSample: [],
+      materializationFailures: 0,
     };
 
     expect(selectSwmSnapshotCoverage(truncatedButLarger, partialOfLarge)).toEqual(partialOfLarge);
