@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 interface BlazegraphImageMetadata {
   image: string;
   containerPort: number;
+  dataPath: string;
 }
 
 interface BlazegraphImageMetadataParser {
@@ -29,10 +30,12 @@ describe('Blazegraph image metadata contract', () => {
       parser.parseBlazegraphImageMetadata({
         image: '  example/blazegraph@sha256:abc  ',
         containerPort: 8080,
+        dataPath: '  /data  ',
       }),
     ).toEqual({
       image: 'example/blazegraph@sha256:abc',
       containerPort: 8080,
+      dataPath: '/data',
     });
   });
 
@@ -40,10 +43,13 @@ describe('Blazegraph image metadata contract', () => {
     null,
     [],
     {},
-    { image: '', containerPort: 8080 },
-    { image: 'example/blazegraph', containerPort: 0 },
-    { image: 'example/blazegraph', containerPort: 65_536 },
-    { image: 'example/blazegraph', containerPort: 8080.5 },
+    { image: '', containerPort: 8080, dataPath: '/data' },
+    { image: 'example/blazegraph', containerPort: 0, dataPath: '/data' },
+    { image: 'example/blazegraph', containerPort: 65_536, dataPath: '/data' },
+    { image: 'example/blazegraph', containerPort: 8080.5, dataPath: '/data' },
+    { image: 'example/blazegraph', containerPort: 8080 },
+    { image: 'example/blazegraph', containerPort: 8080, dataPath: 'data' },
+    { image: 'example/blazegraph', containerPort: 8080, dataPath: '/bad,path' },
   ])('rejects invalid metadata: %j', (metadata) => {
     expect(() => parser.parseBlazegraphImageMetadata(metadata)).toThrow();
   });

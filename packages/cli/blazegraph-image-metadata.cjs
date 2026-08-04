@@ -5,7 +5,7 @@ const fs = require('node:fs');
 
 function parseBlazegraphImageMetadata(value, source = 'Blazegraph image metadata') {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${source}: expected an object with image and containerPort`);
+    throw new Error(`${source}: expected an object with image, containerPort, and dataPath`);
   }
 
   const image = typeof value.image === 'string' ? value.image.trim() : '';
@@ -18,7 +18,12 @@ function parseBlazegraphImageMetadata(value, source = 'Blazegraph image metadata
     throw new Error(`${source}: containerPort must be an integer from 1 through 65535`);
   }
 
-  return { image, containerPort };
+  const dataPath = typeof value.dataPath === 'string' ? value.dataPath.trim() : '';
+  if (!dataPath.startsWith('/') || dataPath.includes(',')) {
+    throw new Error(`${source}: dataPath must be an absolute container path without commas`);
+  }
+
+  return { image, containerPort, dataPath };
 }
 
 function readBlazegraphImageMetadata(filePath) {

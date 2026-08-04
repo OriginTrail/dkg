@@ -64,6 +64,7 @@ export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="
 interface BlazegraphImageMetadata {
   image: string;
   containerPort: number;
+  dataPath: string;
 }
 
 interface BlazegraphImageMetadataParser {
@@ -91,6 +92,9 @@ export const BLAZEGRAPH_IMAGE = BLAZEGRAPH_IMAGE_METADATA.image;
 
 /** Container HTTP port declared alongside the selected image. */
 export const BLAZEGRAPH_CONTAINER_PORT = BLAZEGRAPH_IMAGE_METADATA.containerPort;
+
+/** Image-specific path containing the Blazegraph journal. */
+export const BLAZEGRAPH_DATA_PATH = BLAZEGRAPH_IMAGE_METADATA.dataPath;
 
 /** Default starting host port, matches devnet.sh and Blazegraph defaults. */
 const DEFAULT_HOST_PORT_START = 9999;
@@ -271,6 +275,8 @@ interface ContainerInspectInfo {
   exists: boolean;
   running: boolean;
   hostPort?: number;
+  durableStorage: boolean;
+  boundedLogs: boolean;
 }
 
 async function inspectContainer(
@@ -282,12 +288,24 @@ async function inspectContainer(
   // signal. Otherwise parse the JSON to get state + port mapping.
   const result = await docker.run(['inspect', name]);
   if (result.exitCode !== 0) {
-    return { exists: false, running: false };
+    return {
+      exists: false,
+      running: false,
+      durableStorage: false,
+      boundedLogs: false,
+    };
   }
   try {
     const arr = JSON.parse(result.stdout);
     const info = Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
-    if (!info) return { exists: true, running: false };
+    if (!info) {
+      return {
+        exists: true,
+        running: false,
+        durableStorage: false,
+        boundedLogs: false,
+      };
+    }
     const running = info.State?.Running === true;
     const ports = info.NetworkSettings?.Ports;
     // Containers provisioned before the islandora image migration expose the
@@ -299,9 +317,50 @@ async function inspectContainer(
     const hostPort = Array.isArray(portBinding) && portBinding.length > 0
       ? Number(portBinding[0].HostPort)
       : undefined;
-    return { exists: true, running, hostPort };
+    const mounts: unknown[] = Array.isArray(info.Mounts) ? info.Mounts : [];
+    const durableStorage = mounts.some((mount) => {
+      if (mount === null || typeof mount !== 'object') return false;
+      const candidate = mount as { Type?: unknown; Destination?: unknown };
+      return candidate.Type === 'volume' && candidate.Destination === BLAZEGRAPH_DATA_PATH;
+    });
+    const logConfig = info.HostConfig?.LogConfig;
+    const boundedLogs = logConfig?.Type === 'local'
+      && logConfig.Config?.['max-size'] === BLAZEGRAPH_LOG_MAX_SIZE
+      && logConfig.Config?.['max-file'] === BLAZEGRAPH_LOG_MAX_FILE;
+    return {
+      exists: true,
+      running,
+      hostPort,
+      durableStorage,
+      boundedLogs,
+    };
   } catch {
-    return { exists: true, running: false };
+    return {
+      exists: true,
+      running: false,
+      durableStorage: false,
+      boundedLogs: false,
+    };
+  }
+}
+
+function warnForLegacyContainerConfiguration(
+  info: ContainerInspectInfo,
+  name: string,
+  log: (msg: string) => void,
+): void {
+  if (!info.durableStorage) {
+    log(
+      `  WARNING: Reused container "${name}" has no named Docker volume mounted at ${BLAZEGRAPH_DATA_PATH}. ` +
+      'DKG will not recreate it automatically because that could discard Blazegraph data; back up the journal before migrating or recreating the container.',
+    );
+  }
+  if (!info.boundedLogs) {
+    log(
+      `  WARNING: Reused container "${name}" does not use the bounded local log policy ` +
+      `(max-size=${BLAZEGRAPH_LOG_MAX_SIZE}, max-file=${BLAZEGRAPH_LOG_MAX_FILE}). ` +
+      'Its Docker logs remain outside the configured 4 GB rotation budget.',
+    );
   }
 }
 
@@ -418,6 +477,7 @@ export async function provisionBlazegraphDocker(
     const port = inspectInfo.hostPort ?? opts.port ?? DEFAULT_HOST_PORT_START;
     const url = `http://127.0.0.1:${port}`;
     log(`  Reusing running container "${containerName}" on port ${port}.`);
+    warnForLegacyContainerConfiguration(inspectInfo, containerName, log);
     await waitForBlazegraphReady({ url, fetch, intervalMs: pollIntervalMs, timeoutMs: pollTimeoutMs, log });
     const created = !(await namespaceExists({ url, namespace, fetch }));
     if (created) {
@@ -445,7 +505,9 @@ export async function provisionBlazegraphDocker(
       log(`  docker start failed (${startResult.stderr.trim() || 'unknown'}); recreating.`);
       await docker.run(['rm', '-f', containerName]);
     } else {
-      const port = (await inspectContainer(docker, containerName)).hostPort
+      const restartedInfo = await inspectContainer(docker, containerName);
+      warnForLegacyContainerConfiguration(restartedInfo, containerName, log);
+      const port = restartedInfo.hostPort
         ?? opts.port
         ?? DEFAULT_HOST_PORT_START;
       const url = `http://127.0.0.1:${port}`;
@@ -479,7 +541,7 @@ export async function provisionBlazegraphDocker(
     // Blazegraph is an implementation detail of the local node. Do not publish
     // its unauthenticated SPARQL/update endpoint on every host interface.
     '-p', `127.0.0.1:${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
-    '--mount', `type=volume,source=${volumeName},target=/data`,
+    '--mount', `type=volume,source=${volumeName},target=${BLAZEGRAPH_DATA_PATH}`,
     // Docker's local driver rotates and compresses logs. The explicit options
     // keep the bound independent of host-wide Docker daemon defaults.
     '--log-driver', 'local',
