@@ -328,6 +328,34 @@ describe('public SWM snapshot materialization', () => {
     expect(summary.failedPhases).toBe(0);
   });
 
+  it('writes the KA\'s verified metadata INSIDE the write lock, right after the head swap', async () => {
+    // #2050 G7. `replaceHeadMetadata` is delete-only, and the compensating
+    // `storeInsert(processed.verifiedMeta)` sits below the `continue` on the
+    // incomplete branch — so a round that ran out of clock mid-list deleted the
+    // head rows of the KAs it had just materialized and never rewrote them.
+    // Content present, heads absent, invisible to every head reader.
+    //
+    // The existing ordering assertions ("...BEFORE the meta append") do NOT pin
+    // this. They use `indexOf`, and pre-fix the first `meta-inserted` was the
+    // bulk append, which already landed after the swap — so they stayed green
+    // whether or not the per-KA write existed. This case is separate rather than
+    // an edit to them for exactly that reason.
+    //
+    // Pre-fix this failed with `expected 6 to be less than 5`: the meta write
+    // landed AFTER the lock released. What must hold is that the KA's own
+    // verified metadata is rewritten before its lock releases, so the
+    // head-absent window is one operation wide instead of one round wide.
+    const h = harness();
+    await h.run();
+    const headSwapped = h.events.indexOf('head-swapped');
+    const metaInserted = h.events.indexOf('meta-inserted');
+    const lockReleased = h.events.indexOf('lock-released');
+    expect(headSwapped).toBeGreaterThan(-1);
+    expect(lockReleased).toBeGreaterThan(-1);
+    expect(metaInserted).toBeGreaterThan(headSwapped);
+    expect(metaInserted).toBeLessThan(lockReleased);
+  });
+
   it('withholds the meta insert when a replace fails, and marks the phase failed', async () => {
     const h = harness({ replaceImpl: async () => { throw new Error('store unavailable'); } });
     const summary = await h.run();

@@ -15,6 +15,7 @@
  */
 
 import type { ethers } from 'ethers';
+import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
   Quad,
   TripleStore,
@@ -1078,6 +1079,13 @@ export interface SharedMemorySyncDiagnostics {
   snapshotPlaneIncomplete?: number;
   /** Extra catch-up passes spent over the peer set beyond the first. */
   continuationPasses?: number;
+  /**
+   * Why the bounded repeat stopped. Typed as the policy's own closed union
+   * rather than `string`, so a new stop reason cannot reach the terminal message
+   * unnoticed — the terminal text renders this, and an unhandled reason there
+   * would read as a missing explanation rather than as a new state.
+   */
+  continuationStopReason?: CatchupPassDecisionReason;
   /**
    * The REPLAY half of `bytesReceived`: the metadata and aggregate-data phases,
    * which a repeated pass re-fetches in full. Named for the plan's single

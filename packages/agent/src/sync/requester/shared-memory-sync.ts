@@ -374,6 +374,71 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializationFailures = 0;
       let materializedQuads = 0;
       const materializedKeys = new Set<string>();
+
+      // #2050 G7. `replaceHeadMetadata` is DELETE-ONLY, and the compensating
+      // `storeInsert(processed.verifiedMeta)` sits below the `continue` on the
+      // incomplete branch — so a round that ran out of clock mid-list deleted the
+      // head rows of the KAs it had just materialized and never rewrote them:
+      // content present, heads absent, invisible to every head reader, and
+      // permanent, because the next round sees the content and skips.
+      //
+      // Each KA's own verified metadata is therefore rewritten here, inside the
+      // same write lock, immediately after the delete — narrowing a window that
+      // already exists rather than opening a new one.
+      const quadKey = (quad: Quad): string =>
+        `${quad.graph} ${quad.subject} ${quad.predicate} ${quad.object}`;
+      const verifiedMetaKeys = new Set(processed.verifiedMeta.map(quadKey));
+      // Which verified meta rows the per-KA path has already written this round.
+      // Plain accumulation, NOT overlap compensation: descriptor `metadataQuads`
+      // are pairwise disjoint by construction — a head subject belongs to one
+      // descriptor by the parser's grouping key, and an operation subject is
+      // pinned to a single `kaUal`/`assertionVersion` by `validateOperationRows`.
+      const perKaInsertedMetaKeys = new Set<string>();
+      let contextGraphEnsured = false;
+      const ensureContextGraphOnce = async (): Promise<void> => {
+        if (contextGraphEnsured) return;
+        await ensureContextGraph(pid);
+        contextGraphEnsured = true;
+      };
+      /**
+       * True when the stored head already certifies exactly THIS descriptor's
+       * version. Anything else — no head at all, or an older one — must be
+       * rewritten: by this point `storedVersionOutranksDescriptor` has already
+       * returned for every stored version that outranks or fails to parse, so a
+       * surviving mismatch is a head that under-states what the store holds.
+       * That is reachable whenever a pass replaced the graph and stopped before
+       * the head swap, and it never self-heals through partial rounds — which is
+       * the only kind of round #2050's scenario gets.
+       */
+      const headCertifiesDescriptor = (stored: string | null, descriptorVersion: string): boolean => {
+        if (stored === null) return false;
+        try {
+          return BigInt(stored) === BigInt(descriptorVersion);
+        } catch {
+          return false;
+        }
+      };
+      /**
+       * Write this descriptor's verified metadata, and count each distinct row
+       * once. The filter is defensive only: on the public lane descriptors are
+       * parsed from `processed.verifiedMeta` itself and `metadataQuads` is a
+       * partition of that same input, so it cannot drop a row here — but it is
+       * what makes the ledger provably a subset of this round's verified keys,
+       * which is what makes the bulk subtraction below exact.
+       */
+      const insertVerifiedDescriptorMeta = async (
+        descriptor: GraphScopedSwmRecoveryDescriptor,
+      ): Promise<void> => {
+        const rows = descriptor.metadataQuads.filter(
+          (quad) => verifiedMetaKeys.has(quadKey(quad)) && !perKaInsertedMetaKeys.has(quadKey(quad)),
+        );
+        if (rows.length === 0) return;
+        await ensureContextGraphOnce();
+        await storeInsert([...rows]);
+        for (const quad of rows) perKaInsertedMetaKeys.add(quadKey(quad));
+        summary.insertedTriples += rows.length;
+        summary.insertedMetaTriples += rows.length;
+      };
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
         if (!descriptors?.length || !snapshotMaterializer || !publicSnapshotStore) return;
@@ -416,15 +481,27 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // digest is an OLDER version of the same size and must be
                 // replaced, not skipped.
                 if (await snapshotMaterializer.isGraphAssetMaterialized(descriptor)) {
-                  if (storedHead.needsRepair) {
-                    // Content is already this descriptor's, but the head
-                    // subject still carries union-insert residue (several
-                    // version/operation rows) — e.g. a prior round replaced
-                    // the graph and then failed before finishing the metadata
-                    // swap. Collapse the head now; the fresh verified meta for
-                    // this descriptor is re-inserted after the snapshot phase,
-                    // exactly like the replace path below.
+                  // Content is already this descriptor's. Two states still need
+                  // the head rewritten, and BOTH are invisible to a reader that
+                  // only looks at content:
+                  //
+                  // (1) union-insert residue — several version/operation rows on
+                  //     one subject, left by a prior round that replaced the
+                  //     graph and failed before finishing the metadata swap;
+                  // (2) a head that does not certify THIS descriptor's version —
+                  //     absent entirely (the r26 residual: content written, head
+                  //     deleted, never rewritten), or an older version left by a
+                  //     pass that stopped between the replace and the swap.
+                  //
+                  // Both are repaired the same way and for the same reason: on a
+                  // partial round nothing else writes this head, so leaving it
+                  // means the KA stays unreadable no matter how many passes run.
+                  if (
+                    storedHead.needsRepair
+                    || !headCertifiesDescriptor(storedHead.version, descriptor.assertionVersion)
+                  ) {
                     await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                    await insertVerifiedDescriptorMeta(descriptor);
                   }
                   materializedKeys.add(graphKey);
                   return;
@@ -434,19 +511,38 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   fetchedDataQuads: [],
                   publicSnapshotStore,
                 });
-                await ensureContextGraph(pid);
+                await ensureContextGraphOnce();
                 await snapshotMaterializer.replaceGraph(asset.assertionGraph, [...asset.quads]);
                 // Graph first, THEN the head swap — a crash between the two
                 // leaves content newer than the head, which the next round
-                // repairs (digest matches → head collapsed above). The swap
-                // deletes the old head + its operations so the append-style
-                // `storeInsert(processed.verifiedMeta)` below lands on a clean
-                // subject instead of stacking a second version onto it
-                // (LIMIT-1 head readers would otherwise see an arbitrary mix).
+                // repairs (digest matches → head rewritten above). The swap
+                // deletes the old head + its operations so the insert that
+                // follows lands on a clean subject instead of stacking a second
+                // version onto it (LIMIT-1 head readers would otherwise see an
+                // arbitrary mix).
                 await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
+                // Immediately, and inside this KA's lock: the delete above is
+                // the whole of G7 without it. `storeInsert(processed.verifiedMeta)`
+                // is below the incomplete branch's `continue`, so on a partial
+                // round it never runs and this KA's head would stay deleted.
+                await insertVerifiedDescriptorMeta(descriptor);
                 materializedKeys.add(graphKey);
                 materializedGraphs += 1;
                 materializedQuads += asset.quads.length;
+                // Counted HERE, not after the snapshot phase returns. A
+                // snapshot-phase transport failure THROWS, and the prefix-salvage
+                // path does not cover this phase, so the throw unwinds past every
+                // post-call merge — a round that materialized 120 KAs and then
+                // threw used to report zero inserted triples. The KA is already
+                // committed at this point (graph replaced, head rewritten, both
+                // inside this lock), so the counter is describing work that is
+                // durably done rather than work still in flight.
+                summary.insertedTriples += asset.quads.length;
+                // Also DATA progress: lifecycle readiness classifies a round with
+                // zero `insertedDataTriples` as metadata-only, which would
+                // mis-report a successful graph-scoped materialization as "no
+                // data".
+                summary.insertedDataTriples += asset.quads.length;
                 logInfo(ctx, `SWM sync for "${pid}": materialized snapshot ${snapshotRef} `
                   + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
               },
@@ -485,11 +581,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           : {}),
       });
       if (materializedGraphs > 0) {
-        summary.insertedTriples += materializedQuads;
-        // Also data progress: lifecycle readiness classifies a round with zero
-        // insertedDataTriples as metadata-only, which would mis-report a
-        // successful graph-scoped materialization as "no data".
-        summary.insertedDataTriples += materializedQuads;
+        // Reporting only — the counters were already added per KA, inside the
+        // write lock, so they survive a snapshot-phase throw. Adding them again
+        // here would double-count every materialized triple.
         logInfo(ctx, `SWM sync for "${pid}": materialized ${materializedGraphs} graph-scoped `
           + `KA snapshot(s) totalling ${materializedQuads} triples`);
       }
@@ -582,9 +676,34 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedDataTriples += validWsQuads.length;
       }
       if (processed.verifiedMeta.length > 0) {
+        // Still written in full — an RDF store is a set, so rewriting the rows
+        // the per-KA path already wrote is a no-op, and the rows for KAs that
+        // were NOT materialized still have to land.
+        //
+        // The COUNT subtracts what was already counted, which makes
+        // `insertedMetaTriples` mean this:
+        //   - usable round  → `processed.verifiedMeta.length`, byte-identical to
+        //     the pre-#2050 counter. No existing round's number moves.
+        //   - partial round → the rows the per-KA path wrote: strictly > 0 when
+        //     anything materialized, strictly < the full meta length.
+        //
+        // That second line INVERTS the field's diagnostic meaning, which matters
+        // because `insertedMetaTriples === 0` is the discriminator for whether a
+        // job hit G7 at all. Pre-fix, zero on a partial round WAS the symptom.
+        // Post-fix, non-zero on a partial round is the expected repair signal,
+        // and zero means nothing was materialized rather than that the writes
+        // were thrown away.
+        //
+        // Subtracting the ledger SIZE rather than re-filtering `verifiedMeta` is
+        // what keeps the usable-round identity exact if a meta response ever
+        // carries the same quad twice (an OFFSET-window overlap under concurrent
+        // insert is the plausible source): a re-filter drops both copies and
+        // undercounts by one. Valid because every per-KA row is filtered through
+        // `verifiedMetaKeys`, so the ledger is always a subset of these keys.
         await storeInsert(processed.verifiedMeta);
-        summary.insertedTriples += processed.verifiedMeta.length;
-        summary.insertedMetaTriples += processed.verifiedMeta.length;
+        const newlyCountedMeta = processed.verifiedMeta.length - perKaInsertedMetaKeys.size;
+        summary.insertedTriples += newlyCountedMeta;
+        summary.insertedMetaTriples += newlyCountedMeta;
       }
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);

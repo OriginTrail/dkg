@@ -7,6 +7,7 @@ import {
   normalizeDurableSyncResult,
   normalizeSyncAdmissionSource,
   type DKGAgent,
+  type CatchupPassDecisionReason,
   type DurableProgressSummary,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
@@ -120,6 +121,11 @@ export interface CatchupJobResult {
       snapshotPlaneIncomplete: number;
       /** Extra passes over the peer set beyond the first. */
       continuationPasses: number;
+      /**
+       * Why the bounded repeat stopped, as the policy's own closed union — so a
+       * new reason cannot reach the terminal message unnoticed.
+       */
+      continuationStopReason?: CatchupPassDecisionReason;
       /**
        * `bytesReceived` split into its replay half (metadata + aggregate data,
        * which every pass re-fetches in full) and its useful half (snapshot

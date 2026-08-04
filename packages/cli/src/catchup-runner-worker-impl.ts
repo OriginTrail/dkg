@@ -116,14 +116,32 @@ interface CatchupPassContext {
  *
  * `snapshotsTotal > 0` is what excludes the barren and cleanly-empty peers;
  * `snapshotsResolved < snapshotsTotal` is what excludes the ones already done.
- * `manifestComplete` is deliberately NOT required: a peer whose metadata was
- * truncated still has real, fetchable refs in the prefix it did serve, and
- * excluding it would strand exactly the work it can still deliver.
+ *
+ * `manifestComplete` IS required, and it is not a failure signal — it states that
+ * the denominator is the peer's whole manifest rather than a truncated prefix.
+ * A truncated manifest is the one shape that can advance coverage forever while
+ * materializing nothing: `runSharedMemorySync` parses descriptors only when the
+ * meta phase completed, and wires `onSnapshotReady` only when descriptors exist,
+ * so a truncated-meta round still fetches and caches blobs — advancing
+ * `snapshotsResolved`, and so satisfying the coverage-advance gate — while
+ * writing zero KAs. Every repeat would re-pay a full metadata phase to warm a
+ * cache that cannot become visible until the manifest completes, and a fresh
+ * per-round deadline is no more generous than the one that truncated it.
+ *
+ * This does NOT re-admit the failure-counter mistake above. A peer that yielded
+ * mid-snapshot-list on the local clock — the peer this loop exists to revisit —
+ * completed its META phase first and therefore carries `manifestComplete: true`,
+ * so it stays capable. The two conditions are orthogonal: one says the
+ * denominator is whole, the other would have said the peer faulted.
  */
 function capablePeersForNextPass(coverageByPeer: Map<string, SwmSnapshotCoverage>): string[] {
   const capable: string[] = [];
   for (const [peerId, coverage] of coverageByPeer) {
-    if (coverage.snapshotsTotal > 0 && coverage.snapshotsResolved < coverage.snapshotsTotal) {
+    if (
+      coverage.manifestComplete
+      && coverage.snapshotsTotal > 0
+      && coverage.snapshotsResolved < coverage.snapshotsTotal
+    ) {
       capable.push(peerId);
     }
   }
@@ -671,6 +689,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         planeProven: catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
         capablePeers: capablePeersForNextPass(lastCoverageByPeer),
       });
+      // Recorded on every decision, the stopping one included — "why did it
+      // stop" is the question a partial catch-up actually raises, and Chunk 5's
+      // terminal message renders this.
+      diagnostics.sharedMemory.continuationStopReason = decision.reason;
       if (!decision.continue) break;
       coverageHighWaterMark = lastPassCoverage;
       continuationPasses += 1;
