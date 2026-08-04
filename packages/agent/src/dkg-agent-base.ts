@@ -990,6 +990,9 @@ export class DKGAgentBase {
   protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
   /** Process-wide sweep single-flight; interval/startup callers join this promise. */
   protected vmReconcileSweepInFlight: Promise<void> | null = null;
+  /** Closed dispatcher retained across restart until its old worker and sweep fully drain. */
+  protected vmReconcileRetirementInFlight: Promise<void> | null = null;
+  protected vmReconcileRetiringDispatcher: VmReconcileDispatcher<ContextGraphReconcileResult> | undefined;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
@@ -1015,8 +1018,8 @@ export class DKGAgentBase {
   protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
-  /** Monotonic guard: continuations from an earlier node run stay stale after restart. */
-  protected vmReconcileRotationGeneration = 0;
+  /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
+  protected vmReconcileLifecycleGeneration = 0;
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */

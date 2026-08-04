@@ -764,6 +764,8 @@ export interface VmReconcileRotationRecord {
   /** Peers physically attempted during the current proof cycle. */
   attemptedPeerIds: Set<string>;
   cleanAbsentPeerIds: Set<string>;
+  /** The cycle was built after a successful curator lookup or from a cached successful roster. */
+  curatorRosterConfirmed: boolean;
   /** Monotonic bound after which a partial clean-absence proof restarts. */
   collectionDeadlineAt: number;
   /** Cursor only; every physical attempt advances it, regardless of outcome. */

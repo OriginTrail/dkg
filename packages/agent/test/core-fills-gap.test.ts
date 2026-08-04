@@ -3492,6 +3492,118 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     )).toBe(backoff);
   });
 
+  it('does not let an unconfirmed curator roster suppress the next discovery attempt', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmUnconfirmedCuratorBackoff', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/unconfirmed-curator';
+    const ordinaryPeer = '12D3KooWUnconfirmedOrdinary';
+    const target = vmRecoveryTarget(localCgId, 0, 'unconfirmed');
+    const first = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 100, false,
+    );
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], first.record,
+    );
+    expect(first.record).toMatchObject({
+      phase: 'backoff',
+      curatorRosterConfirmed: false,
+    });
+
+    const retry = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 101, false,
+    );
+    expect(retry.suppressed).toBe(false);
+    expect(retry.record).not.toBe(first.record);
+    expect(retry.record).toMatchObject({
+      phase: 'collecting',
+      curatorRosterConfirmed: false,
+    });
+
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], retry.record,
+    );
+    const confirmed = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 102, true,
+    );
+    expect(confirmed.suppressed).toBe(false);
+    expect(confirmed.record).not.toBe(retry.record);
+    expect(confirmed.record.curatorRosterConfirmed).toBe(true);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], confirmed.record,
+    );
+    expect((internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 103, true,
+    ).suppressed).toBe(true);
+  });
+
+  it('retries curator discovery after an unconfirmed clean-absence cycle', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCuratorDiscoveryRetry', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/curator-retry';
+    const ordinaryPeer = '12D3KooWCuratorRetryOrdinary';
+    const curatorPeer = '12D3KooWCuratorRetryAuthoritative';
+    const connectedById = new Map([
+      [ordinaryPeer, { toString: () => ordinaryPeer }],
+    ]);
+    (internals as any).node = {
+      peerId: '12D3KooWCuratorRetryLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()]
+          .map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    const resolveCurators = vi.fn()
+      .mockResolvedValueOnce({
+        peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: true,
+      })
+      .mockResolvedValueOnce({
+        peerIds: [curatorPeer], curatorIsLocal: false,
+        legacyTripleResolved: false, lookupFailed: false,
+      });
+    (internals as any).resolveCuratorPeerIdsForCg = resolveCurators;
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectedById.set(peerId, { toString: () => peerId });
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      const found = peerId === curatorPeer;
+      return {
+        result: {
+          fetchedDataTriples: found ? 1 : 0,
+          fetchedMetaTriples: found ? 8 : 0,
+          insertedTriples: found ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: found ? 'found' : 'clean-absent',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = vi.fn()
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValue({ status: 'reconciled', blockNumber: 100 });
+    const target = vmRecoveryTarget(localCgId, 0, 'curator-retry');
+
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.outcomes.get(0)).toEqual({ status: 'pending' });
+    expect(fetches).toEqual([ordinaryPeer]);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+
+    const second = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(resolveCurators).toHaveBeenCalledTimes(2);
+    expect(fetches).toEqual([ordinaryPeer, curatorPeer]);
+    expect(second.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+  });
+
   it('ignores stale exact-recovery targets before creating state or fetching', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmStaleTarget', chainAdapter: chain });
@@ -3625,11 +3737,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'restart-generation')], 100, () => true,
     );
     await fallbackStarted;
-    const priorGeneration = (internals as any).vmReconcileRotationGeneration;
+    const priorGeneration = (internals as any).vmReconcileLifecycleGeneration;
     (internals as any).closeVmReconcileRotationState();
     (internals as any).openVmReconcileRotationState();
     expect((internals as any).vmReconcileRotationClosed).toBe(false);
-    expect((internals as any).vmReconcileRotationGeneration).toBe(priorGeneration + 1);
+    expect((internals as any).vmReconcileLifecycleGeneration).toBe(priorGeneration + 1);
     releaseFallback();
 
     await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });

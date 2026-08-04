@@ -191,11 +191,14 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       && options.ownerQueueLimit !== undefined
       && this.countOwner(ownerKey) + reservedOwner >= options.ownerQueueLimit,
     );
+    const queuedRunnable = this.queue.some((entry) => (
+      !entry.settled && this.hooks.canRun(entry)
+    ));
 
     if (
       !handoffReservation
       && this.hooks.canRun(base)
-      && queuedBefore === 0
+      && !queuedRunnable
       && !reservationGlobalFull
       && !reservationOwnerFull
     ) {

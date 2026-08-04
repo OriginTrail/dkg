@@ -1,5 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from './page-fetch.js';
+import { stripLiteral } from '../../dkg-agent-utils.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const KA_UAL = `${DKG_NS}kaUal`;
@@ -84,9 +85,4 @@ export function mergeExactDurableFetchDisposition(
   if (current === 'incomplete' || next === 'incomplete') return 'incomplete';
   if (current === 'found' || next === 'found') return 'found';
   return 'clean-absent';
-}
-
-function stripLiteral(raw: string): string {
-  const match = raw.match(/^"(.*)"(?:\^\^.*|@.*)?$/);
-  return match ? match[1]! : raw;
 }

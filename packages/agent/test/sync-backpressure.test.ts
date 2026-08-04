@@ -873,6 +873,54 @@ describe('sync global backpressure', () => {
     releaseLow();
   });
 
+  it('uses genuinely free capacity when older work is blocked by its own lower limit', async () => {
+    type MixedPolicyPayload = { name: string; inflightLimit: number };
+    let now = 0;
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<MixedPolicyPayload>({
+      now: () => now,
+      canRun: (entry) => running < entry.payload.inflightLimit,
+      onStart: (entry) => {
+        running += 1;
+        starts.push(entry.payload.name);
+        return () => { running -= 1; };
+      },
+    });
+    const options = (name: string, inflightLimit: number, priority: number) => ({
+      payload: { name, inflightLimit },
+      ownerKey: name,
+      lane: 'durable' as const,
+      priority,
+      priorityClass: priority > 0 ? 'elevated' as const : 'default' as const,
+      queueLimit: 1,
+      agingThresholdMs: 10,
+      createBusyError: (reason: string) => new Error(reason),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const blocker = queue.acquire(options('limit-one-blocker', 1, 0));
+    const releaseBlocker = await blocker.release;
+    const aged = queue.acquire(options('aged-limit-one', 1, 0));
+    now = 20;
+
+    const higherCapacity = queue.acquire(options('limit-two-foreground', 2, 1));
+    expect(higherCapacity.status).toBe('running');
+    const releaseHigherCapacity = await higherCapacity.release;
+    expect(starts).toEqual(['limit-one-blocker', 'limit-two-foreground']);
+    expect(aged.status).toBe('queued');
+
+    releaseHigherCapacity();
+    releaseBlocker();
+    const releaseAged = await aged.release;
+    expect(starts).toEqual([
+      'limit-one-blocker',
+      'limit-two-foreground',
+      'aged-limit-one',
+    ]);
+    releaseAged();
+  });
+
   it('rolls back direct-start capacity when onStart throws after claiming it', async () => {
     let running = 0;
     const starts: string[] = [];

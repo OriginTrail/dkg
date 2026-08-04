@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
   PROTOCOL_SYNC,
@@ -11,6 +11,8 @@ import {
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -137,17 +139,74 @@ describe('exact VM recovery lifecycle', () => {
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     try {
       await agent.start();
-      const initialGeneration = (agent as any).vmReconcileRotationGeneration;
+      const initialGeneration = (agent as any).vmReconcileLifecycleGeneration;
       await agent.stop();
       expect((agent as any).vmReconcileRotationClosed).toBe(true);
-      expect((agent as any).vmReconcileRotationGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
 
       await agent.start();
       expect((agent as any).vmReconcileRotationClosed).toBe(false);
-      expect((agent as any).vmReconcileRotationGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
       expect((agent as any).vmReconcileDispatcher.snapshot().closed).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
+    }
+  });
+
+  it('retires a timed-out dispatcher before admitting reconcile work after restart', async () => {
+    const timeoutDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      ...timeoutDescriptor,
+      value: 1,
+    });
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const targetEntered = deferred<void>();
+    const releaseTarget = deferred<void>();
+    const heal = vi.fn(async () => undefined);
+    try {
+      await agent.start();
+      const oldDispatcher = (agent as any).vmReconcileDispatcher;
+      (agent as any).resolveVmReconcileTarget = async () => {
+        targetEntered.resolve();
+        await releaseTarget.promise;
+        return {};
+      };
+      (agent as any).healStrandedScopedKCs = heal;
+
+      const oldRun = (agent as any).runVmReconcileForCg('restart-retirement', 'manual');
+      await targetEntered.promise;
+      await agent.stop();
+      expect(oldDispatcher.snapshot()).toMatchObject({ active: 1, closed: true });
+
+      await agent.start();
+      expect((agent as any).vmReconcileDispatcher).toBe(oldDispatcher);
+      await expect(
+        (agent as any).runVmReconcileForCg('restart-retirement-new', 'manual'),
+      ).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+
+      await agent.stop();
+      await agent.start();
+      expect((agent as any).vmReconcileDispatcher).toBe(oldDispatcher);
+      expect((agent as any).vmReconcileRetiringDispatcher).toBe(oldDispatcher);
+
+      releaseTarget.resolve();
+      await expect(oldRun).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
+      expect(heal).not.toHaveBeenCalled();
+      await waitFor(() => (
+        (agent as any).vmReconcileDispatcher !== oldDispatcher
+        && (agent as any).vmReconcileDispatcher?.snapshot().closed === false
+      ));
+    } finally {
+      releaseTarget.resolve();
+      await agent.stop().catch(() => {});
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
+        timeoutDescriptor,
+      );
     }
   });
 });

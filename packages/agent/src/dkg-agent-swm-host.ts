@@ -245,6 +245,7 @@ import {
 import {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileUnavailableError,
+  VmReconcileQueueClosedError,
   type ContextGraphReconcileResult,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
@@ -2569,17 +2570,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * burst of live nudges) collapse into one sweep per CG.
    */
   async runVmReconcileSweep(this: DKGAgent): Promise<void> {
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     const dispatcher = this.vmReconcileDispatcher;
-    if (!this.vmReconcileEnabled() || !dispatcher) return;
+    if (!isLifecycleCurrent() || !this.vmReconcileEnabled() || !dispatcher) return;
     if (this.vmReconcileSweepInFlight) return this.vmReconcileSweepInFlight;
     const running = (async () => {
       const eligible: string[] = [];
       for (const [localCgId, sub] of this.subscribedContextGraphs) {
+        if (!isLifecycleCurrent()) return;
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
         if (sub.subscribed && !sub.onChainId) {
           await this.selfPrimeSubscriptionOnChainId(localCgId, sub);
+          if (!isLifecycleCurrent()) return;
         }
         // Member subscriptions AND Phase D core-hosted public CGs get swept.
         if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
@@ -2596,9 +2602,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // foreground live/manual work can still enter the unified dispatcher.
       const start = this.vmReconcileSweepCursor % eligible.length;
       for (let offset = 0; offset < eligible.length; offset += 1) {
+        if (!isLifecycleCurrent()) return;
         const index = (start + offset) % eligible.length;
         await dispatcher.dispatch(eligible[index]!, 'periodic').catch(() => undefined);
       }
+      if (!isLifecycleCurrent()) return;
       this.vmReconcileSweepCursor = (start + 1) % eligible.length;
     })();
     this.vmReconcileSweepInFlight = running;
@@ -2748,24 +2756,31 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     source: VmReconcileSource,
   ): Promise<ContextGraphReconcileResult> {
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+    if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
     const target = await this.resolveVmReconcileTarget(localCgId);
+    if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
 
     // Keep the legacy-label -> scoped-VM migration in the admitted lane and
     // before the evidence gate. A current watermark can still need this repair.
     await this.healStrandedScopedKCs(localCgId, target.sub);
+    if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
 
     const result = await reconcileContextGraph(
-      this.createVmReconcileDeps(localCgId),
+      this.createVmReconcileDeps(localCgId, lifecycleGeneration),
       target.cursor,
       localCgId,
       target.onChainCgId,
     );
+    if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
     const response = this.toContextGraphReconcileResult(localCgId, source, target, result);
     this.emitVmReconcileTelemetry(localCgId, target, result, response.status);
     // Queue one trailing slice while this key is still active. The dispatcher
     // places it behind already-waiting live CGs, so a large graph makes steady
     // progress without monopolising the only VM worker.
-    if (result.hasMore || result.staleTarget) {
+    if (isLifecycleCurrent() && (result.hasMore || result.staleTarget)) {
       this.vmReconcileDispatcher?.triggerLive(localCgId);
     }
     return response;
@@ -2804,19 +2819,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
     };
   }
 
-  createVmReconcileDeps(this: DKGAgent, localCgId: string): ChainReconcilerDeps {
+  createVmReconcileDeps(
+    this: DKGAgent,
+    localCgId: string,
+    lifecycleGeneration = this.vmReconcileLifecycleGeneration,
+  ): ChainReconcilerDeps {
     const capturedSub = this.subscribedContextGraphs.get(localCgId);
     const capturedOnChainId = capturedSub?.onChainId;
     const capturedCursor = this.reconcileCursors.get(localCgId);
     const isTargetCurrent = (): boolean => {
       const current = this.subscribedContextGraphs.get(localCgId);
-      return current === capturedSub
+      return !this.vmReconcileRotationClosed
+        && this.vmReconcileLifecycleGeneration === lifecycleGeneration
+        && current === capturedSub
         && current?.onChainId === capturedOnChainId
         && this.reconcileCursors.get(localCgId) === capturedCursor;
     };
     return {
       getKCCount: async (cg) => {
         const head = Number(await this.chain.getContextGraphKCCount!(cg));
+        if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
         if (!Number.isSafeInteger(head) || head < 0) {
           throw new Error(`Invalid on-chain KC count for context graph "${localCgId}": ${head}`);
         }
@@ -2826,7 +2848,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Capability-absent chains disable the reorg gate; transient RPC
         // failures still throw so the durable watermark cannot advance.
         if (typeof this.chain.getBlockNumber !== 'function') return undefined;
-        return await this.chain.getBlockNumber();
+        const headBlock = await this.chain.getBlockNumber();
+        if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+        return headBlock;
       },
       reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock, {
@@ -2839,6 +2863,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       maxOrdinalConcurrency: DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
       isTargetCurrent: () => isTargetCurrent(),
       persistWatermark: (lcg, watermark) => {
+        if (!isTargetCurrent()) return;
         const sub = this.subscribedContextGraphs.get(lcg);
         if (!sub) return;
         const previous = sub.lastReconciledOrdinal ?? 0;
@@ -3639,6 +3664,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     target: OrdinalRecoveryTarget,
     candidatePeerIds: readonly string[],
     now: number,
+    curatorRosterConfirmed = true,
   ): {
     slotKey: string;
     record?: VmReconcileRotationRecord;
@@ -3650,6 +3676,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const fingerprint = this.vmReconcileRotationFingerprint(target);
     let record = this.vmReconcileRotationState.get(slotKey);
     if (record && record.fingerprint !== fingerprint) {
+      this.vmReconcileRotationState.delete(slotKey);
+      record = undefined;
+    }
+    if (record?.phase === 'backoff' && !record.curatorRosterConfirmed) {
+      // Absence gathered while curator discovery was unavailable must not
+      // suppress the next lookup: that lookup may reveal the only holder.
       this.vmReconcileRotationState.delete(slotKey);
       record = undefined;
     }
@@ -3682,6 +3714,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         candidatePeerIds: new Set(candidatePeerIds),
         attemptedPeerIds: new Set(),
         cleanAbsentPeerIds: new Set(),
+        curatorRosterConfirmed,
         collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
         failures: 0,
         nextRetryAt: 0,
@@ -3702,6 +3735,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const previousCandidatePeerIds = record.candidatePeerIds;
       const nextCandidatePeerIds = new Set(candidatePeerIds);
       record.candidatePeerIds = new Set(candidatePeerIds);
+      record.curatorRosterConfirmed = curatorRosterConfirmed;
       const removedPeer = [...previousCandidatePeerIds]
         .some((peerId) => !nextCandidatePeerIds.has(peerId));
       if (removedPeer) {
@@ -3723,7 +3757,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         record.collectionDeadlineAt = now
           + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
       }
-    } else if (record.phase === 'backoff') {
+    } else if (curatorRosterConfirmed) {
+      record.curatorRosterConfirmed = true;
+    }
+    if (record.phase === 'backoff') {
       if (now < record.nextRetryAt) {
         this.touchVmReconcileRotationRecord(slotKey, record);
         return { slotKey, record, suppressed: true };
@@ -3818,7 +3855,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   closeVmReconcileRotationState(this: DKGAgent): void {
-    this.vmReconcileRotationGeneration = (this.vmReconcileRotationGeneration ?? 0) + 1;
+    this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
     // Some lifecycle tests intentionally construct a narrow partial agent
     // without running the base constructor. Shutdown must remain best-effort
@@ -3829,6 +3866,35 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   openVmReconcileRotationState(this: DKGAgent): void {
     this.vmReconcileRotationClosed = false;
+  }
+
+  rearmVmReconcileRuntimeAfterRestart(this: DKGAgent): void {
+    const dispatcher = this.vmReconcileDispatcher;
+    if (!dispatcher?.snapshot().closed) return;
+    const sweep = this.vmReconcileSweepInFlight;
+    if (dispatcher.snapshot().active === 0 && !sweep) {
+      this.vmReconcileDispatcher = undefined;
+      return;
+    }
+    if (this.vmReconcileRetiringDispatcher === dispatcher) return;
+
+    this.vmReconcileRetiringDispatcher = dispatcher;
+    const retirement = (async () => {
+      await dispatcher.waitForIdle();
+      if (sweep) await sweep.catch(() => undefined);
+      if (this.vmReconcileRetiringDispatcher !== dispatcher) return;
+      this.vmReconcileRetiringDispatcher = undefined;
+      this.vmReconcileRetirementInFlight = null;
+      if (this.vmReconcileDispatcher === dispatcher) this.vmReconcileDispatcher = undefined;
+      if (
+        this.started
+        && !this.vmReconcileRotationClosed
+      ) {
+        this.ensureVmReconcileDispatcher();
+        void this.runVmReconcileSweep();
+      }
+    })();
+    this.vmReconcileRetirementInFlight = retirement;
   }
 
   vmReconcileRecoveryTargetMatches(
@@ -4046,9 +4112,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
   ): Promise<PendingOrdinalRecoveryResult> {
-    const rotationGeneration = this.vmReconcileRotationGeneration;
+    const rotationGeneration = this.vmReconcileLifecycleGeneration;
     const isRecoveryCurrent = () => !this.vmReconcileRotationClosed
-      && this.vmReconcileRotationGeneration === rotationGeneration
+      && this.vmReconcileLifecycleGeneration === rotationGeneration
       && isTargetCurrent();
     const ctx = createOperationContext('system');
     const noRecovery = (
@@ -4096,6 +4162,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           target,
           observedCandidatePeerIds,
           now,
+          existing.curatorRosterConfirmed,
         ),
       };
     });
@@ -4208,6 +4275,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           target,
           orderedPeerIds,
           this.vmReconcileRotationNow(),
+          resolutionSucceeded || cachedCuratorPeerIds.length > 0,
         ),
       }));
     const eligible = preparedEntries
