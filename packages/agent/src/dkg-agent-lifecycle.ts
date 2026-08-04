@@ -7427,7 +7427,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // instead of going through setContextGraphSubscription. Preserve the
       // process-local lifetime at this lowest shared write boundary too.
       this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
-      return;
+      return Promise.resolve();
     }
     // Persist member subscriptions AND (Phase D) public CGs this Core hosts —
     // the host-only record MUST survive restart so a Core that was offline

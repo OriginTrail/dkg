@@ -218,14 +218,27 @@ async function createHarness(opts: HarnessOptions = {}) {
     jobs: new Map<string, any>(),
     latestByContextGraph: new Map<string, string>(),
   };
-  const subscribeCalls: string[] = [];
+  const subscribeCalls: Array<{
+    id: string;
+    syncMode: 'on-demand' | 'always-on';
+  }> = [];
 
   const agent = {
     getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
     getSubscribedContextGraphs: () => subscriptions,
-    subscribeToContextGraph: (id: string) => {
-      subscribeCalls.push(id);
-      subscriptions.set(id, { ...subscriptions.get(id), subscribed: true });
+    subscribeToContextGraph: (
+      id: string,
+      options?: { syncMode?: 'on-demand' | 'always-on' },
+    ) => {
+      const previous = subscriptions.get(id);
+      const requestedSyncMode = options?.syncMode ?? 'always-on';
+      const syncMode = previous?.subscribed === true && previous.syncMode === 'always-on'
+        ? 'always-on'
+        : requestedSyncMode;
+      subscribeCalls.push({ id, syncMode: requestedSyncMode });
+      const applied = { ...previous, subscribed: true, syncMode };
+      subscriptions.set(id, applied);
+      return applied;
     },
     markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
       subscriptions.set(id, { ...subscriptions.get(id), ...patch });
@@ -620,6 +633,40 @@ describe('A21 — a subscribe crossing shutdown never names a job that does not 
       expect(deduped.body.catchup.jobId).toBe(queued.body.catchup.jobId);
       expect(metrics.results()).toEqual(['queued', 'deduped']);
     } finally {
+      await harness.close();
+    }
+  });
+
+  it('refuses an on-demand-to-always-on promotion while admission is closed', async () => {
+    daemonState.catchupRunner = createCatchupRunner({} as unknown as DKGAgent);
+    const harness = await createHarness({
+      subscriptions: {
+        'cg-running': { subscribed: true, syncMode: 'on-demand' },
+      },
+    });
+    try {
+      const queued = await harness.subscribe({
+        contextGraphId: 'cg-running',
+        syncMode: 'on-demand',
+      });
+      await waitForDispatchedRun();
+      expect(queued.body.syncMode).toBe('on-demand');
+
+      daemonState.catchupAcceptingJobs = false;
+      const rejectedPromotion = await harness.subscribe({
+        contextGraphId: 'cg-running',
+        syncMode: 'always-on',
+      });
+
+      expect(rejectedPromotion.status).toBe(503);
+      expect(rejectedPromotion.body.code).toBe('CATCHUP_SHUTTING_DOWN');
+      expect(harness.subscribeCalls).toEqual([
+        { id: 'cg-running', syncMode: 'on-demand' },
+      ]);
+      expect(harness.subscriptions.get('cg-running')?.syncMode).toBe('on-demand');
+      expect(metrics.results()).toEqual(['queued', 'shutting_down']);
+    } finally {
+      await (daemonState.catchupRunner as ReturnType<typeof createCatchupRunner>).close();
       await harness.close();
     }
   });
