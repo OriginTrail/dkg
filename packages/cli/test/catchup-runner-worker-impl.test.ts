@@ -1765,3 +1765,139 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     });
   });
 });
+
+/**
+ * #2050 — the COMPOSED continuation chain, executed rather than reasoned about.
+ *
+ * Every link in this chain is pinned individually elsewhere: the coverage record
+ * survives a throwing round (agent-side T14), the capability gate reads coverage
+ * and not failure counters, the high-water mark advances, and the pure stop rule
+ * decides correctly. What nothing executed was the SEAM — that a round which
+ * materialized some Knowledge Assets and then failed actually causes a **second
+ * pass to run**.
+ *
+ * That distinction is not pedantic. Both of the last two defects on this change
+ * survived precisely because each piece was individually correct: a coverage
+ * record that was fabricated-but-plausible, and a counter whose name outlived its
+ * meaning. A chain of correct links can still fail to be connected.
+ *
+ * The load-bearing assertion here is the **pass count**, not the terminal record.
+ * A test that only checks the final coverage passes whether the loop ran once or
+ * twice — the first pass's own record already carries the converged numbers if
+ * the second pass simply overwrites it.
+ */
+describe('#2050 continuation loop — a failed-but-productive pass earns another one', () => {
+  const CG = 'continuation-chain-cg';
+  const PEER = 'peer-continuation-0001';
+
+  /** A round that resolved some of its manifest and did NOT complete cleanly. */
+  function partialSharedRound(resolved: number, total: number) {
+    return {
+      ...sharedResult(),
+      // Not clean: without this the plane is proven by data and the loop stops at
+      // `plane-proven` before the capability gate is ever consulted — which would
+      // make this test pass for a reason that has nothing to do with the seam.
+      failedPhases: 1,
+      swmCoverage: {
+        contextGraphId: CG,
+        peerIdSuffix: PEER.slice(-8),
+        snapshotsResolved: resolved,
+        snapshotsTotal: total,
+        manifestComplete: true,
+        missingCount: total - resolved,
+        missingSample: resolved < total ? ['sha256:unresolved'] : [],
+        materializationFailures: 0,
+      },
+    };
+  }
+
+  it('runs a SECOND shared-memory pass, and only the shared-memory plane', async () => {
+    const sharedCalls: string[] = [];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(String(args[0]));
+            return durableResult();
+          case 'syncSharedMemory': {
+            sharedCalls.push(String(args[0]));
+            // Pass 1 resolved 2 of 3 and did not finish; pass 2 finishes the
+            // manifest, which takes the peer out of the capable set.
+            return sharedCalls.length === 1
+              ? partialSharedRound(2, 3)
+              : partialSharedRound(3, 3);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+
+    // (5) THE seam: a second pass was actually dispatched. Asserted as a COUNT,
+    // because the terminal record below is identical whether the loop ran once
+    // or twice.
+    expect(sharedCalls).toEqual([PEER, PEER]);
+
+    // Continuation passes are shared-memory only — re-pulling durable would be
+    // amplification that nothing in the capability gate selects for.
+    expect(durableCalls).toEqual([PEER]);
+
+    // (2)-(4) The chain that produced it: the second pass's record replaced the
+    // first, coverage advanced, and the loop then stopped because the peer had
+    // nothing left rather than because it gave up.
+    expect(result.diagnostics?.sharedMemory?.swmCoverage).toMatchObject({
+      snapshotsResolved: 3,
+      snapshotsTotal: 3,
+      missingCount: 0,
+    });
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(1);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason).toBe('no-capable-peers');
+
+    // Distinct peers, not peer-passes. Pre-fix this counted rounds, which drove
+    // `peersNotAttempted` negative once a pass repeated.
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(0);
+  });
+
+  it('does NOT run a second pass when the first pass resolved nothing', async () => {
+    // The high-water mark starts at 0, so a pass that resolved zero has not
+    // advanced it — a peer that just demonstrated it can deliver nothing does not
+    // earn a repeat. This is the negative half: without it, the row above would
+    // pass under an implementation that always ran a second pass.
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            sharedCalls.push(String(args[0]));
+            return partialSharedRound(0, 3);
+          default:
+            return null;
+        }
+      },
+    );
+
+    expect(sharedCalls).toEqual([PEER]);
+    // `0`, not absent: the field is initialised on the diagnostics object and is
+    // overwritten only when a repeat actually ran. Asserting `undefined` here was
+    // my own error, and the comment stays because a reader who assumes absence
+    // means "no repeats" would write the same wrong assertion again.
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(0);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason).toBe('coverage-stalled');
+  });
+});
