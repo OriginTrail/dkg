@@ -38,11 +38,22 @@ async function countTriples(base, token, cg, view) {
         method: 'POST', token,
         body: { sparql: 'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }', contextGraphId: cg, view },
     });
-    const row = q?.result?.bindings?.[0] ?? q?.results?.bindings?.[0] ?? (Array.isArray(q?.results) ? q.results[0] : null) ?? (Array.isArray(q?.data?.results) ? q.data.results[0] : null);
-    if (!row) return null;
+    const row = q?.result?.bindings?.[0] ?? q?.results?.bindings?.[0]
+        ?? (Array.isArray(q?.results) ? q.results[0] : null)
+        ?? (Array.isArray(q?.data?.results) ? q.data.results[0] : null)
+        ?? (Array.isArray(q?.rows) ? q.rows[0] : null)
+        ?? (Array.isArray(q?.bindings) ? q.bindings[0] : null);
+    if (!row) {
+        console.error(`countTriples(${view}): unrecognized response shape: ${JSON.stringify(q).slice(0, 280)}`);
+        return null;
+    }
     const first = Object.values(row)[0];
     const v = Number(first && typeof first === 'object' ? first.value : first);
-    return Number.isFinite(v) ? v : null;
+    if (!Number.isFinite(v)) {
+        console.error(`countTriples(${view}): row did not parse to a number: ${JSON.stringify(row).slice(0, 200)}`);
+        return null;
+    }
+    return v;
 }
 
 async function main() {
