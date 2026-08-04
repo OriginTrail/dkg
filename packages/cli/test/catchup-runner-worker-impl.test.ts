@@ -1989,3 +1989,112 @@ describe('#2050 capability gate — which peers earn a second pass', () => {
     expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(1);
   });
 });
+
+/**
+ * Retention of a peer's coverage across a FAILED round.
+ *
+ * The discriminator is which peers a LATER pass contacts, and finding it took
+ * ruling two others out. After a throwing pass the stop reason cannot tell
+ * retention from forgetting — retained leaves coverage equal to the high-water
+ * mark, forgotten makes the max over an empty map `0`, and both are `<=` the
+ * mark, so both report `coverage-stalled`. The terminal message cannot either:
+ * it renders `diagnostics.sharedMemory.swmCoverage`, which `accumulate` reduces
+ * independently of `lastCoverageByPeer`, so forgetting a peer there is invisible
+ * to it.
+ *
+ * A second, still-productive peer keeps the mark advancing so the loop runs a
+ * further pass at all — and then membership of that pass is the observable.
+ */
+describe('#2050 coverage retention across a failed round', () => {
+  const CG = 'retention-cg';
+  const STEADY = 'peer-steady-4444';
+  const OTHER = 'peer-other-5555';
+
+  function cov(peerId: string, resolved: number, total: number) {
+    return {
+      contextGraphId: CG,
+      peerIdSuffix: peerId.slice(-8),
+      snapshotsResolved: resolved,
+      snapshotsTotal: total,
+      manifestComplete: true,
+      missingCount: Math.max(0, total - resolved),
+      missingSample: [],
+      materializationFailures: 0,
+    };
+  }
+
+  /** `otherRound` decides what the peer under test returns on its Nth round. */
+  async function walk(otherRound: (nth: number) => unknown) {
+    const shared: string[] = [];
+    let steadySeen = 0;
+    let otherSeen = 0;
+    await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [STEADY, OTHER], connectedPeers: 2 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            const peerId = String(args[0]);
+            shared.push(peerId);
+            if (peerId === STEADY) {
+              steadySeen += 1;
+              // Advances by a WIDE margin each pass, and the margin is
+              // load-bearing. `highestResolvedCoverage` is a max over all peers,
+              // so at +1 per pass the peer under test — retained at 2 — would hold
+              // the max flat and the loop would stop at `coverage-stalled` before
+              // a third pass ever ran. The row would then fail for a reason having
+              // nothing to do with retention.
+              return {
+                ...sharedResult(),
+                failedPhases: 1,
+                swmCoverage: cov(STEADY, steadySeen * 10, 99),
+              };
+            }
+            otherSeen += 1;
+            return otherRound(otherSeen);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+    return shared;
+  }
+
+  it('RETAINS coverage when a round fails, so the peer is contacted again', async () => {
+    // Round 1 reports real progress; round 2 throws, which `syncSharedMemory`
+    // turns into `emptyShared()` — truthy, and carrying no coverage.
+    const shared = await walk((nth) => {
+      if (nth === 1) return { ...sharedResult(), failedPhases: 1, swmCoverage: cov(OTHER, 2, 3) };
+      throw new Error('transport failure');
+    });
+    // Contacted in pass 1, again in pass 2 (where it threw), and STILL in pass 3
+    // — a throw is not evidence that the peer has nothing left.
+    expect(shared.filter((p) => p === OTHER).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('FORGETS coverage when a CLEAN round reports none, so the peer is dropped', async () => {
+    // The other direction, and it is what stops "always retain" from satisfying
+    // the row above: a peer that cleanly says it has nothing must not be revisited.
+    const shared = await walk((nth) => (nth === 1
+      ? { ...sharedResult(), failedPhases: 1, swmCoverage: cov(OTHER, 2, 3) }
+      : {
+        ...sharedResult(),
+        // Clean — `completedPhases > 0`, no failures — so the record is
+        // legitimately forgotten. But carrying NO data, deliberately: a clean
+        // DATA-BEARING round proves the plane, and the loop then stops at
+        // `plane-proven` before the capability gate is ever consulted. With the
+        // default `sharedResult()` this row passed with the delete branch removed
+        // entirely, which is the collapse it exists to rule out.
+        insertedTriples: 0,
+        insertedDataTriples: 0,
+        completedPhases: 1,
+      }));
+    expect(shared.filter((p) => p === OTHER)).toHaveLength(2);
+  });
+});

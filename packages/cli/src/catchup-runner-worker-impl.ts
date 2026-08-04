@@ -114,8 +114,19 @@ interface CatchupPassContext {
  * passes to the two peers that mattered in the r26 incident, and extra passes to
  * the ten barren ones.
  *
- * `snapshotsTotal > 0` is what excludes the barren and cleanly-empty peers;
- * `snapshotsResolved < snapshotsTotal` is what excludes the ones already done.
+ * `snapshotsResolved < snapshotsTotal` is what does the excluding — both for the
+ * peers already done AND for the barren and cleanly-empty ones, which report
+ * `0/0` and fail it at `0 < 0`.
+ *
+ * `snapshotsTotal > 0` is therefore a **defensive restatement with no reachable
+ * effect**, kept because it states the intent legibly. Do NOT treat it as a live
+ * guard: mutating it to `>= 0` leaves the entire suite green, and no honest
+ * fixture can kill it — changing any outcome would need `resolved < total` to
+ * hold while `total <= 0`, i.e. a negative resolved count, which no path
+ * produces. A row written to kill it would pass only because its fixture is
+ * impossible. Stated here rather than left in a commit message because the next
+ * mutation window would otherwise re-derive it from scratch, and the next
+ * refactor would preserve an inert clause believing it load-bearing.
  *
  * `manifestComplete` IS required, and it is not a failure signal — it states that
  * the denominator is the peer's whole manifest rather than a truncated prefix.
