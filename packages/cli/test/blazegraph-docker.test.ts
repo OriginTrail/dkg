@@ -375,15 +375,20 @@ describe('provisionBlazegraphDocker', () => {
     });
     expect(result.port).toBe(10001);
     const runCall = calls.find((c) => c[0] === 'run');
-    expect(runCall).toBeDefined();
-    expect(runCall).toContain(`127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`);
-    expect(runCall).toContain('type=volume,source=dkg-blazegraph-mynode-data,target=/data');
-    expect(runCall).toContain('local');
-    expect(runCall).toContain(`max-size=${BLAZEGRAPH_LOG_MAX_SIZE}`);
-    expect(runCall).toContain(`max-file=${BLAZEGRAPH_LOG_MAX_FILE}`);
     expect(BLAZEGRAPH_LOG_MAX_SIZE).toBe('200m');
     expect(BLAZEGRAPH_LOG_MAX_FILE).toBe('20');
-    expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
+    expect(runCall).toEqual([
+      'run',
+      '-d',
+      '--restart', 'unless-stopped',
+      '--name', 'dkg-blazegraph-mynode',
+      '-p', `127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`,
+      '--mount', 'type=volume,source=dkg-blazegraph-mynode-data,target=/data',
+      '--log-driver', 'local',
+      '--log-opt', `max-size=${BLAZEGRAPH_LOG_MAX_SIZE}`,
+      '--log-opt', `max-file=${BLAZEGRAPH_LOG_MAX_FILE}`,
+      BLAZEGRAPH_IMAGE,
+    ]);
     const metadata = JSON.parse(
       readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),
     ) as { image: string; containerPort: number };
