@@ -843,6 +843,77 @@ describe('Phase D - VM reconcile damping', () => {
     });
   });
 
+  it('clears exact-recovery rotation state on the direct recent-cache terminal path', async () => {
+    const internals = await boot();
+    const localCgId = '68';
+    const onChainCgId = 68n;
+    const kaId = 9068n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    const storageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId);
+    const merkleRoot = await internals.chain.getLatestMerkleRoot(kaId);
+    const target = {
+      localCgId,
+      onChainCgId: onChainCgId.toString(),
+      ordinal: 0,
+      ual,
+      merkleRoot: bytesToHex(merkleRoot),
+      kaId: kaId.toString(),
+      reason: 'no-swm' as const,
+    };
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    (internals as any).prepareVmReconcileRotationTarget(
+      target, ['12D3KooWDirectTerminalRecent'], 100,
+    );
+    ((internals as any).recentReconciledUals as { add(key: string): void }).add(
+      (internals as any).vmReconcileCacheKey(localCgId, ual, merkleRoot),
+    );
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+  });
+
+  it.each([
+    ['promoted', 'reconciled'],
+    ['already-confirmed', 'already'],
+    ['stale-target', 'already'],
+  ] as const)(
+    'clears exact-recovery rotation state on direct %s finalization',
+    async (finalizationOutcome, expectedStatus) => {
+      const internals = await boot();
+      const ordinalByOutcome = {
+        promoted: 69,
+        'already-confirmed': 70,
+        'stale-target': 71,
+      } as const;
+      const graphOrdinal = ordinalByOutcome[finalizationOutcome];
+      const localCgId = String(graphOrdinal);
+      const onChainCgId = BigInt(graphOrdinal);
+      const kaId = BigInt(9_000 + graphOrdinal);
+      registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+      const target = {
+        ...vmRecoveryTarget(localCgId, 0, kaId.toString()),
+        onChainCgId: onChainCgId.toString(),
+      };
+      const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+      (internals as any).prepareVmReconcileRotationTarget(
+        target, [`12D3KooWDirectTerminal${graphOrdinal}`], 100,
+      );
+      (internals as any).getOrCreateFinalizationHandler = () => ({
+        handleChainReconciledKC: async () => finalizationOutcome,
+      });
+      expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
+
+      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+        .resolves.toMatchObject({ status: expectedStatus });
+
+      expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+    },
+  );
+
   it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {
     const internals = await boot();
     const onChainCgId = 42n;
