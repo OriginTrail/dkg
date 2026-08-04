@@ -334,22 +334,40 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     walk: PublicSnapshotWalkProgress,
     manifestComplete: boolean,
     materializationFailures: number,
+    materializedRefCount: number,
+    unwrittenRefSample: readonly string[],
     contextGraphId: string,
   ): void => {
     // No record for a graph that declared no snapshot refs. `0/0` is not a
     // shortfall, and a peer with nothing to offer must not look like a peer
     // that still owes us KAs — an absent record reads as "not capable".
     if (walk.totalSnapshots <= 0) return;
+    // RESOLVED MEANS LOCALLY MATERIALIZED, not fetched.
+    //
+    // `walk.readySnapshots` counts refs retrieved and digest-valid in the blob
+    // cache, and the walk increments it unconditionally after the
+    // materialization hook — the hook swallows its own failures. Reporting that
+    // as resolved made an all-cached round whose writes ALL failed look like
+    // `250/250`: the capability gate computed `250 < 250` false and dropped the
+    // peer, the high-water mark advanced to maximal, and the continuation
+    // stopped silently having written nothing — inside the fix meant to prevent
+    // exactly that.
+    //
+    // Deriving `missingCount` from the same figure keeps
+    // `resolved + missing === total` true by construction, and makes it cover
+    // both never-fetched and fetched-but-unwritten refs without either being
+    // tracked twice.
+    const snapshotsResolved = Math.min(materializedRefCount, walk.totalSnapshots);
     summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
       contextGraphId,
       peerIdSuffix: remotePeerId.slice(-8),
-      // Refs FETCHED and digest-valid, which is not the same as Knowledge
-      // Assets written — see `materializationFailures`.
-      snapshotsResolved: walk.readySnapshots,
+      snapshotsResolved,
       snapshotsTotal: walk.totalSnapshots,
       manifestComplete,
-      missingCount: walk.missingCount,
-      missingSample: walk.missingSample,
+      missingCount: walk.totalSnapshots - snapshotsResolved,
+      // Never-retrieved refs first, then retrieved-but-unwritten ones.
+      missingSample: [...walk.missingSample, ...unwrittenRefSample]
+        .slice(0, PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT),
       materializationFailures,
     });
   };
@@ -363,6 +381,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     // Likewise: materialization failures recorded before the throw are real and
     // must reach the coverage record, not be lost with the stack.
     let materializedFailuresForCg = 0;
+    let materializedRefsForCg = 0;
+    const unresolvedRefSampleForCg: string[] = [];
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
@@ -474,6 +494,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializationFailures = 0;
       let materializedQuads = 0;
       const materializedKeys = new Set<string>();
+      /** Snapshot refs whose every descriptor is locally present. */
+      const materializedRefs = new Set<string>();
+      /** Refs that fetched but could not be written; named in the shortfall. */
+      const unresolvedRefSample: string[] = [];
 
       // #2050 G7. `replaceHeadMetadata` is DELETE-ONLY, and the compensating
       // `storeInsert(processed.verifiedMeta)` sits below the `continue` on the
@@ -541,7 +565,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       };
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
+        // No descriptors, no materializer, or no store means nothing is
+        // written, so this ref stays UNRESOLVED. Returning without recording it
+        // is the point: a fetched-but-unwritten ref must never look like
+        // progress to the continuation loop.
         if (!descriptors?.length || !snapshotMaterializer || !publicSnapshotStore) return;
+        let refMaterialized = true;
         for (const descriptor of descriptors) {
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
           if (materializedKeys.has(graphKey)) continue;
@@ -656,11 +685,27 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // the caller keeps the phase incomplete and withholds the metadata
             // that would otherwise certify a graph that was never written.
             materializationFailures += 1;
+            refMaterialized = false;
+            if (unresolvedRefSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
+              unresolvedRefSample.push(snapshotRef);
+              // Mirrored outside the `try`, like the counters, so a later throw
+              // cannot lose refs we already know failed to write.
+              unresolvedRefSampleForCg.push(snapshotRef);
+            }
             // Mirrored outside the `try` so a later throw cannot lose it.
             materializedFailuresForCg = materializationFailures;
             logWarn(ctx, `SWM sync failed to materialize snapshot ${snapshotRef} for "${pid}": `
               + `${err instanceof Error ? err.message : String(err)}`);
           }
+        }
+        // Resolved means LOCALLY MATERIALIZED — every descriptor for this ref
+        // written or already present. A ref that fetched and then failed to
+        // write is not resolved, which is what stops an all-cached round whose
+        // writes all failed from reporting maximal coverage and silently
+        // ending the continuation.
+        if (refMaterialized) {
+          materializedRefs.add(snapshotRef);
+          materializedRefsForCg = materializedRefs.size;
         }
       };
 
@@ -710,7 +755,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
       // only bites the on-connect fan-out, where this field is a diagnostic
       // rather than a decision input.
-      recordSnapshotCoverage(snapshotSync, wsMetaResult.completed, materializationFailures, pid);
+      recordSnapshotCoverage(snapshotSync, wsMetaResult.completed, materializationFailures, materializedRefs.size, unresolvedRefSample, pid);
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -818,7 +863,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (thrownProgress) {
         // Same builder as the success path — the counts arrive as one coherent
         // group attached by the walk, never reassembled here.
-        recordSnapshotCoverage(thrownProgress, manifestComplete, materializedFailuresForCg, pid);
+        recordSnapshotCoverage(thrownProgress, manifestComplete, materializedFailuresForCg, materializedRefsForCg, unresolvedRefSampleForCg, pid);
       }
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
       if (isSyncPermanentRejection(err)) {

@@ -1592,10 +1592,10 @@ describe('public SWM snapshot coverage (#2050)', () => {
     expect(summary.swmCoverage).toEqual({
       contextGraphId: COVERAGE_CG,
       peerIdSuffix: 'abcd1234',
-      snapshotsResolved: 1,
+      snapshotsResolved: 0,
       snapshotsTotal: 2,
       manifestComplete: true,
-      missingCount: 1,
+      missingCount: 2,
       // The ref that was never served, named — not an empty placeholder. The
       // sample and the count come from the same walk, so they cannot disagree.
       missingSample: ['digest-never-served'],
@@ -1778,20 +1778,33 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
       logDebug: noop,
     });
 
-    // Pre-fix this was `undefined` — the throw unwound past the record, the
-    // pass looked non-advancing, and the peer was dropped.
+    // Pre-fix this was `undefined` — the throw unwound past the record
+    // entirely, so the pass looked non-advancing and the peer was dropped.
+    // Existence of the record, with the peer's real denominator, is what this
+    // row pins.
+    //
+    // `snapshotsResolved` is 0 because this fixture wires no
+    // `snapshotMaterializer`, so nothing is written — and resolved counts
+    // Knowledge Assets MATERIALIZED, not refs fetched. That is deliberate:
+    // counting fetches here is the defect that let an all-cached round whose
+    // writes all failed report maximal coverage and silently end the
+    // continuation.
     expect(summary.swmCoverage).toEqual({
       contextGraphId: T14_CG,
       peerIdSuffix: '99887766',
-      snapshotsResolved: 2,
+      snapshotsResolved: 0,
       snapshotsTotal: 3,
       manifestComplete: true,
-      missingCount: 1,
+      missingCount: 3,
       missingSample: ['digest-that-throws'],
       materializationFailures: 0,
     });
-    // The walk's invariant survives the failure path too.
-    expect(summary.swmCoverage!.snapshotsResolved + summary.swmCoverage!.missingCount)
-      .toBe(summary.swmCoverage!.snapshotsTotal);
   });
+
+  // The `resolved + missing === total` invariant is deliberately NOT asserted
+  // here. `recordSnapshotCoverage` derives `missingCount` as
+  // `totalSnapshots - snapshotsResolved`, so the invariant holds by
+  // construction and any test of it restates numbers the deep-equal above
+  // already pinned. An assertion that cannot fail is worse than none: it reads
+  // as coverage of a property nothing is checking.
 });
