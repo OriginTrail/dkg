@@ -5148,8 +5148,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             isCurrent: () => (isCurrent?.() ?? true) && bindingIsCurrent(),
             shouldQuarantineCommitted: () => {
               const current = this.subscribedContextGraphs.get(asset.contextGraphId);
-              return current === undefined
-                || (verifiedOnChainId !== null && current.onChainId !== verifiedOnChainId);
+              return (subscription !== undefined && current === undefined)
+                || (verifiedOnChainId !== null
+                  && current !== undefined
+                  && current.onChainId !== verifiedOnChainId);
             },
             options: {
               priority: 'background',

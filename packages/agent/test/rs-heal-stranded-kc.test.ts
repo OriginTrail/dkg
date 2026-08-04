@@ -233,6 +233,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
         lastReconciledOrdinal: 0,
       },
     ]]);
+    agentLike.contextGraphBindingGenerations = new Map();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileDispatcher = {

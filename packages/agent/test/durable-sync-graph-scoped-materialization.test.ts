@@ -1631,8 +1631,8 @@ describe('durable graph-scoped KA materialization', () => {
   it('atomically removes an asset when its subscription is deleted after commit starts', async () => {
     const store = new OxigraphStore();
     let releaseReplace!: () => void;
-    let markReplaceEntered!: () => void;
-    const replaceEntered = new Promise<void>((resolve) => { markReplaceEntered = resolve; });
+    let markReplaceCommitted!: () => void;
+    const replaceCommitted = new Promise<void>((resolve) => { markReplaceCommitted = resolve; });
     const replaceGate = new Promise<void>((resolve) => { releaseReplace = resolve; });
     const replaceGraphAndSubject = store.replaceGraphAndSubject!.bind(store);
     let replaceCalls = 0;
@@ -1641,11 +1641,12 @@ describe('durable graph-scoped KA materialization', () => {
         if (property === 'replaceGraphAndSubject') {
           return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
             replaceCalls += 1;
+            const result = await replaceGraphAndSubject(...args);
             if (replaceCalls === 1) {
-              markReplaceEntered();
+              markReplaceCommitted();
               await replaceGate;
             }
-            return replaceGraphAndSubject(...args);
+            return result;
           };
         }
         const value = Reflect.get(target, property, target);
@@ -1668,7 +1669,7 @@ describe('durable graph-scoped KA materialization', () => {
       shouldQuarantineCommitted: () => !subscriptionPresent,
     });
 
-    await replaceEntered;
+    await replaceCommitted;
     subscriptionPresent = false;
     releaseReplace();
 

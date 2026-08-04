@@ -807,6 +807,36 @@ describe('durable sync lifecycle chain binding', () => {
     expect(mockedMaterialize).toHaveBeenCalledTimes(materializationsBeforeRejectedSave);
   });
 
+  it('retains a chain-authenticated public asset when no subscription exists', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => (
+        ethers.keccak256(ethers.toUtf8Bytes(contextGraphId))
+      ),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain);
+    await expect(storeGraphScopedAsset(
+      graphScopedStoreRequest(graphScopedAsset(root), Date.now() + 60_000),
+    )).resolves.toBe('applied');
+
+    expect(mockedMaterialize).toHaveBeenCalledOnce();
+    expect(mockedMaterialize.mock.calls[0]![0].shouldQuarantineCommitted?.()).toBe(false);
+  });
+
   it('does not let a stale strict snapshot overwrite a newer host-only persistence write', async () => {
     const oldSubscription = { subscribed: true, onChainId: '14' };
     const hostOnlySubscription = { subscribed: false, coreHosted: true, onChainId: '14' };
