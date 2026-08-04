@@ -1573,6 +1573,112 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'assertionVersion')).toEqual(['"1"']);
   });
 
+  it('does not pass a lifecycle abort signal into an entered atomic replacement', async () => {
+    const store = new OxigraphStore();
+    const controller = new AbortController();
+    let releaseReplace!: () => void;
+    let markReplaceEntered!: () => void;
+    const replaceEntered = new Promise<void>((resolve) => { markReplaceEntered = resolve; });
+    const replaceGate = new Promise<void>((resolve) => { releaseReplace = resolve; });
+    const replaceGraphAndSubject = store.replaceGraphAndSubject!.bind(store);
+    let observedCommitSignal: AbortSignal | undefined;
+    const gatedStore = new Proxy(store, {
+      get(target, property) {
+        if (property === 'replaceGraphAndSubject') {
+          return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
+            observedCommitSignal = args[5]?.signal;
+            markReplaceEntered();
+            await replaceGate;
+            if (observedCommitSignal?.aborted) {
+              throw Object.assign(new Error('transport aborted'), { name: 'AbortError' });
+            }
+            return replaceGraphAndSubject(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let current = true;
+    let settled = false;
+    const materialization = materializeVerifiedGraphScopedAsset({
+      store: gatedStore,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(2)],
+        metadataQuads: metadata(2),
+      },
+      isCurrent: () => current,
+      options: { signal: controller.signal },
+    }).finally(() => { settled = true; });
+
+    await replaceEntered;
+    current = false;
+    controller.abort();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(observedCommitSignal).toBeUndefined();
+
+    releaseReplace();
+    await expect(materialization).resolves.toBe('quarantined');
+    expect(await values(store, 'assertionVersion')).toEqual(['"2"']);
+  });
+
+  it('atomically removes an asset when its subscription is deleted after commit starts', async () => {
+    const store = new OxigraphStore();
+    let releaseReplace!: () => void;
+    let markReplaceCommitted!: () => void;
+    const replaceCommitted = new Promise<void>((resolve) => { markReplaceCommitted = resolve; });
+    const replaceGate = new Promise<void>((resolve) => { releaseReplace = resolve; });
+    const replaceGraphAndSubject = store.replaceGraphAndSubject!.bind(store);
+    let replaceCalls = 0;
+    const gatedStore = new Proxy(store, {
+      get(target, property) {
+        if (property === 'replaceGraphAndSubject') {
+          return async (...args: Parameters<NonNullable<TripleStore['replaceGraphAndSubject']>>) => {
+            replaceCalls += 1;
+            const result = await replaceGraphAndSubject(...args);
+            if (replaceCalls === 1) {
+              markReplaceCommitted();
+              await replaceGate;
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let subscriptionPresent = true;
+    const materialization = materializeVerifiedGraphScopedAsset({
+      store: gatedStore,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 2n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(2)],
+        metadataQuads: metadata(2),
+      },
+      isCurrent: () => true,
+      shouldQuarantineCommitted: () => !subscriptionPresent,
+    });
+
+    await replaceCommitted;
+    subscriptionPresent = false;
+    releaseReplace();
+
+    await expect(materialization).resolves.toBe('quarantined');
+    expect(replaceCalls).toBe(2);
+    expect(await store.countQuads(assertionGraph)).toBe(0);
+    expect(await values(store, 'assertionVersion')).toEqual([]);
+  });
+
   it('leaves both old partitions intact when the atomic store update fails', async () => {
     const store = new OxigraphStore();
     const v1Data = dataQuad(1);

@@ -385,6 +385,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      { source: 'agent.contextGraph.registrationStatus' },
     );
     return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
   }
@@ -415,7 +416,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async getContextGraphOnChainId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; source?: string } = {},
   ): Promise<string | null> {
     const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (subscribed) return subscribed;
@@ -434,7 +435,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        source: options.source ?? 'agent.contextGraph.onChainId',
+      },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];
@@ -828,6 +832,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_POLICY}> ?pp }
         OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID}> ?paa }
       } } LIMIT 1`,
+      { source: 'agent.contextGraph.registrationOptions' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return {};
     const row = result.bindings[0] ?? {};
@@ -963,7 +968,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         },
       );
       if (!updated) {
-        await this.store.query(sparql);
+        await this.store.query(sparql, {
+          source: 'agent.cg.removeSubGraph.registrationFallback',
+        });
       }
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
@@ -1132,6 +1139,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const exists = await this.store.query(
       `SELECT ?hit WHERE { ${existsPatterns.map((p) => `{ ${p} }`).join(' UNION ')} } LIMIT 1`,
+      { source: 'agent.endorsement.resolveTarget.exists' },
     );
     if (exists.type !== 'bindings' || exists.bindings.length === 0) {
       throw new Error(
@@ -1149,6 +1157,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ]);
     const roots = await this.store.query(
       `SELECT DISTINCT ?root WHERE { ${rootPatterns.map((p) => `{ ${p} }`).join(' UNION ')} }`,
+      { source: 'agent.endorsement.resolveTarget.roots' },
     );
     const rootEntities = roots.type === 'bindings'
       ? (roots.bindings as Record<string, string>[]).map((row) => row.root).filter(Boolean)
@@ -1183,6 +1192,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       .join(' || ');
     const result = await this.store.query(
       `SELECT DISTINCT ?s WHERE { GRAPH <${safeGraph}> { ?s ?p ?o . FILTER(${filterClauses}) } }`,
+      { source: 'agent.endorsement.resolveRootSubjects' },
     );
     const subjects = new Set(rootEntities);
     if (result.type === 'bindings') {

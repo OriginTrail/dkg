@@ -476,6 +476,7 @@ export class GossipPublishHandler {
               <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
               <http://dkg.io/ontology/createdBy> ?createdBy .
           } }`,
+          { source: 'agent.gossipPublish.subGraphRegistration' },
         );
         if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
           const regQuads = generateSubGraphRegistration({
@@ -618,6 +619,7 @@ export class GossipPublishHandler {
                 `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
                   `<${assertSafeIri(graphPublish.scope.ual)}> ` +
                   `<http://dkg.io/ontology/status> "confirmed" } }`,
+                { source: 'agent.gossipPublish.confirmedGuard' },
               );
               if (confirmed.type === 'boolean' && confirmed.value) {
                 return 'stale' as const;
@@ -986,6 +988,7 @@ export class GossipPublishHandler {
     const cgData = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?peer WHERE { GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
+      { source: 'agent.gossipPublish.allowedPeers' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     return result.bindings

@@ -24,6 +24,54 @@ export type SyncSchedulerLane =
   | 'pre_authorization'
   | 'responder';
 
+/**
+ * Which trigger enqueued a `sync-global` admission.
+ *
+ * The lane says WHAT kind of work is queued; every trigger funnels into the same
+ * few lanes, so lane alone cannot tell an operator whether a saturated queue is
+ * an explicit user-driven catch-up, routine sync-on-connect, or a background
+ * reconcile. Issue #2006 had to reconstruct that from daemon logs.
+ *
+ * The set is deliberately closed and small: these values become metric and log
+ * dimensions, so cardinality is a contract, not an implementation detail.
+ *
+ * The rule is TRIGGER attribution, with a base case: a sync operation is
+ * attributed to whatever triggered it, and work with no triggering sync
+ * operation is triggered by the control plane. `control-plane` is that base
+ * case — node-internal metadata work (curator meta refresh, on both the
+ * requester and responder sides) that no sync trigger is responsible for.
+ * It exists so `unspecified` can keep meaning "we do not know", which is what
+ * makes an unclassified sample able to invalidate an observation window.
+ */
+export const SYNC_ADMISSION_SOURCES = [
+  'catchup-foreground',
+  'catchup-background',
+  'on-connect',
+  'reconcile',
+  'vm-recovery',
+  'swm-recovery',
+  'control-plane',
+  'unspecified',
+] as const;
+
+export type SyncAdmissionSource = typeof SYNC_ADMISSION_SOURCES[number];
+
+const SYNC_ADMISSION_SOURCE_SET: ReadonlySet<string> = new Set(SYNC_ADMISSION_SOURCES);
+
+/**
+ * Clamp an admission origin to the closed set before it becomes a diagnostic
+ * label. The union is compile-time only; a value crossing a worker/RPC boundary
+ * or arriving through a cast must never be able to widen the label space or
+ * smuggle a Context Graph / peer identifier into node-wide diagnostics.
+ */
+export function normalizeSyncAdmissionSource(
+  source: string | undefined,
+): SyncAdmissionSource {
+  return source !== undefined && SYNC_ADMISSION_SOURCE_SET.has(source)
+    ? source as SyncAdmissionSource
+    : 'unspecified';
+}
+
 const SNAPSHOT_LIMIT_PATHS = [
   ['global', 'rows'],
   ['global', 'bytesEstimate'],

@@ -94,6 +94,11 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
         chainId,
         endpoints: options.rpcEndpoints,
+        // This scope is constructed PER precommit invocation, so its admission
+        // must come from the process-wide per-chain registry — a gate private
+        // to this instance would have contended with nothing, and two
+        // concurrent precommits on one chain would both admit.
+        owner: 'rfc64',
       }),
       materialize: createFinalizedVmStoreMaterializerV1({ store: options.store }),
     });

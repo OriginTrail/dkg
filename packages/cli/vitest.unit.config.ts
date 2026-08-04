@@ -30,6 +30,7 @@ export default defineConfig({
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
+          'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/query-route-lifecycle.test.ts',
           'test/status-command-store.test.ts',
@@ -66,6 +67,12 @@ export default defineConfig({
           'test/random-sampling-status.test.ts',
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
+          'test/catchup-runner-worker-lifecycle.test.ts',
+          // W1 §6.6/§6.7 — catch-up request/job accounting (I7–I9) and the
+          // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
+          // a fake worker thread; no hardhat.
+          'test/daemon-catchup-telemetry-shutdown.test.ts',
+          'test/catchup-runner-worker-killswitch.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',

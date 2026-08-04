@@ -1230,11 +1230,13 @@ export async function readMaterializedVersion(
   store: TripleStore,
   metaGraph: string,
   ual: string,
+  options: QueryOptions = {},
 ): Promise<MaterializedVersion | null> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
   const res = await store.query(
     `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${MATERIALIZED_VERSION_PRED}> ?v } } LIMIT 1`,
+    options,
   );
   if (res.type !== 'bindings' || res.bindings.length === 0) return null;
   return parseMaterializedVersion(res.bindings[0]['v']);
@@ -1251,12 +1253,14 @@ export async function shouldApplyMaterialization(
   ual: string,
   incoming: MaterializedVersion,
   incomingAssertionVersion?: bigint,
+  options: QueryOptions = {},
 ): Promise<boolean> {
   if (incomingAssertionVersion !== undefined) {
     assertSafeGraphIriForSparql(metaGraph);
     assertSafeGraphIriForSparql(ual);
     const assertionVersions = await store.query(
       `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${ual}> <${ASSERTION_VERSION_PRED}> ?v } }`,
+      options,
     );
     if (assertionVersions.type === 'bindings') {
       for (const row of assertionVersions.bindings) {
@@ -1269,7 +1273,7 @@ export async function shouldApplyMaterialization(
       }
     }
   }
-  const current = await readMaterializedVersion(store, metaGraph, ual);
+  const current = await readMaterializedVersion(store, metaGraph, ual, options);
   if (!current) return true;
   return compareMaterializedVersion(incoming, current) >= 0;
 }
@@ -1279,11 +1283,15 @@ export async function writeMaterializedVersion(
   metaGraph: string,
   ual: string,
   version: MaterializedVersion,
+  options: QueryOptions = {},
 ): Promise<void> {
   assertSafeGraphIriForSparql(metaGraph);
   assertSafeGraphIriForSparql(ual);
-  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED });
-  await store.insert([materializedVersionQuad(metaGraph, ual, version)]);
+  await store.deleteByPattern(
+    { graph: metaGraph, subject: ual, predicate: MATERIALIZED_VERSION_PRED },
+    options,
+  );
+  await store.insert([materializedVersionQuad(metaGraph, ual, version)], options);
 }
 
 export function materializedVersionQuad(
@@ -1329,9 +1337,11 @@ export async function withMaterializationLock<T>(
   metaGraph: string,
   ual: string,
   fn: () => Promise<T>,
+  options: { signal?: AbortSignal } = {},
 ): Promise<T> {
   const key = `${metaGraph}\u0000${ual}`;
   const prev = _materializationLocks.get(key);
+  let entered = false;
   // Build our work promise so subsequent callers can chain after us
   // BEFORE we start awaiting prev (otherwise two near-simultaneous
   // callers would both see `prev === undefined` and run in parallel).
@@ -1339,17 +1349,49 @@ export async function withMaterializationLock<T>(
     if (prev) {
       try { await prev; } catch { /* prev's caller already handled it */ }
     }
+    if (options.signal?.aborted) {
+      throw new DOMException('Materialization lock wait aborted', 'AbortError');
+    }
+    entered = true;
     return fn();
   })();
   _materializationLocks.set(key, work);
-  try {
-    return await work;
-  } finally {
+  // Cleanup follows the serialized tail, not the caller-facing abort race. If
+  // a waiter aborts behind an active owner, deleting the key immediately would
+  // let a third writer bypass that owner and violate the TOCTOU guarantee.
+  void work.finally(() => {
     // GC: if no one else queued after us, drop the entry so the map
     // doesn't grow unbounded across long-running daemons.
     if (_materializationLocks.get(key) === work) {
       _materializationLocks.delete(key);
     }
+  }).catch(() => undefined);
+  if (!options.signal) return work;
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<T>((_resolve, reject) => {
+    onAbort = () => {
+      // Once the critical section has started it is an atomic durability unit:
+      // its caller must observe its real completion before shutdown can close
+      // the store. Cancellation only removes callers still waiting for the
+      // previous owner; it must never detach an entered writer.
+      if (entered) return;
+      // An aborted waiter that never entered the critical section contributes
+      // no serialization work. Restore the prior owner as the visible tail so
+      // repeated stop/restart cycles cannot accumulate an unbounded promise
+      // chain behind one physically hung store mutation.
+      if (!entered && prev && _materializationLocks.get(key) === work) {
+        _materializationLocks.set(key, prev);
+      }
+      reject(new DOMException('Materialization lock wait aborted', 'AbortError'));
+    };
+    if (options.signal!.aborted) onAbort();
+    else options.signal!.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return entered ? await work : await Promise.race([work, aborted]);
+  } finally {
+    if (onAbort) options.signal.removeEventListener('abort', onAbort);
   }
 }
 

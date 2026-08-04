@@ -1231,14 +1231,22 @@ describe('refreshMetaFromCurator', () => {
     const bootstrapPeer = 'peer-from-join-approval';
     const authoritativePeer = 'peer-from-authoritative-meta';
     const preferredSyncPeers = new Map([[contextGraphId, bootstrapPeer]]);
+    const declaredFacts = {
+      // A complete canonical definition, in the shape the projection produces:
+      // each declared fact appears as the scalar AND in its array.
+      declared: true,
+      accessPolicy: 'private',
+      curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
+      curators: ['did:dkg:agent:0x0000000000000000000000000000000000000abc'],
+      creator: `did:dkg:agent:${authoritativePeer}`,
+      creators: [`did:dkg:agent:${authoritativePeer}`],
+    };
     const agent = {
       preferredSyncPeers,
-      getCgMeta: async () => ({
-        curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
-        curators: [],
-        creator: `did:dkg:agent:${authoritativePeer}`,
-        creators: [],
-      }),
+      getCgMeta: async () => declaredFacts,
+      // The Context Graph declares this curator→peer binding in its OWN `_meta`,
+      // which is what makes it authoritative rather than merely rankable (#2006).
+      getOwnCgMetaFacts: async () => declaredFacts,
       discovery: {
         findAgents: async () => {
           throw new Error('creator metadata should resolve the curator peer');
@@ -1253,10 +1261,18 @@ describe('refreshMetaFromCurator', () => {
     expect(resolved).toBe(authoritativePeer);
     expect(preferredSyncPeers.has(contextGraphId)).toBe(false);
 
-    const lifecycleResolved = await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId.call({
+    // The same resolution through the lifecycle entry points, against the real
+    // metadata rather than a stubbed curator: the join-approved peer ranks only
+    // until `_meta` names someone. The declared answer then wins the RANKING —
+    // but it confers no authority, because `_meta` identifies the graph that
+    // holds the rows, not the writer that supplied them.
+    const lifecycleAgent = {
+      ...agent,
       preferredSyncPeers: new Map([[contextGraphId, bootstrapPeer]]),
-      resolveCuratorPeerId: async () => authoritativePeer,
-    } as never, contextGraphId);
-    expect(lifecycleResolved).toBe(authoritativePeer);
+    };
+    expect(await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
+    expect(await LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBeUndefined();
   });
 });

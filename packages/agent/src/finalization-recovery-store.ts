@@ -80,11 +80,15 @@ export interface FinalizationRecoveryHealth {
   degradedReason?: string;
   stateCounts: Partial<Record<FinalizationRecoveryState, number>>;
   livePayloadBytes: number;
+  dueEntries: number;
+  oldestDueAgeMs?: number;
   oldestPendingAgeMs?: number;
 }
 
 export interface FinalizationRecoveryStore {
   readonly closed: boolean;
+  /** Reloads one entry after waiting on an in-process serialization boundary. */
+  get(key: string): Promise<FinalizationRecoveryEntry | undefined>;
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
   recordTrustedPublisher(
     key: string,
@@ -113,6 +117,12 @@ export interface FinalizationRecoveryStore {
   clearSettledRetry(key: string, generation: number): Promise<void>;
   rejectSettled(key: string, generation: number, lastError: string): Promise<boolean>;
   isAttemptDue(entry: FinalizationRecoveryEntry): boolean;
+  /**
+   * Returns a bounded, oldest-first snapshot of entries whose persisted retry
+   * gate is open. Callers must still rely on generation-checked transitions:
+   * live gossip or reconciliation may update an entry after this read.
+   */
+  listDue(limit: number): Promise<FinalizationRecoveryEntry[]>;
   listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;

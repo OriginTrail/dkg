@@ -551,6 +551,7 @@ async function resolveDirectRootlessUpdateScope(
   const result = await agent.store.query(
     `CONSTRUCT { <${safeUal}> ?p ?o } WHERE { `
       + `GRAPH <${metaGraph}> { <${safeUal}> ?p ?o } }`,
+    { source: 'agent.publish.rootlessUpdate.currentMetadata' },
   );
   const rows = result.type === 'quads' ? result.quads : [];
 
@@ -560,6 +561,7 @@ async function resolveDirectRootlessUpdateScope(
         + `?ual <${ROOTLESS_UPDATE_DKG_NS}batchId> "${kaId.toString()}"^^<${ROOTLESS_UPDATE_XSD_INTEGER}> . `
         + `OPTIONAL { ?ual <${ROOTLESS_UPDATE_DKG_NS}contentScopeVersion> ?scope } `
         + `} } LIMIT 2`,
+      { source: 'agent.publish.rootlessUpdate.legacyBatchLookup' },
     );
     if (byBatch.type === 'bindings' && byBatch.bindings.length > 0) {
       throw new LegacyKnowledgeAssetReadOnlyError();
@@ -2420,21 +2422,24 @@ export class PublishMethods extends DKGAgentBase {
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const result = await this.store.query(`
-      ASK WHERE {
-        {
-          GRAPH <${ontologyGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+    const result = await this.store.query(
+      `
+        ASK WHERE {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            }
+          }
+          UNION
+          {
+            GRAPH <${cgMetaGraph}> {
+              <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            }
           }
         }
-        UNION
-        {
-          GRAPH <${cgMetaGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-          }
-        }
-      }
-    `);
+      `,
+      { source: 'agent.publish.contextGraphDefinition' },
+    );
     return result.type === 'boolean' && result.value === true;
   }
 
@@ -2669,6 +2674,7 @@ export class PublishMethods extends DKGAgentBase {
     // recover that partition from the immutable `(UAL, assertionVersion)` graph.
     const existingMetaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+      { source: 'agent.assertionFinalize.existingSeal' },
     );
     const existingMetaQuads =
       existingMetaResult.type === 'quads' ? existingMetaResult.quads : [];
@@ -2844,6 +2850,7 @@ export class PublishMethods extends DKGAgentBase {
       if (reReservedKaId === undefined) {
         const reKaIdRes = await this.store.query(
           `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName)}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
+          { source: 'agent.assertionFinalize.reservedKaId' },
         );
         const reNum =
           reKaIdRes.type === 'bindings' && reKaIdRes.bindings[0]?.['n'] !== undefined
@@ -3017,6 +3024,7 @@ export class PublishMethods extends DKGAgentBase {
         OPTIONAL { <${lifecycleUri}> <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?version }
         OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
       } } LIMIT 1`,
+      { source: 'agent.assertionFinalize.lifecycleScope' },
     );
     const lifecycleScopeRow = lifecycleScopeResult.type === 'bindings'
       ? lifecycleScopeResult.bindings[0]
@@ -3044,6 +3052,7 @@ export class PublishMethods extends DKGAgentBase {
     }
     const existingKaIdRes = await this.store.query(
       `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${KA_ID_PRED}> ?n } } LIMIT 1`,
+      { source: 'agent.assertionFinalize.existingKaId' },
     );
     const hasExistingKaId =
       existingKaIdRes.type === 'bindings' && existingKaIdRes.bindings.length > 0;
@@ -3106,6 +3115,7 @@ export class PublishMethods extends DKGAgentBase {
       const stampedNumber = parseStampedNumber(existingKaIdRes.bindings[0]['n']);
       const reservedUalRes = await this.store.query(
         `SELECT ?u WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?u } } LIMIT 1`,
+        { source: 'agent.assertionFinalize.reservedUal' },
       );
       const stampedReservedUal =
         reservedUalRes.type === 'bindings' && reservedUalRes.bindings[0]?.['u'] !== undefined
@@ -4359,6 +4369,7 @@ export class PublishMethods extends DKGAgentBase {
     const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const metaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+      { source: 'agent.asyncVmPublish.seal' },
     );
     const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
     const seal = parseAssertionSealQuads(metaQuads, assertionUri);
@@ -5191,6 +5202,7 @@ export class PublishMethods extends DKGAgentBase {
         OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
         OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
       } } LIMIT 1`,
+      { source: 'agent.asyncVmPublish.lifecyclePointer' },
     );
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
@@ -5590,6 +5602,7 @@ export class PublishMethods extends DKGAgentBase {
     // 1. Read the seal from _meta.
     const metaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+      { source: 'agent.vmPublish.seal' },
     );
     const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
     const seal = parseAssertionSealQuads(metaQuads, assertionUri);
@@ -5693,6 +5706,7 @@ export class PublishMethods extends DKGAgentBase {
         OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
         OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
       } } LIMIT 1`,
+      { source: 'agent.vmPublish.lifecyclePointer' },
     );
     const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
     const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
@@ -6291,6 +6305,7 @@ export class PublishMethods extends DKGAgentBase {
     try {
       const res = await this.store.query(
         `SELECT ?vm WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } } LIMIT 1`,
+        { source: 'agent.publish.pointerVmGuard' },
       );
       const raw = res.type === 'bindings' ? res.bindings[0]?.['vm'] : undefined;
       vmBare = raw?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
@@ -6328,6 +6343,7 @@ export class PublishMethods extends DKGAgentBase {
       const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
       const metaResult = await this.store.query(
         `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+        { source: 'agent.publish.swmPointerSeal' },
       );
       const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
       const seal = parseAssertionSealQuads(metaQuads, assertionUri);

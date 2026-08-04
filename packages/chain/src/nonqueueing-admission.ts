@@ -6,6 +6,45 @@ export interface NonqueueingAdmissionGateV1<K> {
   ): Promise<T>;
 }
 
+/**
+ * How the endpoint lifecycle admits work, without knowing what kind of policy
+ * it is.
+ *
+ * This lives here, in the neutral admission layer, rather than with the
+ * process-wide registry: a LOCAL policy should not have to import its own type
+ * from a feature-specific module that owns owner vocabulary and lane state, and
+ * the alternative — restating the structural `run` shape at each factory — is
+ * the anonymous-duplicate problem in another form.
+ */
+export interface EndpointAdmissionPolicyV1<K> {
+  run<T>(
+    key: K,
+    operation: () => Promise<T>,
+    saturated: (active: number, holder?: string) => Error,
+  ): Promise<T>;
+}
+
+/**
+ * A per-instance policy, for callers whose limit is genuinely local.
+ *
+ * The one-shot finalized read is the only such caller today: its limit is 4 and
+ * folding it into the snapshot's single process-wide lane would throttle an
+ * unrelated path. Its saturation reports no holder, because a local gate has no
+ * owner concept to report.
+ */
+export function createLocalNonqueueingAdmissionV1<K>(
+  limit: number,
+): EndpointAdmissionPolicyV1<K> {
+  const gate = createNonqueueingAdmissionGateV1<K>(limit);
+  return Object.freeze({
+    run: <T>(
+      key: K,
+      operation: () => Promise<T>,
+      saturated: (active: number, holder?: string) => Error,
+    ) => gate.run(key, operation, (active) => saturated(active, undefined)),
+  });
+}
+
 /** Shared non-queueing permit state used by finalized routers and transports. */
 export function createNonqueueingAdmissionGateV1<K>(
   limit: number,

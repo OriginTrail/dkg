@@ -6,7 +6,12 @@ import type {
 } from '@origintrail-official/dkg-node-ui';
 import {
   catchupPlaneCompletedWithoutFailure,
+  catchupPlaneProvenByAuthorityHostedEmpty,
+  catchupPlaneProvenByData,
+  catchupPlaneProvenByUnanimousEmpty,
+  catchupPlaneReady,
   type CatchupJobResult,
+  type CatchupPlaneCompletionEvidence,
 } from './catchup-runner.js';
 
 export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
@@ -136,16 +141,23 @@ function catchupServedUsableData(result: CatchupJobResult): boolean {
   return result.dataSynced > 0 || result.sharedMemorySynced > 0;
 }
 
+/**
+ * Did ANY peer complete this plane cleanly, whatever it carried?
+ *
+ * Every carrier of clean-completion evidence must be listed here, not just the
+ * ones that prove readiness: this predicate gates the denial and no-response
+ * branches that run BEFORE `catchupPlaneReady` is ever consulted, so a form of
+ * evidence missing from it is silently unreachable. The curator's hosted-empty
+ * round is the newest carrier and is exactly that shape — no data, no wire-empty
+ * response, and still a clean answer from the one peer that speaks for the graph.
+ */
 function cleanCompletionHasResponse(
-  completion: {
-    verifiedDataPeers: number;
-    verifiedPrivateOnlyPeers?: number;
-    emptyPeers: number;
-  } | undefined,
+  completion: CatchupPlaneCompletionEvidence | undefined,
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0 ||
     (completion?.verifiedPrivateOnlyPeers ?? 0) > 0 ||
-    (completion?.emptyPeers ?? 0) > 0;
+    (completion?.emptyPeers ?? 0) > 0 ||
+    (completion?.authorityEmptyPeers ?? 0) > 0;
 }
 
 function catchupHasRequestedCleanPeerResponse(
@@ -175,31 +187,86 @@ export function catchupResultHasCleanResponse(result: CatchupJobResult): boolean
     (!result.denied && peerReturnedMetadata);
 }
 
-function catchupPlaneReadyThisRun(input: {
+interface CatchupPlaneReadinessThisRun {
+  /** Whether this plane counts as ready for THIS run's reported job status. */
+  ready: boolean;
+  /**
+   * Whether the evidence is strong enough to PERSIST as sticky readiness
+   * provenance.
+   *
+   * Readiness provenance is carried forward by an OR against
+   * `readinessBeforeCatchup`, so anything recorded here is permanent for the
+   * subscription. Verified content earns it outright, as does the curator's own
+   * word that it hosts an empty graph.
+   *
+   * A unanimous-empty round earns it only when the round was FULLY ACCOUNTED:
+   * every peer the walk attempted actually answered (`failedPeers === 0`).
+   * Emptiness is a verdict derived from ABSENCE of evidence, so it is only as
+   * good as the denominator it was taken over — with peers unaccounted for and
+   * no authoritative curator to anchor it, a single unrelated empty response
+   * produces the same verdict as a genuinely empty graph.
+   *
+   * Splitting it this way keeps both properties that pulled against each other:
+   *
+   * - LIVENESS. The per-run verdict is unchanged, so a graph on a lossy network
+   *   still reports `done` instead of retrying forever. Failing the verdict
+   *   itself closed on unaccounted peers was rejected for exactly that reason.
+   * - NO FROZEN GUESS. Nothing derived from a partial round is written down, so
+   *   a wrong empty verdict cannot outlive the run that produced it.
+   *
+   * This bit is what `statePatch.synced` is built from, and `synced` gates
+   * write preflight (`contextGraphRowIsWritable`), so anything admitted here
+   * grants durable readiness to consumers that never see the job result.
+   */
+  persistable: boolean;
+}
+
+function catchupPlaneReadinessThisRun(input: {
   result: CatchupJobResult;
   plane: 'durable' | 'sharedMemory';
   isPrivate: boolean;
-}): boolean {
+}): CatchupPlaneReadinessThisRun {
+  const diagnostics = input.result.diagnostics?.[input.plane];
   const completion = input.result.cleanPlaneCompletions?.[input.plane];
+  const options = { isPrivate: input.isPrivate };
+  // Every attempted peer answered, so the empty verdict was taken over the
+  // whole peer set rather than over whoever happened to reply.
+  const fullyAccounted = (diagnostics?.failedPeers ?? 0) === 0;
   if (completion) {
-    const verifiedPrivateOnly = input.plane === 'durable' &&
-      (input.result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers ?? 0) > 0;
-    return completion.verifiedDataPeers > 0 ||
-      verifiedPrivateOnly ||
-      (!input.isPrivate && completion.emptyPeers > 0);
+    const provenPositively = catchupPlaneProvenByData(completion)
+      || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
+    const unanimousEmpty = catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
+    return {
+      ready: provenPositively || unanimousEmpty,
+      persistable: provenPositively || (unanimousEmpty && fullyAccounted),
+    };
   }
 
   // Backward compatibility for callers that construct a legacy result (for
   // example, an older in-process runner during a rolling upgrade). New worker
   // results always carry cleanPlaneCompletions, so aggregate failures are not
-  // used as readiness evidence on the production path.
-  const diagnostics = input.result.diagnostics?.[input.plane];
+  // used as readiness evidence on the production path. The same fail-closed
+  // rule applies: aggregate counters can show that SOMEBODY answered empty, but
+  // only a content-free, failure-free round proves the plane really is empty.
   const dataProgress = input.plane === 'durable'
     ? input.result.dataSynced > 0 ||
       (input.result.diagnostics?.durable.verifiedPrivateOnlyResponses ?? 0) > 0
     : input.result.sharedMemorySynced > 0;
-  return catchupPlaneCompletedWithoutFailure(diagnostics) &&
-    (dataProgress || (!input.isPrivate && (diagnostics?.emptyResponses ?? 0) > 0));
+  if (catchupPlaneCompletedWithoutFailure(diagnostics) && dataProgress) {
+    return { ready: true, persistable: true };
+  }
+  // Pass NO completion evidence rather than an all-zero stand-in: the empty
+  // proof consults the raw aggregate counters only when completion evidence is
+  // genuinely absent, and a synthetic `emptyPeers: 0` would read as "the
+  // per-peer view saw no clean empty response" and suppress the legacy path.
+  const ready = catchupPlaneReady(undefined, diagnostics, options);
+  return {
+    ready,
+    // No completion evidence means neither positive proof mode can fire, so
+    // anything true here came from the aggregate empty counter and is subject
+    // to the same fully-accounted requirement.
+    persistable: ready && fullyAccounted,
+  };
 }
 
 export interface ContextGraphCatchupReadinessClassification {
@@ -256,25 +323,43 @@ export function classifyContextGraphCatchupReadiness(input: {
       };
     }
 
-    const durableReadyThisRun = catchupPlaneReadyThisRun({
+    const durableThisRun = catchupPlaneReadinessThisRun({
       result,
       plane: 'durable',
       isPrivate: input.isPrivate,
     });
-    const sharedMemoryReadyThisRun = input.includeSharedMemory &&
-      catchupPlaneReadyThisRun({
+    const sharedMemoryThisRun = input.includeSharedMemory
+      ? catchupPlaneReadinessThisRun({
         result,
         plane: 'sharedMemory',
         isPrivate: input.isPrivate,
-      });
+      })
+      : { ready: false, persistable: false };
+    const durableReadyThisRun = durableThisRun.ready;
+    const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
     const currentReadinessProvenance =
       input.readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
-    const durableVerified =
-      (currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified) ||
-      durableReadyThisRun;
-    const sharedMemoryVerified =
-      (currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified) ||
-      sharedMemoryReadyThisRun;
+    const durableVerifiedBefore =
+      currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
+    const sharedMemoryVerifiedBefore =
+      currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
+    const durableVerified = durableVerifiedBefore || durableReadyThisRun;
+    const sharedMemoryVerified = sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun;
+    // What this run is allowed to FREEZE, as opposed to what it reports. These
+    // diverge only for a unanimous-empty verdict, which stays re-derived per run
+    // so that a wrong empty verdict cannot become permanent.
+    const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
+    const sharedMemoryVerifiedPersisted =
+      sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
+    // `subscription.synced` is a SECOND persisted readiness bit, living outside
+    // the provenance store and consumed by callers that never see this job's
+    // result — `contextGraphRowIsWritable` treats `subscribed && synced` as
+    // writable. It must therefore carry the same verdict as `readinessPatch`,
+    // not the transient one. The pre-catch-up path already assumes they agree:
+    // it derives `synced` from the persisted provenance and patches the row
+    // back into line, so letting them diverge here would be corrected away on
+    // the next pass anyway — after a window in which the graph looked writable.
+    const overallVerifiedPersisted = durableVerifiedPersisted || sharedMemoryVerifiedPersisted;
     const overallVerified = durableVerified || sharedMemoryVerified;
     const missingGraphProof = !overallVerified;
     const missingRequestedSharedMemory =
@@ -302,14 +387,14 @@ export function classifyContextGraphCatchupReadiness(input: {
       jobStatus,
       error,
       statePatch: {
-        synced: overallVerified,
-        sharedMemorySynced: sharedMemoryVerified,
+        synced: overallVerifiedPersisted,
+        sharedMemorySynced: sharedMemoryVerifiedPersisted,
         metaSynced: true,
         pendingMeta: false,
       },
       readinessPatch: {
-        durableVerified,
-        sharedMemoryVerified,
+        durableVerified: durableVerifiedPersisted,
+        sharedMemoryVerified: sharedMemoryVerifiedPersisted,
       },
       eventPayload: durableReadyThisRun || sharedMemoryReadyThisRun
         ? {
