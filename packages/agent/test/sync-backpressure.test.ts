@@ -650,6 +650,35 @@ describe('sync global backpressure', () => {
     expect(starts).toEqual(['blocker', 'high', 'oldest-aged', 'upper', 'medium']);
   });
 
+  it('protects the sole aged entry when the queue limit is one', async () => {
+    let now = 0;
+    let running = 0;
+    const starts: string[] = [];
+    const queue = new PriorityAdmissionQueue<string>({
+      now: () => now,
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        starts.push(entry.payload);
+        return () => { running -= 1; };
+      },
+    });
+    const oneSlot = { queueLimit: 1 };
+
+    const blocker = queue.acquire(queueOptions('blocker', 0, oneSlot));
+    const releaseBlocker = await blocker.release;
+    const aged = queue.acquire(queueOptions('aged', 0, oneSlot));
+    now = 20;
+
+    expect(() => queue.acquire(queueOptions('high', 10, oneSlot))).toThrow('global_queue_full');
+    expect(queue.entries().map((entry) => entry.payload)).toEqual(['aged']);
+
+    releaseBlocker();
+    const releaseAged = await aged.release;
+    releaseAged();
+    expect(starts).toEqual(['blocker', 'aged']);
+  });
+
   it('clears debt when its last aged recipient is cancelled', async () => {
     let now = 0;
     let running = 0;

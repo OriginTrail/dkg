@@ -390,13 +390,10 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       entry.priority < options.priority
       && (!ownerFull || entry.ownerKey === ownerKey)
     ));
-    let protectedAged: InternalEntry<Payload> | undefined;
-    if (options.queueLimit >= 2) {
-      const now = this.now();
-      protectedAged = candidates
-        .filter((entry) => this.isAged(entry, now))
-        .sort((a, b) => a.sequence - b.sequence)[0];
-    }
+    const now = this.now();
+    const protectedAged = candidates
+      .filter((entry) => this.isAged(entry, now))
+      .sort((a, b) => a.sequence - b.sequence)[0];
     return candidates
       .filter((entry) => entry !== protectedAged)
       .sort((a, b) => a.priority - b.priority || b.sequence - a.sequence)[0];

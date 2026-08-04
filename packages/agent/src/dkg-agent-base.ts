@@ -1015,6 +1015,8 @@ export class DKGAgentBase {
   protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
+  /** Monotonic guard: continuations from an earlier node run stay stale after restart. */
+  protected vmReconcileRotationGeneration = 0;
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */

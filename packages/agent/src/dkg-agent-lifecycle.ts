@@ -1474,6 +1474,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     this.started = true;
+    if (this.vmReconcileDispatcher?.snapshot().closed) this.vmReconcileDispatcher = undefined;
+    this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
       localNodeIdentityId: this.identityId.toString(),

@@ -3818,12 +3818,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   closeVmReconcileRotationState(this: DKGAgent): void {
+    this.vmReconcileRotationGeneration = (this.vmReconcileRotationGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
     // Some lifecycle tests intentionally construct a narrow partial agent
     // without running the base constructor. Shutdown must remain best-effort
     // for that supported test seam and never mask later teardown failures.
     this.vmReconcileRotationState?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
+  }
+
+  openVmReconcileRotationState(this: DKGAgent): void {
+    this.vmReconcileRotationClosed = false;
   }
 
   vmReconcileRecoveryTargetMatches(
@@ -4041,6 +4046,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     headBlock: number | undefined,
     isTargetCurrent: () => boolean,
   ): Promise<PendingOrdinalRecoveryResult> {
+    const rotationGeneration = this.vmReconcileRotationGeneration;
+    const isRecoveryCurrent = () => !this.vmReconcileRotationClosed
+      && this.vmReconcileRotationGeneration === rotationGeneration
+      && isTargetCurrent();
     const ctx = createOperationContext('system');
     const noRecovery = (
       continuationOrdinal?: number,
@@ -4051,7 +4060,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       continuationOrdinal,
       cooldownOnly,
     });
-    if (!isTargetCurrent() || targets.length === 0) return noRecovery();
+    if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
 
     const expectedOnChainCgId = onChainCgId.toString();
     const currentTargets = targets.filter((target) =>
@@ -4137,7 +4146,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         legacyTripleResolved: false,
         lookupFailed: true,
       }));
-    if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+    if (!isRecoveryCurrent()) return noRecovery();
     const resolutionSucceeded = curatorResolution.lookupFailed !== true;
     const resolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
@@ -4148,7 +4157,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && resolvedCuratorPeerIds.length === 0) {
       legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
     }
-    if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+    if (!isRecoveryCurrent()) return noRecovery();
     const authoritativeCuratorPeerIds = resolutionSucceeded
       ? resolvedCuratorPeerIds
       : cachedCuratorPeerIds;
@@ -4169,7 +4178,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     this.pruneVmReconcileState();
     for (const peerId of curatorPeerIds) {
-      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+      if (!isRecoveryCurrent()) return noRecovery();
       await this.ensurePeerConnected(peerId).catch((error) => {
         this.log.info(
           ctx,
@@ -4177,7 +4186,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       });
     }
-    if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+    if (!isRecoveryCurrent()) return noRecovery();
 
     const connectedByPeerId = new Map(
       this.node.libp2p.getConnections()
@@ -4239,7 +4248,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let recoveryWorkRan = false;
 
     for (const entry of eligible) {
-      if (!isTargetCurrent()) break;
+      if (!isRecoveryCurrent()) break;
       const { target } = entry;
       const record = entry.prepared.record;
       const installedRecord = record
@@ -4265,7 +4274,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const protocolReady = connectedPeer
           ? await this.waitForSyncProtocol(connectedPeer)
           : false;
-        if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+        if (!isRecoveryCurrent()) return noRecovery();
         if (!connectedPeer || !protocolReady) {
           unavailablePeerIds.add(candidatePeerId);
           continue;
@@ -4278,7 +4287,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ctx,
           'VM exact fetch',
         );
-        if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+        if (!isRecoveryCurrent()) return noRecovery();
         if (!peerAdmitted) {
           unavailablePeerIds.add(candidatePeerId);
           continue;
@@ -4307,7 +4316,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // item rotates behind untouched work so one unavailable KA cannot spend
       // every peer budget and starve the rest of the queue.
       if (attemptedOrdinals.has(target.ordinal)) break;
-      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+      if (!isRecoveryCurrent()) return noRecovery();
       this.emitReplication({
         contextGraphId: localCgId,
         onChainCgId: onChainCgId.toString(),
@@ -4349,15 +4358,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // The exact request may have completed after unsubscribe, rebind, or
       // shutdown. Its authenticated materialization is already fail-closed,
       // but no process-local evidence or cooldown may outlive that lifecycle.
-      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+      if (!isRecoveryCurrent()) return noRecovery();
       const outcome = await this.reconcileChainOrdinal(
         localCgId,
         onChainCgId,
         target.ordinal,
         headBlock,
-        { isTargetCurrent, deferActiveFetch: true },
+        { isTargetCurrent: isRecoveryCurrent, deferActiveFetch: true },
       );
-      if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+      if (!isRecoveryCurrent()) return noRecovery();
       outcomes.set(target.ordinal, outcome);
       if (outcome.status === 'pending' && outcome.recovery) {
         if (!installedRecord) continue;
@@ -4402,7 +4411,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Only a batch that reached a peer and recovered nothing retains the
     // cooldown. Re-anchor that short damper at completion: a slow or legacy
     // response may already have outlived the timestamp taken before transfer.
-    if (!isTargetCurrent() || this.vmReconcileRotationClosed) return noRecovery();
+    if (!isRecoveryCurrent()) return noRecovery();
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (!recoveryWorkRan || recoveredAny) {

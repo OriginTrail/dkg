@@ -3593,6 +3593,52 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileRotationState.size).toBe(0);
   });
 
+  it('keeps a pre-stop exact recovery stale after rotation state reopens', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRestartGeneration', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/restart-generation';
+    const peer = '12D3KooWRestartGenerationPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWRestartGenerationLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    let releaseFallback!: () => void;
+    let markFallbackStarted!: () => void;
+    const fallbackStarted = new Promise<void>((resolve) => { markFallbackStarted = resolve; });
+    const fallbackRelease = new Promise<void>((resolve) => { releaseFallback = resolve; });
+    (internals as any).resolvePreferredSyncPeerId = async () => {
+      markFallbackStarted();
+      await fallbackRelease;
+      return peer;
+    };
+    const connect = recorder(async () => undefined);
+    const fetch = recorder(async () => undefined);
+    (internals as any).ensurePeerConnected = connect;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'restart-generation')], 100, () => true,
+    );
+    await fallbackStarted;
+    const priorGeneration = (internals as any).vmReconcileRotationGeneration;
+    (internals as any).closeVmReconcileRotationState();
+    (internals as any).openVmReconcileRotationState();
+    expect((internals as any).vmReconcileRotationClosed).toBe(false);
+    expect((internals as any).vmReconcileRotationGeneration).toBe(priorGeneration + 1);
+    releaseFallback();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(connect.calls).toEqual([]);
+    expect(fetch.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.size).toBe(0);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
   it('does not recreate state after a rebind while dialing the curator', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmDialInvalidation', chainAdapter: chain });

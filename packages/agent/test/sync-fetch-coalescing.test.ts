@@ -132,6 +132,26 @@ async function createAgentWithSend(
   return agent;
 }
 
+describe('exact VM recovery lifecycle', () => {
+  it('reopens rotation admission when the same agent is restarted', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    try {
+      await agent.start();
+      const initialGeneration = (agent as any).vmReconcileRotationGeneration;
+      await agent.stop();
+      expect((agent as any).vmReconcileRotationClosed).toBe(true);
+      expect((agent as any).vmReconcileRotationGeneration).toBe(initialGeneration + 1);
+
+      await agent.start();
+      expect((agent as any).vmReconcileRotationClosed).toBe(false);
+      expect((agent as any).vmReconcileRotationGeneration).toBe(initialGeneration + 1);
+      expect((agent as any).vmReconcileDispatcher.snapshot().closed).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+});
+
 function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResult> {
   return (agent as any).fetchSyncPages(
     createOperationContext('sync'),
