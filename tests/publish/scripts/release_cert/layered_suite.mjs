@@ -232,6 +232,10 @@ async function main() {
     const names = weeklyCgNames();
     const cgs = [{ id: process.env.RC_CG_PUBLIC || names.public, kind: 'public' }];
     if (process.env.RC_CG_PRIVATE) cgs.push({ id: process.env.RC_CG_PRIVATE, kind: 'private' });
+    // Keep the permanent aging CG actually growing: one extra publish every 6 hours.
+    if (new Date().getUTCHours() % 6 === 0 && new Date().getUTCMinutes() < 30) {
+        cgs.push({ id: names.aging, kind: 'aging' });
+    }
 
     const sizeKb = pickSizeKb();
     const runId = `layered-${Date.now()}`;

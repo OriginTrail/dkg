@@ -48,7 +48,10 @@ async function countTriples(base, token, cg, view) {
         return null;
     }
     const first = Object.values(row)[0];
-    const v = Number(first && typeof first === 'object' ? first.value : first);
+    const rawVal = first && typeof first === 'object' ? first.value : first;
+    // values arrive as N-Triples typed literals, e.g. "0"^^<http://...#integer>
+    const m = typeof rawVal === 'string' ? rawVal.match(/^"(-?\d+)"/) : null;
+    const v = Number(m ? m[1] : rawVal);
     if (!Number.isFinite(v)) {
         console.error(`countTriples(${view}): row did not parse to a number: ${JSON.stringify(row).slice(0, 200)}`);
         return null;
@@ -59,7 +62,7 @@ async function countTriples(base, token, cg, view) {
 async function main() {
     const curatorUrl = process.env.RC_CURATOR_URL || 'http://100.99.142.87:9200';
     const curatorToken = process.env[process.env.RC_CURATOR_TOKEN_ENV || 'V10_TOKEN_TESTNET1'];
-    const cg = process.env.RC_COLDSTART_CG || weeklyCgNames().aging;
+    const cg = process.env.RC_COLDSTART_CG || weeklyCgNames().public;
 
     const home = fs.mkdtempSync(path.join(process.env.WORKSPACE || os.tmpdir(), 'rc-coldstart-'));
     console.log(`🧊 cold-start: fresh home ${home}, target CG ${cg}`);
