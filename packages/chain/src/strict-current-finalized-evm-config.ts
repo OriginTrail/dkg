@@ -1,7 +1,13 @@
 import { assertCanonicalChainId } from '@origintrail-official/dkg-core';
 
 import { CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1 } from './current-finalized-evm-read-profile.js';
+import { normalizeEndpointOrigin } from '@origintrail-official/dkg-core';
+
 import { snapshotDenseDataArray } from './strict-local-data.js';
+import {
+  selectStrictFinalizedEndpointSessionV1,
+  type StrictFinalizedEndpointV1,
+} from './strict-finalized-endpoint-session.js';
 import {
   FINALIZED_CHAIN_READ_OWNERS,
   type FinalizedChainReadOwnerV1,
@@ -136,29 +142,101 @@ function assertConfigDataProperties(
 }
 
 function snapshotNormalizedEndpoints(input: unknown): readonly string[] {
-  const normalized: string[] = [];
+  const normalized: StrictFinalizedEndpointV1[] = [];
+  const seen = new Set<string>();
   try {
     const endpoints = snapshotDenseDataArray(input, {
       label: 'Strict current-finalized RPC endpoints',
       minLength: 1,
+      // Deliberately NOT bounded on the raw array. Base deduplicated by href
+      // BEFORE applying its count check, so a config of 33 identical URLs — or
+      // 40 entries collapsing to two — normalized to a valid pool and
+      // constructed. A cap on the raw array turns those into a construction
+      // failure and silently narrows the published contract from "at most two
+      // distinct normalized endpoints" to "at most N raw entries". The dedup
+      // below is O(n) via a Set and selection is a fixed two-slot scan, so an
+      // oversized array costs a linear pass, not quadratic work; the attempt
+      // count is bounded by selection and the postcondition regardless.
     });
     for (const entry of endpoints) {
       const endpoint = normalizeEndpoint(entry);
-      if (!normalized.includes(endpoint)) normalized.push(endpoint);
+      if (seen.has(endpoint.href)) continue;
+      seen.add(endpoint.href);
+      normalized.push(endpoint);
     }
   } catch (cause) {
     if (cause instanceof TypeError) throw cause;
-    throw new TypeError('Strict current-finalized endpoints must be a dense data-only array');
-  }
-  if (normalized.length === 0 || normalized.length > CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1) {
+    // `cause` preserved: this catch flattens whatever `snapshotDenseDataArray`
+    // reports into a single shape complaint, so the specific detail is otherwise
+    // unrecoverable by a caller. The message is left alone because tests pin it.
     throw new TypeError(
-      `Strict current-finalized RPC requires 1..${CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1} distinct endpoints`,
+      'Strict current-finalized endpoints must be a dense data-only array',
+      { cause },
     );
   }
-  return Object.freeze(normalized);
+  // No emptiness check here: `snapshotDenseDataArray(..., { minLength: 1 })`
+  // above already rejects an empty pool, and a non-empty pool either throws in
+  // `normalizeEndpoint` or yields at least one entry. A second check would be
+  // unreachable, and its old message advertised the `1..2` contract this change
+  // deliberately replaced.
+
+  // Session selection. Every endpoint above has already been validated and
+  // deduplicated by URL, so an invalid entry anywhere in the pool still fails
+  // closed — selection only decides which of the VALID ones this session uses.
+  //
+  // Before this, a pool larger than the attempt ceiling was fatal:
+  // `resolveRpcUrls(chain.rpcUrl, chain.rpcUrls)` is three URLs on testnet,
+  // mainnet-base and mainnet-gnosis, so RFC64's finalized-VM precommit could not
+  // construct a snapshot scope on any shipped EVM network. Selecting at most two
+  // distinct provider ORIGINS satisfies the ceiling by construction, which is
+  // why the ceiling itself is left untouched.
+  const selected = selectStrictFinalizedEndpointSessionV1(normalized);
+
+  // Postcondition, not paranoia. The attempt ceiling used to be enforced HERE by
+  // rejecting oversized pools; that rejection is what this change removes. But
+  // the runner does not read `maxAttempts` — it attempts one endpoint per entry
+  // of this list (`strict-current-finalized-evm-lifecycle.ts:104`) — so the
+  // value attested as `CONTROL_EIP1271_MAX_ATTEMPTS_V1` and verified at
+  // `current-finalized-evm-call.ts:182` is truthful ONLY while this list is
+  // bounded. Leaving that to a `>=` inside another module would make an attested
+  // claim depend on a remote implementation detail; a caller passing a bad bound
+  // there would silently widen the attempt count instead of failing closed.
+  //
+  // This guards the GENERIC constant, not the attested one, and that is the
+  // correct layering: `current-finalized-evm-read-profile.ts` states these limits
+  // belong to the generic finalized-read boundary and that EIP-1271 is one
+  // specialization which must not implicitly redefine unrelated finalized reads.
+  // Importing the control constant here would invert that dependency. The guard
+  // therefore protects the attested value via the alias at
+  // `control-object-signature-verifier.ts:56`, and that alias is already pinned
+  // by `strict-current-finalized-evm-rpc.unit.test.ts` ("keeps the EIP-1271
+  // specialization pinned to the generic finalized-read profile"), so it cannot
+  // be broken silently — verified by mutating the alias to its own literal,
+  // which that test kills.
+  if (selected.length > CURRENT_FINALIZED_EVM_READ_MAX_ATTEMPTS_V1) {
+    throw new TypeError(
+      'Strict current-finalized endpoint selection exceeded the attested attempt ceiling',
+    );
+  }
+  return Object.freeze([...selected]);
 }
 
-function normalizeEndpoint(input: unknown): string {
+/**
+ * The canonical endpoint boundary: one pass that yields BOTH the dial URL and
+ * the provider-origin identity selection needs.
+ *
+ * Deriving the origin here rather than in the selector means the URL is parsed
+ * once, and the selector becomes a policy over an already-valid model instead of
+ * a second validator defending against states this function has already made
+ * impossible.
+ *
+ * The origin comes from core's `normalizeEndpointOrigin` — the same predicate
+ * `canonicalPageProof` uses to decide `dual-origin-corroborated`, so the two
+ * layers cannot drift. It is handed `url.origin`, never the full dial URL: core
+ * bounds its input at the canonical scalar limit, and applying that to the whole
+ * URL would impose a length limit RPC endpoints never had.
+ */
+function normalizeEndpoint(input: unknown): StrictFinalizedEndpointV1 {
   if (typeof input !== 'string' || input.trim() === '') {
     throw new TypeError('Strict current-finalized RPC endpoint must be a nonempty URL string');
   }
@@ -171,7 +249,21 @@ function normalizeEndpoint(input: unknown): string {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.hash !== '') {
     throw new TypeError('Strict current-finalized RPC endpoint must use HTTP(S) without a fragment');
   }
-  return url.href;
+  let origin: string;
+  try {
+    origin = normalizeEndpointOrigin(url.origin, 'strict current-finalized RPC endpoint origin');
+  } catch (cause) {
+    // Core throws `VmUpdateConvergenceError`, which extends `Error`, while every
+    // rejection in this module is a `TypeError`. http(s) URLs always have a
+    // tuple origin so this is not reachable from the scheme check above, but the
+    // conversion keeps the module's error contract total rather than resting on
+    // that argument.
+    throw new TypeError(
+      'Strict current-finalized RPC endpoint has no usable provider origin',
+      { cause },
+    );
+  }
+  return Object.freeze({ href: url.href, origin });
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
