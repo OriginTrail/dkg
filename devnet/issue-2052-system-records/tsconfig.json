@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "build-fixture.ts",
+    "characterize.test.ts",
+    "extract-rdf.test.ts",
+    "characterize.ts",
+    "extract-rdf.ts",
+    "model.ts"
+  ]
+}
