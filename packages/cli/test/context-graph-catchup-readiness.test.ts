@@ -708,10 +708,19 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
 
 /**
  * The shortfall clause Chunk 5 appends. Kept separate from T16 above, which
- * pins the ten base strings: T16 asserts the incomplete-progress message as a
- * PREFIX, so it is satisfied by that prefix followed by anything at all — it
- * cannot see whether this clause is correct, malformed, or absent. These rows
- * are the ones that can.
+ * pins the ten base strings.
+ *
+ * T16 used to assert the incomplete-progress message as a PREFIX — satisfied by
+ * that prefix followed by anything at all, including nothing. It now pins the
+ * whole string with `toBe`, because the weaker form bought nothing: that
+ * fixture appends no shortfall, so full equality passes unchanged and can
+ * additionally catch a clause wrongly appended there.
+ *
+ * The strengthening does NOT make these rows redundant, for the reason that
+ * matters: T16's scenario never appends a clause, so no assertion of any
+ * strength in it can observe whether THIS clause is correct, malformed or
+ * absent. Strength and reachability are different properties — these rows are
+ * the ones that reach it.
  */
 describe('T16b — the shared-memory shortfall clause (#2050)', () => {
   const INCOMPLETE_PROGRESS = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
