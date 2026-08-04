@@ -30,6 +30,45 @@ export const CONTEXT_GRAPH_READINESS_VERSION = 1;
 const SWM_SHORTFALL_SAMPLE_LIMIT = 10;
 
 /**
+ * Rendered length of ONE identifier in that clause.
+ *
+ * Bounding the count is not enough: each identifier is a literal a public peer
+ * put in its own SWM metadata, and the producer only trims it. Ten refs are ten
+ * peer-chosen strings of any length.
+ */
+const SWM_SHORTFALL_REF_MAX_CHARS = 96;
+
+/**
+ * Make one peer-supplied snapshot ref safe to put in an operator-facing string.
+ *
+ * These identifiers are UNTRUSTED. They arrive as `dkg:publicSnapshotRef`
+ * literals in a remote peer's shared-memory metadata, and the producer applies
+ * only `.trim()`. Rendered verbatim into the terminal error — which surfaces
+ * through the API and the node UI — a peer could:
+ *
+ *   - forge structure, e.g. a ref containing "\nSync denied by 3 remote peers",
+ *     which reads as an additional line of our own diagnostics;
+ *   - inflate the message without bound, which matters here specifically because
+ *     oversized peer literals are a phenomenon this codebase has already met on
+ *     the sync path, not a hypothetical.
+ *
+ * So: fold every C0/C1 control character (newlines and tabs included) to U+FFFD
+ * rather than dropping it — dropping would let "a\nb" masquerade as the real ref
+ * "ab" — then bound the length with a visible marker so a truncated identifier
+ * cannot be mistaken for a complete one.
+ *
+ * Sanitising at the RENDERER is deliberate: it is the last point before the
+ * string reaches an operator, so it holds regardless of which producer path
+ * filled the sample or what a future one does.
+ */
+function sanitizeSnapshotRef(ref: string): string {
+  const flattened = ref.replace(/[\u0000-\u001F\u007F-\u009F]/gu, '\uFFFD');
+  return flattened.length > SWM_SHORTFALL_REF_MAX_CHARS
+    ? `${flattened.slice(0, SWM_SHORTFALL_REF_MAX_CHARS)}\u2026(truncated)`
+    : flattened;
+}
+
+/**
  * Why the continuation loop stopped, in operator-facing words.
  *
  * An exhaustive `Record` rather than a `switch` with a default: the vocabulary
@@ -94,7 +133,13 @@ export function swmShortfallClause(
 
   // `continuationPasses` counts the REPEATS, so the walk itself is one more.
   const passes = (continuationPasses ?? 0) + 1;
-  const sample = coverage.missingSample.slice(0, SWM_SHORTFALL_SAMPLE_LIMIT);
+  // Sanitized per identifier, not merely capped in count. See
+  // `sanitizeSnapshotRef`: these are untrusted peer literals. Mapping after the
+  // slice keeps `unnamed` arithmetic on the SAMPLE COUNT, which sanitizing
+  // cannot change — so the "(+N more)" accounting is unaffected by construction.
+  const sample = coverage.missingSample
+    .slice(0, SWM_SHORTFALL_SAMPLE_LIMIT)
+    .map(sanitizeSnapshotRef);
   const unnamed = coverage.missingCount - sample.length;
   const named = sample.length > 0
     ? `, including ${sample.join(', ')}${unnamed > 0 ? ` (+${unnamed} more)` : ''}`

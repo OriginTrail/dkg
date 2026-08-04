@@ -22,6 +22,26 @@ const DKG = 'http://dkg.io/ontology/';
  * structure on this node; the exact figure travels as `missingCount`.
  */
 const PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT = 10;
+/**
+ * Stored length of ONE sampled ref.
+ *
+ * A ref is a `dkg:publicSnapshotRef` literal chosen by a remote peer and only
+ * `.trim()`ed on the way in, so its length is peer-controlled. Capping the
+ * SAMPLE SIZE bounds how many we keep, not how big each one is: ten refs of a
+ * megabyte each still cross the worker RPC and sit in the diagnostics record.
+ *
+ * Bounded at the source as well as at the renderer. The renderer's bound is what
+ * protects the operator-facing sentence; this one keeps an oversized literal out
+ * of memory and off the wire, which the renderer cannot do from the far side.
+ */
+const PUBLIC_SNAPSHOT_REF_SAMPLE_MAX_CHARS = 128;
+
+/** Bound one sampled ref. Truncation is marked so it cannot read as complete. */
+function boundSampledRef(ref: string): string {
+  return ref.length > PUBLIC_SNAPSHOT_REF_SAMPLE_MAX_CHARS
+    ? `${ref.slice(0, PUBLIC_SNAPSHOT_REF_SAMPLE_MAX_CHARS)}\u2026`
+    : ref;
+}
 
 /**
  * Snapshot-walk progress carried OUT of a throw.
@@ -699,10 +719,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
               unresolvedRefSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT
               && !unresolvedRefSample.includes(snapshotRef)
             ) {
-              unresolvedRefSample.push(snapshotRef);
+              unresolvedRefSample.push(boundSampledRef(snapshotRef));
               // Mirrored outside the `try`, like the counters, so a later throw
               // cannot lose refs we already know failed to write.
-              unresolvedRefSampleForCg.push(snapshotRef);
+              unresolvedRefSampleForCg.push(boundSampledRef(snapshotRef));
             }
             // Mirrored outside the `try` so a later throw cannot lose it.
             materializedFailuresForCg = materializationFailures;
@@ -1020,7 +1040,9 @@ export async function syncPublicSnapshotsForMeta(params: {
   const missingSample: string[] = [];
   const noteMissing = (ref: string): void => {
     missingCount += 1;
-    if (missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) missingSample.push(ref);
+    if (missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
+      missingSample.push(boundSampledRef(ref));
+    }
   };
   /** Every ref from `index` onward is unresolved; record them and stop. */
   const abandonFrom = (index: number): void => {

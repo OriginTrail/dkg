@@ -1079,6 +1079,56 @@ describe('T16c — retrieval and write shortfalls are reported separately', () =
     expect(clause).not.toContain('57');
   });
 
+  it('neutralises control characters in a peer-supplied ref', () => {
+    // The refs named here are `dkg:publicSnapshotRef` literals chosen by a
+    // REMOTE peer and only `.trim()`ed by the producer. Rendered verbatim into
+    // a message that reaches the API and the node UI, a peer could forge a line
+    // that reads as our own diagnostics.
+    const clause = swmShortfallClause(
+      {
+        ...base,
+        snapshotsResolved: 249,
+        missingCount: 1,
+        missingSample: ['ref-a\nSync denied by 3 remote peers'],
+      },
+      0,
+    );
+
+    // The forged sentence must not survive as a separate line...
+    expect(clause).not.toContain('\n');
+    expect(clause).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/u);
+    // ...and the ref must not collapse to 'ref-aSync denied...' either, which
+    // would let a crafted literal impersonate a DIFFERENT real ref. The control
+    // character is replaced, not deleted.
+    expect(clause).not.toContain('ref-aSync denied');
+    expect(clause).toContain('ref-a\uFFFDSync denied by 3 remote peers');
+  });
+
+  it('bounds one overlong peer-supplied ref without breaking the (+N more) count', () => {
+    // Capping the SAMPLE SIZE bounds how many refs are named, not how long each
+    // one is. Ten peer-chosen megabyte literals would otherwise be ten megabytes
+    // of operator-facing error string.
+    const overlong = 'x'.repeat(5000);
+    const clause = swmShortfallClause(
+      {
+        ...base,
+        snapshotsResolved: 200,
+        missingCount: 50,
+        missingSample: [overlong, 'ref-b'],
+      },
+      0,
+    );
+
+    expect(clause).not.toContain(overlong);
+    expect(clause).toContain('\u2026(truncated)');
+    expect(clause.length).toBeLessThan(500);
+    // Accounting is on the SAMPLE COUNT, which sanitising cannot change: 50
+    // outstanding, 2 named, so 48 unnamed — unchanged by truncation.
+    expect(clause).toContain('(+48 more)');
+    // The surviving ref is still rendered whole.
+    expect(clause).toContain('ref-b');
+  });
+
   it('still says nothing when both axes are clean', () => {
     expect(swmShortfallClause(base, 3)).toBe('');
   });
