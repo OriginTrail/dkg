@@ -399,6 +399,50 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
  * over-broad "insert everything" implementation fails here too: heads must exist
  * for exactly the KAs that were materialized, and for no others.
  */
+/**
+ * Runs a round over `shares` where the first `materializeCount` snapshots are
+ * pre-cached (so they materialize from cache) and the next one is NOT cached
+ * and its network fetch returns incomplete — the partial-round branch.
+ */
+async function runPartial(store: OxigraphStore, shares: ReturnType<typeof manifest>, materializeCount: number) {
+  const snapshotStore = new MemorySnapshotStore();
+  for (const s of shares.slice(0, materializeCount)) {
+    await snapshotStore.putSnapshot({ digest: s.digest, quads: s.payload });
+  }
+  const { materializer } = materializerFor(store);
+  return runSharedMemorySync({
+    ctx,
+    remotePeerId: 'peer-source',
+    contextGraphIds: [CG],
+    createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+    fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => {
+      if (phase === 'meta') {
+        const quads = shares.flatMap((s) => s.meta);
+        return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed: true, timedOut: false };
+      }
+      if (phase === 'snapshot') {
+        // The uncached snapshot cannot be served: the phase ends incomplete,
+        // which is exactly what a mid-list deadline produces.
+        return { quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0, checkpointKey: 'snap', completed: false, timedOut: true };
+      }
+      return { quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0, checkpointKey: 'k', completed: true, timedOut: false };
+    },
+    processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
+      verifiedData: wsDataQuads, verifiedMeta: wsMetaQuads,
+      totalFetchedDataQuads: wsDataQuads.length, totalFetchedMetaQuads: wsMetaQuads.length,
+      droppedDataTriples: 0, emptyResponses: 0, entityCreators: [],
+    }),
+    ensureContextGraph: async () => {},
+    storeInsert: async (quads) => { await store.insert(quads); },
+    snapshotMaterializer: materializer,
+    publicSnapshotStore: snapshotStore,
+    deleteCheckpoint: () => {},
+    setCheckpoint: () => {},
+    ensureOwnedMap: () => new Map(),
+    logInfo: () => {}, logWarn: () => {}, logDebug: () => {},
+  });
+}
+
 describe('T9 — a partial round leaves content AND head rows for what it materialized', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
@@ -422,49 +466,6 @@ describe('T9 — a partial round leaves content AND head rows for what it materi
     return present.sort();
   }
 
-  /**
-   * Runs a round over `shares` where the first `materializeCount` snapshots are
-   * pre-cached (so they materialize from cache) and the next one is NOT cached
-   * and its network fetch returns incomplete — the partial-round branch.
-   */
-  async function runPartial(store: OxigraphStore, shares: ReturnType<typeof manifest>, materializeCount: number) {
-    const snapshotStore = new MemorySnapshotStore();
-    for (const s of shares.slice(0, materializeCount)) {
-      await snapshotStore.putSnapshot({ digest: s.digest, quads: s.payload });
-    }
-    const { materializer } = materializerFor(store);
-    return runSharedMemorySync({
-      ctx,
-      remotePeerId: 'peer-source',
-      contextGraphIds: [CG],
-      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => {
-        if (phase === 'meta') {
-          const quads = shares.flatMap((s) => s.meta);
-          return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed: true, timedOut: false };
-        }
-        if (phase === 'snapshot') {
-          // The uncached snapshot cannot be served: the phase ends incomplete,
-          // which is exactly what a mid-list deadline produces.
-          return { quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0, checkpointKey: 'snap', completed: false, timedOut: true };
-        }
-        return { quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0, checkpointKey: 'k', completed: true, timedOut: false };
-      },
-      processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
-        verifiedData: wsDataQuads, verifiedMeta: wsMetaQuads,
-        totalFetchedDataQuads: wsDataQuads.length, totalFetchedMetaQuads: wsMetaQuads.length,
-        droppedDataTriples: 0, emptyResponses: 0, entityCreators: [],
-      }),
-      ensureContextGraph: async () => {},
-      storeInsert: async (quads) => { await store.insert(quads); },
-      snapshotMaterializer: materializer,
-      publicSnapshotStore: snapshotStore,
-      deleteCheckpoint: () => {},
-      setCheckpoint: () => {},
-      ensureOwnedMap: () => new Map(),
-      logInfo: () => {}, logWarn: () => {}, logDebug: () => {},
-    });
-  }
 
   it('writes head rows for exactly the KAs it materialized, and none for the rest', async () => {
     const store = new OxigraphStore();
@@ -499,5 +500,84 @@ describe('T9 — a partial round leaves content AND head rows for what it materi
     for (const s of shares.slice(2)) {
       expect(heads).not.toContain(s.headSubject);
     }
+  });
+});
+
+/**
+ * T9b (#2050) — the r26 RESIDUAL: content already materialized, head row absent
+ * or stale. Nothing rewrites it pre-fix, so the KA stays invisible forever.
+ *
+ * This is the third head-deleting exit, and it is the one neither T9 row can
+ * reach: both of those go through the MATERIALIZE path, while this state short-
+ * circuits at `isGraphAssetMaterialized() === true` and returns early. A node
+ * that ran a partial round before the fix is left in exactly this state — the
+ * graph is written, so the content guard says "already materialized", and the
+ * head that would advertise it was deleted and never rewritten.
+ *
+ * Both cases run on the PARTIAL branch deliberately. On a complete round the
+ * bulk `storeInsert(processed.verifiedMeta)` writes every head anyway and would
+ * mask the exit entirely — the assertion would pass with the repair removed.
+ * With the round incomplete, the exit's own insert is the ONLY thing that can
+ * write these head rows, which is what makes the mutant `storedHead.needsRepair
+ * || !headCertifiesDescriptor(…)` → `storedHead.needsRepair` fail here.
+ */
+describe('T9b — the already-materialized exit repairs an absent or stale head', () => {
+  const stores: OxigraphStore[] = [];
+  afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
+
+  async function headVersions(store: TripleStore, headSubject: string): Promise<string[]> {
+    return distinctObjects(store, WS_META, headSubject, `${DKG}assertionVersion`);
+  }
+
+  it('writes the head for content that is present with NO head row at all', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    const shares = manifest(3);
+    const target = shares[0]!;
+
+    // The r26 residual, reproduced exactly: assertion graph written by an
+    // earlier partial round, zero head rows. `needsRepair` is FALSE here
+    // (`readStoredHead` returns `{version: null, needsRepair: false}` when the
+    // subject carries nothing), so a repair gated only on `needsRepair` never
+    // fires and the KA stays stranded.
+    await store.insert(inGraph(target.payload, target.assertionGraph));
+    expect(await headVersions(store, target.headSubject)).toEqual([]);
+
+    await runPartial(store, shares, 2);
+
+    expect(await headVersions(store, target.headSubject))
+      .toEqual([`"1"^^<${XSD_INTEGER}>`]);
+  });
+
+  it('replaces a head pinned at an OLDER version than the content', async () => {
+    // Same exit, stale rather than absent: the head advertises v1 while the
+    // graph already holds the descriptor's content. One version row before,
+    // exactly one after — and it must be the descriptor's, not the stale one.
+    const store = new OxigraphStore();
+    stores.push(store);
+    // The stored head must be STRICTLY OLDER than the descriptor, or the in-lock
+    // version guard short-circuits at `storedVersionOutranksDescriptor` and exit
+    // 3 is never reached. An earlier draft pre-seeded a v1 head against a v1
+    // descriptor: the guard returned early, the stale rows survived untouched —
+    // and the version assertion STILL PASSED, because both heads read "1". It
+    // could not tell the two states apart.
+    const base = manifest(3);
+    const ual = base[0]!.headSubject.replace('#dkg-swm-head', '');
+    // Same UAL, payload and digest, VERSION 2. A graph-scoped KA keeps ONE
+    // assertion graph across versions, so the pre-seeded content still matches.
+    const target = share(2, 'op-ka-1-v2', 'ka-1', ual, 2);
+    const shares = [target, ...base.slice(1)];
+
+    await store.insert(inGraph(target.payload, target.assertionGraph));
+    await store.insert(base[0]!.meta.filter((q) => q.subject === base[0]!.headSubject));
+    expect(await headVersions(store, target.headSubject)).toEqual([`"1"^^<${XSD_INTEGER}>`]);
+
+    await runPartial(store, shares, 2);
+
+    const versions = await headVersions(store, target.headSubject);
+    expect(versions).toEqual([`"2"^^<${XSD_INTEGER}>`]);
+    // The stale operation subject must not survive alongside the fresh one.
+    expect(await distinctObjects(store, WS_META, target.headSubject, `${DKG}shareOperationId`))
+      .toEqual([`"${target.operationId}"`]);
   });
 });
