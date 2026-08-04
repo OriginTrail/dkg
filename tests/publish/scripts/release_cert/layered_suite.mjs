@@ -247,16 +247,30 @@ async function main() {
         console.log(JSON.stringify(rows, null, 1));
         return;
     }
-    const db = await connectDb();
-    await ensureSchema(db);
-    for (const r of rows) {
-        await db.query(
-            `INSERT INTO publish_layer_ops (run_id, node_name, blockchain_name, layer, cg_kind, payload_size_kb, success, client_ms, server_ms, error, node_version, details)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-            [r.run_id, r.node_name, r.blockchain_name, r.layer, r.cg_kind, r.payload_size_kb, r.success, r.client_ms, r.server_ms, r.error, r.node_version, r.details ? JSON.stringify(r.details) : null],
-        );
+    let db;
+    try {
+        db = await connectDb();
+        await ensureSchema(db);
+    } catch (e) {
+        console.error(`❌ DB unavailable (${e.message}) — dumping rows so the run is not lost:`);
+        console.log('ROWS_JSON ' + JSON.stringify(rows));
+        process.exit(1);
     }
-    await db.end();
+    try {
+        for (const r of rows) {
+            await db.query(
+                `INSERT INTO publish_layer_ops (run_id, node_name, blockchain_name, layer, cg_kind, payload_size_kb, success, client_ms, server_ms, error, node_version, details)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+                [r.run_id, r.node_name, r.blockchain_name, r.layer, r.cg_kind, r.payload_size_kb, r.success, r.client_ms, r.server_ms, r.error, r.node_version, r.details ? JSON.stringify(r.details) : null],
+            );
+        }
+    } catch (e) {
+        console.error(`❌ insert failed (${e.message}) — dumping rows so the run is not lost:`);
+        console.log('ROWS_JSON ' + JSON.stringify(rows));
+        await db.end().catch(() => {});
+        process.exit(1);
+    }
+    await db.end().catch(() => {});
     const ok = rows.filter((r) => r.success).length;
     console.log(`✅ layered run recorded: ${ok}/${rows.length} ops succeeded`);
 }

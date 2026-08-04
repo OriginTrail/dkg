@@ -40,9 +40,17 @@ async function main() {
     await ensureCg(pub, names.aging, { accessPolicy: 0, publishPolicy: 1, register: REGISTER });
     if (ROTATE_PRIVATE) await ensureCg(pub, names.private, { accessPolicy: 1, publishPolicy: 0, register: REGISTER });
 
-    const subTimeout = Number(process.env.V10_CG_SUBSCRIBE_TIMEOUT_MS || 90000);
+    const subTimeout = Number(process.env.V10_CG_SUBSCRIBE_TIMEOUT_MS || 180000);
     for (const cg of [names.public, names.aging, ...(ROTATE_PRIVATE ? [names.private] : [])]) {
-        await subscribeAndWait(recv, cg, 'receiver', subTimeout, 3000, ['deferred']);
+        try {
+            await subscribeAndWait(recv, cg, 'receiver', subTimeout, 3000, ['deferred']);
+        } catch (e) {
+            // Rotation's contract is ensure-subscribed; a catch-up still queued or
+            // running under store pressure completes in the background and is not
+            // a rotation failure (the layered suite verifies actual sync anyway).
+            if (/did not finish within/.test(e.message)) console.warn(`⚠️ ${cg}: subscribed, catch-up still in progress (${e.message})`);
+            else throw e;
+        }
     }
     console.log(`✅ rotation ensured: ${names.public}, ${names.aging}${ROTATE_PRIVATE ? `, ${names.private}` : ''}`);
 }

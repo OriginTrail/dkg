@@ -82,7 +82,11 @@ async function main() {
         const bootMs = Date.now() - t0;
         console.log(`• fresh node up in ${Math.round(bootMs / 1000)}s (version ${status.version})`);
 
-        const token = fs.readFileSync(path.join(home, 'auth.token'), 'utf8').trim();
+        // auth.token carries a '# DKG node API token — …' comment line above the
+        // token; take the last non-empty, non-comment line (same as loadAuthToken).
+        const token = fs.readFileSync(path.join(home, 'auth.token'), 'utf8')
+            .split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).pop();
+        if (!token) throw new Error('auth.token contained no token line');
         await api(base, '/api/context-graph/subscribe', { method: 'POST', token, body: { contextGraphId: cg, includeSharedMemory: true } });
 
         const deadline = Date.now() + TIMEOUT_S * 1000;

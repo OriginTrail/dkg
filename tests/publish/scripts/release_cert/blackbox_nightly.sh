@@ -51,7 +51,7 @@ for role in curator p1 p2; do start_node "$role"; done
 for role in curator p1 p2; do wait_api "$role"; done
 
 CURATOR_API="http://127.0.0.1:${PORTS[curator]}"
-CURATOR_TOKEN="$(cat "${HOMES[curator]}/auth.token")"
+CURATOR_TOKEN="$(grep -v "^#" "${HOMES[curator]}/auth.token" | grep -v "^$" | tail -1)"
 CURATOR_PEER="$(curl -sf "$CURATOR_API/api/status" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).peerId))')"
 
 # Fresh CG + fresh SWM content on the curator

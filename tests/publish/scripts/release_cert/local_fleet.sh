@@ -57,7 +57,7 @@ wait_node() { # role
   local role="$1" port="${PORT_OF[$1]}"
   for _ in $(seq 1 72); do
     if curl -sf -m 4 "http://127.0.0.1:$port/api/status" > /dev/null; then
-      TOKEN_OF[$role]="$(cat "${HOME_OF[$role]}/auth.token")"
+      TOKEN_OF[$role]="$(grep -v "^#" "${HOME_OF[$role]}/auth.token" | grep -v "^$" | tail -1)"
       echo "✅ $role up on :$port"
       return 0
     fi
