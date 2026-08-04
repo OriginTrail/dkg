@@ -627,7 +627,7 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
     r.diagnostics!.durable.timedOutPhases = 1;
     const c = classify(r);
     expect(c.jobStatus).toBe('unreachable');
-    expect(c.error?.startsWith('Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.')).toBe(true);
+    expect(c.error).toBe('Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.');
   });
 
   it('pins the private missing-graph-proof string', () => {
