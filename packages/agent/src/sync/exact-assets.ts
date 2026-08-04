@@ -1,7 +1,32 @@
-import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-core';
+import {
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
+  parseDeterministicKnowledgeAssetUal,
+} from '@origintrail-official/dkg-core';
 
 /** One VM reconciliation slice deliberately fetches at most this many KAs. */
 export const MAX_EXACT_SYNC_ASSETS = 10;
+
+/**
+ * A published assertion must already fit one DKG gossip application payload.
+ * Apply that same per-asset wire ceiling to each compatibility phase so a
+ * legacy responder that ignores the additive exact filter cannot turn a
+ * narrow repair into an unbounded full-CG accumulation.
+ */
+export const MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET = DKG_GOSSIP_MAX_MESSAGE_BYTES;
+export const MAX_EXACT_SYNC_PHASE_QUADS_PER_ASSET = 100_000;
+
+export function exactSyncPhaseAccumulationLimits(assetUals: readonly string[]): {
+  maxBytes: number;
+  maxQuads: number;
+} {
+  const assetCount = requireExactAssetUals(assetUals).length;
+  return {
+    maxBytes: assetCount * MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
+    // Align with the existing bounded exact-graph read contract so compact
+    // wire data cannot expand into an unbounded retained JS object graph.
+    maxQuads: assetCount * MAX_EXACT_SYNC_PHASE_QUADS_PER_ASSET,
+  };
+}
 
 function canonicalExactAssetSetOrder(assetUals: readonly string[]): string[] {
   return [...new Set(assetUals)].sort();

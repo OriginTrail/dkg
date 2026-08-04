@@ -9,7 +9,10 @@ import {
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import {
+  SyncPageAccumulationLimitError,
+  type SyncPageResult,
+} from '../src/sync/requester/page-fetch.js';
 import { markSyncTransportFailure } from '../src/sync/error-tags.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -1334,6 +1337,36 @@ describe('exact durable fetch disposition', () => {
       data: { nextOffset: 1 },
     });
     expect(detailed.exactFetchDisposition).toBe('incomplete');
+  });
+
+  it('does not verify or store an exact phase rejected by its accumulation limit', async () => {
+    const processDurableBatchInWorker = recorder(async () => durableProcessResult());
+    const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
+    const fetchSyncPages = durableFetchRecorder(async () => {
+      throw new SyncPageAccumulationLimitError('bytes', 11, 10);
+    });
+    const detailed = await runDurableSyncDetailed({
+      ctx,
+      remotePeerId: 'legacy-exact-peer',
+      contextGraphIds: ['exact-cg'],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      exactAssetUalsFor: () => [EXACT_UAL],
+      fetchSyncPages,
+      processDurableBatchInWorker,
+      storeInsert,
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed.result.failedPhases).toBe(1);
+    expect(fetchSyncPages.calls).toHaveLength(1);
+    expect(fetchSyncPages.calls[0][0].phase).toBe('meta');
+    expect(processDurableBatchInWorker.calls).toHaveLength(0);
+    expect(storeInsert.calls).toHaveLength(0);
   });
 
   it('does not treat skipped agents metadata as a clean exact response', async () => {

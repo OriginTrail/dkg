@@ -248,7 +248,11 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
-import { exactAssetFilterKey, requireExactAssetUals } from './sync/exact-assets.js';
+import {
+  exactAssetFilterKey,
+  exactSyncPhaseAccumulationLimits,
+  requireExactAssetUals,
+} from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
@@ -4822,8 +4826,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   /**
    * Foreground VM repair for one bounded set of locally-missing KAs.
    * Upgraded peers serve only these descriptors/payload graphs. Responses from
-   * older peers are accepted for rolling compatibility, but runDurableSync
-   * filters them back to this exact set before verification or storage.
+   * older peers are accepted for rolling compatibility only when their legacy
+   * full-CG prefix fits the exact accumulation bounds and covers the requested
+   * descriptors. Other legacy responses remain incomplete, fail closed, and
+   * rotate to another candidate instead of being verified or stored.
    */
   async syncExactKnowledgeAssetsFromPeer(this: DKGAgent,
     remotePeerId: string,
@@ -5448,6 +5454,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // responder-session identities so offsets can never cross asset batches.
     assetUals?: string[],
   ): Promise<SyncPageResult> {
+    const exactAccumulationLimits = assetUals === undefined
+      ? undefined
+      : exactSyncPhaseAccumulationLimits(assetUals);
     // A caller signal defines an operation-owned cancellation contract. Do not
     // place those fetches in the shared page map: even equal wall-clock
     // deadlines do not make independently abortable operations compatible.
@@ -5511,6 +5520,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
+      maxAcceptedQuads: exactAccumulationLimits?.maxQuads,
       deadline,
       recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
