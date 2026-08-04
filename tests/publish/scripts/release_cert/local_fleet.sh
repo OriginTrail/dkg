@@ -32,12 +32,14 @@ PORT_OF[publisher]=$BASE_PORT
 PORT_OF[receiver]=$((BASE_PORT+1))
 PORT_OF[control]=$((BASE_PORT+2))
 
-install_version() { # version -> prints bin path
+install_version() { # version -> prints bin path (logs to $WS/install-$v.log)
   local v="$1"
   local dir="$WS/pkg-$v"
   if [ ! -x "$dir/node_modules/.bin/dkg" ]; then
-    mkdir -p "$dir"; ( cd "$dir" && npm install --no-audit --no-fund --loglevel=error "@origintrail-official/dkg@$v" >/dev/null 2>&1 )
+    mkdir -p "$dir"
+    ( cd "$dir" && npm init -y >/dev/null 2>&1; npm install --no-audit --no-fund "@origintrail-official/dkg@$v" ) > "$WS/install-$v.log" 2>&1       || { echo "❌ npm install of dkg@$v failed:" >&2; tail -20 "$WS/install-$v.log" >&2; return 1; }
   fi
+  [ -x "$dir/node_modules/.bin/dkg" ] || { echo "❌ dkg@$v installed but bin missing:" >&2; tail -20 "$WS/install-$v.log" >&2; return 1; }
   echo "$dir/node_modules/.bin/dkg"
 }
 
@@ -46,7 +48,8 @@ start_node() { # role version
   local version="$2"
   local home="$WS/home-$role"
   local port="${PORT_OF[$role]}"
-  local bin; bin="$(install_version "$version")"
+  local bin
+  bin="$(install_version "$version")" || { echo "❌ cannot start $role — install failed"; exit 1; }
   mkdir -p "$home"
   cat > "$home/config.json" <<EOF
 { "name": "rc-fleet-$role-$(date -u +%H%M%S)", "nodeRole": "edge", "networkConfig": "testnet", "apiPort": $port, "store": { "backend": "oxigraph" } }

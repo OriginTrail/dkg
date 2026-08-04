@@ -59,18 +59,28 @@ CURATOR_API="http://127.0.0.1:${PORTS[curator]}"
 CURATOR_TOKEN="$(grep -v "^#" "${HOMES[curator]}/auth.token" | grep -v "^$" | tail -1)"
 CURATOR_PEER="$(curl -sf "$CURATOR_API/api/status" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).peerId))')"
 
-# Fresh CG + fresh SWM content on the curator
+# Fresh CG + fresh SWM content on the curator. The daemon answers /api/status
+# before write paths settle, so give it a moment and retry with visible errors.
+sleep 15
 CG_NAME="blackbox-$RUN_ID"
-CG_ID="$(curl -sf -X POST "$CURATOR_API/api/context-graph/create" \
-  -H "Authorization: Bearer $CURATOR_TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$CG_NAME\",\"name\":\"$CG_NAME\",\"accessPolicy\":0,\"publishPolicy\":1,\"register\":false}" \
-  | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);console.log(j.canonicalId||j.contextGraphId||j.id)})')"
+CG_ID=""
+for attempt in 1 2 3 4 5 6; do
+  RESP="$(curl -s -m 30 -X POST "$CURATOR_API/api/context-graph/create" \
+    -H "Authorization: Bearer $CURATOR_TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"id\":\"$CG_NAME\",\"name\":\"$CG_NAME\",\"accessPolicy\":0,\"publishPolicy\":1,\"register\":false}")"
+  CG_ID="$(printf %s "$RESP" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log(j.canonicalId||j.contextGraphId||j.id||"")}catch{console.log("")}})')"
+  if [ -n "$CG_ID" ]; then break; fi
+  echo "• CG create attempt $attempt got: $(printf %s "$RESP" | head -c 300)"
+  sleep 10
+done
+if [ -z "$CG_ID" ]; then echo "❌ CG create never succeeded"; exit 1; fi
 echo "• CG: $CG_ID"
 
 for i in 1 2 3; do
-  curl -sf -X POST "$CURATOR_API/api/knowledge-assets" \
+  PUB="$(curl -s -m 60 -X POST "$CURATOR_API/api/knowledge-assets" \
     -H "Authorization: Bearer $CURATOR_TOKEN" -H 'Content-Type: application/json' \
-    -d "{\"contextGraphId\":\"$CG_ID\",\"name\":\"bb-$RUN_ID-$i\",\"quads\":[{\"subject\":\"urn:bb:$RUN_ID:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"blackbox nightly $i\\\"\",\"graph\":\"\"}],\"alsoShareSwm\":true}" > /dev/null
+    -d "{\"contextGraphId\":\"$CG_ID\",\"name\":\"bb-$RUN_ID-$i\",\"quads\":[{\"subject\":\"urn:bb:$RUN_ID:$i\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"blackbox nightly $i\\\"\",\"graph\":\"\"}],\"alsoShareSwm\":true}")"
+  echo "$PUB" | grep -q '"status"' || { echo "❌ SWM publish $i failed: $(printf %s "$PUB" | head -c 300)"; exit 1; }
 done
 echo "• published 3 SWM KAs on the curator"
 
