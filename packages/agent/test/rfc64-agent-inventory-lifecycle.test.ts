@@ -15,6 +15,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
+import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
   INVENTORY_V1_RELATIVE_PATH,
@@ -49,6 +50,7 @@ function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
+    contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
     rfc64PersistenceV1: undefined,
   });
@@ -261,6 +263,28 @@ describe('DKGAgent RFC-64 inventory lifecycle', () => {
     expect(agent.rfc64PersistenceV1).toBeUndefined();
     await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
     await expect(agent.closeRfc64PersistenceV1()).resolves.toBeUndefined();
+  });
+
+  it('preserves capacity exhaustion when canonical receipt support is unavailable', async () => {
+    const agent = syntheticAgent();
+    agent.chain = { chainId: 'none' };
+    agent.finalizationRuntime.attachRecoveryStore({
+      health: async () => ({
+        available: true,
+        closed: false,
+        ready: false,
+        degradedReason: 'capacity-exhausted',
+        stateCounts: { RECEIVED: 64 },
+        livePayloadBytes: 1,
+        dueEntries: 64,
+      }),
+    } as any);
+
+    await expect(agent.getFinalizationRecoveryHealth()).resolves.toMatchObject({
+      ready: false,
+      canonicalReceiptCapability: 'unsupported',
+      degradedReason: 'capacity-exhausted',
+    });
   });
 
   it('owns one persistent foundation and purges every stale candidate in bounded yielding batches', async () => {

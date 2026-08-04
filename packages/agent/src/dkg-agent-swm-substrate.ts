@@ -480,6 +480,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
 
+    // A host-only Core may continue chain reconciliation after member
+    // unsubscribe, but peer-rotation evidence collected under the member
+    // lifecycle must not survive that ownership transition.
+    this.clearVmReconcileRotationStateForContextGraph(contextGraphId);
+
     // Drop from the active sync scope so background sweeps no longer treat
     // this as a subscribed CG to keep current.
     const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);

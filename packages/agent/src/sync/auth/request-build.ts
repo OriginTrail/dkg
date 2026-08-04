@@ -62,7 +62,8 @@ export interface SyncRequestEnvelope {
    * Additive, UNSIGNED exact-KA response filter. It can only narrow an already
    * authorized Context Graph read. Upgraded responders serve metadata and data
    * for these UALs only; old responders ignore it, while the upgraded requester
-   * still filters their full response before verification/storage.
+   * accepts and filters only a bounded legacy prefix that covers every requested
+   * descriptor. An over-limit or incomplete legacy response remains fail-closed.
    */
   assetUals?: string[];
   /**

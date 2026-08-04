@@ -469,6 +469,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       }
     });
     const snapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
+      owner: 'rfc64',
       chainId: CHAIN_ID,
       endpoints: [rpc.url],
     });

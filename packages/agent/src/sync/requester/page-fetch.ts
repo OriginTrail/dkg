@@ -5,6 +5,7 @@ import {
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
 import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
+import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -111,10 +112,29 @@ export interface SyncPageResult {
   quads: Quad[];
   bytesReceived: number;
   resumedFromOffset: number;
+  /**
+   * True only when this phase started without reusing a requester-side
+   * responder snapshot token. Optional for rolling deep-import compatibility;
+   * proof-sensitive callers must treat an omitted value as unknown.
+   */
+  responderSessionStartedFresh?: boolean;
   nextOffset: number;
   checkpointKey: string;
   completed: boolean;
   timedOut: boolean;
+}
+
+export class SyncPageAccumulationLimitError extends Error {
+  readonly code = 'SYNC_PAGE_ACCUMULATION_LIMIT' as const;
+
+  constructor(
+    readonly dimension: 'bytes' | 'quads',
+    readonly actual: number,
+    readonly limit: number,
+  ) {
+    super(`Sync phase ${dimension} accumulation ${actual} exceeds limit ${limit}`);
+    this.name = 'SyncPageAccumulationLimitError';
+  }
 }
 
 interface FetchSyncPagesParams {
@@ -172,6 +192,9 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Optional cumulative ceilings for proof-sensitive narrow fetches. */
+  maxAcceptedBytes?: number;
+  maxAcceptedQuads?: number;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   /**
    * Per-attempt send hook. `DKGAgent`'s production adapter sends raw
@@ -250,6 +273,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    maxAcceptedBytes,
+    maxAcceptedQuads,
     parseAndFilter,
     send,
     logWarn,
@@ -285,6 +310,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         ?? getPersistedSyncResponderSession(checkpoint, sessionStartedAt)
       )
     : undefined;
+  const responderSessionStartedFresh = savedResponderSession === undefined;
   if (usesPageSession && offset > 0 && !savedResponderSession) {
     checkpointStore.delete(checkpointKey);
     offset = 0;
@@ -348,6 +374,12 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         contextGraphId,
         offset,
         protocolId: protocolSync,
+        // W1 attempt labels. The admission source is NOT threaded here: it
+        // belongs to the enclosing operation and is read from the ambient
+        // context at the record site, which also keeps it structurally out of
+        // every coalescing key.
+        plane: syncPlaneFor(includeSharedMemory),
+        phase,
         // `requestFactory` runs per-attempt so each retry carries a
         // fresh `issuedAtMs`/`requestId`. Required for sync's auth
         // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +
@@ -390,6 +422,17 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       responsePages += 1;
       phaseTelemetry.recordPage();
 
+      const nextBytesReceived = bytesReceived + responseBytes.byteLength;
+      if (maxAcceptedBytes !== undefined && nextBytesReceived > maxAcceptedBytes) {
+        const error = new SyncPageAccumulationLimitError(
+          'bytes',
+          nextBytesReceived,
+          maxAcceptedBytes,
+        );
+        markSyncPeerResponded(error);
+        throw error;
+      }
+
       let parsed: { quads: Quad[]; totalQuads: number };
       let decodeDurationMs = 0;
       let parseDurationMs = 0;
@@ -397,7 +440,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         const decodeStartedAt = Date.now();
         const nquadsText = decodeSyncResponse(responseBytes);
         decodeDurationMs = Date.now() - decodeStartedAt;
-        bytesReceived += responseBytes.byteLength;
+        bytesReceived = nextBytesReceived;
         if (
           nquadsText === syncDeniedResponse ||
           (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
@@ -413,6 +456,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         throwIfAborted(signal);
         parseDurationMs = Date.now() - parseStartedAt;
         phaseTelemetry.recordQuads(parsed.quads);
+        const nextAcceptedQuads = allQuads.length + parsed.quads.length;
+        if (maxAcceptedQuads !== undefined && nextAcceptedQuads > maxAcceptedQuads) {
+          throw new SyncPageAccumulationLimitError(
+            'quads',
+            nextAcceptedQuads,
+            maxAcceptedQuads,
+          );
+        }
       } catch (error) {
         markSyncPeerResponded(error);
         throw error;
@@ -461,7 +512,13 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
-    if (usesPageSession && isSyncResponderSessionInvalidError(err)) {
+    if (usesPageSession && err instanceof SyncPageAccumulationLimitError) {
+      // The exact response proved that this responder ignored (or violated)
+      // the requested narrow scope. Never resume that incompatible row list:
+      // a later retry must mint a fresh session and start from offset zero.
+      unfinishedSyncResponderSessions.delete(checkpointKey);
+      checkpointStore.delete(checkpointKey);
+    } else if (usesPageSession && isSyncResponderSessionInvalidError(err)) {
       // A responder-declared superseded/expired token can never make progress.
       // Rotate it immediately even at offset zero instead of re-saving the
       // terminal token until its requester-side TTL elapses. Some transports
@@ -547,6 +604,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         quads: allQuads,
         bytesReceived,
         resumedFromOffset,
+        responderSessionStartedFresh,
         nextOffset: offset,
         checkpointKey,
         completed: false,
@@ -605,6 +663,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     quads: allQuads,
     bytesReceived,
     resumedFromOffset,
+    responderSessionStartedFresh,
     nextOffset: offset,
     checkpointKey,
     completed: !timedOut,

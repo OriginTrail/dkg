@@ -1,4 +1,5 @@
 import { ethers } from 'ethers';
+import { buildKnowledgeAssetUalFromOnChainIdV1 } from '@origintrail-official/dkg-core';
 import { buildKnowledgeAssetUal, type ChainAdapter } from '@origintrail-official/dkg-chain';
 
 export interface KnowledgeAssetIdentity {
@@ -41,12 +42,17 @@ export function buildReconciledKnowledgeAssetUal(
   legacyStorageAddress: string,
   kaId: bigint,
 ): string {
-  if ((kaId >> 96n) === 0n) {
-    return buildKnowledgeAssetUal(chainId, legacyStorageAddress, kaId);
-  }
-
-  const identity = unpackKnowledgeAssetId(kaId);
-  return buildKnowledgeAssetUal(chainId, identity.agentAddress, identity.kaNumber);
+  // Delegates to the single owner of this rule in `core`. It used to branch
+  // here and in `packages/core/src/vm-update-convergence.ts`, guarded by a
+  // cross-package parity test — two production implementations of one identity
+  // rule, with a test that catches drift only after it happens. The dependency
+  // direction never required that: `agent → chain → core`, so `core` can own it
+  // and this can delegate downward.
+  //
+  // Behaviour is unchanged: the owner lowercases the storage address exactly as
+  // `buildKnowledgeAssetUal` did, which the sole caller relies on — it passes
+  // the checksummed address returned by `getDKGKnowledgeAssetsAddress()`.
+  return buildKnowledgeAssetUalFromOnChainIdV1(chainId, legacyStorageAddress, kaId);
 }
 
 export async function resolveAssetUalFromKaIdentity(

@@ -1484,8 +1484,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * Check whether any locally registered agent is the curator/creator
    * of the given context graph.
    */
-  async isCuratorOf(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const owner = await this.getContextGraphOwner(contextGraphId);
+  async isCuratorOf(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const owner = await this.getContextGraphOwner(contextGraphId, options);
     if (!owner) return false;
     // Mirror the comparison in PROTOCOL_JOIN_REQUEST. `normalizeAgentDid`
     // collapses EVM-address case drift but preserves peer-ID case.

@@ -1,5 +1,11 @@
 import { performance } from 'node:perf_hooks';
-import { getMetrics } from '@origintrail-official/dkg-core';
+import {
+  backpressureRegistry,
+  getMetrics,
+  ObservableScheduler,
+  type SchedulerPressureOutcome,
+  type SchedulerPressureTicket,
+} from '@origintrail-official/dkg-core';
 import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
@@ -60,6 +66,7 @@ interface QueueEntry<T> {
   priority: StoreWorkPriority;
   operation: string;
   queuedAt: number;
+  pressureTicket: SchedulerPressureTicket;
   work: () => Promise<T>;
   resolve: (value: T) => void;
   reject: (reason?: unknown) => void;
@@ -207,7 +214,7 @@ export function storeWorkPriorityRank(priority: StoreWorkPriority): number {
   return 3;
 }
 
-export class StorePriorityScheduler {
+export class StorePriorityScheduler extends ObservableScheduler {
   private readonly queues: Record<StoreWorkPriority, Array<QueueEntry<unknown>>> = {
     ack: [],
     health: [],
@@ -256,6 +263,20 @@ export class StorePriorityScheduler {
       queueWaitTimeoutMs: legacyQueueWaitTimeoutMs,
       healthReservedSlots: legacyHealthReservedSlots,
     });
+    const resolvedNow = options.now ?? (() => performance.now());
+    const resolvedQueueWaitTimeoutMs = options.queueWaitTimeoutMs
+      ?? parsePositiveIntegerEnv(
+        'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
+        DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
+      );
+    super({
+      scheduler: 'store',
+      now: resolvedNow,
+      thresholds: {
+        degradedQueueAgeMs: Math.max(1, Math.floor(resolvedQueueWaitTimeoutMs / 2)),
+        stalledActiveAgeMs: 30_000,
+      },
+    });
     this.maxConcurrent = options.maxConcurrent
       ?? parsePositiveIntegerEnv('DKG_STORE_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT);
     const requestedAckReservedSlots = options.ackReservedSlots
@@ -285,13 +306,32 @@ export class StorePriorityScheduler {
       requestedNormalFloor,
       requestedBackgroundFloor,
     );
-    this.queueWaitTimeoutMs = options.queueWaitTimeoutMs
-      ?? parsePositiveIntegerEnv(
-        'DKG_STORE_QUEUE_WAIT_TIMEOUT_MS',
-        DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
-      );
-    this.now = options.now ?? (() => performance.now());
+    this.queueWaitTimeoutMs = resolvedQueueWaitTimeoutMs;
+    this.now = resolvedNow;
     this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
+    const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
+    this.updatePressureCapacity({
+      queueLimit: Object.values(this.queueLimits).reduce((sum, value) => sum + value, 0),
+      inflightLimit: this.maxConcurrent,
+      lanes: {
+        ack: {
+          queueLimit: this.queueLimits.ack,
+          inflightLimit: this.maxConcurrent,
+        },
+        health: {
+          queueLimit: this.queueLimits.health,
+          inflightLimit: nonAckLimit,
+        },
+        normal: {
+          queueLimit: this.queueLimits.normal,
+          inflightLimit: this.nonAckLanePolicy.totalLimit,
+        },
+        background: {
+          queueLimit: this.queueLimits.background,
+          inflightLimit: this.nonAckLanePolicy.backgroundLimit,
+        },
+      },
+    });
   }
 
   get snapshot(): StorePrioritySchedulerSnapshot {
@@ -330,14 +370,23 @@ export class StorePriorityScheduler {
     }
     if (this.queues[normalizedPriority].length >= this.queueLimits[normalizedPriority]) {
       const error = new StoreSchedulerBusyError('queue_full', normalizedPriority, operation);
+      this.pressureReject(
+        { lane: normalizedPriority, operation },
+        error.reason,
+      );
       this.observeRejection(error);
       throw error;
     }
     return new Promise<T>((resolve, reject) => {
+      const pressureTicket = this.pressureEnqueue({
+        lane: normalizedPriority,
+        operation,
+      });
       const entry: QueueEntry<T> = {
         priority: normalizedPriority,
         operation,
         queuedAt: this.now(),
+        pressureTicket,
         work,
         resolve,
         reject,
@@ -346,6 +395,7 @@ export class StorePriorityScheduler {
       const onAbort = () => {
         if (this.removeQueued(entry as QueueEntry<unknown>)) {
           this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
+          this.pressureCancelQueued(entry.pressureTicket, 'aborted');
           const reason = signal?.reason;
           reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
           this.observeDepths();
@@ -363,6 +413,7 @@ export class StorePriorityScheduler {
           normalizedPriority,
           operation,
         );
+        this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error);
         reject(error);
         this.observeDepths();
@@ -420,6 +471,7 @@ export class StorePriorityScheduler {
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
     const startedAt = this.now();
+    this.pressureStart(entry.pressureTicket);
     const waitMs = Math.max(0, startedAt - entry.queuedAt);
     const attributes = {
       priority: entry.priority,
@@ -436,17 +488,20 @@ export class StorePriorityScheduler {
       result = Promise.reject(err);
     }
 
+    let pressureOutcome: SchedulerPressureOutcome = 'completed';
     result
       .then((value) => {
         this.observeDuration(entry, startedAt, 'ok');
         entry.resolve(value);
       })
       .catch((err) => {
+        pressureOutcome = 'failed';
         this.observeDuration(entry, startedAt, 'error');
         entry.reject(err);
       })
       .finally(() => {
         getMetrics().storeSchedulerActive.add(-1, attributes);
+        this.pressureFinish(entry.pressureTicket, pressureOutcome);
         this.decrement(entry.priority);
         this.observeDepths();
         this.drain();
@@ -521,6 +576,7 @@ export class StorePriorityScheduler {
 }
 
 export const externalStorePriorityScheduler = new StorePriorityScheduler();
+backpressureRegistry.register(externalStorePriorityScheduler);
 
 export function getExternalStorePrioritySchedulerSnapshot(): StorePrioritySchedulerSnapshot {
   return externalStorePriorityScheduler.snapshot;

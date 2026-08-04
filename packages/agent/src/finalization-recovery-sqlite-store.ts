@@ -34,6 +34,17 @@ export type {
   SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 
+const DUE_FINALIZATION_SQL_PREDICATE = `
+  (
+    state IN ('RECEIVED','VERIFIED','REORGED')
+    OR (
+      state = 'SETTLED'
+      AND (publisher_upgrade_pending = 1 OR next_attempt_at IS NOT NULL)
+    )
+  )
+  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+`;
+
 function sameFinalizationRecoveryIdentity(
   existing: FinalizationRecoveryEntry,
   input: FinalizationRecoveryReceiveInput,
@@ -78,6 +89,16 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
 
   get closed(): boolean {
     return this.#closed;
+  }
+
+  async get(key: string): Promise<FinalizationRecoveryEntry | undefined> {
+    if (this.#closed || this.#closing) return undefined;
+    await this.#mutationTail;
+    if (this.#closed) return undefined;
+    const row = this.database.prepare(
+      'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+    ).get(key);
+    return row ? finalizationRecoveryRowToEntry(row) : undefined;
   }
 
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult> {
@@ -422,6 +443,25 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return entry.nextAttemptAt === undefined || entry.nextAttemptAt <= this.#policy.now();
   }
 
+  async listDue(limit: number): Promise<FinalizationRecoveryEntry[]> {
+    if (this.#closed || this.#closing) return [];
+    if (!Number.isFinite(limit)) return [];
+    const boundedLimit = Math.min(
+      this.#policy.maxEntries,
+      Math.max(0, Math.trunc(limit)),
+    );
+    if (boundedLimit === 0) return [];
+    await this.#mutationTail;
+    if (this.#closed) return [];
+    const now = this.#policy.now();
+    return this.database.prepare(`
+      SELECT * FROM finalization_inbox_v1
+      WHERE ${DUE_FINALIZATION_SQL_PREDICATE}
+      ORDER BY COALESCE(next_attempt_at, updated_at), updated_at, key
+      LIMIT ?
+    `).all(now, boundedLimit).map(finalizationRecoveryRowToEntry);
+  }
+
   async listForKnowledgeAsset(input: {
     chainId: string;
     contextGraphId: string;
@@ -497,17 +537,24 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return this.mutate(() => {
       if (this.#closed) return;
       const now = this.#policy.now();
+      const nextAttemptAt = retryDelayMs === undefined ? null : now + retryDelayMs;
       this.database.prepare(`
         UPDATE finalization_inbox_v1
         SET attempt_count = attempt_count + 1,
             last_error = ?,
-            next_attempt_at = ?,
+            next_attempt_at = CASE
+              WHEN ? IS NULL THEN next_attempt_at
+              WHEN next_attempt_at IS NULL THEN ?
+              ELSE MAX(next_attempt_at, ?)
+            END,
             updated_at = ?
         WHERE key = ? AND generation = ?
           AND state IN ('RECEIVED','VERIFIED','REORGED','SETTLED')
       `).run(
         lastError ?? null,
-        retryDelayMs === undefined ? null : now + retryDelayMs,
+        nextAttemptAt,
+        nextAttemptAt,
+        nextAttemptAt,
         now,
         key,
         generation,
@@ -523,17 +570,31 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         degradedReason: 'closing',
         stateCounts: {},
         livePayloadBytes: 0,
+        dueEntries: 0,
       };
     }
     await this.#mutationTail;
     if (this.#closed) {
-      return { available: false, closed: true, degradedReason: 'closed', stateCounts: {}, livePayloadBytes: 0 };
+      return {
+        available: false,
+        closed: true,
+        degradedReason: 'closed',
+        stateCounts: {},
+        livePayloadBytes: 0,
+        dueEntries: 0,
+      };
     }
     const counts = this.database.prepare(
       'SELECT state, COUNT(*) AS count FROM finalization_inbox_v1 GROUP BY state',
     ).all();
     const stateCounts: Partial<Record<FinalizationRecoveryState, number>> = {};
     for (const row of counts) stateCounts[String(row.state) as FinalizationRecoveryState] = Number(row.count);
+    const now = this.#policy.now();
+    const due = this.database.prepare(`
+      SELECT COUNT(*) AS count, MIN(created_at) AS oldest
+      FROM finalization_inbox_v1
+      WHERE ${DUE_FINALIZATION_SQL_PREDICATE}
+    `).get(now) as { count: number | bigint; oldest: number | bigint | null };
     const capacity = readFinalizationRecoveryCapacity(this.database, this.#policy);
     return {
       available: true,
@@ -542,9 +603,13 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       ...(capacity.capacityExhausted ? { degradedReason: 'capacity-exhausted' } : {}),
       stateCounts,
       livePayloadBytes: capacity.livePayloadBytes,
+      dueEntries: Number(due.count),
+      ...(due.oldest === null
+        ? {}
+        : { oldestDueAgeMs: Math.max(0, now - Number(due.oldest)) }),
       ...(capacity.oldest === undefined
         ? {}
-        : { oldestPendingAgeMs: Math.max(0, this.#policy.now() - capacity.oldest) }),
+        : { oldestPendingAgeMs: Math.max(0, now - capacity.oldest) }),
     };
   }
 

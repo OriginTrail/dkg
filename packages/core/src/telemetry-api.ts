@@ -136,6 +136,26 @@ const BYTE_BUCKETS = [
 ];
 const QUAD_COUNT_BUCKETS = [100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
 const PAGE_COUNT_BUCKETS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000];
+/**
+ * Duration buckets (ms) for a whole context-graph catch-up job, out to ~30 min.
+ *
+ * `OP_DURATION_BUCKETS` stops at 120 s, but observed foreground catch-up jobs ran
+ * 305 s and 382 s — both would land in the `+Inf` overflow and become unresolvable.
+ * Every measured job must fall in a *finite* bucket.
+ */
+const CATCHUP_DURATION_BUCKETS = [
+  1_000, 5_000, 15_000, 30_000, 60_000, 120_000, 240_000,
+  300_000, 420_000, 600_000, 900_000, 1_800_000,
+];
+/**
+ * Duration buckets (ms) for a single logical sync operation's *active* occupancy
+ * (peer wait + decode + verification + store commit). Floor is finer than
+ * `OP_DURATION_BUCKETS` because cheap cache-warm operations cluster below 50 ms.
+ */
+const SYNC_OPERATION_DURATION_BUCKETS = [
+  10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000,
+  10_000, 30_000, 60_000, 120_000, 300_000,
+];
 
 export interface DkgMetrics {
   /** bytes; boundary and phase are bounded sync lifecycle enums */
@@ -183,6 +203,24 @@ export interface DkgMetrics {
   storeSchedulerQueueWaitMs: Histogram;
   /** active admitted operations by priority and operation */
   storeSchedulerActive: UpDownCounter;
+  /** current queued work; scheduler and lane are bounded static labels */
+  backpressureQueueDepth: Gauge;
+  /** configured queue capacity; scheduler and lane are bounded static labels */
+  backpressureQueueLimit: Gauge;
+  /** current admitted work; scheduler and lane are bounded static labels */
+  backpressureInflight: Gauge;
+  /** configured concurrent-work capacity; scheduler and lane are bounded static labels */
+  backpressureInflightLimit: Gauge;
+  /** age of the oldest queued item; scheduler and lane are bounded static labels */
+  backpressureOldestQueuedAgeMs: Gauge;
+  /** age of the oldest admitted item; scheduler and lane are bounded static labels */
+  backpressureOldestActiveAgeMs: Gauge;
+  /** scheduler, lane, event, and optional reason are bounded labels */
+  backpressureEventsTotal: Counter;
+  /** queue wait by bounded scheduler and lane */
+  backpressureQueueWaitMs: Histogram;
+  /** admitted-work duration by bounded scheduler, lane, and outcome */
+  backpressureActiveDurationMs: Histogram;
   /** scope={finalization|reconcile} */
   storeScanSingleFlightJoinsTotal: Counter;
   /** active unique scans by scope */
@@ -195,6 +233,12 @@ export interface DkgMetrics {
   storeCancellationCompletedTotal: Counter;
   /** scope and reason identify the bounded retry loop; attempt is capped */
   storeRetryAttemptsTotal: Counter;
+  /** current durable finalization entries whose retry gate is open */
+  finalizationRecoveryDueEntries: Gauge;
+  /** milliseconds since the oldest currently due finalization was received */
+  finalizationRecoveryOldestDueAgeMs: Gauge;
+  /** outcome={recovered|invalidated|retry-pending|none} */
+  finalizationRecoveryAttemptsTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -243,6 +287,46 @@ export interface DkgMetrics {
   /** kind={oversize|vm-quarantine|store-reject} — synced quads refused for
    *  exceeding the RDF-literal size invariant (OT-RFC-56; poison visibility). */
   oversizeTombstonesTotal: Counter;
+
+  // ── W1 sync measurement contract (I1–I9) ────────────────────────────────
+  // Attributes are closed vocabularies clamped at the record site; an unknown
+  // value becomes `unspecified` and never throws. No cg_id / peer_id, ever.
+
+  /** I1 — one point per *physically invoked* send.
+   *  transport={legacy|changelog}, plane={durable|shared-memory},
+   *  phase={data|meta|snapshot|catalog|delta}, source=<admission source>,
+   *  outcome={response|validation_rejected|cancelled|transport_error}.
+   *  There is deliberately no `timeout`: no causal deadline predicate exists. */
+  syncAttemptTotal: Counter;
+  /** I2 — bytes; encoded application-protocol request payload at the router
+   *  boundary (excludes libp2p framing). Recorded once, immediately before
+   *  `send()`, so attempts that never receive a response still count.
+   *  transport, plane, phase, source. */
+  syncAttemptRequestBytes: Counter;
+  /** I3 — bytes; encoded response payload. Exists only if `send()` resolved,
+   *  including validation rejection. transport, plane, phase, source, outcome. */
+  syncAttemptResponseBytes: Counter;
+  /** I4 — ms; source-attributed *active* occupancy of one completed logical sync
+   *  operation, excluding admission queue wait. Its `count` is the operation
+   *  denominator. lane={durable|changelog|shared_memory|swm_recovery},
+   *  source, outcome={resolved|error|cancelled}. */
+  syncOperationDurationMs: Histogram;
+  /** I5 — operations rejected *before starting*, so they are never a 0 ms I4
+   *  sample. lane, source, reason={queue_full|displaced|aborted_before_start}. */
+  syncOperationRejectedTotal: Counter;
+  /** I6 — single-flight/coalescing joins, recorded at map-hit time (before any
+   *  bytes move). scope={context-graph|durable|shared-memory|page},
+   *  owner_source, joiner_source. A cross-*family* join invalidates the window. */
+  syncSingleflightJoinsTotal: Counter;
+  /** I7 — catch-up subscribe requests, one per route return.
+   *  result={bad_request|forbidden|deduped|ready_replay|ready_synthetic|queued|
+   *  shutting_down}, include_shared_memory. Requests ≠ jobs (N:1). */
+  contextGraphCatchupRequestsTotal: Counter;
+  /** I8 — exactly one point per unique jobId. status=<terminal CatchupJobState>,
+   *  admission={walk|synthetic}. */
+  contextGraphCatchupJobsTotal: Counter;
+  /** I9 — ms; walk jobs only, monotonic clock. admission={walk}. */
+  contextGraphCatchupJobDurationMs: Histogram;
 }
 
 function buildMetrics(): DkgMetrics {
@@ -307,6 +391,39 @@ function buildMetrics(): DkgMetrics {
     storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {
       description: 'Currently admitted external-store operations by lane and static caller',
     }),
+    backpressureQueueDepth: meter.createGauge('dkg.backpressure.queue_depth', {
+      description: 'Current scheduler queue depth by bounded scheduler and lane',
+    }),
+    backpressureQueueLimit: meter.createGauge('dkg.backpressure.queue_limit', {
+      description: 'Configured scheduler queue capacity by bounded scheduler and lane',
+    }),
+    backpressureInflight: meter.createGauge('dkg.backpressure.inflight', {
+      description: 'Current admitted scheduler work by bounded scheduler and lane',
+    }),
+    backpressureInflightLimit: meter.createGauge('dkg.backpressure.inflight_limit', {
+      description: 'Configured scheduler concurrent-work capacity by bounded scheduler and lane',
+    }),
+    backpressureOldestQueuedAgeMs: meter.createGauge('dkg.backpressure.oldest_queued_age_ms', {
+      unit: 'ms',
+      description: 'Current age of the oldest queued scheduler item',
+    }),
+    backpressureOldestActiveAgeMs: meter.createGauge('dkg.backpressure.oldest_active_age_ms', {
+      unit: 'ms',
+      description: 'Current age of the oldest admitted scheduler item',
+    }),
+    backpressureEventsTotal: meter.createCounter('dkg.backpressure.events_total', {
+      description: 'Scheduler lifecycle events and admission rejections',
+    }),
+    backpressureQueueWaitMs: meter.createHistogram('dkg.backpressure.queue_wait_ms', {
+      unit: 'ms',
+      description: 'Scheduler queue wait by bounded scheduler and lane',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    backpressureActiveDurationMs: meter.createHistogram('dkg.backpressure.active_duration_ms', {
+      unit: 'ms',
+      description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
     storeScanSingleFlightJoinsTotal: meter.createCounter('dkg.store.scan_singleflight_joins_total', {
       description: 'Equivalent expensive scans joined to an already running promise',
     }),
@@ -328,6 +445,21 @@ function buildMetrics(): DkgMetrics {
     storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
       description: 'Bounded expensive-work retry attempts',
     }),
+    finalizationRecoveryDueEntries: meter.createGauge(
+      'dkg.finalization_recovery.due_entries',
+      { description: 'Durable finalization inbox entries currently eligible for retry' },
+    ),
+    finalizationRecoveryOldestDueAgeMs: meter.createGauge(
+      'dkg.finalization_recovery.oldest_due_age_ms',
+      {
+        unit: 'ms',
+        description: 'Age of the oldest durable finalization inbox entry eligible for retry',
+      },
+    ),
+    finalizationRecoveryAttemptsTotal: meter.createCounter(
+      'dkg.finalization_recovery.attempts_total',
+      { description: 'Autonomous finalization replay attempts by bounded outcome' },
+    ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
     }),
@@ -389,6 +521,41 @@ function buildMetrics(): DkgMetrics {
     }),
     protocolSendDuration: meter.createHistogram('dkg.protocol_router.send.duration', {
       unit: 'ms', description: 'P2P protocol send wall-time', advice: { explicitBucketBoundaries: RPC_DURATION_BUCKETS },
+    }),
+
+    // ── W1 sync measurement contract (I1–I9) ──────────────────────────────
+    syncAttemptTotal: meter.createCounter('dkg.sync.attempt.total', {
+      description: 'Physically invoked sync sends by transport/plane/phase/source and terminal outcome',
+    }),
+    syncAttemptRequestBytes: meter.createCounter('dkg.sync.attempt.request_bytes', {
+      unit: 'By',
+      description: 'Encoded sync request payload bytes at the router boundary (excludes libp2p framing)',
+    }),
+    syncAttemptResponseBytes: meter.createCounter('dkg.sync.attempt.response_bytes', {
+      unit: 'By',
+      description: 'Encoded sync response payload bytes at the router boundary (excludes libp2p framing)',
+    }),
+    syncOperationDurationMs: meter.createHistogram('dkg.sync.operation.duration_ms', {
+      unit: 'ms',
+      description: 'Active occupancy of one completed logical sync operation, excluding admission queue wait',
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    syncOperationRejectedTotal: meter.createCounter('dkg.sync.operation.rejected_total', {
+      description: 'Sync operations rejected before starting (never a 0 ms duration sample)',
+    }),
+    syncSingleflightJoinsTotal: meter.createCounter('dkg.sync.singleflight.joins_total', {
+      description: 'Single-flight/coalescing joins by scope, owner source and joiner source',
+    }),
+    contextGraphCatchupRequestsTotal: meter.createCounter('dkg.context_graph.catchup.requests_total', {
+      description: 'Catch-up subscribe requests by route result (N:1 with jobs)',
+    }),
+    contextGraphCatchupJobsTotal: meter.createCounter('dkg.context_graph.catchup.jobs_total', {
+      description: 'Catch-up jobs by terminal status and admission path (exactly once per jobId)',
+    }),
+    contextGraphCatchupJobDurationMs: meter.createHistogram('dkg.context_graph.catchup.job_duration_ms', {
+      unit: 'ms',
+      description: 'Walk catch-up job wall-time, monotonic clock',
+      advice: { explicitBucketBoundaries: CATCHUP_DURATION_BUCKETS },
     }),
   };
 }

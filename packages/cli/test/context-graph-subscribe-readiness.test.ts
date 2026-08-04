@@ -528,7 +528,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
-  it('keeps a public clean-empty peer valid when another peer denies', async () => {
+  // Issue #2006: an empty response cannot distinguish "hosts an empty graph"
+  // from "never heard of this graph", so a clean-empty peer only proves the
+  // plane when the whole round was content-free and failure-free. A denial or a
+  // failed data-bearing peer means we did not hear from everyone.
+  it('does not keep a public clean-empty peer valid when another peer denies', async () => {
     const mixed = cleanEmptyResult();
     mixed.connectedPeers = 2;
     mixed.totalPeers = 2;
@@ -553,17 +557,45 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
     });
 
-    expect(result.job.status).toBe('done');
-    expect(result.job.error).toBeUndefined();
-    expect(result.state).toMatchObject({
-      synced: true,
-      sharedMemorySynced: false,
-      metaSynced: true,
-    });
+    expect(result.job.status).not.toBe('done');
+    expect(result.job.status).toBe('unreachable');
+    expect(result.state).toMatchObject({ synced: false });
     expect(result.readiness).toMatchObject({
-      durableVerified: true,
+      durableVerified: false,
       sharedMemoryVerified: false,
     });
+  });
+
+  it('does not settle as done when a data-bearing peer failed and an unrelated peer answered empty', async () => {
+    // The reported field shape: 122,705 data triples fetched, five failed
+    // phases, nothing verified, and unrelated peers answering empty — which
+    // previously settled the job as `done` with 1 KA out of 40.
+    const masked = cleanEmptyResult();
+    masked.connectedPeers = 6;
+    masked.totalPeers = 6;
+    masked.selectedPeers = 6;
+    masked.syncCapablePeers = 6;
+    masked.peersTried = 6;
+    masked.peersResponded = 6;
+    if (!masked.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    masked.diagnostics.durable.fetchedDataTriples = 122_705;
+    masked.diagnostics.durable.failedPhases = 5;
+
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      includeSharedMemory: false,
+      result: masked,
+      initial: {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.job.status).not.toBe('done');
+    expect(result.state).toMatchObject({ synced: false });
+    expect(result.readiness).toMatchObject({ durableVerified: false });
   });
 
   it('does not promote private data readiness from unrelated empty responders after metadata is local', async () => {

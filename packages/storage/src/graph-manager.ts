@@ -840,8 +840,8 @@ export class ContextGraphManager {
     this.ensuredContextGraphs.add(contextGraphId);
   }
 
-  async listContextGraphs(): Promise<string[]> {
-    const graphs = await listGraphsByPrefix(this.store, CG_PREFIX);
+  async listContextGraphs(options?: QueryOptions): Promise<string[]> {
+    const graphs = await listGraphsByPrefix(this.store, CG_PREFIX, options);
     const contextGraphs = new Set<string>();
     for (const g of graphs) {
       if (g.startsWith(CG_PREFIX)) {

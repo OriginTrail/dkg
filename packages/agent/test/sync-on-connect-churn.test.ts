@@ -118,6 +118,31 @@ describe('sync-on-connect churn gates', () => {
     expect(calls).toEqual([PEER_A]);
   });
 
+  it('labels the connect-driven admission on-connect, not unspecified', async () => {
+    // The complement of the reconciler assertion below, and the source with the
+    // highest production volume: every reconnect sync flows through this
+    // default. Nothing pinned it, so changing the default would silently
+    // relabel most sync-global pressure on the operator dashboards.
+    const agent = await createUnstartedAgent('SyncOnConnectSourceLabel');
+    (agent as any).started = true;
+    const sources: unknown[] = [];
+    (agent as any).trySyncFromPeer = async (
+      _peer: string,
+      _onAccounting: unknown,
+      source: unknown,
+    ) => {
+      sources.push(source);
+      return undefined;
+    };
+
+    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect(sources).toEqual(['on-connect']);
+  });
+
   it('reconciler still retries stale connected peers', async () => {
     const agent = await createUnstartedAgent('SyncReconcilerStillRetries');
     (agent as any).started = true;
@@ -132,7 +157,10 @@ describe('sync-on-connect churn gates', () => {
     await (agent as any).reconcileSyncFromConnectedPeers();
     await flushTimers();
 
-    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function)]]);
+    // The third argument is the bounded admission origin (issue #2006): the
+    // reconciler's queue pressure must be attributable to `reconcile`, not
+    // indistinguishable from sync-on-connect.
+    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function), 'reconcile']]);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {

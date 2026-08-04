@@ -1,7 +1,7 @@
 import type { ChainIdV1 } from '@origintrail-official/dkg-core';
 
 import { CurrentFinalizedEvmCallErrorV1 } from './current-finalized-evm-read-profile.js';
-import { createNonqueueingAdmissionGateV1 } from './nonqueueing-admission.js';
+import type { EndpointAdmissionPolicyV1 } from './nonqueueing-admission.js';
 import {
   cancelled,
   isAnchorDependentResourceLimit,
@@ -18,10 +18,21 @@ import type {
 export interface StrictFinalizedEndpointRunnerProfileV1 {
   readonly chainId: ChainIdV1;
   readonly endpoints: readonly string[];
-  readonly maxConcurrentPerChain: number;
   readonly totalDeadlineMs: number;
   readonly attemptTimeoutMs: number;
   readonly messages: StrictFinalizedEndpointRunnerMessagesV1;
+  /**
+   * The admission policy to run under. The runner does not know, and must not
+   * know, whether this is a per-instance gate or the process-wide per-chain
+   * registry — that is the caller's decision, and keeping it here would put a
+   * feature-specific owner vocabulary inside a generic endpoint lifecycle.
+   *
+   * Heavyweight pinned snapshots inject the shared policy, because their
+   * invariant is "one per chain across every caller". The one-shot read
+   * primitive injects a local gate: its limit is 4, and folding it into the
+   * snapshot's single lane would throttle an unrelated path.
+   */
+  readonly admission: EndpointAdmissionPolicyV1<ChainIdV1>;
 }
 
 export interface StrictFinalizedEndpointRunnerMessagesV1 {
@@ -34,7 +45,8 @@ export interface StrictFinalizedEndpointRunnerMessagesV1 {
   readonly attemptDeadline: (timeoutMs: number) => string;
   readonly attemptFailure: string;
   readonly noEndpoint: string;
-  readonly saturated: (active: number) => string;
+  /** `holder` is supplied by policies that track one; a local gate passes none. */
+  readonly saturated: (active: number, holder?: string) => string;
 }
 
 interface StrictFinalizedEndpointRunInputV1<AttemptResult, Result> {
@@ -68,10 +80,7 @@ export interface StrictFinalizedEndpointRunnerV1 {
 export function createStrictFinalizedEndpointRunnerV1(
   profile: StrictFinalizedEndpointRunnerProfileV1,
 ): StrictFinalizedEndpointRunnerV1 {
-  const { messages } = profile;
-  const admission = createNonqueueingAdmissionGateV1<ChainIdV1>(
-    profile.maxConcurrentPerChain,
-  );
+  const { messages, admission } = profile;
   const run: StrictFinalizedEndpointRunnerV1 = async <AttemptResult, Result>(
     input: StrictFinalizedEndpointRunInputV1<AttemptResult, Result>,
   ): Promise<Result> => {
@@ -84,7 +93,7 @@ export function createStrictFinalizedEndpointRunnerV1(
     if (input.signal.aborted) {
       throw cancelled(messages.cancelledBeforeAdmission);
     }
-    return admission.run(input.chainId, async () => {
+    const admitted = async (): Promise<Result> => {
       const totalDeadline = createDeadlineScopeV1(
         input.signal,
         profile.totalDeadlineMs,
@@ -161,10 +170,15 @@ export function createStrictFinalizedEndpointRunnerV1(
       } finally {
         totalDeadline.close();
       }
-    }, (active) => new CurrentFinalizedEvmCallErrorV1(
-      'concurrency-saturated',
-      messages.saturated(active),
-    ));
+    };
+    return admission.run(
+      input.chainId,
+      admitted,
+      (active, holder) => new CurrentFinalizedEvmCallErrorV1(
+        'concurrency-saturated',
+        messages.saturated(active, holder),
+      ),
+    );
   };
   return Object.freeze(run);
 }

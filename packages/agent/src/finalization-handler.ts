@@ -79,6 +79,9 @@ import {
   type FinalizationRecoveryPreparedMaterialization,
   type FinalizationRecoveryReplayOutcome,
 } from './finalization-recovery.js';
+import {
+  FinalizationRecoveryWorker,
+} from './finalization-recovery-worker.js';
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
@@ -381,6 +384,7 @@ export class FinalizationHandler {
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
+  private readonly recoveryWorker: FinalizationRecoveryWorker;
 
   constructor(
     store: TripleStore,
@@ -448,6 +452,21 @@ export class FinalizationHandler {
       },
       materializer,
     );
+    this.recoveryWorker = new FinalizationRecoveryWorker(
+      (limit) => this.recovery.processDueBatch(limit),
+      {
+        info: (message) => this.log.info(createOperationContext('system'), message),
+        warn: (message) => this.log.warn(createOperationContext('system'), message),
+      },
+    );
+  }
+
+  startRecoveryWorker(): void {
+    this.recoveryWorker.start();
+  }
+
+  stopRecoveryWorker(): Promise<void> {
+    return this.recoveryWorker.stop();
   }
 
   async handleFinalizationMessage(
@@ -1307,6 +1326,7 @@ export class FinalizationHandler {
     );
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graphUri)}> { ?s ?p ?o } }`,
+      { source: 'agent.finalization.verifyExactLayer' },
     );
     const quads = result.type === 'quads'
       ? result.quads.map((quad) => ({ ...quad, graph: '' }))
@@ -1946,6 +1966,7 @@ export class FinalizationHandler {
             <${DKG_NS}contentScopeVersion> ?scope .
         }
       }`,
+      { source: 'agent.finalization.confirmedAssertionVersion' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     const expectedRoot = normalizedHex(ethers.hexlify(input.merkleRoot));
@@ -2014,6 +2035,7 @@ export class FinalizationHandler {
       `SELECT ?predicate ?object WHERE {
         GRAPH <${metaGraph}> { <${safeUal}> ?predicate ?object }
       }`,
+      { source: 'agent.finalization.graphScopedMetadataState' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return 'absent';
 
@@ -2147,6 +2169,7 @@ export class FinalizationHandler {
           UNION { <${safeUal}> <${DKG_NS}kaUal> ?value }
           UNION { <${safeUal}> <${DKG_NS}assertionGraph> ?value }
         } }`,
+        { source: 'agent.finalization.hasGraphScopedMetadata' },
       );
       return result.type === 'boolean' && result.value;
     } catch {
@@ -2173,7 +2196,9 @@ export class FinalizationHandler {
       const ask = labelMetaGraph && labelMetaGraph !== metaGraph
         ? `ASK { { ${partitionPattern} } UNION { GRAPH <${assertSafeIri(labelMetaGraph)}> { <${safeUal}> <http://dkg.io/ontology/status> "confirmed" } } }`
         : `ASK { ${partitionPattern} }`;
-      const result = await this.store.query(ask);
+      const result = await this.store.query(ask, {
+        source: 'agent.finalization.alreadyConfirmed',
+      });
       return result.type === 'boolean' && result.value === true;
     } catch {
       return false;
@@ -2311,6 +2336,7 @@ export class FinalizationHandler {
     const contextGraphUri = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
+      { source: 'agent.finalization.contextGraphOnChainId' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     return stripOptionalLiteral(result.bindings[0]?.['id'])?.trim();
@@ -2975,12 +3001,15 @@ export class FinalizationHandler {
         ? `OPTIONAL { ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> ?memoRoot . }
           OPTIONAL { ?op <${SWM_SNAPSHOT_CONTENT_DIGEST_PREDICATE}> ?memoDigest . }`
         : '';
-      const result = await this.store.query(`SELECT ?op ?root ?memoRoot ?memoDigest WHERE {
-        GRAPH <${assertSafeIri(wsMetaGraph)}> {
-          ?op <${DKG_NS}rootEntity> ?root .
-          ${memoPatterns}
-        }
-      }`);
+      const result = await this.store.query(
+        `SELECT ?op ?root ?memoRoot ?memoDigest WHERE {
+          GRAPH <${assertSafeIri(wsMetaGraph)}> {
+            ?op <${DKG_NS}rootEntity> ?root .
+            ${memoPatterns}
+          }
+        }`,
+        { source: 'agent.finalization.swmSnapshotCandidates' },
+      );
       if (result.type === 'bindings') {
         for (const row of result.bindings) {
           const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
@@ -3114,12 +3143,15 @@ export class FinalizationHandler {
     const targetHex = ethers.hexlify(merkleRoot);
     const rootsByOp = new Map<string, string[]>();
     try {
-      const result = await this.store.query(`SELECT ?op ?root WHERE {
-        GRAPH <${assertSafeIri(wsMetaGraph)}> {
-          ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> "${targetHex}" .
-          ?op <${DKG_NS}rootEntity> ?root .
-        }
-      }`);
+      const result = await this.store.query(
+        `SELECT ?op ?root WHERE {
+          GRAPH <${assertSafeIri(wsMetaGraph)}> {
+            ?op <${SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE}> "${targetHex}" .
+            ?op <${DKG_NS}rootEntity> ?root .
+          }
+        }`,
+        { source: 'agent.finalization.stampedSwmSnapshot' },
+      );
       if (result.type === 'bindings') {
         for (const row of result.bindings) {
           const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
@@ -3299,6 +3331,7 @@ export class FinalizationHandler {
             <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
             <http://dkg.io/ontology/createdBy> ?createdBy .
         } }`,
+        { source: 'agent.finalization.subGraphRegistration' },
       );
       if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
         const regQuads = generateSubGraphRegistration({
@@ -3653,6 +3686,7 @@ export class FinalizationHandler {
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
     const result = await this.store.query(
       `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ?op ${ENTITY_PRED_ALT} <${assertSafeIri(rootEntity)}> } }`,
+      { source: 'agent.finalization.rootMetadataOperations' },
     );
     if (result.type !== 'bindings') return;
     for (const row of result.bindings) {
@@ -3666,6 +3700,7 @@ export class FinalizationHandler {
       ]);
       const remaining = await this.store.query(
         `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(op)}> ${ENTITY_PRED_ALT} ?r } }`,
+        { source: 'agent.finalization.remainingOperationRoots' },
       );
       const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
       const countVal = typeof rawCount === 'string'
