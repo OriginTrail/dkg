@@ -95,7 +95,7 @@ export interface FinalizationRecoveryStore {
   get(key: string): Promise<FinalizationRecoveryEntry | undefined>;
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
   /** Moves a bounded oldest-first deferred snapshot into the live inbox. */
-  promotePending?(limit: number): Promise<number>;
+  promotePending(limit: number): Promise<number>;
   recordTrustedPublisher(
     key: string,
     generation: number,

@@ -486,12 +486,12 @@ export class FinalizationHandler {
     let candidate: ParsedGraphScopedFinalization | undefined;
     if (liveAdmission.status === 'admitted') {
       candidate = liveAdmission.input.candidate;
+      let recoveryResult;
       try {
-        if (await this.recovery.processLive(liveAdmission.input)) return;
+        recoveryResult = await this.recovery.processLive(liveAdmission.input);
       } catch (error) {
         if (
           error instanceof StoreSchedulerBusyError
-          || error instanceof FinalizationRecoveryCapacityError
         ) throw error;
         const ctx = candidate.msg.operationId
           ? createOperationContext('gossip', candidate.msg.operationId)
@@ -508,6 +508,10 @@ export class FinalizationHandler {
         }));
         this.log.warn(ctx, `Finalization: failed to process graph-scoped message: ${reason}`);
         return;
+      }
+      if (recoveryResult.status === 'handled') return;
+      if (recoveryResult.status === 'retryable-capacity') {
+        throw new FinalizationRecoveryCapacityError(recoveryResult.ual);
       }
       envelope = {
         rawMessage: data,

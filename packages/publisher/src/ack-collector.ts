@@ -13,6 +13,7 @@ import {
   isTransientStorageACKDeclineCode,
   STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
+  isProtocolUnsupportedError,
   isSubscriptionSource,
   createGraphKnowledgeAssetScope,
   withSpan,
@@ -132,21 +133,6 @@ export interface ACKCollectorParams {
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
   ackMode?: V10ACKMode;
-}
-
-/**
- * libp2p negotiation failures are capability verdicts, not transient network
- * failures. Retrying the same peer and protocol cannot succeed until that peer
- * upgrades or re-registers the handler, so the current ACK round should settle
- * that candidate immediately and let quorum/fallback logic decide.
- */
-export function isStorageACKProtocolNegotiationFailure(
-  error: unknown,
-  protocol: string,
-): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes('Protocol selection failed')
-    && message.includes(`could not negotiate ${protocol}`);
 }
 
 /**
@@ -763,31 +749,40 @@ export class ACKCollector {
     // `storage_ack_insufficient` message when quorum can't be reached.
     // Cores that pre-date the typed wire shape continue to throw / reset
     // and follow the legacy retry path below — declines are strictly
-    // additive on the wire. ALSO carries the synthetic `TRANSPORT_ERROR`
-    // terminal outcome for peers whose final send attempt threw, so a
-    // peer that never answered surfaces WITH its transport error string
-    // instead of a bare `no_response` (testnet dead-air incident).
+    // additive on the wire.
     const declines = new Map<string, { code: string; message: string }>();
-    // ACKs that arrived over the protocol but failed publisher-side validation
-    // are not "no response". Track them separately so QuorumUnmetError can
-    // distinguish transport silence from an ACK the publisher rejected locally
-    // (signature, merkle root, or chain/RPC identity verification).
-    const ackFailures = new Map<string, { reason: string }>();
+    type TerminalPeerOutcome =
+      | { kind: 'ack-validation'; reason: string }
+      | { kind: 'protocol-unsupported'; message: string }
+      | { kind: 'transport-error'; message: string };
+    // Terminal local outcomes are not StorageACK declines. Keep them separate
+    // so protocol capability, transport, and signed responder decisions remain
+    // distinct evidence in QuorumUnmetError.peerOutcomes.
+    const terminalOutcomes = new Map<string, TerminalPeerOutcome>();
     const recordACKFailure = (peerId: string, reason: string): void => {
-      ackFailures.set(peerId, { reason });
+      terminalOutcomes.set(peerId, { kind: 'ack-validation', reason });
       // A later terminal ACK-validation failure is more actionable than an
       // earlier transient decline from the same peer.
       declines.delete(peerId);
     };
 
     const formatDeclineDetail = (): string => {
-      if (declines.size === 0) return '';
-      const formatted = [...declines.entries()]
+      const declineDetails = [...declines.entries()]
         .map(([peer, { code, message }]) => {
           const tag = `${peer.slice(-8)}→${code}`;
           return message ? `${tag} (${message})` : tag;
-        })
-        .join('; ');
+        });
+      const terminalDetails = [...terminalOutcomes.entries()]
+        .flatMap(([peer, outcome]) => {
+          if (outcome.kind === 'ack-validation') return [];
+          const code = outcome.kind === 'protocol-unsupported'
+            ? 'PROTOCOL_UNSUPPORTED'
+            : 'TRANSPORT_ERROR';
+          const tag = `${peer.slice(-8)}→${code}`;
+          return [outcome.message ? `${tag} (${outcome.message})` : tag];
+        });
+      const formatted = [...declineDetails, ...terminalDetails].join('; ');
+      if (!formatted) return '';
       return ` Declines: ${formatted}.`;
     };
 
@@ -825,34 +820,31 @@ export class ACKCollector {
             reason: ack.subscriptionSource ? `ACK:${ack.subscriptionSource}` : 'ACK',
           };
         }
-        const ackFailure = ackFailures.get(peerId);
-        if (ackFailure) {
+        const terminal = terminalOutcomes.get(peerId);
+        if (terminal?.kind === 'ack-validation') return {
+          peerId,
+          dialOk: true,
+          protocolSupported: true,
+          reason: terminal.reason,
+        };
+        if (terminal?.kind === 'protocol-unsupported') return {
+          peerId,
+          dialOk: true,
+          protocolSupported: false,
+          reason: 'PROTOCOL_UNSUPPORTED',
+        };
+        if (terminal?.kind === 'transport-error') return {
+          peerId,
+          dialOk: false,
+          reason: 'TRANSPORT_ERROR',
+        };
+        const decline = declines.get(peerId);
+        if (decline) {
           return {
             peerId,
             dialOk: true,
             protocolSupported: true,
-            reason: ackFailure.reason,
-          };
-        }
-        const decline = declines.get(peerId);
-        if (decline) {
-          const code = decline.code;
-          if (code === 'PROTOCOL_UNSUPPORTED') {
-            return {
-              peerId,
-              dialOk: true,
-              protocolSupported: false,
-              reason: 'PROTOCOL_UNSUPPORTED',
-            };
-          }
-          const reason = code === 'TRANSPORT_ERROR'
-            ? 'TRANSPORT_ERROR'
-            : `STORAGE_ACK_DECLINE:${code}`;
-          return {
-            peerId,
-            dialOk: code !== 'TRANSPORT_ERROR',
-            protocolSupported: code !== 'TRANSPORT_ERROR' ? true : undefined,
-            reason,
+            reason: `STORAGE_ACK_DECLINE:${decline.code}`,
           };
         }
         return { peerId, reason: 'no_response' };
@@ -955,7 +947,7 @@ export class ACKCollector {
             // prior entry is intentional — operators care most about
             // why the peer ultimately could not ACK.
             declines.set(peerId, { code, message: declineMessage });
-            ackFailures.delete(peerId);
+            terminalOutcomes.delete(peerId);
 
             // Transient declines (SWM replication catching up via
             // gossip) can resolve on a retry, so re-send with backoff
@@ -1087,7 +1079,7 @@ export class ACKCollector {
           // stale decline would still appear in `storage_ack_insufficient`
           // if quorum fails for unrelated reasons.
           declines.delete(peerId);
-          ackFailures.delete(peerId);
+          terminalOutcomes.delete(peerId);
 
           // PR5: capture the peer-reported ACK-provenance source if
           // present. Pre-PR5 cores never set the field; treat any
@@ -1114,12 +1106,13 @@ export class ACKCollector {
           };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          if (isStorageACKProtocolNegotiationFailure(err, ackProtocolId)) {
+          if (isProtocolUnsupportedError(err)) {
             getMetrics().ackPeerTotal.add(1, { result: 'protocol_unsupported' });
-            declines.set(peerId, {
-              code: 'PROTOCOL_UNSUPPORTED',
+            terminalOutcomes.set(peerId, {
+              kind: 'protocol-unsupported',
               message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
             });
+            declines.delete(peerId);
             log(
               `[ACKCollector] Peer ${peerId.slice(-8)} does not negotiate ${ackProtocolId}; `
                 + 'settling it without transport retries',
@@ -1161,10 +1154,11 @@ export class ACKCollector {
           // sanitized, bounded message here makes the terminal cause ride
           // `QuorumUnmetError.peerOutcomes` (reason `TRANSPORT_ERROR`) and
           // the `Declines:` detail on the aggregated message.
-          declines.set(peerId, {
-            code: 'TRANSPORT_ERROR',
+          terminalOutcomes.set(peerId, {
+            kind: 'transport-error',
             message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
           });
+          declines.delete(peerId);
           log(`[ACKCollector] Failed to get ACK from ${peerId.slice(-8)} after ${MAX_RETRIES} attempts: ${msg}`);
           return null;
         }

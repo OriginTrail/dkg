@@ -477,7 +477,7 @@ describe('graph-scoped finalization recovery admission', () => {
         contextGraphId: CONTEXT_GRAPH,
         sourcePeerId: '12D3KooWPublisher',
         candidate: parsedMessage(),
-      })).resolves.toBe(true);
+      })).resolves.toEqual({ status: 'handled' });
       expect(applyCalls).toBe(1);
       expect(await store.list()).toMatchObject([{
         state: 'REJECTED',
@@ -1006,7 +1006,7 @@ describe('graph-scoped finalization recovery admission', () => {
           contextGraphId: CONTEXT_GRAPH,
           sourcePeerId: '12D3KooWPublisher',
           candidate: parsedMessage(initialMessage),
-        })).resolves.toBe(true);
+        })).resolves.toEqual({ status: 'handled' });
         expect(await store.list()).toMatchObject([{
           state: 'SETTLED',
           generation: 0,
@@ -1136,7 +1136,7 @@ describe('graph-scoped finalization recovery admission', () => {
           contextGraphId: CONTEXT_GRAPH,
           sourcePeerId: '12D3KooWPublisher',
           candidate: parsedMessage(),
-        })).resolves.toBe(true);
+        })).resolves.toEqual({ status: 'handled' });
         expect(await store.list()).toMatchObject([{
           state: 'SETTLED',
           assertionVersion: '1',

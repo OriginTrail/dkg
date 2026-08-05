@@ -119,6 +119,64 @@ setInterval(() => {}, 60_000);
   await exit;
 }
 
+async function leaveCommittedV2MigrationInCrashedWal(path: string): Promise<void> {
+  const script = String.raw`
+const { DatabaseSync } = require('node:sqlite');
+const path = process.env.DKG_FINALIZATION_INBOX_PATH;
+const database = new DatabaseSync(path);
+database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0');
+database.exec(
+  "BEGIN IMMEDIATE;"
+  + "CREATE TABLE finalization_pending_v2 ("
+  + "key TEXT PRIMARY KEY NOT NULL,chain_id TEXT NOT NULL,context_graph_id TEXT NOT NULL,"
+  + "source_peer_id TEXT,ual TEXT NOT NULL,tx_hash TEXT NOT NULL,assertion_version TEXT NOT NULL,"
+  + "merkle_root TEXT NOT NULL,ka_id TEXT NOT NULL,batch_id TEXT NOT NULL,"
+  + "target_context_graph_id TEXT,envelope_sha256 TEXT NOT NULL,raw_envelope BLOB NOT NULL,"
+  + "created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL) STRICT;"
+  + "CREATE INDEX finalization_pending_time_v2 ON finalization_pending_v2(created_at,key);"
+  + "CREATE INDEX finalization_pending_graph_v2 ON finalization_pending_v2(context_graph_id,created_at);"
+  + "CREATE INDEX finalization_pending_peer_v2 ON finalization_pending_v2(source_peer_id,created_at);"
+  + "PRAGMA user_version=2;COMMIT;"
+);
+process.stdout.write('READY\n');
+setInterval(() => {}, 60_000);
+`;
+  const child = spawn(process.execPath, ['--experimental-sqlite', '-e', script], {
+    env: { ...process.env, DKG_FINALIZATION_INBOX_PATH: path },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  await new Promise<void>((resolveReady, rejectReady) => {
+    let stdout = '';
+    const timeout = setTimeout(
+      () => rejectReady(new Error(`finalization inbox migration child timed out: ${stderr}`)),
+      10_000,
+    );
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (!stdout.includes('READY\n')) return;
+      clearTimeout(timeout);
+      resolveReady();
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      rejectReady(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout);
+      rejectReady(new Error(
+        `finalization inbox migration child exited early: code=${code} signal=${signal} ${stderr}`,
+      ));
+    });
+  });
+  const exit = new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()));
+  child.kill('SIGKILL');
+  await exit;
+}
+
 describe('SQLite finalization recovery store', () => {
   it('migrates a v1 inbox in place without losing accepted entries', async () => {
     const directory = await temporaryDirectory();
@@ -147,6 +205,42 @@ describe('SQLite finalization recovery store', () => {
       ).get()?.name).toBe('finalization_pending_v2');
       schema.close();
       await migrated.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers a committed v2 migration when the main header still says v1', async () => {
+    const directory = await temporaryDirectory();
+    const databasePath = join(directory, FINALIZATION_INBOX_DATABASE_FILENAME);
+    try {
+      const initial = await openSqliteFinalizationRecoveryStore(directory);
+      await initial.receive(received());
+      await initial.close();
+
+      const legacy = new DatabaseSync(databasePath);
+      legacy.exec(`
+        DROP INDEX finalization_pending_peer_v2;
+        DROP INDEX finalization_pending_graph_v2;
+        DROP INDEX finalization_pending_time_v2;
+        DROP TABLE finalization_pending_v2;
+        PRAGMA user_version = 1;
+      `);
+      legacy.close();
+
+      await leaveCommittedV2MigrationInCrashedWal(databasePath);
+      expect(existsSync(`${databasePath}-wal`)).toBe(true);
+      expect((await readFile(databasePath)).readUInt32BE(60)).toBe(1);
+
+      const recovered = await openSqliteFinalizationRecoveryStore(directory);
+      expect(await recovered.list()).toMatchObject([{ key: 'entry-1', state: 'RECEIVED' }]);
+      const schema = new DatabaseSync(databasePath, { readOnly: true });
+      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(schema.prepare(
+        "SELECT name FROM sqlite_schema WHERE name = 'finalization_pending_v2'",
+      ).get()?.name).toBe('finalization_pending_v2');
+      schema.close();
+      await recovered.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -656,13 +750,66 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('keeps the durable deferred lane bounded and reports hard exhaustion', async () => {
+  it('enforces the global deferred-entry quota independently', async () => {
     const directory = await temporaryDirectory();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory, {
         maxEntries: 1,
         maxDeferredEntries: 1,
+        maxDeferredPerPeer: 10,
+        maxDeferredPerContextGraph: 10,
+      });
+      await store.receive(received());
+      await expect(store.receive(received({
+        key: 'entry-2',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      await expect(store.receive(received({
+        key: 'entry-3',
+        contextGraphId: 'other-graph',
+        sourcePeerId: '12D3KooWOtherPublisher',
+        txHash: `0x${'12'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'capacity' });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces the per-peer deferred quota independently', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        maxDeferredEntries: 10,
         maxDeferredPerPeer: 1,
+        maxDeferredPerContextGraph: 10,
+      });
+      await store.receive(received());
+      await expect(store.receive(received({
+        key: 'entry-2',
+        contextGraphId: 'graph-2',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      await expect(store.receive(received({
+        key: 'entry-3',
+        contextGraphId: 'graph-3',
+        txHash: `0x${'12'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'capacity' });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces the per-context-graph deferred quota independently', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        maxDeferredEntries: 10,
+        maxDeferredPerPeer: 10,
         maxDeferredPerContextGraph: 1,
       });
       await store.receive(received());
@@ -672,9 +819,36 @@ describe('SQLite finalization recovery store', () => {
       }))).resolves.toEqual({ status: 'pending' });
       await expect(store.receive(received({
         key: 'entry-3',
+        sourcePeerId: '12D3KooWOtherPublisher',
         txHash: `0x${'12'.repeat(32)}`,
       }))).resolves.toEqual({ status: 'capacity' });
-      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces the deferred-byte quota independently', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        maxDeferredEntries: 10,
+        maxDeferredBytes: 6,
+        maxDeferredPerPeer: 10,
+        maxDeferredPerContextGraph: 10,
+      });
+      await store.receive(received());
+      await expect(store.receive(received({
+        key: 'entry-2',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      await expect(store.receive(received({
+        key: 'entry-3',
+        contextGraphId: 'graph-3',
+        sourcePeerId: '12D3KooWOtherPublisher',
+        txHash: `0x${'12'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'capacity' });
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -864,6 +1038,42 @@ describe('SQLite finalization recovery store', () => {
         { key: 'verified', state: 'VERIFIED' },
         { key: 'trigger', state: 'RECEIVED' },
       ]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('expires stale deferred envelopes while preserving VERIFIED live evidence', async () => {
+    const directory = await temporaryDirectory();
+    let now = 1_000;
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        maxDeferredEntries: 1,
+        rawTtlMs: 100,
+        now: () => now,
+      });
+      await store.receive(received());
+      await store.markVerified('entry-1', 0, evidence());
+      await expect(store.receive(received({
+        key: 'stale-pending',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+
+      now += 101;
+      await expect(store.receive(received({
+        key: 'fresh-pending',
+        contextGraphId: 'fresh-graph',
+        sourcePeerId: '12D3KooWFreshPublisher',
+        txHash: `0x${'12'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+
+      expect(await store.list()).toMatchObject([{ key: 'entry-1', state: 'VERIFIED' }]);
+      expect(await store.health()).toMatchObject({
+        deferredEntries: 1,
+        deferredPayloadBytes: RAW.byteLength,
+      });
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

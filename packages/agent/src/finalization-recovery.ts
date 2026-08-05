@@ -36,6 +36,11 @@ export interface FinalizationRecoveryLiveInput {
   candidate: ParsedGraphScopedFinalization;
 }
 
+export type FinalizationRecoveryLiveProcessResult =
+  | { status: 'fallback' }
+  | { status: 'handled' }
+  | { status: 'retryable-capacity'; ual: string };
+
 export class FinalizationRecoveryCapacityError extends Error {
   readonly code = 'FINALIZATION_RECOVERY_CAPACITY';
   readonly retryable = true;
@@ -291,12 +296,12 @@ export class FinalizationRecovery<
 
   /**
    * Applies a live graph-scoped finalization behind the durable write-ahead
-   * boundary. Returns false when durable recovery is unavailable so the caller
+   * boundary. Returns fallback when durable recovery is unavailable so the caller
    * can preserve the legacy live-verification path.
    */
   async processLive(
     input: FinalizationRecoveryLiveInput,
-  ): Promise<boolean> {
+  ): Promise<FinalizationRecoveryLiveProcessResult> {
     const store = this.getStore();
     // The receipt API is intentionally optional on ChainAdapter. Preserve the
     // legacy live path when it is absent instead of admitting an envelope that
@@ -306,7 +311,7 @@ export class FinalizationRecovery<
       || !this.chain
       || this.chain.chainId === 'none'
       || !this.chain.resolveCanonicalFinalizationReceipt
-    ) return false;
+    ) return { status: 'fallback' };
     const key = finalizationRecoveryEntryKey({
       chainId: this.chain.chainId,
       contextGraphId: input.contextGraphId,
@@ -315,24 +320,27 @@ export class FinalizationRecovery<
     });
     return this.withEntryLock(key, async () => {
       const received = await this.receiveOutcome(input);
-      if (received.status === 'pending') return true;
+      if (received.status === 'pending') return { status: 'handled' };
       if (received.status === 'capacity') {
-        throw new FinalizationRecoveryCapacityError(input.candidate.scope.ual);
+        return {
+          status: 'retryable-capacity',
+          ual: input.candidate.scope.ual,
+        };
       }
       // Conflicts, corruption, and write failures fail closed and leave
       // Oxigraph untouched. Capacity is handled separately above because it is
       // retryable and must never look successfully consumed.
-      if (received.status === 'rejected') return true;
+      if (received.status === 'rejected') return { status: 'handled' };
       let { entry } = received;
       if (entry.state === 'SETTLED') {
         const revalidated = await this.revalidateSettled(input, entry);
-        if (!revalidated) return true;
+        if (!revalidated) return { status: 'handled' };
         entry = revalidated;
       }
       // Terminal rows remain audited and inert until retention removes them.
       // In particular, duplicate gossip must not revive an entry that exhausted
       // the autonomous retry budget.
-      if (!this.isLiveEntry(entry)) return true;
+      if (!this.isLiveEntry(entry)) return { status: 'handled' };
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
@@ -345,7 +353,7 @@ export class FinalizationRecovery<
           } else {
             await this.settleEntry(entry, outcome);
           }
-          return true;
+          return { status: 'handled' };
         } catch (error) {
           if (!this.materializer.isRetryableError(error)) throw error;
           if (attempt === 0) {
@@ -360,10 +368,10 @@ export class FinalizationRecovery<
             entry,
             'store scheduler remained busy',
           );
-          return true;
+          return { status: 'handled' };
         }
       }
-      return true;
+      return { status: 'handled' };
     });
   }
 
@@ -378,15 +386,13 @@ export class FinalizationRecovery<
     try {
       if (!this.chain || this.chain.chainId === 'none') return 0;
       let promoted = 0;
-      if (store.promotePending) {
-        try {
-          promoted = await store.promotePending(limit);
-        } catch (error) {
-          this.log.warn(
-            `Finalization recovery deferred-inbox promotion failed: `
-              + `${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+      try {
+        promoted = await store.promotePending(limit);
+      } catch (error) {
+        this.log.warn(
+          `Finalization recovery deferred-inbox promotion failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       let entries: FinalizationRecoveryEntry[];
       try {

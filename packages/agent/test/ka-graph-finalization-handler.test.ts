@@ -1369,6 +1369,7 @@ describe('graph-scoped finalization handler', () => {
         get closed() { return inbox!.closed; },
         get: inbox.get.bind(inbox),
         receive: inbox.receive.bind(inbox),
+        promotePending: inbox.promotePending.bind(inbox),
         recordTrustedPublisher: inbox.recordTrustedPublisher.bind(inbox),
         recordSettledPublisherUpgrade:
           inbox.recordSettledPublisherUpgrade.bind(inbox),
@@ -1446,6 +1447,7 @@ describe('graph-scoped finalization handler', () => {
           if (failureMode === 'write-failure') throw new Error('disk full');
           return { status: 'capacity' };
         },
+        promotePending: async () => 0,
         recordTrustedPublisher: async () => {
           throw new Error('recordTrustedPublisher must not run after failed admission');
         },
