@@ -170,6 +170,7 @@ export const SYSTEM_RECORD_DIGEST_DOMAINS_V1 = Object.freeze({
   conflictEvidence: 'dkg-system-record-conflict-evidence-object-v1\n',
   profileBundle: 'dkg-system-record-profile-bundle-v1\n',
   signedEnvelope: 'dkg-system-record-signed-envelope-v1\n',
+  signedRootDescriptorEnvelope: 'dkg-system-record-signed-root-descriptor-envelope-v1\n',
   rootCollisionEvidence: 'dkg-system-record-root-collision-evidence-v1\n',
   ownedSubjectTable: 'dkg-system-record-owned-subject-table-v1\n',
   appliedState: 'dkg-system-record-applied-state-v1\n',

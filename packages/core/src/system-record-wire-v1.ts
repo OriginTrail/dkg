@@ -8,20 +8,18 @@ import {
   computeAgentProfileConflictEvidenceDigestV1,
   computeAgentProfileForkResolutionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
-  digestSystemRecordBytesV1,
   parseCanonicalAgentProfileConflictEvidenceV1,
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
 } from './system-record-objects-v1.js';
+import { digestSystemRecordBytesV1 } from './system-record-codec-primitives-v1.js';
 import {
-  assertSignedSystemRecordRootDescriptorEnvelopeV1,
   computeSystemRecordInventoryInternalDigestV1,
   computeSystemRecordInventoryLeafDigestV1,
-  computeSystemRecordRootDescriptorDigestV1,
+  parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   parseCanonicalSystemRecordInventoryInternalObjectV1,
   parseCanonicalSystemRecordInventoryLeafObjectV1,
-  type SignedSystemRecordRootDescriptorEnvelopeV1,
 } from './system-record-inventory-v1.js';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
@@ -32,7 +30,6 @@ import {
   SYSTEM_RECORD_MAX_HEADER_BYTES,
   SYSTEM_RECORD_MAX_INVENTORY_CHILD_INDEX,
   SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH,
-  SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH,
   SYSTEM_RECORD_MAX_WIRE_REQUEST_JSON_DEPTH,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
   SYSTEM_RECORD_WIRE_VERSION_V1,
@@ -252,11 +249,7 @@ function computePayloadObjectDigestV1(
 ): Digest32V1 {
   switch (objectKind) {
     case 'root-descriptor': {
-      const parsed = parseCanonicalJson(payload, {
-        maxBytes: SYSTEM_RECORD_OBJECT_CAPS_V1['root-descriptor'], maxDepth: SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH,
-      });
-      assertSignedSystemRecordRootDescriptorEnvelopeV1(parsed);
-      const envelope = parsed as unknown as SignedSystemRecordRootDescriptorEnvelopeV1;
+      const envelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(payload);
       if (request.operation !== 'get-root'
         || envelope.object.kind !== request.kind
         || envelope.object.networkId !== request.networkId) {

@@ -5,11 +5,13 @@ import {
 } from './canonical-json.js';
 import {
   assertAgentRootV1,
-  assertCanonicalSystemRecordPeerIdV1,
-  digestSystemRecordBytesV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   type AgentProfileAppliedTransitionV1,
 } from './system-record-objects-v1.js';
+import {
+  assertCanonicalSystemRecordPeerIdV1,
+  digestSystemRecordBytesV1,
+} from './system-record-codec-primitives-v1.js';
 import { computeSystemRecordStableKeyHashV1 } from './system-record-inventory-v1.js';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,

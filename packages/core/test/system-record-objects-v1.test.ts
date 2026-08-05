@@ -55,6 +55,11 @@ import {
   SYSTEM_RECORD_MAX_ACTIVATION_BUNDLE_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_BUNDLE_BYTES,
 } from '../src/system-record-limits-v1.js';
+import {
+  canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
+  computeSystemRecordRootDescriptorDigestV1,
+} from '../src/system-record-inventory-v1.js';
+import { verifySystemRecordResponsePayloadV1 } from '../src/system-record-wire-v1.js';
 
 const DIGEST_A = `0x${'aa'.repeat(32)}` as const;
 const DIGEST_B = `0x${'bb'.repeat(32)}` as const;
@@ -598,6 +603,14 @@ describe('system-record owned subjects and verification closure', () => {
         bytes,
       );
     };
+    const activationLeaf = leaf(0);
+    expect(preflightSystemRecordCacheAccountingV1({
+      mode: 'activation', rows: [], inventoryLeaves: [activationLeaf],
+    })).toMatchObject({
+      activationInventoryLeaves: 1,
+      cohortPhysicalObjects: 1,
+      cohortPhysicalBytes: new TextEncoder().encode('leaf-0').byteLength,
+    });
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'activation', rows: [], inventoryLeaves: Array.from({ length: 5 }, (_, index) => leaf(index)),
     })).toThrow(/leaf bound/);
@@ -681,6 +694,38 @@ describe('system-record owned subjects and verification closure', () => {
     expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
       closure: [{ ...first, cacheDigest: DIGEST_C } as unknown as typeof first], metadata,
     }] })).toThrow(/not derived/);
+
+    const descriptor = {
+      objectType: 'root-descriptor', kind: 'agents', networkId: NETWORK,
+      epoch: '0', version: '0', treeRootDigest: DIGEST_A, totalRows: '0',
+    } as const;
+    const descriptorDigest = computeSystemRecordRootDescriptorDigestV1(descriptor);
+    const descriptorBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1({
+      object: descriptor,
+      objectDigest: descriptorDigest,
+      providerPeerId: fixture.peerId,
+      signatureSuite: 'ed25519-v1',
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const request = {
+      wireVersion: '1', requestId: '0123456789abcdef0123456789abcdef',
+      kind: 'agents', networkId: NETWORK, operation: 'get-root', payloadBytes: '0',
+    } as const;
+    const response = {
+      wireVersion: '1', requestId: request.requestId, status: 'ok',
+      objectKind: 'root-descriptor', objectDigest: descriptorDigest,
+      payloadBytes: String(descriptorBytes.byteLength),
+    } as const;
+    expect(() => verifySystemRecordResponsePayloadV1(request, response, descriptorBytes)).not.toThrow();
+    const descriptorReference = createSystemRecordCacheReferenceV1(
+      'root-descriptor', descriptorDigest, descriptorBytes,
+    );
+    expect(descriptorReference).toMatchObject({ digest: descriptorDigest });
+    expect(descriptorReference.cacheDigest).toBe(digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedRootDescriptorEnvelope,
+      descriptorBytes,
+    ));
+    expect(descriptorReference.cacheDigest).not.toBe(descriptorReference.digest);
   });
 
   it('derives a complete raw-artifact closure and fails closed on a missing dependency', async () => {

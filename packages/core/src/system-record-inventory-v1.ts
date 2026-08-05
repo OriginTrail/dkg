@@ -13,7 +13,7 @@ import {
   decodeUnpaddedBase64UrlV1,
   digestSystemRecordBytesV1,
   type SystemRecordPeerPublicKeyV1,
-} from './system-record-objects-v1.js';
+} from './system-record-codec-primitives-v1.js';
 import {
   SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
@@ -499,6 +499,15 @@ export function canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(
     validateSignedRootDescriptor(value) as unknown as CanonicalJsonValue,
     { maxBytes: SYSTEM_RECORD_OBJECT_CAPS_V1['root-descriptor'] },
   );
+}
+
+export function parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(
+  input: string | Uint8Array,
+): SignedSystemRecordRootDescriptorEnvelopeV1 {
+  return validateSignedRootDescriptor(parseCanonicalJson(input, {
+    maxBytes: SYSTEM_RECORD_OBJECT_CAPS_V1['root-descriptor'],
+    maxDepth: SYSTEM_RECORD_MAX_FLAT_JSON_DEPTH,
+  }));
 }
 
 export function buildSystemRecordProviderSignatureMessageV1(

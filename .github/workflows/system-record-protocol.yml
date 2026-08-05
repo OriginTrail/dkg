@@ -69,6 +69,9 @@ jobs:
       - name: Test system-record protocol core
         run: pnpm --filter @origintrail-official/dkg-core test:system-record
 
+      - name: Smoke-test published system-record subpath
+        run: pnpm --filter @origintrail-official/dkg-core test:system-record-export
+
       - name: Test exhaustive system-record inventory publication
         run: pnpm --filter @origintrail-official/dkg-core test:system-record-exhaustive
 

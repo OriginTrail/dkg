@@ -21,6 +21,16 @@ import {
 import { keccak256 } from './crypto/keccak.js';
 import { workspaceAgentEncryptionKeyId } from './crypto/workspace-encryption.js';
 import {
+  assertCanonicalSystemRecordPeerIdV1,
+  decodeUnpaddedBase64UrlV1,
+  digestSystemRecordBytesV1,
+  failSystemRecordObjectV1 as fail,
+  SystemRecordObjectErrorV1,
+  type SystemRecordObjectErrorCodeV1,
+  type SystemRecordPeerPublicKeyV1,
+} from './system-record-codec-primitives-v1.js';
+import { parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1 } from './system-record-inventory-v1.js';
+import {
   SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
@@ -82,34 +92,18 @@ import {
 import { snapshotExactDataRecord } from './sync-wire-objects.js';
 
 const UTF8 = new TextEncoder();
-const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const RFC3339_SECONDS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/;
 const AGENT_ROOT = /^did:dkg:agent:(0x[0-9a-f]{40})$/;
 const REQUEST_RECORD_KIND = SYSTEM_RECORD_KIND_V1;
 
 export type CanonicalRfc3339SecondsV1 = string & { readonly __rfc3339SecondsV1: true };
-export type SystemRecordPeerPublicKeyV1 = string & { readonly __peerPublicKeyV1: true };
-
-export type SystemRecordObjectErrorCodeV1 =
-  | 'system-record-schema'
-  | 'system-record-scalar'
-  | 'system-record-binding'
-  | 'system-record-history'
-  | 'system-record-signature'
-  | 'system-record-order'
-  | 'system-record-limit'
-  | 'system-record-closure';
-
-export class SystemRecordObjectErrorV1 extends Error {
-  constructor(
-    readonly code: SystemRecordObjectErrorCodeV1,
-    message: string,
-    options: ErrorOptions = {},
-  ) {
-    super(`[${code}] ${message}`, options);
-    this.name = 'SystemRecordObjectErrorV1';
-  }
-}
+export {
+  assertCanonicalSystemRecordPeerIdV1,
+  decodeUnpaddedBase64UrlV1,
+  digestSystemRecordBytesV1,
+  SystemRecordObjectErrorV1,
+};
+export type { SystemRecordObjectErrorCodeV1, SystemRecordPeerPublicKeyV1 };
 
 export interface AgentProfileHeadCommonV1 {
   readonly objectType: 'agent-profile-head';
@@ -268,21 +262,6 @@ export function parseCanonicalRfc3339SecondsV1(value: CanonicalRfc3339SecondsV1)
   return Date.parse(value);
 }
 
-export function decodeUnpaddedBase64UrlV1(
-  value: unknown,
-  expectedBytes: number,
-  label: string,
-): Uint8Array {
-  if (typeof value !== 'string' || value.length === 0 || value.includes('=') || !BASE64URL.test(value)) {
-    fail('system-record-scalar', `${label} must be unpadded base64url`);
-  }
-  const bytes = Uint8Array.from(Buffer.from(value, 'base64url'));
-  if (bytes.byteLength !== expectedBytes || Buffer.from(bytes).toString('base64url') !== value) {
-    fail('system-record-scalar', `${label} must canonically encode exactly ${expectedBytes} bytes`);
-  }
-  return bytes;
-}
-
 export function assertSystemRecordPeerBindingV1(
   peerId: unknown,
   peerPublicKey: unknown,
@@ -318,13 +297,6 @@ export function assertAgentRootV1(value: unknown, issuer?: string): asserts valu
   if (issuer !== undefined && value !== `did:dkg:agent:${issuer}`) {
     fail('system-record-binding', 'agent root does not match its EVM issuer');
   }
-}
-
-export function digestSystemRecordBytesV1(domain: string, bytes: Uint8Array): Digest32V1 {
-  const input = new Uint8Array(UTF8.encode(domain).byteLength + bytes.byteLength);
-  input.set(UTF8.encode(domain));
-  input.set(bytes, UTF8.encode(domain).byteLength);
-  return (`0x${Buffer.from(sha256(input)).toString('hex')}`) as Digest32V1;
 }
 
 export function digestSystemRecordJsonV1(
@@ -2381,10 +2353,16 @@ function deriveCacheReferenceArtifactIdentitiesV1(
     const envelope = parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1(canonicalBytes);
     semanticDigest = envelope.objectDigest;
     cacheDigest = computeSignedSystemRecordEnvelopeDigestV1(envelope);
+  } else if (objectKind === 'root-descriptor') {
+    const envelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(canonicalBytes);
+    semanticDigest = envelope.objectDigest;
+    cacheDigest = digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedRootDescriptorEnvelope,
+      canonicalBytes,
+    );
   } else {
     const domains: Record<Exclude<SystemRecordObjectKindV1,
-      'agent-profile-head' | 'authority-transition' | 'fork-resolution'>, string> = {
-      'root-descriptor': SYSTEM_RECORD_DIGEST_DOMAINS_V1.rootDescriptor,
+      'agent-profile-head' | 'authority-transition' | 'fork-resolution' | 'root-descriptor'>, string> = {
       'inventory-internal': SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryInternal,
       'inventory-leaf': SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf,
       'conflict-evidence': SYSTEM_RECORD_DIGEST_DOMAINS_V1.conflictEvidence,
@@ -2548,17 +2526,6 @@ function assertNetwork(value: unknown): asserts value is NetworkIdV1 {
   }
 }
 
-export function assertCanonicalSystemRecordPeerIdV1(value: unknown): asserts value is string {
-  if (typeof value !== 'string' || UTF8.encode(value).byteLength > SYSTEM_RECORD_MAX_PEER_ID_BYTES) {
-    fail('system-record-scalar', 'peerId is outside its byte bound');
-  }
-  try {
-    if (peerIdFromString(value).toString() !== value) throw new Error('noncanonical');
-  } catch (cause) {
-    fail('system-record-scalar', 'peerId is not canonical', cause);
-  }
-}
-
 function address(value: unknown, label: string): asserts value is EvmAddressV1 {
   try { assertCanonicalEvmAddress(value, label); } catch (cause) {
     fail('system-record-scalar', `${label} is invalid`, cause);
@@ -2623,12 +2590,4 @@ function concatBytes(...values: readonly Uint8Array[]): Uint8Array {
     offset += value.byteLength;
   }
   return result;
-}
-
-function fail(
-  code: SystemRecordObjectErrorCodeV1,
-  message: string,
-  cause?: unknown,
-): never {
-  throw new SystemRecordObjectErrorV1(code, message, cause === undefined ? {} : { cause });
 }
