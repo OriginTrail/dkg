@@ -587,11 +587,34 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       };
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
-        // No descriptors, no materializer, or no store means nothing is
-        // written, so this ref stays UNRESOLVED. Returning without recording it
-        // is the point: a fetched-but-unwritten ref must never look like
-        // progress to the continuation loop.
-        if (!descriptors?.length || !snapshotMaterializer || !publicSnapshotStore) return;
+        // Missing WIRING means nothing CAN be written, so the ref stays
+        // UNRESOLVED: a fetched-but-unwritten ref must never look like progress
+        // to the continuation loop.
+        if (!snapshotMaterializer || !publicSnapshotStore) return;
+        // No descriptors is a DIFFERENT case, and collapsing the two made a
+        // fully-synced peer permanently capable.
+        //
+        // The denominator (`snapshotsTotal`) counts refs in the peer's manifest;
+        // the numerator counts refs we materialized. A manifest ref that this
+        // round's verified metadata does not describe — a superseded
+        // share-operation row, say — has no descriptor, so it could never enter
+        // `materializedRefs`. `snapshotsResolved < snapshotsTotal` then held
+        // FOREVER: `capablePeersForNextPass` kept calling that peer capable, and
+        // every future catch-up job spent its whole pass budget re-walking a
+        // graph that was already complete, at O(KA size) per cached ref.
+        //
+        // When the manifest is complete, "no descriptor" means there is genuinely
+        // nothing to write for this ref, so it is resolved by vacuity. Gated on
+        // `manifestComplete` because a truncated meta phase never parsed
+        // descriptors at all — there "no descriptor" means "not known yet", and
+        // counting it would inflate coverage for a peer that advertised nothing.
+        if (!descriptors?.length) {
+          if (manifestComplete) {
+            materializedRefs.add(snapshotRef);
+            materializedRefsForCg = materializedRefs.size;
+          }
+          return;
+        }
         let refMaterialized = true;
         for (const descriptor of descriptors) {
           const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;

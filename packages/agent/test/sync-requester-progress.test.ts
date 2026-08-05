@@ -1608,6 +1608,160 @@ describe('public SWM snapshot coverage (#2050)', () => {
       materializationFailures: 0,
     });
   });
+
+  it('counts a complete manifest ref with NO descriptor as resolved, so a fully synced peer stops being capable', async () => {
+    // The defect behind this row is NON-TERMINATION, not a cosmetically wrong
+    // number. `snapshotsTotal` counts refs in the PEER'S MANIFEST
+    // (`collectPublicSnapshotMetadata` over the round's verified meta);
+    // `snapshotsResolved` counts refs this node MATERIALIZED. A manifest ref
+    // that the round's verified metadata does not DESCRIBE has no descriptor,
+    // so it could never enter `materializedRefs` — and `snapshotsResolved <
+    // snapshotsTotal` is exactly the predicate `capablePeersForNextPass`
+    // (packages/cli/src/catchup-runner-worker-impl.ts) uses to decide a peer
+    // still owes us Knowledge Assets. It therefore held FOREVER: every later
+    // catch-up job spent its whole pass budget re-walking a Context Graph that
+    // was already complete, at O(KA size) per cached ref, and no number of
+    // passes could ever clear it.
+    //
+    // THE MANIFEST MUST BE MIXED, and that is the whole difficulty of this
+    // fixture. `onSnapshotReady` is wired only when `snapshotDescriptorsByRef`
+    // is non-empty, so a manifest in which NO ref has a descriptor never calls
+    // `materializeReadySnapshot` at all: it would report `0/N` for a reason
+    // that has nothing to do with the code under test, and would read green
+    // both with the fix and without it. At least one described ref is what
+    // opens the hook the undescribed ref then has to travel through.
+    //
+    // The two halves are the real production shape rather than two invented
+    // rows: ONE Knowledge Asset shared TWICE. `replaceHeadMetadata` is
+    // head-subject scoped, so a peer that re-shares a KA keeps the SUPERSEDED
+    // share-operation row in its metadata graph while its head names the
+    // current operation. `parseGraphScopedSwmRecoveryDescriptors` only visits
+    // operation subjects a head names, so the superseded row yields no
+    // descriptor — while still carrying `publicQuadsDigest`/`publicQuadsCount`,
+    // which is all `collectPublicSnapshotMetadata` needs to put it in the
+    // manifest. That asymmetry between the two readers IS the bug.
+    //
+    // Only the CURRENT share's head rows are kept. Both versions share one head
+    // subject (`<ual>#dkg-swm-head`), so including both would merge their rows
+    // and `requirePositiveInteger(assertionVersion)` would throw; the surrounding
+    // catch clears ALL descriptors and materialization is silently disabled for
+    // the whole Context Graph — the fixture would stop testing rather than fail.
+    //
+    // Both halves come from ONE `swmFixtures(COVERAGE_CG)` call, so every
+    // metadata-graph URI agrees with the Context Graph under sync by
+    // construction instead of by a hand-matched constant.
+    //
+    // What this row does NOT pin: the `manifestComplete` half of the gate. A
+    // truncated meta phase parses no descriptors at all, so "no descriptor"
+    // there means "not known yet" and must NOT count — that boundary needs its
+    // own row and is deliberately not smuggled into this one.
+    const { share } = swmFixtures(COVERAGE_CG);
+    const RESHARED_UAL = 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/1';
+    const superseded = share({
+      version: 1, operationId: 'op-superseded', marker: 'superseded', ual: RESHARED_UAL, payloadCount: 2,
+    });
+    const current = share({
+      version: 2, operationId: 'op-current', marker: 'current', ual: RESHARED_UAL, payloadCount: 3,
+    });
+    const meta = [
+      ...current.meta,
+      ...superseded.meta.filter((quadRow) => quadRow.subject === superseded.operationSubject),
+    ];
+
+    // Both snapshots already cached: this is the state of a node whose earlier
+    // passes did the work. Distinct payload sizes give distinct digests, so the
+    // manifest really carries two refs (see the `snapshotsTotal` note below).
+    const cached = new Map<string, Quad[]>([
+      [current.digest, current.payload],
+      [superseded.digest, superseded.payload],
+    ]);
+    const snapshotFetches: string[] = [];
+
+    // A real store and the real materializer, for the same reason T14 uses
+    // them: a hand-rolled stub that silently fails to materialize reproduces a
+    // shortfall for a NEW reason and looks identical to the defect under test.
+    const store = new OxigraphStore();
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx,
+        remotePeerId: 'peer-resharing-5a5a5a5a',
+        contextGraphIds: [COVERAGE_CG],
+        createContextGraphSyncDeadline: () => Date.now() + 60_000,
+        fetchSyncPages: async (
+          _ctx: OperationContext,
+          _peer: string,
+          contextGraphId: string,
+          _includeSharedMemory: boolean,
+          phase: string,
+          _graph: string,
+          _deadline: number,
+          snapshotRef?: string,
+        ) => {
+          if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
+          return pageResult(contextGraphId, phase);
+        },
+        processSharedMemoryBatch: async () => ({
+          ...sharedMemoryProcessResult(),
+          emptyResponses: 0,
+          verifiedMeta: meta,
+          totalFetchedMetaQuads: meta.length,
+        }),
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads: Quad[]) => { await store.insert(quads); },
+        snapshotMaterializer: materializer,
+        publicSnapshotStore: {
+          getSnapshot: async (ref: string) => cached.get(ref) ?? null,
+          putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map(),
+        logInfo: noop,
+        logWarn: noop,
+        logDebug: noop,
+      });
+
+      // Fixture integrity first, so a broken fixture names itself instead of
+      // surfacing as an unexplained count: both refs are pre-cached, so neither
+      // may touch the transport. A digest that stopped matching would turn a
+      // cache hit into a fetch and quietly change what the row measures.
+      expect(snapshotFetches).toEqual([]);
+      // The DESCRIBED half genuinely WROTE — which is what makes this manifest
+      // mixed rather than two vacuous resolutions. If the described half ever
+      // stopped materializing (a fixture the parser silently rejects, a
+      // `replaceGraph` that no-ops, wiring that drops the materializer), the
+      // coverage record could still read `2/2` by counting two undescribed refs
+      // while nothing at all was written; the counters alone cannot see that.
+      // `verifiedData` is empty here, so in-lock materialization is the only
+      // possible source of data triples.
+      expect(summary.insertedDataTriples).toBeGreaterThanOrEqual(current.payload.length);
+      expect(summary.failedPhases).toBe(0);
+      // Pre-fix this record was `1/2` with `missingCount: 1` — a peer that owed
+      // this node nothing, reported as still owing it one Knowledge Asset, on
+      // every pass forever. `snapshotsTotal: 2` doubles as the anti-vacuity
+      // guard: if the two payloads ever collided on a digest, `byRef` would fold
+      // them into a single ref and the manifest would stop being mixed while the
+      // row went on passing.
+      expect(summary.swmCoverage).toEqual({
+        contextGraphId: COVERAGE_CG,
+        peerIdSuffix: '5a5a5a5a',
+        snapshotsResolved: 2,
+        snapshotsTotal: 2,
+        manifestComplete: true,
+        missingCount: 0,
+        missingSample: [],
+        materializationFailures: 0,
+      });
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
 });
 
 /**
