@@ -19,7 +19,7 @@
     "redactionPolicy": "V1: wallet roots, peer IDs, and referenced key IDs replaced by deterministic fixture-local ordinal aliases that preserve source lexicographic rank; record/root aliases are mutually bound; only exact allowlisted profile subject shapes and predicates retained; unknown or underived nested subjects rejected before serialization; literal values omitted but UTF-8 byte lengths retained; aliases and per-record shape/byte counts may be correlated with the public agents graph; no tokens, keys, multiaddrs, names, raw identifiers, or hashes of identifiers stored",
     "agentsMetaExcluded": true,
     "profileEvidenceSha256": "sha256:6530bfcf954044d835b078821906f4024fbbf0c9018b5bf9a151e1ed5707878a",
-    "manifestSha256": "sha256:58ad6fe0d5522a253abcdc2b6bdda9ddd1bded3f29504e0a3d36963cbf2519b0"
+    "manifestSha256": "sha256:40da6bd7f3d840c961ed1085f60ab4f938e9c3b5e8ca890354dd0eeffd17815b"
   },
   "staleThresholdMs": 86400000,
   "systemSync": [
@@ -27974,10 +27974,11 @@
     }
   ],
   "loadMeasurement": {
-    "serviceRecordsPerMinuteP10": null,
-    "serviceBytesPerMinuteP10": null,
-    "arrivalRecordsPerMinuteP99": null,
-    "arrivalBytesPerMinuteP99": null,
-    "backlogSlope": null
+    "intervalSeconds": 60,
+    "captureId": null,
+    "requesterSource": null,
+    "providerSource": null,
+    "pairedIntervals": null,
+    "captureDigest": null
   }
 }

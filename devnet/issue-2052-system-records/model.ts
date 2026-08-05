@@ -27,9 +27,10 @@ export {
 export type { OwnedProfileSubjectKindV1 } from './subjects.js';
 
 export const SYSTEM_RECORD_LIMITS_V1 = Object.freeze({
-  activationRecords: 1_024,
+  activationRecords: 512,
   activationBundleBytes: 128 * 1024 * 1024,
-  activationLeaves: 8,
+  activationVerificationClosureBytes: 256 * 1024 * 1024,
+  activationLeaves: 4,
   hardRecords: 262_144,
   leafMinRows: 128,
   leafMaxRows: 512,
@@ -43,11 +44,21 @@ export const SYSTEM_RECORD_LIMITS_V1 = Object.freeze({
   maxOwnedSubjects: 2_048,
   maxUpdateObjects: 6,
   maxUpdateBytes: 1024 * 1024,
-  serviceRecordsPerMinuteP10: 120,
-  serviceBytesPerMinuteP10: 24 * 1024 * 1024,
-  arrivalRecordsPerMinuteP99: 60,
-  arrivalBytesPerMinuteP99: 8 * 1024 * 1024,
+  serviceRecordsPerMinuteP10: 60,
+  closureServiceBytesPerMinuteP10: 24 * 1024 * 1024,
+  arrivalRecordsPerMinuteP99: 16,
+  closureArrivalBytesPerMinuteP99: 8 * 1024 * 1024,
   maxDrainMinutes: 18,
+  requesterRequestsPerSlice: 12,
+  requesterSliceSeconds: 3,
+  providerRequestRefillPerMinute: 256,
+  providerResponseBytesRefillPerMinute: 32 * 1024 * 1024,
+  minimumRequestsPerActiveRecord: 3,
+  requesterOverheadRequestsPerMinute: 48,
+  providerOverheadRequestsPerMinute: 64,
+  loadIntervalSeconds: 60,
+  minimumLoadIntervals: 30,
+  maximumLoadIntervals: 180,
 } as const);
 
 export interface RedactedProfileQuadV1 {
@@ -82,6 +93,60 @@ export interface SystemSyncObservationV1 {
   readonly failedAttempts: number | null;
   readonly verifiedTriples: number;
   readonly insertedTriples: number | null;
+}
+
+export interface PairedLoadIntervalV1 {
+  readonly ordinal: number;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly requesterSampleDigest: string;
+  readonly providerSampleDigest: string;
+  readonly cacheState: 'cold' | 'warm';
+  readonly servicedRecords: number;
+  readonly servicedClosureBytes: number;
+  readonly arrivedRecords: number;
+  readonly arrivedClosureBytes: number;
+  readonly requesterExactRequests: number;
+  readonly providerExactRequests: number;
+  readonly backlogDeltaRecords: number;
+}
+
+export interface LoadIntervalIdentityV1 {
+  readonly ordinal: number;
+  readonly startedAt: string;
+  readonly endedAt: string;
+}
+
+export interface RequesterLoadSampleV1 extends LoadIntervalIdentityV1 {
+  readonly cacheState: 'cold' | 'warm';
+  readonly servicedRecords: number;
+  readonly servicedClosureBytes: number;
+  readonly arrivedRecords: number;
+  readonly arrivedClosureBytes: number;
+  readonly requesterExactRequests: number;
+  readonly backlogDeltaRecords: number;
+}
+
+export interface ProviderLoadSampleV1 extends LoadIntervalIdentityV1 {
+  readonly providerExactRequests: number;
+}
+
+export interface LoadCaptureExpectationV1 {
+  readonly captureId: string;
+  readonly requesterSource: string;
+  readonly providerSource: string;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly requesterSampleDigests: readonly string[];
+  readonly providerSampleDigests: readonly string[];
+}
+
+export interface LoadEnvelopeEvidenceV1 {
+  readonly schemaVersion: 1;
+  readonly fixtureId: string;
+  readonly fixtureManifestSha256: string;
+  readonly activeVerificationClosureBytes: number;
+  readonly capture: LoadCaptureExpectationV1;
 }
 
 export interface CharacterizationFixtureV1 {
@@ -122,11 +187,12 @@ export interface CharacterizationFixtureV1 {
   };
   readonly profiles: readonly RedactedProfileEvidenceV1[];
   readonly loadMeasurement: {
-    readonly serviceRecordsPerMinuteP10: number | null;
-    readonly serviceBytesPerMinuteP10: number | null;
-    readonly arrivalRecordsPerMinuteP99: number | null;
-    readonly arrivalBytesPerMinuteP99: number | null;
-    readonly backlogSlope: number | null;
+    readonly intervalSeconds: 60;
+    readonly captureId: string | null;
+    readonly requesterSource: string | null;
+    readonly providerSource: string | null;
+    readonly pairedIntervals: readonly PairedLoadIntervalV1[] | null;
+    readonly captureDigest: string | null;
   };
 }
 
@@ -150,8 +216,20 @@ export interface BTreeBoundsV1 {
 export interface LoadEnvelopeVerdictV1 {
   readonly eligible: boolean;
   readonly recordDrainMinutes: number | null;
-  readonly byteDrainMinutes: number | null;
+  readonly closureDrainMinutes: number | null;
   readonly failures: readonly string[];
+}
+
+export interface RequestBudgetVerdictV1 {
+  readonly serviceRequestsPerMinute: number;
+  readonly requesterRequestsPerMinute: number;
+  readonly providerRequestsPerMinute: number;
+  readonly requesterHeadroomPerMinute: number;
+  readonly providerHeadroomPerMinute: number;
+  readonly requesterActivationCeilingPerMinute: number;
+  readonly providerActivationCeilingPerMinute: number;
+  readonly providerByteHeadroomPerMinute: number;
+  readonly feasible: boolean;
 }
 
 export interface CharacterizationResultV1 {
@@ -188,6 +266,30 @@ export function assertEvidenceSourceUrlV1(value: string): void {
   if (!/^https:\/\/github\.com\/OriginTrail\/dkg\/issues\/2052(?:#issuecomment-[1-9][0-9]*)?$/.test(value)) {
     throw new TypeError('evidence source URL is outside the fixed public allowlist');
   }
+}
+
+export function parseLoadEnvelopeEvidenceV1(input: unknown): LoadEnvelopeEvidenceV1 {
+  if (!isRecord(input) || input.schemaVersion !== 1) {
+    throw new TypeError('load-envelope evidence must be a V1 object');
+  }
+  assertExactKeys(input, [
+    'schemaVersion',
+    'fixtureId',
+    'fixtureManifestSha256',
+    'activeVerificationClosureBytes',
+    'capture',
+  ], 'load-envelope evidence');
+  if (typeof input.fixtureId !== 'string' || input.fixtureId.length === 0) {
+    throw new TypeError('load-envelope evidence fixtureId must be non-empty');
+  }
+  assertSha256(input.fixtureManifestSha256, 'load-envelope evidence fixtureManifestSha256');
+  assertFiniteInteger(
+    input.activeVerificationClosureBytes,
+    'load-envelope evidence activeVerificationClosureBytes',
+    0,
+  );
+  assertLoadCaptureExpectation(input.capture);
+  return input as unknown as LoadEnvelopeEvidenceV1;
 }
 
 export function parseCharacterizationFixtureV1(input: unknown): CharacterizationFixtureV1 {
@@ -265,7 +367,18 @@ export function characterizationSourceFromFixtureV1(
   return { ...fixture, provenance };
 }
 
-export function characterizeFixtureV1(fixture: CharacterizationFixtureV1): CharacterizationResultV1 {
+export function characterizeFixtureV1(
+  fixture: CharacterizationFixtureV1,
+  loadEnvelopeEvidence: LoadEnvelopeEvidenceV1 | null = null,
+): CharacterizationResultV1 {
+  if (loadEnvelopeEvidence !== null) {
+    if (
+      loadEnvelopeEvidence.fixtureId !== fixture.fixtureId
+      || loadEnvelopeEvidence.fixtureManifestSha256 !== fixture.provenance.manifestSha256
+    ) {
+      throw new TypeError('load-envelope evidence does not bind the exact fixture');
+    }
+  }
   const active = [...fixture.profiles];
 
   const invalidOwnedSubjects: string[] = [];
@@ -321,9 +434,11 @@ export function characterizeFixtureV1(fixture: CharacterizationFixtureV1): Chara
     loadEnvelope: evaluateLoadEnvelopeV1({
       activeRecords: fixture.profilePopulation.activeProfiles,
       activeBundleBytes,
+      activeVerificationClosureBytes:
+        loadEnvelopeEvidence?.activeVerificationClosureBytes ?? null,
       inventoryLeaves: referenceBTreeBoundsV1(fixture.profilePopulation.activeProfiles).maximumLeaves,
       ...fixture.loadMeasurement,
-    }),
+    }, loadEnvelopeEvidence?.capture ?? null),
     systemSync: fixture.systemSync,
   };
 }
@@ -339,7 +454,7 @@ export function referenceBTreeBoundsV1(records: number): BTreeBoundsV1 {
     : Math.floor(records / SYSTEM_RECORD_LIMITS_V1.leafMinRows);
   const maximumHeight = maximumLeaves <= 1
     ? 1
-    : maximumLeaves < 2 * SYSTEM_RECORD_LIMITS_V1.internalMinEntries
+    : maximumLeaves <= SYSTEM_RECORD_LIMITS_V1.internalMaxEntries
       ? 2
       : 3;
   if (maximumLeaves > 2_048 || maximumHeight > SYSTEM_RECORD_LIMITS_V1.maxTreeHeight) {
@@ -348,42 +463,92 @@ export function referenceBTreeBoundsV1(records: number): BTreeBoundsV1 {
   return { records, minimumLeaves, maximumLeaves, maximumHeight };
 }
 
-/** Reference size of the compact leaf row; signed heads are exact-fetched by digest. */
-export function referenceInventoryRowEncodedBytesV1(peerIdBytes: number): number {
+/** Reference size of the compact leaf row; signed objects are exact-fetched by digest. */
+export function referenceInventoryRowEncodedBytesV1(
+  peerIdBytes: number,
+  hasConflictEvidence = false,
+): number {
   assertFiniteInteger(
     peerIdBytes,
     'peerIdBytes',
     1,
     SYSTEM_RECORD_LIMITS_V1.maxPeerIdBytes,
   );
-  const bytes = 1 + 32 + 2 + peerIdBytes + 8 + 8 + 32 + 1;
+  const bytes = 1 + 32 + 2 + peerIdBytes + 8 + 8 + 32
+    + (hasConflictEvidence ? 32 : 0) + 1;
   if (bytes > SYSTEM_RECORD_LIMITS_V1.maxRowBytes) {
     throw new RangeError('reference inventory row exceeds the V1 encoded row limit');
   }
   return bytes;
 }
 
+/** Algebraic floor proving the frozen service target fits both single-stream budgets. */
+export function referenceRequestBudgetV1(): RequestBudgetVerdictV1 {
+  const serviceRequestsPerMinute = SYSTEM_RECORD_LIMITS_V1.serviceRecordsPerMinuteP10
+    * SYSTEM_RECORD_LIMITS_V1.minimumRequestsPerActiveRecord;
+  const requesterRequestsPerMinute = SYSTEM_RECORD_LIMITS_V1.requesterRequestsPerSlice
+    * (60 / SYSTEM_RECORD_LIMITS_V1.requesterSliceSeconds);
+  const providerRequestsPerMinute = SYSTEM_RECORD_LIMITS_V1.providerRequestRefillPerMinute;
+  const requesterHeadroomPerMinute = requesterRequestsPerMinute - serviceRequestsPerMinute;
+  const providerHeadroomPerMinute = providerRequestsPerMinute - serviceRequestsPerMinute;
+  const requesterActivationCeilingPerMinute = serviceRequestsPerMinute
+    + SYSTEM_RECORD_LIMITS_V1.requesterOverheadRequestsPerMinute;
+  const providerActivationCeilingPerMinute = serviceRequestsPerMinute
+    + SYSTEM_RECORD_LIMITS_V1.providerOverheadRequestsPerMinute;
+  const providerByteHeadroomPerMinute =
+    SYSTEM_RECORD_LIMITS_V1.providerResponseBytesRefillPerMinute
+    - SYSTEM_RECORD_LIMITS_V1.closureServiceBytesPerMinuteP10;
+  return {
+    serviceRequestsPerMinute,
+    requesterRequestsPerMinute,
+    providerRequestsPerMinute,
+    requesterHeadroomPerMinute,
+    providerHeadroomPerMinute,
+    requesterActivationCeilingPerMinute,
+    providerActivationCeilingPerMinute,
+    providerByteHeadroomPerMinute,
+    feasible:
+      requesterActivationCeilingPerMinute < requesterRequestsPerMinute
+      && providerActivationCeilingPerMinute < providerRequestsPerMinute
+      && providerByteHeadroomPerMinute > 0,
+  };
+}
+
 export function evaluateLoadEnvelopeV1(input: {
   readonly activeRecords: number;
   readonly activeBundleBytes: number | null;
+  readonly activeVerificationClosureBytes: number | null;
   readonly inventoryLeaves: number;
-  readonly serviceRecordsPerMinuteP10: number | null;
-  readonly serviceBytesPerMinuteP10: number | null;
-  readonly arrivalRecordsPerMinuteP99: number | null;
-  readonly arrivalBytesPerMinuteP99: number | null;
-  readonly backlogSlope: number | null;
-}): LoadEnvelopeVerdictV1 {
+  readonly intervalSeconds: 60;
+  readonly captureId: string | null;
+  readonly requesterSource: string | null;
+  readonly providerSource: string | null;
+  readonly pairedIntervals: readonly PairedLoadIntervalV1[] | null;
+  readonly captureDigest: string | null;
+}, expectedCapture: LoadCaptureExpectationV1 | null): LoadEnvelopeVerdictV1 {
+  if (!referenceRequestBudgetV1().feasible) {
+    throw new RangeError('frozen request budgets cannot satisfy the activation service floor');
+  }
   assertFiniteInteger(input.activeRecords, 'activeRecords', 0, SYSTEM_RECORD_LIMITS_V1.hardRecords);
   if (input.activeBundleBytes !== null) {
     assertFiniteInteger(input.activeBundleBytes, 'activeBundleBytes', 0);
   }
+  if (input.activeVerificationClosureBytes !== null) {
+    assertFiniteInteger(
+      input.activeVerificationClosureBytes,
+      'activeVerificationClosureBytes',
+      0,
+    );
+  }
   assertFiniteInteger(input.inventoryLeaves, 'inventoryLeaves', 0, 2_048);
-  assertOptionalNonnegativeRate(input.serviceRecordsPerMinuteP10, 'serviceRecordsPerMinuteP10');
-  assertOptionalNonnegativeRate(input.serviceBytesPerMinuteP10, 'serviceBytesPerMinuteP10');
-  assertOptionalNonnegativeRate(input.arrivalRecordsPerMinuteP99, 'arrivalRecordsPerMinuteP99');
-  assertOptionalNonnegativeRate(input.arrivalBytesPerMinuteP99, 'arrivalBytesPerMinuteP99');
-  if (input.backlogSlope !== null && !Number.isFinite(input.backlogSlope)) {
-    throw new TypeError('backlogSlope must be finite or null');
+  if (input.intervalSeconds !== SYSTEM_RECORD_LIMITS_V1.loadIntervalSeconds) {
+    throw new RangeError('intervalSeconds must be the frozen one-minute window');
+  }
+  if (
+    input.pairedIntervals !== null
+    && input.pairedIntervals.length > SYSTEM_RECORD_LIMITS_V1.maximumLoadIntervals
+  ) {
+    throw new RangeError('pairedIntervals exceeds the frozen sample cap');
   }
   const failures: string[] = [];
   if (input.activeRecords > SYSTEM_RECORD_LIMITS_V1.activationRecords) {
@@ -394,61 +559,413 @@ export function evaluateLoadEnvelopeV1(input: {
   } else if (input.activeBundleBytes > SYSTEM_RECORD_LIMITS_V1.activationBundleBytes) {
     failures.push('active_bundle_byte_cap');
   }
+  if (input.activeVerificationClosureBytes === null) {
+    failures.push('closure_measurement_unavailable');
+  } else if (
+    input.activeVerificationClosureBytes
+      > SYSTEM_RECORD_LIMITS_V1.activationVerificationClosureBytes
+  ) {
+    failures.push('active_closure_byte_cap');
+  }
   if (input.inventoryLeaves > SYSTEM_RECORD_LIMITS_V1.activationLeaves) {
     failures.push('inventory_leaf_cap');
   }
 
-  const rates = [
-    input.serviceRecordsPerMinuteP10,
-    input.serviceBytesPerMinuteP10,
-    input.arrivalRecordsPerMinuteP99,
-    input.arrivalBytesPerMinuteP99,
-    input.backlogSlope,
-  ];
-  if (rates.some((value) => value === null)) {
+  if (input.pairedIntervals === null) {
+    if (
+      input.captureId !== null
+      || input.requesterSource !== null
+      || input.providerSource !== null
+      || input.captureDigest !== null
+    ) {
+      throw new TypeError('absent pairedIntervals requires null capture metadata');
+    }
+    if (expectedCapture !== null) {
+      throw new TypeError('absent pairedIntervals requires no expected capture');
+    }
     failures.push('load_measurement_unavailable');
-    return { eligible: false, recordDrainMinutes: null, byteDrainMinutes: null, failures };
+    return { eligible: false, recordDrainMinutes: null, closureDrainMinutes: null, failures };
+  }
+  if (expectedCapture === null) {
+    failures.push('load_capture_expectation_unavailable');
+    return { eligible: false, recordDrainMinutes: null, closureDrainMinutes: null, failures };
+  }
+  assertLoadCapture({ ...input, pairedIntervals: input.pairedIntervals }, expectedCapture);
+  if (input.pairedIntervals.length < SYSTEM_RECORD_LIMITS_V1.minimumLoadIntervals) {
+    failures.push('insufficient_paired_intervals');
+  }
+  if (input.pairedIntervals.length === 0) {
+    return { eligible: false, recordDrainMinutes: null, closureDrainMinutes: null, failures };
+  }
+  for (const [index, interval] of input.pairedIntervals.entries()) {
+    assertLoadInterval(interval, index);
+  }
+  if (input.pairedIntervals.some((interval) => interval.cacheState !== 'cold')) {
+    failures.push('cold_measurement_required');
+  }
+  if (input.pairedIntervals.some((interval) => interval.requesterExactRequests
+    < interval.servicedRecords * SYSTEM_RECORD_LIMITS_V1.minimumRequestsPerActiveRecord)) {
+    failures.push('requester_service_counter_inconsistent');
+  }
+  if (input.pairedIntervals.some((interval) => interval.providerExactRequests
+    < interval.servicedRecords * SYSTEM_RECORD_LIMITS_V1.minimumRequestsPerActiveRecord)) {
+    failures.push('provider_service_counter_inconsistent');
   }
 
-  const serviceRecords = input.serviceRecordsPerMinuteP10 as number;
-  const serviceBytes = input.serviceBytesPerMinuteP10 as number;
-  const arrivalRecords = input.arrivalRecordsPerMinuteP99 as number;
-  const arrivalBytes = input.arrivalBytesPerMinuteP99 as number;
-  const backlogSlope = input.backlogSlope as number;
+  const serviceRecords = loadPercentile(input.pairedIntervals, 'servicedRecords', 0.1);
+  const closureServiceBytes = loadPercentile(
+    input.pairedIntervals,
+    'servicedClosureBytes',
+    0.1,
+  );
+  const arrivalRecords = loadPercentile(input.pairedIntervals, 'arrivedRecords', 0.99);
+  const closureArrivalBytes = loadPercentile(
+    input.pairedIntervals,
+    'arrivedClosureBytes',
+    0.99,
+  );
+  const requesterExactRequests = loadPercentile(
+    input.pairedIntervals,
+    'requesterExactRequests',
+    0.99,
+  );
+  const providerExactRequests = loadPercentile(
+    input.pairedIntervals,
+    'providerExactRequests',
+    0.99,
+  );
+  const backlogDelta = input.pairedIntervals.reduce(
+    (sum, interval) => sum + interval.backlogDeltaRecords,
+    0,
+  );
   if (serviceRecords < SYSTEM_RECORD_LIMITS_V1.serviceRecordsPerMinuteP10) {
     failures.push('record_service_floor');
   }
-  if (serviceBytes < SYSTEM_RECORD_LIMITS_V1.serviceBytesPerMinuteP10) {
-    failures.push('byte_service_floor');
+  if (closureServiceBytes < SYSTEM_RECORD_LIMITS_V1.closureServiceBytesPerMinuteP10) {
+    failures.push('closure_byte_service_floor');
   }
   if (arrivalRecords > SYSTEM_RECORD_LIMITS_V1.arrivalRecordsPerMinuteP99) {
     failures.push('record_arrival_ceiling');
   }
-  if (arrivalBytes > SYSTEM_RECORD_LIMITS_V1.arrivalBytesPerMinuteP99) {
-    failures.push('byte_arrival_ceiling');
+  if (closureArrivalBytes > SYSTEM_RECORD_LIMITS_V1.closureArrivalBytesPerMinuteP99) {
+    failures.push('closure_byte_arrival_ceiling');
   }
-  if (backlogSlope >= 0) failures.push('nonnegative_backlog_slope');
+  const requestBudget = referenceRequestBudgetV1();
+  if (requesterExactRequests > requestBudget.requesterActivationCeilingPerMinute) {
+    failures.push('requester_request_ceiling');
+  }
+  if (providerExactRequests > requestBudget.providerActivationCeilingPerMinute) {
+    failures.push('provider_request_ceiling');
+  }
+  if (backlogDelta >= 0) failures.push('nonnegative_backlog_slope');
 
   const recordDrainMinutes = serviceRecords > arrivalRecords
     ? input.activeRecords / (serviceRecords - arrivalRecords)
     : Number.POSITIVE_INFINITY;
-  const byteDrainMinutes = input.activeBundleBytes !== null && serviceBytes > arrivalBytes
-    ? input.activeBundleBytes / (serviceBytes - arrivalBytes)
-    : input.activeBundleBytes === null
+  const closureDrainMinutes = input.activeVerificationClosureBytes !== null
+    && closureServiceBytes > closureArrivalBytes
+    ? input.activeVerificationClosureBytes / (closureServiceBytes - closureArrivalBytes)
+    : input.activeVerificationClosureBytes === null
       ? null
       : Number.POSITIVE_INFINITY;
   if (recordDrainMinutes > SYSTEM_RECORD_LIMITS_V1.maxDrainMinutes) {
     failures.push('record_drain_deadline');
   }
-  if (byteDrainMinutes !== null && byteDrainMinutes > SYSTEM_RECORD_LIMITS_V1.maxDrainMinutes) {
-    failures.push('byte_drain_deadline');
+  if (
+    closureDrainMinutes !== null
+    && closureDrainMinutes > SYSTEM_RECORD_LIMITS_V1.maxDrainMinutes
+  ) {
+    failures.push('closure_drain_deadline');
   }
   return {
     eligible: failures.length === 0,
     recordDrainMinutes,
-    byteDrainMinutes,
+    closureDrainMinutes,
     failures,
   };
+}
+
+export function loadIntervalSampleDigestV1(
+  captureId: string,
+  source: string,
+  endpointRole: 'requester',
+  interval: RequesterLoadSampleV1,
+): string;
+export function loadIntervalSampleDigestV1(
+  captureId: string,
+  source: string,
+  endpointRole: 'provider',
+  interval: ProviderLoadSampleV1,
+): string;
+export function loadIntervalSampleDigestV1(
+  captureId: string,
+  source: string,
+  endpointRole: 'requester' | 'provider',
+  interval: RequesterLoadSampleV1 | ProviderLoadSampleV1,
+): string {
+  const common = {
+    captureId,
+    source,
+    endpointRole,
+    ordinal: interval.ordinal,
+    startedAt: interval.startedAt,
+    endedAt: interval.endedAt,
+  };
+  if (endpointRole === 'requester') {
+    const requester = interval as RequesterLoadSampleV1;
+    return sha256Canonical({
+      ...common,
+      cacheState: requester.cacheState,
+      servicedRecords: requester.servicedRecords,
+      servicedClosureBytes: requester.servicedClosureBytes,
+      arrivedRecords: requester.arrivedRecords,
+      arrivedClosureBytes: requester.arrivedClosureBytes,
+      requesterExactRequests: requester.requesterExactRequests,
+      backlogDeltaRecords: requester.backlogDeltaRecords,
+    });
+  }
+  return sha256Canonical({
+    ...common,
+    providerExactRequests: (interval as ProviderLoadSampleV1).providerExactRequests,
+  });
+}
+
+function assertLoadInterval(interval: PairedLoadIntervalV1, index: number): void {
+  if (!isRecord(interval)) throw new TypeError(`pairedIntervals[${index}] must be an object`);
+  assertExactKeys(interval, [
+    'ordinal',
+    'startedAt',
+    'endedAt',
+    'requesterSampleDigest',
+    'providerSampleDigest',
+    'cacheState',
+    'servicedRecords',
+    'servicedClosureBytes',
+    'arrivedRecords',
+    'arrivedClosureBytes',
+    'requesterExactRequests',
+    'providerExactRequests',
+    'backlogDeltaRecords',
+  ], `pairedIntervals[${index}]`);
+  assertFiniteInteger(interval.ordinal, `pairedIntervals[${index}].ordinal`, 0);
+  if (typeof interval.startedAt !== 'string' || typeof interval.endedAt !== 'string') {
+    throw new TypeError(`pairedIntervals[${index}] timestamps must be strings`);
+  }
+  assertSha256(interval.requesterSampleDigest, `pairedIntervals[${index}].requesterSampleDigest`);
+  assertSha256(interval.providerSampleDigest, `pairedIntervals[${index}].providerSampleDigest`);
+  if (interval.cacheState !== 'cold' && interval.cacheState !== 'warm') {
+    throw new TypeError(`pairedIntervals[${index}].cacheState must be cold or warm`);
+  }
+  for (const key of [
+    'servicedRecords',
+    'servicedClosureBytes',
+    'arrivedRecords',
+    'arrivedClosureBytes',
+    'requesterExactRequests',
+    'providerExactRequests',
+  ] as const) {
+    assertFiniteInteger(interval[key], `pairedIntervals[${index}].${key}`, 0);
+  }
+  assertFiniteInteger(
+    interval.backlogDeltaRecords,
+    `pairedIntervals[${index}].backlogDeltaRecords`,
+    -SYSTEM_RECORD_LIMITS_V1.hardRecords,
+    SYSTEM_RECORD_LIMITS_V1.hardRecords,
+  );
+}
+
+function assertLoadCapture(input: {
+  readonly intervalSeconds: 60;
+  readonly captureId: string | null;
+  readonly requesterSource: string | null;
+  readonly providerSource: string | null;
+  readonly pairedIntervals: readonly PairedLoadIntervalV1[];
+  readonly captureDigest: string | null;
+}, expected: LoadCaptureExpectationV1 | null): void {
+  if (
+    typeof input.captureId !== 'string'
+    || !/^capture:[a-z0-9][a-z0-9._-]{0,63}$/.test(input.captureId)
+  ) {
+    throw new TypeError('captureId must use the canonical capture identifier grammar');
+  }
+  if (
+    typeof input.requesterSource !== 'string'
+    || !/^[a-z0-9][a-z0-9:._-]{0,127}$/.test(input.requesterSource)
+  ) {
+    throw new TypeError('requesterSource must use the canonical source identifier grammar');
+  }
+  if (
+    typeof input.providerSource !== 'string'
+    || !/^[a-z0-9][a-z0-9:._-]{0,127}$/.test(input.providerSource)
+  ) {
+    throw new TypeError('providerSource must use the canonical source identifier grammar');
+  }
+  if (expected !== null) {
+    assertLoadCaptureExpectation(expected);
+    if (
+      expected.captureId !== input.captureId
+      || expected.requesterSource !== input.requesterSource
+      || expected.providerSource !== input.providerSource
+    ) {
+      throw new TypeError('capture identity does not match the trusted activation manifest');
+    }
+    const expectedStartedAt = parseTimestamp(expected.startedAt, 'expected capture start');
+    const expectedEndedAt = parseTimestamp(expected.endedAt, 'expected capture end');
+    if (
+      expected.startedAt !== new Date(expectedStartedAt).toISOString()
+      || expected.endedAt !== new Date(expectedEndedAt).toISOString()
+      || expectedEndedAt <= expectedStartedAt
+    ) {
+      throw new TypeError('expected capture bounds must be canonical and increasing');
+    }
+    if (input.pairedIntervals.length === 0) {
+      throw new TypeError('pairedIntervals cannot satisfy a non-empty expected capture');
+    }
+    if (
+      expected.requesterSampleDigests.length !== input.pairedIntervals.length
+      || expected.providerSampleDigests.length !== input.pairedIntervals.length
+    ) {
+      throw new TypeError('trusted endpoint sample manifests must cover every interval');
+    }
+  }
+  assertSha256(input.captureDigest, 'captureDigest');
+  const requesterDigests = new Set<string>();
+  const providerDigests = new Set<string>();
+  for (const [index, interval] of input.pairedIntervals.entries()) {
+    if (interval.ordinal !== index) {
+      throw new TypeError('pairedIntervals must have contiguous zero-based ordinals');
+    }
+    const startedAt = parseTimestamp(interval.startedAt, `pairedIntervals[${index}].startedAt`);
+    const endedAt = parseTimestamp(interval.endedAt, `pairedIntervals[${index}].endedAt`);
+    if (interval.startedAt !== new Date(startedAt).toISOString()
+      || interval.endedAt !== new Date(endedAt).toISOString()) {
+      throw new TypeError('pairedIntervals timestamps must be canonical ISO timestamps');
+    }
+    if (endedAt - startedAt !== input.intervalSeconds * 1000) {
+      throw new TypeError('pairedIntervals must use exact one-minute windows');
+    }
+    if (index > 0) {
+      const priorEnd = Date.parse(input.pairedIntervals[index - 1].endedAt);
+      if (startedAt !== priorEnd) {
+        throw new TypeError('pairedIntervals must be strictly contiguous and ordered');
+      }
+    }
+    if (requesterDigests.has(interval.requesterSampleDigest)) {
+      throw new TypeError('requester sample digests must be unique');
+    }
+    if (providerDigests.has(interval.providerSampleDigest)) {
+      throw new TypeError('provider sample digests must be unique');
+    }
+    const digestInput = {
+      ordinal: interval.ordinal,
+      startedAt: interval.startedAt,
+      endedAt: interval.endedAt,
+      cacheState: interval.cacheState,
+      servicedRecords: interval.servicedRecords,
+      servicedClosureBytes: interval.servicedClosureBytes,
+      arrivedRecords: interval.arrivedRecords,
+      arrivedClosureBytes: interval.arrivedClosureBytes,
+      requesterExactRequests: interval.requesterExactRequests,
+      providerExactRequests: interval.providerExactRequests,
+      backlogDeltaRecords: interval.backlogDeltaRecords,
+    };
+    if (interval.requesterSampleDigest !== loadIntervalSampleDigestV1(
+      input.captureId,
+      input.requesterSource,
+      'requester',
+      digestInput,
+    )) {
+      throw new TypeError('requester sample digest does not bind its interval/source');
+    }
+    if (interval.providerSampleDigest !== loadIntervalSampleDigestV1(
+      input.captureId,
+      input.providerSource,
+      'provider',
+      digestInput,
+    )) {
+      throw new TypeError('provider sample digest does not bind its interval/source');
+    }
+    if (expected !== null && (
+      interval.requesterSampleDigest !== expected.requesterSampleDigests[index]
+      || interval.providerSampleDigest !== expected.providerSampleDigests[index]
+    )) {
+      throw new TypeError('paired interval samples do not match the trusted endpoint manifest');
+    }
+    requesterDigests.add(interval.requesterSampleDigest);
+    providerDigests.add(interval.providerSampleDigest);
+  }
+  if (expected !== null && (
+      input.pairedIntervals[0].startedAt !== expected.startedAt
+      || input.pairedIntervals[input.pairedIntervals.length - 1].endedAt !== expected.endedAt
+  )) {
+    throw new TypeError('pairedIntervals do not cover the trusted activation window');
+  }
+  const expectedDigest = sha256Canonical({
+    captureId: input.captureId,
+    requesterSource: input.requesterSource,
+    providerSource: input.providerSource,
+    intervalSeconds: input.intervalSeconds,
+    pairedIntervals: input.pairedIntervals,
+  });
+  if (input.captureDigest !== expectedDigest) {
+    throw new TypeError('captureDigest does not bind the paired interval evidence');
+  }
+}
+
+function assertLoadCaptureExpectation(
+  value: unknown,
+): asserts value is LoadCaptureExpectationV1 {
+  if (!isRecord(value)) throw new TypeError('load capture expectation must be an object');
+  assertExactKeys(value, [
+    'captureId',
+    'requesterSource',
+    'providerSource',
+    'startedAt',
+    'endedAt',
+    'requesterSampleDigests',
+    'providerSampleDigests',
+  ], 'load capture expectation');
+  if (
+    typeof value.captureId !== 'string'
+    || !/^capture:[a-z0-9][a-z0-9._-]{0,63}$/.test(value.captureId)
+  ) {
+    throw new TypeError('load capture expectation captureId is invalid');
+  }
+  for (const key of ['requesterSource', 'providerSource'] as const) {
+    if (
+      typeof value[key] !== 'string'
+      || !/^[a-z0-9][a-z0-9:._-]{0,127}$/.test(value[key] as string)
+    ) {
+      throw new TypeError(`load capture expectation ${key} is invalid`);
+    }
+  }
+  for (const key of ['startedAt', 'endedAt'] as const) {
+    if (typeof value[key] !== 'string') {
+      throw new TypeError(`load capture expectation ${key} must be a string`);
+    }
+  }
+  for (const key of ['requesterSampleDigests', 'providerSampleDigests'] as const) {
+    const digests = value[key];
+    if (!Array.isArray(digests) || digests.length > SYSTEM_RECORD_LIMITS_V1.maximumLoadIntervals) {
+      throw new TypeError(`load capture expectation ${key} exceeds the sample cap`);
+    }
+    for (const [index, digest] of digests.entries()) {
+      assertSha256(digest, `load capture expectation ${key}[${index}]`);
+    }
+    if (new Set(digests).size !== digests.length) {
+      throw new TypeError(`load capture expectation ${key} must be unique`);
+    }
+  }
+}
+
+function loadPercentile(
+  intervals: readonly PairedLoadIntervalV1[],
+  key: 'servicedRecords' | 'servicedClosureBytes' | 'arrivedRecords'
+    | 'arrivedClosureBytes' | 'requesterExactRequests' | 'providerExactRequests',
+  percentileValue: number,
+): number {
+  const sorted = intervals.map((interval) => interval[key]).sort((left, right) => left - right);
+  return percentile(sorted, percentileValue);
 }
 
 export function sha256Canonical(value: unknown): string {
@@ -728,6 +1245,13 @@ function assertProfile(value: unknown): asserts value is RedactedProfileEvidence
       throw new TypeError('profile quad predicate is outside the frozen allowlist');
     }
     if (
+      subjectKind === 'root'
+      && quad.predicate === 'https://dkg.network/ontology#peerId'
+      && quad.objectKind !== 'literal'
+    ) {
+      throw new TypeError('profile peerId object must be a literal');
+    }
+    if (
       requiresOwnedObjectRelationshipV1(subjectKind, quad.predicate)
       && quad.objectOwnedSubject === null
     ) {
@@ -848,27 +1372,44 @@ function assertSystemObservation(value: unknown): asserts value is SystemSyncObs
 function assertLoadMeasurement(value: unknown): asserts value is CharacterizationFixtureV1['loadMeasurement'] {
   if (!isRecord(value)) throw new TypeError('loadMeasurement must be an object');
   assertExactKeys(value, [
-    'serviceRecordsPerMinuteP10',
-    'serviceBytesPerMinuteP10',
-    'arrivalRecordsPerMinuteP99',
-    'arrivalBytesPerMinuteP99',
-    'backlogSlope',
+    'intervalSeconds',
+    'captureId',
+    'requesterSource',
+    'providerSource',
+    'pairedIntervals',
+    'captureDigest',
   ], 'load measurement');
-  for (const key of [
-    'serviceRecordsPerMinuteP10',
-    'serviceBytesPerMinuteP10',
-    'arrivalRecordsPerMinuteP99',
-    'arrivalBytesPerMinuteP99',
-    'backlogSlope',
-  ]) {
-    if (key === 'backlogSlope') {
-      if (value[key] !== null && (typeof value[key] !== 'number' || !Number.isFinite(value[key]))) {
-        throw new TypeError(`loadMeasurement.${key} must be finite or null`);
-      }
-    } else {
-      assertOptionalNonnegativeRate(value[key] as number | null, `loadMeasurement.${key}`);
-    }
+  if (value.intervalSeconds !== SYSTEM_RECORD_LIMITS_V1.loadIntervalSeconds) {
+    throw new TypeError('loadMeasurement.intervalSeconds must be 60');
   }
+  if (value.pairedIntervals === null) {
+    if (
+      value.captureId !== null
+      || value.requesterSource !== null
+      || value.providerSource !== null
+      || value.captureDigest !== null
+    ) {
+      throw new TypeError('absent load intervals require null capture metadata');
+    }
+    return;
+  }
+  if (!Array.isArray(value.pairedIntervals)) {
+    throw new TypeError('loadMeasurement.pairedIntervals must be an array or null');
+  }
+  if (value.pairedIntervals.length > SYSTEM_RECORD_LIMITS_V1.maximumLoadIntervals) {
+    throw new TypeError('loadMeasurement.pairedIntervals exceeds the frozen sample cap');
+  }
+  for (const [index, interval] of value.pairedIntervals.entries()) {
+    assertLoadInterval(interval as PairedLoadIntervalV1, index);
+  }
+  assertLoadCapture(value as unknown as {
+    intervalSeconds: 60;
+    captureId: string | null;
+    requesterSource: string | null;
+    providerSource: string | null;
+    pairedIntervals: readonly PairedLoadIntervalV1[];
+    captureDigest: string | null;
+  }, null);
 }
 
 function assertProfilePopulation(
@@ -971,12 +1512,6 @@ function assertProfilePopulation(
   }
 }
 
-function assertOptionalNonnegativeRate(value: number | null, label: string): void {
-  if (value !== null && (!Number.isFinite(value) || value < 0)) {
-    throw new TypeError(`${label} must be non-negative and finite or null`);
-  }
-}
-
 function assertExactKeys(
   value: Record<string, unknown>,
   expected: readonly string[],
@@ -1008,6 +1543,12 @@ function assertFiniteInteger(
 ): asserts value is number {
   if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
     throw new TypeError(`${label} must be an integer in ${minimum}..${maximum}`);
+  }
+}
+
+function assertSha256(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw new TypeError(`${label} must be a canonical sha256 digest`);
   }
 }
 

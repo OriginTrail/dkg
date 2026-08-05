@@ -5,12 +5,14 @@ import { fileURLToPath } from 'node:url';
 import {
   characterizeFixtureV1,
   parseCharacterizationFixtureV1,
+  parseLoadEnvelopeEvidenceV1,
 } from './model.js';
 
 interface CliOptions {
   readonly fixture: string;
   readonly json: boolean;
   readonly requireLoadEnvelope: boolean;
+  readonly loadEnvelopeEvidence: string | null;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -24,7 +26,12 @@ export async function runCharacterizationCli(
   const fixture = parseCharacterizationFixtureV1(
     JSON.parse(await readFile(fixturePath, 'utf8')) as unknown,
   );
-  const result = characterizeFixtureV1(fixture);
+  const loadEnvelopeEvidence = options.loadEnvelopeEvidence === null
+    ? null
+    : parseLoadEnvelopeEvidenceV1(
+      JSON.parse(await readFile(resolveInput(options.loadEnvelopeEvidence), 'utf8')) as unknown,
+    );
+  const result = characterizeFixtureV1(fixture, loadEnvelopeEvidence);
 
   if (options.json) {
     write(`${JSON.stringify(result, null, 2)}\n`);
@@ -49,6 +56,7 @@ function parseArgs(argv: readonly string[]): CliOptions {
   let fixture = 'r27';
   let json = false;
   let requireLoadEnvelope = false;
+  let loadEnvelopeEvidence: string | null = null;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--fixture') {
@@ -59,11 +67,19 @@ function parseArgs(argv: readonly string[]): CliOptions {
       json = true;
     } else if (arg === '--require-load-envelope') {
       requireLoadEnvelope = true;
+    } else if (arg === '--load-envelope-evidence') {
+      const value = argv[++index];
+      if (!value) throw new TypeError('--load-envelope-evidence requires a value');
+      loadEnvelopeEvidence = value;
     } else {
       throw new TypeError(`unknown argument: ${arg}`);
     }
   }
-  return { fixture, json, requireLoadEnvelope };
+  return { fixture, json, requireLoadEnvelope, loadEnvelopeEvidence };
+}
+
+function resolveInput(value: string): string {
+  return isAbsolute(value) ? value : resolve(process.cwd(), value);
 }
 
 function resolveFixture(value: string): string {

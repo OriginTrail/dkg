@@ -24,7 +24,8 @@ import {
 import { characterizeFixtureV1 } from './model.js';
 
 const ROOT = 'did:dkg:agent:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const PEER = '12D3KooWTestPeer';
+const PEER = '12D3KooWDxBauQDeJjCmcvWiREFALfKsr5VfTzGUJbZJ6CUcc7aF';
+const SECOND_PEER = '12D3KooWAbxJCdeDKf8dsFf14mWuSonPP1PoxCyPnFB7pdPic6w6';
 const PUBLIC_KEY = encodeWorkspaceEncryptionKey(Uint8Array.from({ length: 32 }, (_, index) => index + 1));
 const KEY_ID = workspaceAgentEncryptionKeyId(ROOT.slice('did:dkg:agent:'.length), Buffer.from(PUBLIC_KEY, 'base64url'));
 
@@ -252,18 +253,31 @@ test('models missing/multiple peer identities and bounded root batches', () => {
   assert.equal(classifyProfileDisposition(missing, new Map()), 'missing-peer');
 
   const multiple = collectPopulation([
-    { root: uri(ROOT), peer: literal('peer-a'), seen: literal('2026-08-04T12:00:00+00:00') },
-    { root: uri(ROOT), peer: literal('peer-b'), seen: literal('2026-08-04T12:00:00Z') },
+    { root: uri(ROOT), peer: literal(PEER), seen: literal('2026-08-04T12:00:00+00:00') },
+    { root: uri(ROOT), peer: literal(SECOND_PEER), seen: literal('2026-08-04T12:00:00Z') },
   ]).get(ROOT);
   assert.ok(multiple);
   assert.equal(classifyProfileDisposition(multiple, new Map()), 'multi-peer-root');
 
-  const onePeer = { root: ROOT, peers: new Set(['peer-a']), lastSeen: [] };
+  const onePeer = { root: ROOT, peers: new Set([PEER]), lastSeen: [] };
   assert.equal(
-    classifyProfileDisposition(onePeer, new Map([['peer-a', new Set([ROOT, `${ROOT}:other`])]])),
+    classifyProfileDisposition(onePeer, new Map([[PEER, new Set([ROOT, `${ROOT}:other`])]])),
     'peer-multi-root',
   );
   assert.deepEqual(valuesBatches(Array.from({ length: 257 }, (_, index) => index), 256).map((v) => v.length), [256, 1]);
+});
+
+test('rejects malformed peer terms before they become record identities', () => {
+  for (const peer of [
+    uri('https://example.invalid/not-a-peer'),
+    { type: 'bnode', value: 'peer-node' } as SparqlTerm,
+    literal('not-a-libp2p-peer-id'),
+  ]) {
+    assert.throws(
+      () => collectPopulation([{ root: uri(ROOT), peer }]),
+      /canonical libp2p literal/,
+    );
+  }
 });
 
 test('the CLI names and enforces only the load-envelope sub-gate', async () => {

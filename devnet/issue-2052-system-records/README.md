@@ -64,10 +64,36 @@ The W1 smoke command measures telemetry record-site overhead only. It does not
 measure system replay, B+tree convergence, profile authority, or activation load.
 The CLI exposes this only as a load-envelope sub-gate, not a full activation
 verdict. The baseline remains activation-ineligible until Stack C/D can produce
-real service/arrival measurements, exact encoded bundle byte counts, signed
-capability/authority coverage, and serve-lease evidence.
+real unique complete-closure service/arrival measurements, exact encoded bundle and
+verification-closure byte counts, signed capability/authority coverage, and complete-
+closure serve-reference evidence. Activation measurements must contain at least 30 paired
+one-minute intervals marked cold by the runtime instrumentation. Before capture, the
+activation coordinator supplies immutable expected capture identity, endpoint sources,
+and start/end bounds. Requester and provider collectors emit role-specific sample digests.
+After capture, a separately supplied trusted coordinator artifact binds those ordered
+digest arrays, the exact fixture manifest, and aggregate verification-closure bytes. The
+runtime capture digest binds the paired interval array; zero-based ordinals, canonical
+timestamps, strict minute-to-minute continuity, exact boundary coverage, and trusted
+endpoint digest matching reject duplicate, reordered, gapped, trimmed, cherry-picked,
+or recomputed cross-minute-swapped evidence. The artifact's provenance is an operational
+trust input; this V1 parser does not claim to cryptographically attest its author. Requester and
+provider counters in every interval must each cover at least three exact requests per
+serviced record; mixed warm/cold evidence and independently aggregated marginal percentiles
+cannot satisfy the gate.
 The reported `nquadsBytes` values characterize RDF size only; they are not a
-substitute for the encoded transferable bundle size used by the activation gate.
+substitute for either encoded transferable bundle size or complete verification-
+closure bytes used by the activation gate and drain equation.
+
+A trusted activation run supplies that separate artifact explicitly:
+
+```bash
+node --import tsx devnet/issue-2052-system-records/characterize.ts \
+  --fixture /path/to/capture-fixture.json \
+  --load-envelope-evidence /path/to/coordinator-evidence.json \
+  --require-load-envelope
+```
+
+Without the artifact, `--require-load-envelope` fails closed.
 
 The fixture was generated from an isolated copy of the stopped node's Oxigraph
 v0.5.8 store. `extract-rdf.ts` accepts only an unauthenticated localhost endpoint,

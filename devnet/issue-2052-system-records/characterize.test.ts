@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -11,17 +12,26 @@ import {
   classifyOwnedSubjectV1,
   evaluateLoadEnvelopeV1,
   expectedProfileLinkPredicateV1,
+  loadIntervalSampleDigestV1,
   manifestDigestInput,
   parseCharacterizationFixtureV1,
   referenceBTreeBoundsV1,
   referenceInventoryRowEncodedBytesV1,
+  referenceRequestBudgetV1,
   sha256Canonical,
   type CharacterizationFixtureV1,
+  type LoadCaptureExpectationV1,
+  type PairedLoadIntervalV1,
   type RedactedProfileEvidenceV1,
 } from './model.js';
 import { deriveProfilePopulationV1 } from './population.js';
+import { runCharacterizationCli } from './characterize.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const LOAD_CAPTURE_ID = 'capture:testnet-cold-0001';
+const LOAD_REQUESTER_SOURCE = 'peer:requester-0001';
+const LOAD_PROVIDER_SOURCE = 'peer:provider-0001';
+const LOAD_CAPTURE_EXPECTATION = loadCaptureExpectation(loadIntervals());
 
 test('classifies only the frozen exact profile subject shapes', () => {
   const root = 'did:dkg:agent:0x0000000000000000000000000000000000000001';
@@ -52,19 +62,24 @@ test('proves the reference B+tree hard and activation ceilings algebraically', (
     maximumHeight: 0,
   });
   assert.deepEqual(referenceBTreeBoundsV1(SYSTEM_RECORD_LIMITS_V1.activationRecords), {
-    records: 1_024,
-    minimumLeaves: 2,
-    maximumLeaves: 8,
+    records: 512,
+    minimumLeaves: 1,
+    maximumLeaves: 4,
     maximumHeight: 2,
   });
   assert.equal(referenceBTreeBoundsV1(255).maximumLeaves, 1);
   assert.equal(referenceBTreeBoundsV1(256).maximumLeaves, 2);
   assert.equal(referenceBTreeBoundsV1(512).maximumLeaves, 4);
-  assert.equal(referenceBTreeBoundsV1(32_767).maximumHeight, 2);
-  assert.equal(referenceBTreeBoundsV1(32_768).maximumHeight, 3);
+  assert.equal(referenceBTreeBoundsV1(32_768).maximumHeight, 2);
+  assert.equal(referenceBTreeBoundsV1(32_895).maximumHeight, 2);
+  assert.equal(referenceBTreeBoundsV1(32_896).maximumHeight, 3);
   assert.equal(
     referenceInventoryRowEncodedBytesV1(SYSTEM_RECORD_LIMITS_V1.maxPeerIdBytes),
     340,
+  );
+  assert.equal(
+    referenceInventoryRowEncodedBytesV1(SYSTEM_RECORD_LIMITS_V1.maxPeerIdBytes, true),
+    372,
   );
   assert.deepEqual(referenceBTreeBoundsV1(SYSTEM_RECORD_LIMITS_V1.hardRecords), {
     records: 262_144,
@@ -73,61 +88,321 @@ test('proves the reference B+tree hard and activation ceilings algebraically', (
     maximumHeight: 3,
   });
   assert.throws(() => referenceBTreeBoundsV1(262_145), /records must be an integer/);
+  assert.deepEqual(referenceRequestBudgetV1(), {
+    serviceRequestsPerMinute: 180,
+    requesterRequestsPerMinute: 240,
+    providerRequestsPerMinute: 256,
+    requesterHeadroomPerMinute: 60,
+    providerHeadroomPerMinute: 76,
+    requesterActivationCeilingPerMinute: 228,
+    providerActivationCeilingPerMinute: 244,
+    providerByteHeadroomPerMinute: 8 * 1024 * 1024,
+    feasible: true,
+  });
 });
 
 test('accepts the heartbeat-aware activation load equation with deadline reserve', () => {
+  const ownershipSample = loadIntervals()[0];
+  const changedProvider = {
+    ...ownershipSample,
+    providerExactRequests: ownershipSample.providerExactRequests + 1,
+  };
+  const changedRequester = {
+    ...ownershipSample,
+    servicedRecords: ownershipSample.servicedRecords + 1,
+  };
+  assert.equal(
+    loadIntervalSampleDigestV1(
+      LOAD_CAPTURE_ID,
+      LOAD_REQUESTER_SOURCE,
+      'requester',
+      ownershipSample,
+    ),
+    loadIntervalSampleDigestV1(
+      LOAD_CAPTURE_ID,
+      LOAD_REQUESTER_SOURCE,
+      'requester',
+      changedProvider,
+    ),
+  );
+  assert.equal(
+    loadIntervalSampleDigestV1(
+      LOAD_CAPTURE_ID,
+      LOAD_PROVIDER_SOURCE,
+      'provider',
+      ownershipSample,
+    ),
+    loadIntervalSampleDigestV1(
+      LOAD_CAPTURE_ID,
+      LOAD_PROVIDER_SOURCE,
+      'provider',
+      changedRequester,
+    ),
+  );
   const verdict = evaluateLoadEnvelopeV1({
-    activeRecords: 1_024,
+    activeRecords: 512,
     activeBundleBytes: 128 * 1024 * 1024,
-    inventoryLeaves: 8,
-    serviceRecordsPerMinuteP10: 120,
-    serviceBytesPerMinuteP10: 24 * 1024 * 1024,
-    arrivalRecordsPerMinuteP99: 60,
-    arrivalBytesPerMinuteP99: 8 * 1024 * 1024,
-    backlogSlope: -1,
-  });
+    activeVerificationClosureBytes: 256 * 1024 * 1024,
+    inventoryLeaves: 4,
+    ...loadMeasurement(loadIntervals()),
+  }, LOAD_CAPTURE_EXPECTATION);
   assert.equal(verdict.eligible, true);
   assert.ok(verdict.recordDrainMinutes !== null && verdict.recordDrainMinutes < 18);
-  assert.equal(verdict.byteDrainMinutes, 8);
+  assert.equal(verdict.closureDrainMinutes, 16);
 });
 
 test('blocks activation when arrivals saturate service or measurements are absent', () => {
-  const saturated = evaluateLoadEnvelopeV1({
-    activeRecords: 1_024,
+  const untrusted = evaluateLoadEnvelopeV1({
+    activeRecords: 1,
     activeBundleBytes: 1,
-    inventoryLeaves: 8,
-    serviceRecordsPerMinuteP10: 120,
-    serviceBytesPerMinuteP10: 24 * 1024 * 1024,
-    arrivalRecordsPerMinuteP99: 120,
-    arrivalBytesPerMinuteP99: 1,
-    backlogSlope: 0,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(loadIntervals()),
+  }, null);
+  assert.deepEqual(untrusted.failures, ['load_capture_expectation_unavailable']);
+
+  const saturatedIntervals = loadIntervals({
+    arrivedRecords: 60,
+    arrivedClosureBytes: 1,
+    requesterExactRequests: 229,
+    providerExactRequests: 245,
+    backlogDeltaRecords: 0,
   });
+  const saturated = evaluateLoadEnvelopeV1({
+    activeRecords: 512,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 4,
+    ...loadMeasurement(saturatedIntervals),
+  }, loadCaptureExpectation(saturatedIntervals));
   assert.equal(saturated.eligible, false);
   assert.ok(saturated.failures.includes('record_arrival_ceiling'));
   assert.ok(saturated.failures.includes('record_drain_deadline'));
   assert.ok(saturated.failures.includes('nonnegative_backlog_slope'));
+  assert.ok(saturated.failures.includes('requester_request_ceiling'));
+  assert.ok(saturated.failures.includes('provider_request_ceiling'));
+
+  const closureOverflow = evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes:
+      SYSTEM_RECORD_LIMITS_V1.activationVerificationClosureBytes + 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(loadIntervals()),
+  }, LOAD_CAPTURE_EXPECTATION);
+  assert.ok(closureOverflow.failures.includes('active_closure_byte_cap'));
+
+  const mixed = loadIntervals();
+  mixed[14] = resignLoadInterval({ ...mixed[14], cacheState: 'warm' });
+  const warm = evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(mixed),
+  }, loadCaptureExpectation(mixed));
+  assert.ok(warm.failures.includes('cold_measurement_required'));
+
+  const shortIntervals = loadIntervals().slice(0, 29);
+  const short = evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(shortIntervals),
+  }, loadCaptureExpectation(shortIntervals));
+  assert.ok(short.failures.includes('insufficient_paired_intervals'));
+
+  const marginalFalsePositive = loadIntervals();
+  marginalFalsePositive[14] = resignLoadInterval({
+    ...marginalFalsePositive[14],
+    servicedRecords: 100,
+    requesterExactRequests: 228,
+    providerExactRequests: 244,
+  });
+  const paired = evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(marginalFalsePositive),
+  }, loadCaptureExpectation(marginalFalsePositive));
+  assert.ok(paired.failures.includes('requester_service_counter_inconsistent'));
+  assert.ok(paired.failures.includes('provider_service_counter_inconsistent'));
+
+  const reordered = loadIntervals().reverse();
+  const invalidIntervals = loadIntervals({ arrivedRecords: -1 });
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(reordered),
+  }, LOAD_CAPTURE_EXPECTATION), /contiguous zero-based ordinals/);
+
+  const duplicatedSample = loadIntervals();
+  duplicatedSample[1] = {
+    ...duplicatedSample[1],
+    requesterSampleDigest: duplicatedSample[0].requesterSampleDigest,
+  };
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(duplicatedSample),
+  }, LOAD_CAPTURE_EXPECTATION), /requester sample digests must be unique/);
+
+  const gap = loadIntervals();
+  gap[1] = {
+    ...gap[1],
+    startedAt: '2026-08-04T20:02:00.000Z',
+    endedAt: '2026-08-04T20:03:00.000Z',
+  };
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(gap),
+  }, LOAD_CAPTURE_EXPECTATION), /strictly contiguous and ordered/);
+
+  const unboundCapture = loadMeasurement(loadIntervals());
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...unboundCapture,
+    captureDigest: `sha256:${'0'.repeat(64)}`,
+  }, LOAD_CAPTURE_EXPECTATION), /captureDigest does not bind/);
+
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(loadIntervals()),
+  }, { ...LOAD_CAPTURE_EXPECTATION, captureId: 'capture:different' }),
+  /capture identity does not match/);
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(loadIntervals()),
+  }, { ...LOAD_CAPTURE_EXPECTATION, requesterSource: 'peer:different-requester' }),
+  /capture identity does not match/);
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(loadIntervals()),
+  }, { ...LOAD_CAPTURE_EXPECTATION, startedAt: '2026-08-04T19:59:00.000Z' }),
+  /do not cover the trusted activation window/);
+
+  const fullIntervals = loadIntervals();
+  const trimmed = fullIntervals.slice(1).map((interval, ordinal) => resignLoadInterval({
+    ...interval,
+    ordinal,
+  }));
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(trimmed),
+  }, LOAD_CAPTURE_EXPECTATION), /trusted endpoint sample manifests|trusted activation window/);
+
+  const suffixTrimmed = fullIntervals.slice(0, -1);
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...loadMeasurement(suffixTrimmed),
+  }, LOAD_CAPTURE_EXPECTATION), /trusted endpoint sample manifests|trusted activation window/);
+
+  const endpointOriginal = loadIntervals().map((interval, index) => resignLoadInterval({
+    ...interval,
+    providerExactRequests: 180 + index,
+  }));
+  const endpointSwap = [...endpointOriginal];
+  endpointSwap[0] = resignLoadInterval({
+    ...endpointSwap[0],
+    providerExactRequests: endpointOriginal[1].providerExactRequests,
+  });
+  endpointSwap[1] = resignLoadInterval({
+    ...endpointSwap[1],
+    providerExactRequests: endpointOriginal[0].providerExactRequests,
+  });
+  const swappedCapture = loadMeasurement(endpointSwap);
+  assert.throws(() => evaluateLoadEnvelopeV1({
+    activeRecords: 1,
+    activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
+    inventoryLeaves: 1,
+    ...swappedCapture,
+  }, loadCaptureExpectation(endpointOriginal)), /trusted endpoint manifest/);
 
   const absent = evaluateLoadEnvelopeV1({
     activeRecords: 1,
     activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
     inventoryLeaves: 1,
-    serviceRecordsPerMinuteP10: null,
-    serviceBytesPerMinuteP10: null,
-    arrivalRecordsPerMinuteP99: null,
-    arrivalBytesPerMinuteP99: null,
-    backlogSlope: null,
-  });
+    ...loadMeasurement(null),
+  }, null);
   assert.deepEqual(absent.failures, ['load_measurement_unavailable']);
   assert.throws(() => evaluateLoadEnvelopeV1({
     activeRecords: 1,
     activeBundleBytes: 1,
+    activeVerificationClosureBytes: 1,
     inventoryLeaves: 1,
-    serviceRecordsPerMinuteP10: 120,
-    serviceBytesPerMinuteP10: 1,
-    arrivalRecordsPerMinuteP99: -1,
-    arrivalBytesPerMinuteP99: 0,
-    backlogSlope: -1,
-  }), /arrivalRecordsPerMinuteP99 must be non-negative/);
+    ...loadMeasurement(invalidIntervals),
+  }, loadCaptureExpectation(invalidIntervals)), /arrivedRecords must be an integer/);
+});
+
+test('the CLI requires and accepts exact external load-envelope evidence', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-2052-load-envelope-'));
+  const fixturePath = join(directory, 'fixture.json');
+  const evidencePath = join(directory, 'evidence.json');
+  const intervals = loadIntervals();
+  const fixture = withDigest({
+    ...baseFixture(),
+    loadMeasurement: loadMeasurement(intervals),
+  });
+  const evidence = {
+    schemaVersion: 1 as const,
+    fixtureId: fixture.fixtureId,
+    fixtureManifestSha256: fixture.provenance.manifestSha256,
+    activeVerificationClosureBytes: 0,
+    capture: loadCaptureExpectation(intervals),
+  };
+  try {
+    await writeFile(fixturePath, `${JSON.stringify(fixture)}\n`, 'utf8');
+    await writeFile(evidencePath, `${JSON.stringify(evidence)}\n`, 'utf8');
+    assert.equal(await runCharacterizationCli([
+      '--fixture', fixturePath,
+      '--load-envelope-evidence', evidencePath,
+      '--require-load-envelope',
+    ], () => undefined), 0);
+    assert.equal(await runCharacterizationCli([
+      '--fixture', fixturePath,
+      '--require-load-envelope',
+    ], () => undefined), 1);
+    await writeFile(evidencePath, `${JSON.stringify({
+      ...evidence,
+      fixtureManifestSha256: `sha256:${'0'.repeat(64)}`,
+    })}\n`, 'utf8');
+    await assert.rejects(runCharacterizationCli([
+      '--fixture', fixturePath,
+      '--load-envelope-evidence', evidencePath,
+      '--require-load-envelope',
+    ], () => undefined), /does not bind the exact fixture/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('groups by peer key, detects root collisions, and rejects unredacted subjects', () => {
@@ -268,6 +543,16 @@ test('rejects malicious root links and per-record envelope overflow', () => {
 
 test('rejects arbitrary derived and owned-object identifiers with valid digests', () => {
   const base = profile(1, 'peer:0001');
+  assert.throws(
+    () => parseCharacterizationFixtureV1(withDigest({
+      ...baseFixture(),
+      profiles: [{
+        ...base,
+        quads: [{ ...base.quads[0], objectKind: 'iri' as const }],
+      }],
+    })),
+    /peerId object must be a literal/,
+  );
   const profileWithUnknownField = { ...base, rawPeerId: '12D3KooW-sensitive' };
   assert.throws(
     () => parseCharacterizationFixtureV1(withDigest({
@@ -297,9 +582,11 @@ test('rejects arbitrary derived and owned-object identifiers with valid digests'
 
   const arbitraryObject = {
     ...base,
-    quads: [{
-      ...base.quads[0],
+    quads: [...base.quads, {
+      subject: base.rootSubject,
+      predicate: 'http://www.w3.org/ns/prov#wasGeneratedBy',
       objectKind: 'iri' as const,
+      objectBytes: 32,
       objectOwnedSubject: 'urn:raw:wallet-or-token',
     }],
   };
@@ -627,6 +914,7 @@ test('loads the committed r27 fixture and keeps baseline activation fail-closed'
   assert.equal(result.invalidOwnedSubjects.length, 0);
   assert.equal(result.loadEnvelope.eligible, false);
   assert.ok(result.loadEnvelope.failures.includes('bundle_measurement_unavailable'));
+  assert.ok(result.loadEnvelope.failures.includes('closure_measurement_unavailable'));
   assert.ok(result.loadEnvelope.failures.includes('load_measurement_unavailable'));
 });
 
@@ -694,12 +982,117 @@ function baseFixture(): Omit<CharacterizationFixtureV1, 'profiles'> & { profiles
     },
     profiles: [],
     loadMeasurement: {
-      serviceRecordsPerMinuteP10: null,
-      serviceBytesPerMinuteP10: null,
-      arrivalRecordsPerMinuteP99: null,
-      arrivalBytesPerMinuteP99: null,
-      backlogSlope: null,
+      intervalSeconds: 60,
+      captureId: null,
+      requesterSource: null,
+      providerSource: null,
+      pairedIntervals: null,
+      captureDigest: null,
     },
+  };
+}
+
+function loadIntervals(
+  overrides: Partial<PairedLoadIntervalV1> = {},
+): PairedLoadIntervalV1[] {
+  const interval = {
+    cacheState: 'cold' as const,
+    servicedRecords: 60,
+    servicedClosureBytes: 24 * 1024 * 1024,
+    arrivedRecords: 16,
+    arrivedClosureBytes: 8 * 1024 * 1024,
+    requesterExactRequests: 180,
+    providerExactRequests: 180,
+    backlogDeltaRecords: -1,
+    ...overrides,
+  };
+  const startedAt = Date.parse('2026-08-04T20:00:00.000Z');
+  return Array.from(
+    { length: SYSTEM_RECORD_LIMITS_V1.minimumLoadIntervals },
+    (_, ordinal) => {
+      const sample = {
+        ...interval,
+        ordinal,
+        startedAt: new Date(startedAt + ordinal * 60_000).toISOString(),
+        endedAt: new Date(startedAt + (ordinal + 1) * 60_000).toISOString(),
+      };
+      return {
+        ...sample,
+        requesterSampleDigest: loadIntervalSampleDigestV1(
+          LOAD_CAPTURE_ID,
+          LOAD_REQUESTER_SOURCE,
+          'requester',
+          sample,
+        ),
+        providerSampleDigest: loadIntervalSampleDigestV1(
+          LOAD_CAPTURE_ID,
+          LOAD_PROVIDER_SOURCE,
+          'provider',
+          sample,
+        ),
+      };
+    },
+  );
+}
+
+function loadMeasurement(
+  pairedIntervals: readonly PairedLoadIntervalV1[] | null,
+): CharacterizationFixtureV1['loadMeasurement'] {
+  if (pairedIntervals === null) {
+    return {
+      intervalSeconds: 60,
+      captureId: null,
+      requesterSource: null,
+      providerSource: null,
+      pairedIntervals: null,
+      captureDigest: null,
+    };
+  }
+  const capture = {
+    captureId: LOAD_CAPTURE_ID,
+    requesterSource: LOAD_REQUESTER_SOURCE,
+    providerSource: LOAD_PROVIDER_SOURCE,
+    intervalSeconds: 60 as const,
+    pairedIntervals,
+  };
+  return { ...capture, captureDigest: sha256Canonical(capture) };
+}
+
+function loadCaptureExpectation(
+  pairedIntervals: readonly PairedLoadIntervalV1[],
+): LoadCaptureExpectationV1 {
+  if (pairedIntervals.length === 0) throw new TypeError('test capture must be non-empty');
+  return {
+    captureId: LOAD_CAPTURE_ID,
+    requesterSource: LOAD_REQUESTER_SOURCE,
+    providerSource: LOAD_PROVIDER_SOURCE,
+    startedAt: pairedIntervals[0].startedAt,
+    endedAt: pairedIntervals[pairedIntervals.length - 1].endedAt,
+    requesterSampleDigests: pairedIntervals.map((interval) => interval.requesterSampleDigest),
+    providerSampleDigests: pairedIntervals.map((interval) => interval.providerSampleDigest),
+  };
+}
+
+function resignLoadInterval(interval: PairedLoadIntervalV1): PairedLoadIntervalV1 {
+  const {
+    requesterSampleDigest: _requesterSampleDigest,
+    providerSampleDigest: _providerSampleDigest,
+    ...sample
+  } = interval;
+  return {
+    ...sample,
+    requesterSampleDigest: loadIntervalSampleDigestV1(
+      LOAD_CAPTURE_ID,
+      LOAD_REQUESTER_SOURCE,
+      'requester',
+      sample,
+    ),
+    providerSampleDigest: loadIntervalSampleDigestV1(
+      LOAD_CAPTURE_ID,
+      LOAD_PROVIDER_SOURCE,
+      'provider',
+      sample,
+    ),
   };
 }
 

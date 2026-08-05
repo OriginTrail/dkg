@@ -10,6 +10,7 @@
     "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {
+    "@libp2p/peer-id": "^6.0.9",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-rdf-utils": "workspace:*"
   }

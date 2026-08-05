@@ -27972,10 +27972,11 @@
     }
   ],
   "loadMeasurement": {
-    "serviceRecordsPerMinuteP10": null,
-    "serviceBytesPerMinuteP10": null,
-    "arrivalRecordsPerMinuteP99": null,
-    "arrivalBytesPerMinuteP99": null,
-    "backlogSlope": null
+    "intervalSeconds": 60,
+    "captureId": null,
+    "requesterSource": null,
+    "providerSource": null,
+    "pairedIntervals": null,
+    "captureDigest": null
   }
 }

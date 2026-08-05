@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
+import { peerIdFromString } from '@libp2p/peer-id';
 import {
   decodeWorkspaceEncryptionKey,
   workspaceAgentEncryptionKeyId,
@@ -160,11 +161,12 @@ ORDER BY ?s ?p ?o`.trim(),
     profiles,
   );
   const loadMeasurement: CharacterizationFixtureV1['loadMeasurement'] = {
-    serviceRecordsPerMinuteP10: null,
-    serviceBytesPerMinuteP10: null,
-    arrivalRecordsPerMinuteP99: null,
-    arrivalBytesPerMinuteP99: null,
-    backlogSlope: null,
+    intervalSeconds: 60,
+    captureId: null,
+    requesterSource: null,
+    providerSource: null,
+    pairedIntervals: null,
+    captureDigest: null,
   };
   const source: CharacterizationSourceV1 = {
     schemaVersion: 1,
@@ -338,8 +340,7 @@ export function collectPopulation(rows: readonly SparqlRow[]): Map<string, Popul
   for (const row of rows) {
     const root = requiredTerm(row, 'root').value;
     const record = result.get(root) ?? { root, peers: new Set<string>(), lastSeen: [] };
-    const peer = row.peer?.value;
-    if (peer) record.peers.add(peer);
+    if (row.peer !== undefined) record.peers.add(canonicalPeerIdLiteral(row.peer));
     const seen = row.seen?.value;
     if (seen && Number.isFinite(Date.parse(seen)) && !record.lastSeen.includes(seen)) {
       record.lastSeen.push(seen);
@@ -347,6 +348,18 @@ export function collectPopulation(rows: readonly SparqlRow[]): Map<string, Popul
     result.set(root, record);
   }
   return result;
+}
+
+function canonicalPeerIdLiteral(term: SparqlTerm): string {
+  if (term.type !== 'literal' || term.value.length === 0) {
+    throw new TypeError('population peer must be a canonical libp2p literal');
+  }
+  try {
+    if (peerIdFromString(term.value).toString() !== term.value) throw new Error('noncanonical');
+  } catch (cause) {
+    throw new TypeError('population peer must be a canonical libp2p literal', { cause });
+  }
+  return term.value;
 }
 
 export function classifyProfileDisposition(
