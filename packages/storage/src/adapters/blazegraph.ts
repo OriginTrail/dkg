@@ -36,6 +36,14 @@ import { readResponseTextBounded } from '../http-response-limit.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
+/**
+ * BigdataRDFContext reads this request header into maxQueryTimeMillis. The
+ * deployed Blazegraph web.xml leaves queryTimeout at 0, so a client-side
+ * AbortController alone otherwise abandons work that can keep running on the
+ * server for minutes after the DKG request has failed.
+ */
+const BLAZEGRAPH_MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
+
 export interface BlazegraphStoreOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
   timeout?: number;
@@ -46,6 +54,8 @@ interface StoreOperationDeadline {
   waitFor<T>(work: Promise<T>): Promise<T>;
   check(): void;
   dispose(): void;
+  /** Milliseconds left until the operation deadline (0 when elapsed). */
+  remainingMs(): number;
 }
 
 function parsePositiveIntegerEnv(name: string, fallback: number): number {
@@ -66,6 +76,27 @@ function resolveOperationTimeout(configured: number | undefined): number {
     throw new Error('BlazegraphStore timeout must be a positive integer in milliseconds');
   }
   return configured;
+}
+
+/**
+ * Kill Blazegraph work shortly before the client abandons the request. Keep a
+ * 10% unwind margin for short budgets and cap that margin at two seconds for
+ * normal operations. A 1 ms floor avoids sending 0, which Blazegraph treats as
+ * unlimited, while preserving the server-first deadline after queue wait.
+ */
+export function serverSideQueryTimeoutMillis(remainingMs: number): number {
+  const budget = Math.max(1, Math.floor(remainingMs));
+  const unwindMargin = Math.min(2_000, Math.max(1, Math.floor(budget / 10)));
+  return Math.max(1, budget - unwindMargin);
+}
+
+function serverTimeoutHeaders(deadline: StoreOperationDeadline): Record<string, string> {
+  if (process.env.DKG_BLAZEGRAPH_SERVER_TIMEOUT_DISABLED === '1') return {};
+  return {
+    [BLAZEGRAPH_MAX_QUERY_MILLIS_HEADER]: String(
+      serverSideQueryTimeoutMillis(deadline.remainingMs()),
+    ),
+  };
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -151,6 +182,7 @@ function createStoreOperationDeadline(
       }
       detachCaller();
     },
+    remainingMs: () => Math.max(0, deadlineAt - performance.now()),
   };
 }
 
@@ -434,6 +466,7 @@ export class BlazegraphStore implements TripleStore {
         headers: {
           'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
           Accept: 'application/sparql-results+json',
+          ...serverTimeoutHeaders(deadline),
         },
         body: trimmed,
         signal: deadline.signal,
@@ -473,6 +506,7 @@ export class BlazegraphStore implements TripleStore {
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
         Accept: 'text/x-nquads, application/n-quads',
+        ...serverTimeoutHeaders(deadline),
       },
       body: sparql,
       signal: deadline.signal,
@@ -576,7 +610,10 @@ export class BlazegraphStore implements TripleStore {
     await this.runStoreWork(operation, options, async (deadline) => {
       const res = await deadline.waitFor(fetch(this.url, {
         method: 'POST',
-        headers: { 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
+        headers: {
+          'Content-Type': SPARQL_UPDATE_CONTENT_TYPE,
+          ...serverTimeoutHeaders(deadline),
+        },
         body: update,
         signal: deadline.signal,
       }));
