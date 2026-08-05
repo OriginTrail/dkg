@@ -1297,12 +1297,10 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       ['bucket', 'directoryPath', 'head', 'session'],
       'load',
     );
-    const sessionHandle = loadRecord.session as CandidateSessionV1;
+    const sessionHandle = loadRecord.session;
     const session = this.requireSession(sessionHandle);
-    assertSignedAuthorCatalogHeadEnvelopeV1(
-      loadRecord.head as SignedAuthorCatalogHeadEnvelopeV1,
-    );
-    const head = loadRecord.head as SignedAuthorCatalogHeadEnvelopeV1;
+    assertSignedAuthorCatalogHeadEnvelopeV1(loadRecord.head);
+    const head = loadRecord.head;
     const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
     const headDigest = head.objectDigest as Digest32V1;
     const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);

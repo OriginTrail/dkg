@@ -10,6 +10,29 @@ export type SwmAuthorInventoryErrorCodeV1 =
   | 'swm-inventory-cas-conflict'
   | 'swm-inventory-database-corrupt';
 
+const SWM_AUTHOR_INVENTORY_ERROR_CODES_V1 = new Set<SwmAuthorInventoryErrorCodeV1>([
+  'swm-inventory-input',
+  'swm-inventory-cas-conflict',
+  'swm-inventory-database-corrupt',
+]);
+
+export function isSwmAuthorInventoryErrorCodeV1(
+  value: unknown,
+): value is SwmAuthorInventoryErrorCodeV1 {
+  return typeof value === 'string'
+    && SWM_AUTHOR_INVENTORY_ERROR_CODES_V1.has(value as SwmAuthorInventoryErrorCodeV1);
+}
+
+export function isSwmAuthorInventoryErrorV1(
+  value: unknown,
+  code?: SwmAuthorInventoryErrorCodeV1,
+): value is Error & { readonly code: SwmAuthorInventoryErrorCodeV1 } {
+  if (!(value instanceof Error) || !('code' in value)) return false;
+  const actual = (value as Error & { readonly code?: unknown }).code;
+  return isSwmAuthorInventoryErrorCodeV1(actual)
+    && (code === undefined || actual === code);
+}
+
 export type SwmAuthorInventoryMutationV1 =
   | { readonly kind: 'upsert'; readonly row: SwmAuthorInventoryRowV1 }
   | { readonly kind: 'remove'; readonly kaUal: SwmAuthorInventoryRowV1['kaUal'] };

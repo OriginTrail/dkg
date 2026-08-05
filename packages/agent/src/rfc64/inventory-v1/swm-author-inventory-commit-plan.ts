@@ -9,14 +9,14 @@ import {
   parseCanonicalSwmAuthorInventoryRowsV1,
   type Digest32V1,
   type EvmAddressV1,
-  type SwmAuthorInventoryRowV1,
   type SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
 
-import type {
-  CompareAndSwapSwmAuthorInventoryInputV1,
-  SwmAuthorInventoryErrorCodeV1,
-  SwmAuthorInventoryMutationV1,
+import {
+  isSwmAuthorInventoryErrorV1,
+  type CompareAndSwapSwmAuthorInventoryInputV1,
+  type SwmAuthorInventoryErrorCodeV1,
+  type SwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-contracts.js';
 import { snapshotExactPlainDataRecordV1 } from './exact-record.js';
 import {
@@ -87,12 +87,12 @@ export function prepareSwmAuthorInventoryCommitV1(
     );
     const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(
-        candidateSnapshot.head as SwmAuthorInventorySnapshotV1['head'],
+        candidateSnapshot.head,
       ),
     );
     const rows = parseCanonicalSwmAuthorInventoryRowsV1(
       canonicalizeSwmAuthorInventoryRowsBytesV1(
-        candidateSnapshot.rows as readonly SwmAuthorInventoryRowV1[],
+        candidateSnapshot.rows,
       ),
     );
     const snapshot = Object.freeze({ head, rows });
@@ -129,14 +129,4 @@ export function prepareSwmAuthorInventoryCommitV1(
       { cause },
     );
   }
-}
-
-function isSwmAuthorInventoryErrorV1(
-  value: unknown,
-): value is Error & { readonly code: SwmAuthorInventoryErrorCodeV1 } {
-  if (!(value instanceof Error) || !('code' in value)) return false;
-  const code = (value as Error & { readonly code?: unknown }).code;
-  return code === 'swm-inventory-input'
-    || code === 'swm-inventory-cas-conflict'
-    || code === 'swm-inventory-database-corrupt';
 }

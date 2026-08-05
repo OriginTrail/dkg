@@ -12,9 +12,10 @@ import {
   type SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
 
-import type {
-  SwmAuthorInventoryCasResultV1,
-  SwmAuthorInventoryErrorCodeV1,
+import {
+  isSwmAuthorInventoryErrorV1,
+  type SwmAuthorInventoryCasResultV1,
+  type SwmAuthorInventoryErrorCodeV1,
 } from './swm-author-inventory-contracts.js';
 import type {
   EncodedSwmAuthorInventoryKeyV1,
@@ -85,6 +86,11 @@ export class SwmAuthorInventoryPersistenceV1 {
       author: key.author,
     }) as SqlRowV1 | undefined);
     if (headRow === undefined) return null;
+    const rowsQuery = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRows);
+    const storedRows = this.host.statement(() => rowsQuery.all({
+      scope: key.scope,
+      author: key.author,
+    }) as SqlRowV1[]);
     try {
       const envelopeBytes = assertBoundedSqlBlobV1(
         headRow.signed_head_envelope,
@@ -104,11 +110,6 @@ export class SwmAuthorInventoryPersistenceV1 {
       ) {
         throw new Error('stored head columns do not match the signed envelope');
       }
-      const rowsQuery = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRows);
-      const storedRows = this.host.statement(() => rowsQuery.all({
-        scope: key.scope,
-        author: key.author,
-      }) as SqlRowV1[]);
       const rows = Object.freeze(storedRows.map(decodeStoredSwmAuthorInventoryRowV1));
       const snapshot = Object.freeze({ head, rows });
       assertSwmAuthorInventorySnapshotBindingV1(snapshot);
@@ -135,7 +136,7 @@ export class SwmAuthorInventoryPersistenceV1 {
       }
       return Object.freeze({ snapshot, expectedHead, canonicalMutation });
     } catch (cause) {
-      if (isSwmInventoryCandidateError(cause, 'swm-inventory-database-corrupt')) throw cause;
+      if (isSwmAuthorInventoryErrorV1(cause, 'swm-inventory-database-corrupt')) throw cause;
       throw this.host.error(
         'swm-inventory-database-corrupt',
         'stored SWM author inventory is not canonical or internally bound',
@@ -333,17 +334,4 @@ function swmAuthorInventoryReplayEvidenceEqualV1(
 ): boolean {
   return nullableByteArraysEqualV1(stored.expectedHead, requested.expectedHead)
     && byteArraysEqualV1(stored.canonicalMutation, requested.canonicalMutation);
-}
-
-function isSwmInventoryCandidateError(
-  value: unknown,
-  code?: SwmInventoryErrorCodeV1,
-): value is Error & { readonly code: SwmInventoryErrorCodeV1 } {
-  if (!(value instanceof Error) || !('code' in value)) return false;
-  const actual = (value as Error & { readonly code?: unknown }).code;
-  return (
-    actual === 'swm-inventory-input'
-    || actual === 'swm-inventory-cas-conflict'
-    || actual === 'swm-inventory-database-corrupt'
-  ) && (code === undefined || actual === code);
 }

@@ -1,9 +1,9 @@
 import { chmodSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   INVENTORY_V1_DIRECTORY_MODE,
+  INVENTORY_V1_DDL,
   INVENTORY_V1_FILE_MODE,
   INVENTORY_V1_LEGACY_USER_VERSION,
   INVENTORY_V1_RELATIVE_PATH,
@@ -28,6 +29,8 @@ import {
   openInventoryV1,
   type Rfc64InventoryV1Foundation,
 } from '../src/rfc64/inventory-v1/index.js';
+import { CandidateInventoryV1 } from '../src/rfc64/inventory-v1/candidate.js';
+import { INVENTORY_V1_STATEMENT_SQL } from '../src/rfc64/inventory-v1/statements.js';
 
 const AUTHOR = '0x3333333333333333333333333333333333333333';
 const SIGNATURE = `0x${'77'.repeat(65)}`;
@@ -45,6 +48,8 @@ const SCOPE_DIGEST = computeSwmAuthorInventoryScopeDigestV1(SCOPE);
 
 const ROW_A = row('7', 'draft-a', 'share-a', '11', '22');
 const ROW_B = row('8', 'draft-b', 'share-b', '33', '44');
+const MIGRATION_HEAD = `0x${'55'.repeat(32)}` as const;
+const MIGRATION_ROWS = `0x${'66'.repeat(32)}` as const;
 const directories: string[] = [];
 const foundations: Rfc64InventoryV1Foundation[] = [];
 
@@ -258,6 +263,37 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     initialized.close();
     const path = join(directory, INVENTORY_V1_RELATIVE_PATH);
     const v2 = new DatabaseSync(path);
+    const session = new Uint8Array(32).fill(1);
+    const targetHead = new Uint8Array(32).fill(2);
+    v2.prepare(`
+      INSERT INTO rfc64_candidate_bucket_loads_v1 (
+        session_id, catalog_scope_digest, author_address,
+        target_catalog_head_digest, subgraph_name, catalog_era_u64be,
+        bucket_count_u64be, bucket_id_u64be, bucket_object_digest,
+        row_count_u64be, payload_byte_length_u64be
+      ) VALUES (
+        :session, :scope, :author, :head, NULL, zeroblob(8),
+        x'0000000000000001', zeroblob(8), zeroblob(32), zeroblob(8), zeroblob(8)
+      )
+    `).run({
+      session,
+      scope: hexBytes(SCOPE_DIGEST),
+      author: hexBytes(AUTHOR),
+      head: targetHead,
+    });
+    if (!dropAppliedHead) {
+      v2.prepare(`
+        INSERT INTO rfc64_applied_catalog_heads_v1 (
+          catalog_scope_digest, author_address, current_catalog_head_digest,
+          applied_inventory_digest, catalog_version_u64be, inventory_row_count_u64be
+        ) VALUES (:scope, :author, :head, :rows, zeroblob(8), x'0000000000000001')
+      `).run({
+        scope: hexBytes(SCOPE_DIGEST),
+        author: hexBytes(AUTHOR),
+        head: hexBytes(MIGRATION_HEAD),
+        rows: hexBytes(MIGRATION_ROWS),
+      });
+    }
     v2.exec(`
       PRAGMA journal_mode = DELETE;
       DROP TABLE rfc64_swm_author_inventory_rows_v1;
@@ -278,8 +314,28 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       expect(database.prepare(
         "SELECT count(*) AS count FROM sqlite_schema WHERE name LIKE 'rfc64_swm_author_inventory_%_v1'",
       ).get()?.count).toBe(2);
+      expect(database.prepare(`
+        SELECT hex(session_id) AS session, hex(catalog_scope_digest) AS scope,
+               hex(author_address) AS author, hex(target_catalog_head_digest) AS head
+        FROM rfc64_candidate_bucket_loads_v1
+      `).get()).toEqual({
+        session: '01'.repeat(32).toUpperCase(),
+        scope: SCOPE_DIGEST.slice(2).toUpperCase(),
+        author: AUTHOR.slice(2).toUpperCase(),
+        head: '02'.repeat(32).toUpperCase(),
+      });
     } finally {
       database.close();
+    }
+    if (!dropAppliedHead) {
+      expect(migrated.readAppliedCatalogHeadV1(SCOPE_DIGEST, AUTHOR)).toEqual({
+        catalogScopeDigest: SCOPE_DIGEST,
+        authorAddress: AUTHOR,
+        currentCatalogHeadDigest: MIGRATION_HEAD,
+        appliedInventoryDigest: MIGRATION_ROWS,
+        catalogVersion: '0',
+        inventoryRowCount: '1',
+      });
     }
     const genesis = snapshot([ROW_A]);
     expect(migrated.compareAndSwapSwmAuthorInventoryV1({
@@ -350,6 +406,46 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(() => inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR))
       .toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
   });
+
+  it('preserves the latency failure and performs a verified reopen when row reads overrun', () => {
+    const path = join(temporaryDirectory(), 'latency-fault.sqlite3');
+    let database = new DatabaseSync(path);
+    database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+    let now = 0;
+    let injectRowLatency = false;
+    let facade = latencyFaultFacade(database, () => {
+      if (injectRowLatency) now += 10_001;
+    });
+    const reopen = vi.fn((abandoned: DatabaseSync): DatabaseSync => {
+      expect(abandoned).toBe(facade);
+      database.close();
+      database = new DatabaseSync(path);
+      database.exec('PRAGMA foreign_keys = ON');
+      facade = latencyFaultFacade(database, () => {
+        if (injectRowLatency) now += 10_001;
+      });
+      return facade;
+    });
+    const inventory = new CandidateInventoryV1(facade, reopen, () => now);
+    try {
+      const genesis = snapshot([ROW_A]);
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis,
+        mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      });
+      injectRowLatency = true;
+      const abandoned = facade;
+      expect(() => inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR))
+        .toThrowError(expect.objectContaining({ code: 'latency-budget-exceeded' }));
+      expect(reopen).toHaveBeenCalledOnce();
+      expect(reopen.mock.calls[0]?.[0] === abandoned).toBe(true);
+      expect(reopen.mock.results[0]?.value === abandoned).toBe(false);
+    } finally {
+      inventory.close();
+      try { database.close(); } catch { /* inventory owns the current handle */ }
+    }
+  });
 });
 
 function row(
@@ -407,4 +503,34 @@ function temporaryDirectory(): string {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-swm-inventory-')));
   directories.push(directory);
   return directory;
+}
+
+function hexBytes(value: string): Uint8Array {
+  return Uint8Array.from(Buffer.from(value.slice(2), 'hex'));
+}
+
+function latencyFaultFacade(
+  database: DatabaseSync,
+  afterRowsRead: () => void,
+): DatabaseSync {
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'prepare') {
+        const prepare = target.prepare.bind(target);
+        return (sql: string): StatementSync => {
+          const statement = prepare(sql);
+          if (sql !== INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRows) return statement;
+          return {
+            all: (parameters: Record<string, unknown>) => {
+              const rows = statement.all(parameters as never);
+              afterRowsRead();
+              return rows;
+            },
+          } as unknown as StatementSync;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }

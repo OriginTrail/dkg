@@ -32,14 +32,17 @@ export function snapshotPlainDataRecordV1(
 }
 
 /** @internal */
-export function snapshotExactPlainDataRecordV1(
-  value: unknown,
-  expectedKeys: readonly string[],
+export function snapshotExactPlainDataRecordV1<
+  T extends object,
+  const Keys extends readonly (keyof T & string)[],
+>(
+  value: T,
+  expectedKeys: Keys,
   label: string,
-): Readonly<Record<string, unknown>> {
+): Readonly<Pick<T, Keys[number]>> {
   const snapshot = snapshotPlainDataRecordV1(value, label);
   assertExactFieldSetV1(snapshot, expectedKeys, label);
-  return snapshot;
+  return snapshot as Readonly<Pick<T, Keys[number]>>;
 }
 
 /** @internal */
