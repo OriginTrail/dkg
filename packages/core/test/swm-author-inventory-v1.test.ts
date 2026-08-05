@@ -21,6 +21,9 @@ import {
   type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
 } from '../src/swm-author-inventory-v1.js';
 import {
+  MAX_SEAL_TRIPLE_COUNT_V1,
+} from '../src/canonical-graph-scoped-author-seal.js';
+import {
   computeControlObjectDigestHex,
   type UnsignedControlEnvelopeV1,
 } from '../src/sync-control-object.js';
@@ -218,6 +221,35 @@ describe('SWM author inventory v1', () => {
       ...ROW_A,
       expiresAt: ROW_A.sharedAt,
     } as SwmAuthorInventoryRowV1])).toThrow(/expiresAt must be later/);
+  });
+
+  it('keeps row counts within canonical author-seal bounds', () => {
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([{
+      ...ROW_A,
+      publicTripleCount: '0',
+      privateTripleCount: '0',
+    } as SwmAuthorInventoryRowV1])).toThrow(/at least one triple/);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([{
+      ...ROW_A,
+      publicTripleCount: (MAX_SEAL_TRIPLE_COUNT_V1 + 1n).toString(),
+    } as SwmAuthorInventoryRowV1])).toThrow(/canonical author seal bounds/);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([{
+      ...ROW_A,
+      privateTripleCount: (MAX_SEAL_TRIPLE_COUNT_V1 + 1n).toString(),
+    } as SwmAuthorInventoryRowV1])).toThrow(/canonical author seal bounds/);
+  });
+
+  it('rejects signed heads whose declared row count exceeds the protocol cap', () => {
+    expect(() => assertSignedSwmAuthorInventoryHeadEnvelopeV1(
+      signedHead([ROW_A], {
+        totalRows: (MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1).toString(),
+      }),
+    )).toThrow(/totalRows must not exceed/);
+    expect(() => assertSignedSwmAuthorInventoryHeadEnvelopeV1(
+      signedHead([ROW_A], {
+        totalRows: MAX_SWM_AUTHOR_INVENTORY_ROWS_V1.toString(),
+      }),
+    )).not.toThrow();
   });
 
   it('enforces SWM-specific row, scalar, and signed-head size limits', () => {

@@ -9,6 +9,9 @@ import {
   type AuthorLaneScopeV1,
 } from './author-catalog-codec.js';
 import {
+  MAX_SEAL_TRIPLE_COUNT_V1,
+} from './canonical-graph-scoped-author-seal.js';
+import {
   canonicalizeJson,
   parseCanonicalJson,
   type CanonicalJsonValue,
@@ -180,8 +183,23 @@ export function assertSwmAuthorInventoryRowV1(
     assertCanonicalDeterministicUalV1(value.kaUal);
     assertBoundedIdentifier(value.shareOperationId, 'shareOperationId');
     assertCanonicalDigest(value.projectionDigest, 'projectionDigest');
-    parseCanonicalDecimalU64(value.publicTripleCount, 'publicTripleCount');
-    parseCanonicalDecimalU64(value.privateTripleCount, 'privateTripleCount');
+    const publicTripleCount = parseCanonicalDecimalU64(
+      value.publicTripleCount,
+      'publicTripleCount',
+    );
+    const privateTripleCount = parseCanonicalDecimalU64(
+      value.privateTripleCount,
+      'privateTripleCount',
+    );
+    if (
+      publicTripleCount > MAX_SEAL_TRIPLE_COUNT_V1
+      || privateTripleCount > MAX_SEAL_TRIPLE_COUNT_V1
+    ) {
+      throw new Error('triple counts must fit the canonical author seal bounds');
+    }
+    if (publicTripleCount + privateTripleCount === 0n) {
+      throw new Error('inventory row must commit at least one triple');
+    }
     assertCanonicalDigest(value.sealDigest, 'sealDigest');
     assertCanonicalTimestampMs(value.sharedAt, 'sharedAt');
     if (value.expiresAt !== null) {
@@ -256,7 +274,10 @@ export function assertSwmAuthorInventoryHeadV1(
     if ((version === 0n) !== (value.previousHeadDigest === null)) {
       throw new Error('only version 0 may have a null previousHeadDigest');
     }
-    parseCanonicalDecimalU64(value.totalRows, 'totalRows');
+    const totalRows = parseCanonicalDecimalU64(value.totalRows, 'totalRows');
+    if (totalRows > BigInt(MAX_SWM_AUTHOR_INVENTORY_ROWS_V1)) {
+      throw new Error(`totalRows must not exceed ${MAX_SWM_AUTHOR_INVENTORY_ROWS_V1}`);
+    }
     assertCanonicalDigest(value.rowsDigest, 'rowsDigest');
     assertCanonicalTimestampMs(value.issuedAt, 'issuedAt');
   });
