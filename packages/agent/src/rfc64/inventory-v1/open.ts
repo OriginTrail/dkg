@@ -956,12 +956,7 @@ function openOrRebuildOwnedDatabase(
     const identity = readIdentity(database);
     assertCommittedTargetIdentity(identity);
     try {
-      if (identity.userVersion === INVENTORY_V1_LEGACY_USER_VERSION) {
-        migrateInventoryV1ToV2(database, databasePath);
-      }
-      if (readIdentity(database).userVersion === INVENTORY_V1_V2_USER_VERSION) {
-        migrateInventoryV2ToV3(database, databasePath);
-      }
+      migrateInventorySchemaToCurrent(database, databasePath);
       verifyOwnedSchema(database);
     } catch (error) {
       if (!(error instanceof OwnedInventoryV1SchemaError)) throw error;
@@ -1170,71 +1165,76 @@ function schemaMatches(
   });
 }
 
-function migrateInventoryV1ToV2(database: DatabaseSyncV1, databasePath: string): void {
-  const identity = readIdentity(database);
-  if (
-    identity.applicationId !== INVENTORY_V1_APPLICATION_ID
-    || identity.userVersion !== INVENTORY_V1_LEGACY_USER_VERSION
-    || !schemaMatches(identity.userObjects, INVENTORY_V1_LEGACY_USER_OBJECTS)
-  ) {
-    throw new OwnedInventoryV1SchemaError(
-      'RFC-64 inventory v1 schema is not eligible for the v2 migration',
+interface InventorySchemaMigrationV1 {
+  readonly fromVersion: number;
+  readonly toVersion: number;
+  readonly fromLabel: string;
+  readonly toLabel: string;
+  readonly fromObjects: Readonly<Record<string, string>>;
+  readonly toObjects: Readonly<Record<string, string>>;
+  readonly sql: string;
+}
+
+const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Object.freeze([
+  Object.freeze({
+    fromVersion: INVENTORY_V1_LEGACY_USER_VERSION,
+    toVersion: INVENTORY_V1_V2_USER_VERSION,
+    fromLabel: 'v1',
+    toLabel: 'v2',
+    fromObjects: INVENTORY_V1_LEGACY_USER_OBJECTS,
+    toObjects: INVENTORY_V1_V2_USER_OBJECTS,
+    sql: INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
+  }),
+  Object.freeze({
+    fromVersion: INVENTORY_V1_V2_USER_VERSION,
+    toVersion: INVENTORY_V1_USER_VERSION,
+    fromLabel: 'v2',
+    toLabel: 'v3',
+    fromObjects: INVENTORY_V1_V2_USER_OBJECTS,
+    toObjects: INVENTORY_V1_USER_OBJECTS,
+    sql: INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
+  }),
+]);
+
+function migrateInventorySchemaToCurrent(
+  database: DatabaseSyncV1,
+  databasePath: string,
+): void {
+  while (true) {
+    const identity = readIdentity(database);
+    if (identity.userVersion === INVENTORY_V1_USER_VERSION) return;
+    const migration = INVENTORY_SCHEMA_MIGRATIONS_V1.find(
+      (candidate) => candidate.fromVersion === identity.userVersion,
     );
-  }
-  let transactionOpen = false;
-  try {
-    database.exec('BEGIN IMMEDIATE');
-    transactionOpen = true;
-    database.exec(INVENTORY_V1_MIGRATE_V1_TO_V2_SQL);
-    database.exec('COMMIT');
-    transactionOpen = false;
-  } catch (cause) {
-    if (transactionOpen) {
-      try { database.exec('ROLLBACK'); } catch { /* retain migration failure */ }
+    if (migration === undefined) {
+      throw new OwnedInventoryV1SchemaError(
+        `RFC-64 inventory schema v${identity.userVersion} has no migration to the current schema`,
+      );
     }
-    throw new InventoryV1OpenError(
-      'database-io',
-      'failed to migrate RFC-64 inventory schema from v1 to v2',
-      { cause },
-    );
-  }
-  const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
-  if (checkpoint?.busy !== 0) {
-    throw new InventoryV1OpenError(
-      checkpoint?.busy === 1 ? 'database-busy' : 'database-io',
-      'RFC-64 inventory v2 migration could not checkpoint its committed schema',
-    );
-  }
-  fsyncRegularFile(databasePath, 'migrated inventory database');
-  fsyncDirectory(dirname(databasePath));
-  const migrated = readIdentity(database);
-  if (
-    migrated.userVersion !== INVENTORY_V1_V2_USER_VERSION
-    || !schemaMatches(migrated.userObjects, INVENTORY_V1_V2_USER_OBJECTS)
-  ) {
-    throw new InventoryV1OpenError(
-      'database-io',
-      'RFC-64 inventory v2 migration did not commit its exact schema',
-    );
+    migrateInventorySchema(database, databasePath, identity, migration);
   }
 }
 
-function migrateInventoryV2ToV3(database: DatabaseSyncV1, databasePath: string): void {
-  const identity = readIdentity(database);
+function migrateInventorySchema(
+  database: DatabaseSyncV1,
+  databasePath: string,
+  identity: DatabaseIdentityV1,
+  migration: InventorySchemaMigrationV1,
+): void {
   if (
     identity.applicationId !== INVENTORY_V1_APPLICATION_ID
-    || identity.userVersion !== INVENTORY_V1_V2_USER_VERSION
-    || !schemaMatches(identity.userObjects, INVENTORY_V1_V2_USER_OBJECTS)
+    || identity.userVersion !== migration.fromVersion
+    || !schemaMatches(identity.userObjects, migration.fromObjects)
   ) {
     throw new OwnedInventoryV1SchemaError(
-      'RFC-64 inventory v2 schema is not eligible for the v3 migration',
+      `RFC-64 inventory ${migration.fromLabel} schema is not eligible for the ${migration.toLabel} migration`,
     );
   }
   let transactionOpen = false;
   try {
     database.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
-    database.exec(INVENTORY_V1_MIGRATE_V2_TO_V3_SQL);
+    database.exec(migration.sql);
     database.exec('COMMIT');
     transactionOpen = false;
   } catch (cause) {
@@ -1243,7 +1243,7 @@ function migrateInventoryV2ToV3(database: DatabaseSyncV1, databasePath: string):
     }
     throw new InventoryV1OpenError(
       'database-io',
-      'failed to migrate RFC-64 inventory schema from v2 to v3',
+      `failed to migrate RFC-64 inventory schema from ${migration.fromLabel} to ${migration.toLabel}`,
       { cause },
     );
   }
@@ -1251,19 +1251,19 @@ function migrateInventoryV2ToV3(database: DatabaseSyncV1, databasePath: string):
   if (checkpoint?.busy !== 0) {
     throw new InventoryV1OpenError(
       checkpoint?.busy === 1 ? 'database-busy' : 'database-io',
-      'RFC-64 inventory v3 migration could not checkpoint its committed schema',
+      `RFC-64 inventory ${migration.toLabel} migration could not checkpoint its committed schema`,
     );
   }
   fsyncRegularFile(databasePath, 'migrated inventory database');
   fsyncDirectory(dirname(databasePath));
   const migrated = readIdentity(database);
   if (
-    migrated.userVersion !== INVENTORY_V1_USER_VERSION
-    || !schemaMatches(migrated.userObjects)
+    migrated.userVersion !== migration.toVersion
+    || !schemaMatches(migrated.userObjects, migration.toObjects)
   ) {
     throw new InventoryV1OpenError(
       'database-io',
-      'RFC-64 inventory v3 migration did not commit its exact schema',
+      `RFC-64 inventory ${migration.toLabel} migration did not commit its exact schema`,
     );
   }
 }

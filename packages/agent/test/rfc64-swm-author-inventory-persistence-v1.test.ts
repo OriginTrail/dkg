@@ -21,6 +21,7 @@ import {
 import {
   INVENTORY_V1_DIRECTORY_MODE,
   INVENTORY_V1_FILE_MODE,
+  INVENTORY_V1_LEGACY_USER_VERSION,
   INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_VERSION,
   INVENTORY_V1_V2_USER_VERSION,
@@ -112,7 +113,114 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
   });
 
-  it('migrates an exact v2 inventory before committing SWM shadow state', async () => {
+  it('rejects a row from another DKG network before writing either head or rows', async () => {
+    const inventory = await openInventoryV1(temporaryDirectory());
+    foundations.push(inventory);
+    const foreignRow = Object.freeze({
+      ...ROW_A,
+      kaUal: `did:dkg:base:84532/${AUTHOR}/7`,
+    }) as SwmAuthorInventoryRowV1;
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: snapshot([foreignRow]),
+      mutation: { kind: 'upsert', row: foreignRow },
+      expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects non-genesis initialization and malformed successor transitions', async () => {
+    const inventory = await openInventoryV1(temporaryDirectory());
+    foundations.push(inventory);
+    const nonGenesis = snapshot([ROW_A], undefined, {
+      version: '1',
+      previousHeadDigest: `0x${'99'.repeat(32)}`,
+    });
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: nonGenesis,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+
+    const genesis = snapshot([ROW_A]);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    });
+    for (const malformed of [
+      snapshot([ROW_A, ROW_B], genesis, { version: '2' }),
+      snapshot([ROW_A, ROW_B], genesis, { previousHeadDigest: `0x${'88'.repeat(32)}` }),
+    ]) {
+      expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: malformed,
+        mutation: { kind: 'upsert', row: ROW_B },
+        expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
+      })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+    }
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(genesis);
+  });
+
+  it('does not accept an invalid mutation merely because the signed head already exists', async () => {
+    const inventory = await openInventoryV1(temporaryDirectory());
+    foundations.push(inventory);
+    const genesis = snapshot([ROW_A]);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    });
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'remove', kaUal: ROW_B.kaUal },
+      expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+  });
+
+  it('replaces an existing row by KA UAL and durably reads the replacement after restart', async () => {
+    const directory = temporaryDirectory();
+    let inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    const genesis = snapshot([ROW_A]);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    });
+    const replacement = Object.freeze({
+      ...ROW_A,
+      assertionVersion: '2',
+      shareOperationId: 'share-a-replaced',
+      projectionDigest: `0x${'55'.repeat(32)}`,
+    }) as SwmAuthorInventoryRowV1;
+    const successor = snapshot([replacement], genesis);
+    expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: successor,
+      mutation: { kind: 'upsert', row: replacement },
+      expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
+    })).toEqual({ status: 'applied', snapshot: successor });
+
+    inventory.close();
+    foundations.splice(foundations.indexOf(inventory), 1);
+    inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(successor);
+  });
+
+  it.each([
+    {
+      label: 'v1',
+      version: INVENTORY_V1_LEGACY_USER_VERSION,
+      dropAppliedHead: true,
+    },
+    {
+      label: 'v2',
+      version: INVENTORY_V1_V2_USER_VERSION,
+      dropAppliedHead: false,
+    },
+  ])('migrates an exact $label inventory through v3 before committing SWM shadow state', async ({
+    version,
+    dropAppliedHead,
+  }) => {
     const directory = temporaryDirectory();
     const initialized = await openInventoryV1(directory);
     initialized.close();
@@ -122,7 +230,8 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       PRAGMA journal_mode = DELETE;
       DROP TABLE rfc64_swm_author_inventory_rows_v1;
       DROP TABLE rfc64_swm_author_inventory_heads_v1;
-      PRAGMA user_version = ${INVENTORY_V1_V2_USER_VERSION};
+      ${dropAppliedHead ? 'DROP TABLE rfc64_applied_catalog_heads_v1;' : ''}
+      PRAGMA user_version = ${version};
     `);
     v2.close();
     chmodSync(dirname(path), INVENTORY_V1_DIRECTORY_MODE);
@@ -235,6 +344,7 @@ function row(
 function snapshot(
   rows: readonly SwmAuthorInventoryRowV1[],
   previous?: SwmAuthorInventorySnapshotV1,
+  overrides: Partial<SwmAuthorInventoryHeadV1> = {},
 ): SwmAuthorInventorySnapshotV1 {
   const version = previous === undefined ? '0' : (BigInt(previous.head.payload.version) + 1n).toString();
   const payload = Object.freeze({
@@ -244,6 +354,7 @@ function snapshot(
     totalRows: rows.length.toString(),
     rowsDigest: computeSwmAuthorInventoryRowsDigestV1(rows),
     issuedAt: '1700000000200',
+    ...overrides,
   }) as SwmAuthorInventoryHeadV1;
   const unsigned = Object.freeze({
     issuer: AUTHOR,

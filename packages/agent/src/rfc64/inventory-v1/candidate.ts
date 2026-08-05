@@ -10,7 +10,6 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   ZERO_DIGEST32_V1,
   assertCanonicalDigest,
-  assertCanonicalDeterministicUalV1,
   assertAssertionCoordinateV1,
   assertAuthorCatalogBucketScopeBindingV1,
   assertAuthorCatalogBucketV1,
@@ -18,22 +17,15 @@ import {
   assertAuthorCatalogRowV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
-  assertSwmAuthorInventorySnapshotBindingV1,
   assertSubGraphNameV1,
   canonicalizeAuthorCatalogBucketPayloadBytesV1,
   canonicalizeAuthorCatalogScopeV1,
   canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1,
-  canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
   computeAuthorCatalogKeyDigestV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
-  computeSwmAuthorInventoryScopeDigestV1,
-  deriveSwmAuthorInventoryScopeFromHeadV1,
   deriveAuthorCatalogScopeFromHeadV1,
   parseCanonicalSignedAuthorCatalogHeadEnvelopeV1,
-  parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
-  parseCanonicalSwmAuthorInventoryRowsV1,
   parseCanonicalDecimalU64,
   readVerifiedAuthorCatalogBucketDescriptorV1,
   readVerifiedTransferredCatalogBundleMetadataV1,
@@ -51,7 +43,6 @@ import {
   type KaIdV1,
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
-  type SignedSwmAuthorInventoryHeadEnvelopeV1,
   type SubGraphNameV1,
   type SwmAuthorInventoryRowV1,
   type SwmAuthorInventorySnapshotV1,
@@ -60,6 +51,7 @@ import {
   type VerifiedTransferredCatalogBundleV1,
 } from '@origintrail-official/dkg-core';
 
+import { snapshotExactPlainDataRecordV1 } from './exact-record.js';
 import {
   assertSqlBlobWidthV1,
   decimalU64ToSqlBlobV1,
@@ -73,6 +65,11 @@ import {
   sqlBlobsEqualV1,
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
+import {
+  SwmAuthorInventoryPersistenceV1,
+  encodeSwmAuthorInventoryKeyV1,
+  prepareSwmAuthorInventoryCommitV1,
+} from './swm-author-inventory-persistence.js';
 
 const MAX_PAGE_SIZE = 256;
 const STATEMENT_LATENCY_BUDGET_MS = 10_000;
@@ -399,22 +396,6 @@ interface EncodedAppliedCatalogHeadV1 {
   readonly publicSnapshot: AppliedCatalogHeadSnapshotV1;
 }
 
-interface EncodedSwmAuthorInventoryKeyV1 {
-  readonly scope: Uint8Array;
-  readonly author: Uint8Array;
-}
-
-interface PreparedSwmAuthorInventoryCasV1 extends EncodedSwmAuthorInventoryKeyV1 {
-  readonly snapshot: SwmAuthorInventorySnapshotV1;
-  readonly mutation: SwmAuthorInventoryMutationV1;
-  readonly expectedHead: Uint8Array | null;
-  readonly nextHead: Uint8Array;
-  readonly inventoryVersion: Uint8Array;
-  readonly totalRows: Uint8Array;
-  readonly rowsDigest: Uint8Array;
-  readonly signedHeadEnvelope: Uint8Array;
-}
-
 interface SessionContextV1 {
   readonly scopeHex: string;
   readonly authorHex: string;
@@ -668,22 +649,28 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     authorAddress: EvmAddressV1,
   ): SwmAuthorInventorySnapshotV1 | null {
     this.assertOpen();
-    const key = encodeSwmAuthorInventoryKey(inventoryScopeDigest, authorAddress);
-    return this.readTransaction(() => this.readSwmAuthorInventorySnapshot(key));
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest,
+      authorAddress,
+      swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.read(key));
   }
 
   compareAndSwapSwmAuthorInventoryV1(
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1 {
     this.assertOpen();
-    const prepared = prepareSwmAuthorInventoryCas(input);
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const prepared = prepareSwmAuthorInventoryCommitV1(input, swmAuthorInventoryErrorV1);
     try {
       return this.writeTransaction(
         'compare-and-swap SWM author inventory',
-        () => this.applySwmAuthorInventoryCas(prepared),
+        () => persistence.apply(prepared),
         {
-          resolve: () => this.resolveSwmAuthorInventoryCas(prepared),
-          retry: () => this.applySwmAuthorInventoryCas(prepared),
+          resolve: () => persistence.resolve(prepared),
+          retry: () => persistence.apply(prepared),
           resolvedCommittedResult: () => Object.freeze({
             status: 'applied' as const,
             snapshot: prepared.snapshot,
@@ -1314,7 +1301,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   private encodeAndVerifyLoadUnchecked(
     load: VerifiedCandidateBucketLoadV1,
   ): EncodedCandidateLoadV1 {
-    const loadRecord = exactPlainRecord(
+    const loadRecord = snapshotExactPlainDataRecordV1(
       load,
       ['bucket', 'directoryPath', 'head', 'session'],
       'load',
@@ -1651,182 +1638,12 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     );
   }
 
-  private readSwmAuthorInventorySnapshot(
-    key: EncodedSwmAuthorInventoryKeyV1,
-  ): SwmAuthorInventorySnapshotV1 | null {
-    const headQuery = this.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorHead);
-    const headRow = this.statement(() => headQuery.get({
-      scope: key.scope,
-      author: key.author,
-    }) as SqlRowV1 | undefined);
-    if (headRow === undefined) return null;
-    try {
-      const envelopeBytes = assertBoundedSqlBlob(
-        headRow.signed_head_envelope,
-        1,
-        4 * 1024,
-        'stored SWM author inventory head envelope',
-      );
-      const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(envelopeBytes);
-      const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
-      if (
-        computeSwmAuthorInventoryScopeDigestV1(scope) !== sqlBlobToDigest32V1(key.scope)
-        || head.payload.authorAddress !== sqlBlobToEvmAddressV1(key.author)
-        || head.objectDigest !== sqlBlobToDigest32V1(headRow.current_head_digest)
-        || head.payload.version !== sqlBlobToDecimalU64V1(headRow.inventory_version_u64be)
-        || head.payload.totalRows !== sqlBlobToDecimalU64V1(headRow.total_rows_u64be)
-        || head.payload.rowsDigest !== sqlBlobToDigest32V1(headRow.rows_digest)
-      ) {
-        throw new Error('stored head columns do not match the signed envelope');
-      }
-      const rowsQuery = this.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRows);
-      const storedRows = this.statement(() => rowsQuery.all({
-        scope: key.scope,
-        author: key.author,
-      }) as SqlRowV1[]);
-      const rows = Object.freeze(storedRows.map(decodeStoredSwmAuthorInventoryRow));
-      const snapshot = Object.freeze({ head, rows });
-      assertSwmAuthorInventorySnapshotBindingV1(snapshot);
-      return snapshot;
-    } catch (cause) {
-      if (
-        cause instanceof InventoryV1CandidateError
-        && cause.code === 'swm-inventory-database-corrupt'
-      ) throw cause;
-      throw new InventoryV1CandidateError(
-        'swm-inventory-database-corrupt',
-        'stored SWM author inventory is not canonical or internally bound',
-        { cause },
-      );
-    }
-  }
-
-  private applySwmAuthorInventoryCas(
-    next: PreparedSwmAuthorInventoryCasV1,
-  ): SwmAuthorInventoryCasResultV1 {
-    const current = this.readSwmAuthorInventorySnapshot(next);
-    if (current !== null && current.head.objectDigest === next.snapshot.head.objectDigest) {
-      if (!swmAuthorInventorySnapshotsEqual(current, next.snapshot)) {
-        throw new InventoryV1CandidateError(
-          'swm-inventory-database-corrupt',
-          'one SWM inventory head digest resolved to different exact state',
-        );
-      }
-      return Object.freeze({ status: 'existing' as const, snapshot: current });
-    }
-    this.assertSwmAuthorInventoryCasTransition(current, next);
-
-    const headParameters = swmAuthorHeadParameters(next);
-    if (current === null) {
-      const insert = this.prepare(INVENTORY_V1_STATEMENT_SQL.insertSwmAuthorHead);
-      const result = this.statement(() => insert.run(headParameters));
-      if (Number(result.changes) !== 1) {
-        throw new InventoryV1CandidateError(
-          'swm-inventory-database-corrupt',
-          'SWM author inventory initialization did not insert exactly one head',
-        );
-      }
-    } else {
-      const update = this.prepare(INVENTORY_V1_STATEMENT_SQL.updateSwmAuthorHeadCas);
-      const result = this.statement(() => update.run({
-        ...headParameters,
-        expectedHead: next.expectedHead,
-      }));
-      if (Number(result.changes) !== 1) {
-        throw swmAuthorInventoryCasConflict(
-          current.head.objectDigest as Digest32V1,
-          next.expectedHead === null ? null : inputDigest(next.expectedHead),
-        );
-      }
-    }
-
-    const mutation = next.mutation;
-    if (mutation.kind === 'upsert') {
-      const upsert = this.prepare(INVENTORY_V1_STATEMENT_SQL.upsertSwmAuthorRow);
-      const result = this.statement(() => upsert.run({
-        ...swmAuthorKeyParameters(next),
-        ...swmAuthorRowParameters(mutation.row),
-      }));
-      if (Number(result.changes) !== 1) {
-        throw new InventoryV1CandidateError(
-          'swm-inventory-database-corrupt',
-          'SWM author inventory upsert did not mutate exactly one row',
-        );
-      }
-    } else {
-      const remove = this.prepare(INVENTORY_V1_STATEMENT_SQL.deleteSwmAuthorRow);
-      const result = this.statement(() => remove.run({
-        ...swmAuthorKeyParameters(next),
-        kaUal: mutation.kaUal,
-      }));
-      if (Number(result.changes) !== 1) {
-        throw new InventoryV1CandidateError(
-          'swm-inventory-input',
-          'SWM author inventory removal target is absent',
-        );
-      }
-    }
-
-    const committed = this.readSwmAuthorInventorySnapshot(next);
-    if (committed === null || !swmAuthorInventorySnapshotsEqual(committed, next.snapshot)) {
-      throw new InventoryV1CandidateError(
-        'swm-inventory-database-corrupt',
-        'SWM author inventory write did not exact-read as the requested next state',
-      );
-    }
-    return Object.freeze({ status: 'applied' as const, snapshot: committed });
-  }
-
-  private assertSwmAuthorInventoryCasTransition(
-    current: SwmAuthorInventorySnapshotV1 | null,
-    next: PreparedSwmAuthorInventoryCasV1,
-  ): void {
-    const actual = current?.head.objectDigest as Digest32V1 | undefined;
-    const expected = next.expectedHead === null ? null : inputDigest(next.expectedHead);
-    if ((actual ?? null) !== expected) {
-      throw swmAuthorInventoryCasConflict(actual ?? null, expected);
-    }
-    const nextHead = next.snapshot.head.payload;
-    if (current === null) {
-      if (nextHead.version !== '0' || nextHead.previousHeadDigest !== null) {
-        throw new InventoryV1CandidateError(
-          'swm-inventory-input',
-          'SWM author inventory initialization requires version 0 with no predecessor',
-        );
-      }
-    } else if (
-      BigInt(nextHead.version) !== BigInt(current.head.payload.version) + 1n
-      || nextHead.previousHeadDigest !== current.head.objectDigest
-    ) {
-      throw new InventoryV1CandidateError(
-        'swm-inventory-input',
-        'SWM author inventory successor must increment version and bind the exact predecessor',
-      );
-    }
-    const expectedRows = applySwmAuthorInventoryMutation(current?.rows ?? [], next.mutation);
-    if (!swmAuthorInventoryRowsEqual(expectedRows, next.snapshot.rows)) {
-      throw new InventoryV1CandidateError(
-        'swm-inventory-input',
-        'signed SWM author inventory row set is not the exact requested mutation',
-      );
-    }
-  }
-
-  private resolveSwmAuthorInventoryCas(
-    next: PreparedSwmAuthorInventoryCasV1,
-  ): IndeterminateCommitResolutionV1 {
-    const current = this.readSwmAuthorInventorySnapshot(next);
-    if (
-      current !== null
-      && current.head.objectDigest === next.snapshot.head.objectDigest
-      && swmAuthorInventorySnapshotsEqual(current, next.snapshot)
-    ) return 'committed';
-    const expected = next.expectedHead === null ? null : inputDigest(next.expectedHead);
-    if ((current?.head.objectDigest ?? null) === expected) return 'not-committed';
-    throw swmAuthorInventoryCasConflict(
-      (current?.head.objectDigest as Digest32V1 | undefined) ?? null,
-      expected,
-    );
+  private swmAuthorInventoryPersistenceV1(): SwmAuthorInventoryPersistenceV1 {
+    return new SwmAuthorInventoryPersistenceV1({
+      prepare: (sql) => this.prepare(sql),
+      statement: <T>(operation: () => T): T => this.statement(operation),
+      error: swmAuthorInventoryErrorV1,
+    });
   }
 
   private captureDeleteTarget(row: SqlRowV1): DeleteTargetV1 {
@@ -2479,319 +2296,17 @@ function appliedHeadCasConflict(
   );
 }
 
-function encodeSwmAuthorInventoryKey(
-  inventoryScopeDigest: unknown,
-  authorAddress: unknown,
-): EncodedSwmAuthorInventoryKeyV1 {
-  try {
-    assertCanonicalDigest(inventoryScopeDigest, 'inventoryScopeDigest');
-    return {
-      scope: digest32ToSqlBlobV1(inventoryScopeDigest),
-      author: evmAddressToSqlBlobV1(authorAddress as EvmAddressV1),
-    };
-  } catch (cause) {
-    throw new InventoryV1CandidateError(
-      'swm-inventory-input',
-      'SWM author inventory key is not canonical',
-      { cause },
-    );
-  }
-}
-
-function prepareSwmAuthorInventoryCas(
-  input: unknown,
-): PreparedSwmAuthorInventoryCasV1 {
-  try {
-    const candidate = snapshotExactPlainDataRecord(
-      input,
-      ['snapshot', 'mutation', 'expectedCurrentHeadDigest'],
-      'SWM author inventory CAS input',
-    );
-    const candidateSnapshot = snapshotExactPlainDataRecord(
-      candidate.snapshot,
-      ['head', 'rows'],
-      'SWM author inventory snapshot',
-    );
-    const head = parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
-      canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(
-        candidateSnapshot.head as SignedSwmAuthorInventoryHeadEnvelopeV1,
-      ),
-    );
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(
-        candidateSnapshot.rows as readonly SwmAuthorInventoryRowV1[],
-      ),
-    );
-    const snapshot = Object.freeze({ head, rows });
-    assertSwmAuthorInventorySnapshotBindingV1(snapshot);
-    const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
-    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(scope);
-    const key = encodeSwmAuthorInventoryKey(inventoryScopeDigest, head.payload.authorAddress);
-    let expectedHead: Uint8Array | null = null;
-    if (candidate.expectedCurrentHeadDigest !== null) {
-      assertCanonicalDigest(candidate.expectedCurrentHeadDigest, 'expectedCurrentHeadDigest');
-      expectedHead = digest32ToSqlBlobV1(candidate.expectedCurrentHeadDigest);
-    }
-    const mutation = snapshotSwmAuthorInventoryMutation(candidate.mutation);
-    return Object.freeze({
-      ...key,
-      snapshot,
-      mutation,
-      expectedHead,
-      nextHead: digest32ToSqlBlobV1(head.objectDigest as Digest32V1),
-      inventoryVersion: decimalU64ToSqlBlobV1(head.payload.version),
-      totalRows: decimalU64ToSqlBlobV1(head.payload.totalRows),
-      rowsDigest: digest32ToSqlBlobV1(head.payload.rowsDigest),
-      signedHeadEnvelope: canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(head),
-    });
-  } catch (cause) {
-    if (cause instanceof InventoryV1CandidateError) throw cause;
-    throw new InventoryV1CandidateError(
-      'swm-inventory-input',
-      'SWM author inventory CAS input is not canonical or internally bound',
-      { cause },
-    );
-  }
-}
-
-function snapshotSwmAuthorInventoryMutation(
-  mutation: unknown,
-): SwmAuthorInventoryMutationV1 {
-  const candidate = snapshotPlainDataRecord(mutation, 'SWM author inventory mutation');
-  if (candidate.kind === 'upsert') {
-    assertExactFieldSet(candidate, ['kind', 'row'], 'SWM author inventory upsert mutation');
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1([
-        candidate.row as SwmAuthorInventoryRowV1,
-      ]),
-    );
-    return Object.freeze({ kind: 'upsert' as const, row: rows[0]! });
-  }
-  if (candidate.kind === 'remove' && typeof candidate.kaUal === 'string') {
-    assertExactFieldSet(candidate, ['kind', 'kaUal'], 'SWM author inventory remove mutation');
-    const kaUal = assertCanonicalDeterministicUalV1(candidate.kaUal).ual;
-    return Object.freeze({ kind: 'remove' as const, kaUal });
-  }
-  throw new Error('SWM author inventory mutation has an invalid kind or payload');
-}
-
-function swmAuthorKeyParameters(
-  key: EncodedSwmAuthorInventoryKeyV1,
-): SqlParametersV1 {
-  return { scope: key.scope, author: key.author };
-}
-
-function swmAuthorHeadParameters(
-  head: PreparedSwmAuthorInventoryCasV1,
-): SqlParametersV1 {
-  return {
-    ...swmAuthorKeyParameters(head),
-    nextHead: head.nextHead,
-    inventoryVersion: head.inventoryVersion,
-    totalRows: head.totalRows,
-    rowsDigest: head.rowsDigest,
-    signedHeadEnvelope: head.signedHeadEnvelope,
-  };
-}
-
-function swmAuthorRowParameters(row: SwmAuthorInventoryRowV1): SqlParametersV1 {
-  return {
-    kaUal: row.kaUal,
-    assertionCoordinate: row.assertionCoordinate,
-    assertionVersion: decimalU64ToSqlBlobV1(row.assertionVersion),
-    shareOperationId: row.shareOperationId,
-    projectionDigest: digest32ToSqlBlobV1(row.projectionDigest),
-    publicTripleCount: decimalU64ToSqlBlobV1(row.publicTripleCount),
-    privateTripleCount: decimalU64ToSqlBlobV1(row.privateTripleCount),
-    sealDigest: digest32ToSqlBlobV1(row.sealDigest),
-    sharedAt: decimalU64ToSqlBlobV1(row.sharedAt),
-    expiresAt: row.expiresAt === null ? null : decimalU64ToSqlBlobV1(row.expiresAt),
-  };
-}
-
-function decodeStoredSwmAuthorInventoryRow(row: SqlRowV1): SwmAuthorInventoryRowV1 {
-  const decoded = {
-    assertionCoordinate: assertSqlText(row.assertion_coordinate, 'assertion_coordinate'),
-    assertionVersion: sqlBlobToDecimalU64V1(row.assertion_version_u64be),
-    kaUal: assertSqlText(row.ka_ual, 'ka_ual'),
-    shareOperationId: assertSqlText(row.share_operation_id, 'share_operation_id'),
-    projectionDigest: sqlBlobToDigest32V1(row.projection_digest),
-    publicTripleCount: sqlBlobToDecimalU64V1(row.public_triple_count_u64be),
-    privateTripleCount: sqlBlobToDecimalU64V1(row.private_triple_count_u64be),
-    sealDigest: sqlBlobToDigest32V1(row.seal_digest),
-    sharedAt: sqlBlobToDecimalU64V1(row.shared_at_u64be),
-    expiresAt: row.expires_at_u64be === null
-      ? null
-      : sqlBlobToDecimalU64V1(row.expires_at_u64be),
-  } as SwmAuthorInventoryRowV1;
-  return parseCanonicalSwmAuthorInventoryRowsV1(
-    canonicalizeSwmAuthorInventoryRowsBytesV1([decoded]),
-  )[0]!;
-}
-
-function applySwmAuthorInventoryMutation(
-  current: readonly SwmAuthorInventoryRowV1[],
-  mutation: SwmAuthorInventoryMutationV1,
-): readonly SwmAuthorInventoryRowV1[] {
-  const rows = [...current];
-  if (mutation.kind === 'upsert') {
-    const index = rows.findIndex((row) => row.kaUal === mutation.row.kaUal);
-    if (index >= 0) {
-      if (swmAuthorInventoryRowsEqual([rows[index]!], [mutation.row])) {
-        throw new InventoryV1CandidateError(
-          'swm-inventory-input',
-          'SWM author inventory mutation must change the exact row set',
-        );
-      }
-      rows[index] = mutation.row;
-    } else {
-      rows.push(mutation.row);
-    }
-  } else {
-    const index = rows.findIndex((row) => row.kaUal === mutation.kaUal);
-    if (index < 0) {
-      throw new InventoryV1CandidateError(
-        'swm-inventory-input',
-        'SWM author inventory removal target is absent',
-      );
-    }
-    rows.splice(index, 1);
-  }
-  rows.sort((left, right) => left.kaUal < right.kaUal ? -1 : left.kaUal > right.kaUal ? 1 : 0);
-  return Object.freeze(rows);
-}
-
-function swmAuthorInventoryRowsEqual(
-  left: readonly SwmAuthorInventoryRowV1[],
-  right: readonly SwmAuthorInventoryRowV1[],
-): boolean {
-  return byteArraysEqual(
-    canonicalizeSwmAuthorInventoryRowsBytesV1(left),
-    canonicalizeSwmAuthorInventoryRowsBytesV1(right),
-  );
-}
-
-function swmAuthorInventorySnapshotsEqual(
-  left: SwmAuthorInventorySnapshotV1,
-  right: SwmAuthorInventorySnapshotV1,
-): boolean {
-  return left.head.objectDigest === right.head.objectDigest
-    && byteArraysEqual(
-      canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(left.head),
-      canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(right.head),
-    )
-    && swmAuthorInventoryRowsEqual(left.rows, right.rows);
-}
-
-function swmAuthorInventoryCasConflict(
-  actual: Digest32V1 | null,
-  expected: Digest32V1 | null,
+function swmAuthorInventoryErrorV1(
+  code: Extract<
+    InventoryV1CandidateErrorCode,
+    | 'swm-inventory-input'
+    | 'swm-inventory-cas-conflict'
+    | 'swm-inventory-database-corrupt'
+  >,
+  message: string,
+  options: ErrorOptions = {},
 ): InventoryV1CandidateError {
-  return new InventoryV1CandidateError(
-    'swm-inventory-cas-conflict',
-    `SWM author inventory CAS expected ${expected ?? 'no current head'} but found ${actual ?? 'none'}`,
-  );
-}
-
-function assertSqlText(value: unknown, label: string): string {
-  if (typeof value !== 'string') {
-    throw new Error(`stored ${label} is not TEXT`);
-  }
-  return value;
-}
-
-function assertBoundedSqlBlob(
-  value: unknown,
-  minimum: number,
-  maximum: number,
-  label: string,
-): Uint8Array {
-  if (!(value instanceof Uint8Array) || value.byteLength < minimum || value.byteLength > maximum) {
-    throw new Error(`${label} is outside its bounded BLOB shape`);
-  }
-  return value.slice();
-}
-
-function byteArraysEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
-}
-
-function snapshotExactPlainDataRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-): Readonly<Record<string, unknown>> {
-  const snapshot = snapshotPlainDataRecord(value, label);
-  assertExactFieldSet(snapshot, expectedKeys, label);
-  return snapshot;
-}
-
-function snapshotPlainDataRecord(
-  value: unknown,
-  label: string,
-): Readonly<Record<string, unknown>> {
-  if (
-    typeof value !== 'object'
-    || value === null
-    || Object.getPrototypeOf(value) !== Object.prototype
-  ) {
-    throw new Error(`${label} must be a plain object`);
-  }
-  const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key !== 'string')) {
-    throw new Error(`${label} must not contain symbol fields`);
-  }
-  const snapshot: Record<string, unknown> = {};
-  for (const key of keys as string[]) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label}.${key} must be an enumerable data property`);
-    }
-    snapshot[key] = descriptor.value;
-  }
-  return Object.freeze(snapshot);
-}
-
-function assertExactFieldSet(
-  value: Readonly<Record<string, unknown>>,
-  expectedKeys: readonly string[],
-  label: string,
-): void {
-  const keys = Object.keys(value);
-  if (
-    keys.length !== expectedKeys.length
-    || keys.some((key) => !expectedKeys.includes(key))
-  ) {
-    throw new Error(`${label} has an invalid field set`);
-  }
-}
-
-function exactPlainRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
-    invalidLoad(`${label} must be a plain object`);
-  }
-  const keys = Reflect.ownKeys(value);
-  if (
-    keys.length !== expectedKeys.length
-    || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
-  ) {
-    invalidLoad(`${label} has an invalid field set`);
-  }
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      invalidLoad(`${label}.${key} must be an enumerable data property`);
-    }
-  }
-  return value as Record<string, unknown>;
+  return new InventoryV1CandidateError(code, message, options);
 }
 
 function cloneKey(key: EncodedLoadKeyV1): EncodedLoadKeyV1 {
