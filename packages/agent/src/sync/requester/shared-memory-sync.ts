@@ -886,9 +886,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `isGraphAssetMaterialized` sees those markers and skips the KAs for
       // good. That is the same permanent-invisibility failure the G7 repair in
       // this PR exists to prevent, arrived at from a different direction.
+      // The `descriptorsAuthoritative` conjunct is scoped to rounds that
+      // actually declared snapshot refs. With an empty manifest there is no
+      // snapshot the metadata could wrongly certify, so holding the phase down
+      // protects nothing and only discards this round's verified metadata — and
+      // `recordSnapshotCoverage` returns early on an empty manifest, so no
+      // coverage record exists to explain the shortfall either. A Context Graph
+      // whose slices are all graph-backed (`dkg:publicSnapshotGraph`, written
+      // when the publisher has no snapshot store) declares zero refs and hit
+      // exactly that.
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
-        && descriptorsAuthoritative;
+        && (descriptorsAuthoritative || snapshotSync.totalSnapshots === 0);
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
           + `not materialized — holding the phase incomplete so metadata cannot certify them`);
