@@ -46,8 +46,11 @@ import {
   INVENTORY_V1_LEGACY_USER_OBJECTS,
   INVENTORY_V1_LEGACY_USER_VERSION,
   INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
+  INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
+  INVENTORY_V1_V2_USER_OBJECTS,
+  INVENTORY_V1_V2_USER_VERSION,
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
@@ -65,7 +68,9 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type CompareAndSwapAppliedCatalogHeadInputV1,
+  type CompareAndSwapSwmAuthorInventoryInputV1,
   type Rfc64InventoryV1CandidateApi,
+  type SwmAuthorInventoryCasResultV1,
   type VerifiedCandidateBucketLoadV1,
   type VerifiedCandidateCatalogRowV1,
 } from './candidate.js';
@@ -76,6 +81,7 @@ import type {
   EvmAddressV1,
   KaIdV1,
   SignedAuthorCatalogHeadEnvelopeV1,
+  SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
 import {
   createProductionInventoryV1LifecycleAdapter,
@@ -478,6 +484,24 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   ): AppliedCatalogHeadCasResultV1 {
     this.requireOpen();
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
+  }
+
+  readSwmAuthorInventorySnapshotV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): SwmAuthorInventorySnapshotV1 | null {
+    this.requireOpen();
+    return this.#candidate.readSwmAuthorInventorySnapshotV1(
+      inventoryScopeDigest,
+      authorAddress,
+    );
+  }
+
+  compareAndSwapSwmAuthorInventoryV1(
+    input: CompareAndSwapSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    this.requireOpen();
+    return this.#candidate.compareAndSwapSwmAuthorInventoryV1(input);
   }
 
   private requireOpen(): DatabaseSyncV1 {
@@ -935,6 +959,9 @@ function openOrRebuildOwnedDatabase(
       if (identity.userVersion === INVENTORY_V1_LEGACY_USER_VERSION) {
         migrateInventoryV1ToV2(database, databasePath);
       }
+      if (readIdentity(database).userVersion === INVENTORY_V1_V2_USER_VERSION) {
+        migrateInventoryV2ToV3(database, databasePath);
+      }
       verifyOwnedSchema(database);
     } catch (error) {
       if (!(error instanceof OwnedInventoryV1SchemaError)) throw error;
@@ -1081,6 +1108,7 @@ function assertExistingTargetHeader(databasePath: string): void {
   }
   if (
     identity.userVersion !== INVENTORY_V1_LEGACY_USER_VERSION
+    && identity.userVersion !== INVENTORY_V1_V2_USER_VERSION
     && identity.userVersion !== INVENTORY_V1_USER_VERSION
   ) {
     throw new InventoryV1OpenError(
@@ -1095,6 +1123,7 @@ function assertCommittedTargetIdentity(identity: DatabaseIdentityV1): void {
     identity.applicationId !== INVENTORY_V1_APPLICATION_ID
     || (
       identity.userVersion !== INVENTORY_V1_LEGACY_USER_VERSION
+      && identity.userVersion !== INVENTORY_V1_V2_USER_VERSION
       && identity.userVersion !== INVENTORY_V1_USER_VERSION
     )
   ) {
@@ -1180,12 +1209,61 @@ function migrateInventoryV1ToV2(database: DatabaseSyncV1, databasePath: string):
   fsyncDirectory(dirname(databasePath));
   const migrated = readIdentity(database);
   if (
+    migrated.userVersion !== INVENTORY_V1_V2_USER_VERSION
+    || !schemaMatches(migrated.userObjects, INVENTORY_V1_V2_USER_OBJECTS)
+  ) {
+    throw new InventoryV1OpenError(
+      'database-io',
+      'RFC-64 inventory v2 migration did not commit its exact schema',
+    );
+  }
+}
+
+function migrateInventoryV2ToV3(database: DatabaseSyncV1, databasePath: string): void {
+  const identity = readIdentity(database);
+  if (
+    identity.applicationId !== INVENTORY_V1_APPLICATION_ID
+    || identity.userVersion !== INVENTORY_V1_V2_USER_VERSION
+    || !schemaMatches(identity.userObjects, INVENTORY_V1_V2_USER_OBJECTS)
+  ) {
+    throw new OwnedInventoryV1SchemaError(
+      'RFC-64 inventory v2 schema is not eligible for the v3 migration',
+    );
+  }
+  let transactionOpen = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    transactionOpen = true;
+    database.exec(INVENTORY_V1_MIGRATE_V2_TO_V3_SQL);
+    database.exec('COMMIT');
+    transactionOpen = false;
+  } catch (cause) {
+    if (transactionOpen) {
+      try { database.exec('ROLLBACK'); } catch { /* retain migration failure */ }
+    }
+    throw new InventoryV1OpenError(
+      'database-io',
+      'failed to migrate RFC-64 inventory schema from v2 to v3',
+      { cause },
+    );
+  }
+  const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+  if (checkpoint?.busy !== 0) {
+    throw new InventoryV1OpenError(
+      checkpoint?.busy === 1 ? 'database-busy' : 'database-io',
+      'RFC-64 inventory v3 migration could not checkpoint its committed schema',
+    );
+  }
+  fsyncRegularFile(databasePath, 'migrated inventory database');
+  fsyncDirectory(dirname(databasePath));
+  const migrated = readIdentity(database);
+  if (
     migrated.userVersion !== INVENTORY_V1_USER_VERSION
     || !schemaMatches(migrated.userObjects)
   ) {
     throw new InventoryV1OpenError(
       'database-io',
-      'RFC-64 inventory v2 migration did not commit its exact schema',
+      'RFC-64 inventory v3 migration did not commit its exact schema',
     );
   }
 }
@@ -2219,7 +2297,11 @@ function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabase
   if (identity === null || identity.applicationId === 0) return 'ambiguous';
   if (identity.applicationId !== INVENTORY_V1_APPLICATION_ID) return 'foreign';
   if (identity.userVersion > INVENTORY_V1_USER_VERSION) return 'newer';
-  return identity.userVersion === INVENTORY_V1_USER_VERSION ? 'owned' : 'ambiguous';
+  return identity.userVersion === INVENTORY_V1_LEGACY_USER_VERSION
+    || identity.userVersion === INVENTORY_V1_V2_USER_VERSION
+    || identity.userVersion === INVENTORY_V1_USER_VERSION
+    ? 'owned'
+    : 'ambiguous';
 }
 
 function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdentityV1 | null {

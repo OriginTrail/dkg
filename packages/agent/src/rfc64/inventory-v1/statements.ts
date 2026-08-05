@@ -265,6 +265,71 @@ SET current_catalog_head_digest = :nextHead,
 WHERE catalog_scope_digest = :scope
   AND author_address = :author
   AND current_catalog_head_digest = :expectedHead;`,
+
+  getSwmAuthorHead: `
+SELECT current_head_digest, inventory_version_u64be, total_rows_u64be,
+       rows_digest, signed_head_envelope
+FROM rfc64_swm_author_inventory_heads_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author;`,
+
+  getSwmAuthorRows: `
+SELECT ka_ual, assertion_coordinate, assertion_version_u64be,
+       share_operation_id, projection_digest, public_triple_count_u64be,
+       private_triple_count_u64be, seal_digest, shared_at_u64be,
+       expires_at_u64be
+FROM rfc64_swm_author_inventory_rows_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+ORDER BY ka_ual;`,
+
+  insertSwmAuthorHead: `
+INSERT INTO rfc64_swm_author_inventory_heads_v1 (
+  inventory_scope_digest, author_address, current_head_digest,
+  inventory_version_u64be, total_rows_u64be, rows_digest, signed_head_envelope
+) VALUES (
+  :scope, :author, :nextHead, :inventoryVersion, :totalRows,
+  :rowsDigest, :signedHeadEnvelope
+);`,
+
+  updateSwmAuthorHeadCas: `
+UPDATE rfc64_swm_author_inventory_heads_v1
+SET current_head_digest = :nextHead,
+    inventory_version_u64be = :inventoryVersion,
+    total_rows_u64be = :totalRows,
+    rows_digest = :rowsDigest,
+    signed_head_envelope = :signedHeadEnvelope
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+  AND current_head_digest = :expectedHead;`,
+
+  upsertSwmAuthorRow: `
+INSERT INTO rfc64_swm_author_inventory_rows_v1 (
+  inventory_scope_digest, author_address, ka_ual, assertion_coordinate,
+  assertion_version_u64be, share_operation_id, projection_digest,
+  public_triple_count_u64be, private_triple_count_u64be, seal_digest,
+  shared_at_u64be, expires_at_u64be
+) VALUES (
+  :scope, :author, :kaUal, :assertionCoordinate, :assertionVersion,
+  :shareOperationId, :projectionDigest, :publicTripleCount,
+  :privateTripleCount, :sealDigest, :sharedAt, :expiresAt
+)
+ON CONFLICT (inventory_scope_digest, author_address, ka_ual) DO UPDATE SET
+  assertion_coordinate = excluded.assertion_coordinate,
+  assertion_version_u64be = excluded.assertion_version_u64be,
+  share_operation_id = excluded.share_operation_id,
+  projection_digest = excluded.projection_digest,
+  public_triple_count_u64be = excluded.public_triple_count_u64be,
+  private_triple_count_u64be = excluded.private_triple_count_u64be,
+  seal_digest = excluded.seal_digest,
+  shared_at_u64be = excluded.shared_at_u64be,
+  expires_at_u64be = excluded.expires_at_u64be;`,
+
+  deleteSwmAuthorRow: `
+DELETE FROM rfc64_swm_author_inventory_rows_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+  AND ka_ual = :kaUal;`,
 });
 
 export type InventoryV1StatementKey = keyof typeof INVENTORY_V1_STATEMENT_SQL;
@@ -288,6 +353,12 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   getAppliedHead: 'rfc64.applied-head.get.v1',
   insertAppliedHead: 'rfc64.applied-head.insert.v1',
   updateAppliedHeadCas: 'rfc64.applied-head.cas-update.v1',
+  getSwmAuthorHead: 'rfc64.swm-author-inventory.head.get.v1',
+  getSwmAuthorRows: 'rfc64.swm-author-inventory.rows.get.v1',
+  insertSwmAuthorHead: 'rfc64.swm-author-inventory.head.insert.v1',
+  updateSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-update.v1',
+  upsertSwmAuthorRow: 'rfc64.swm-author-inventory.row.upsert.v1',
+  deleteSwmAuthorRow: 'rfc64.swm-author-inventory.row.delete.v1',
 } as const satisfies Readonly<Record<InventoryV1StatementKey, string>>);
 
 export type InventoryV1StatementId =
@@ -306,6 +377,8 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'diffRemovedNext',
   'countBucketRows',
   'getAppliedHead',
+  'getSwmAuthorHead',
+  'getSwmAuthorRows',
 ] as const satisfies readonly InventoryV1StatementKey[]);
 
 export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
@@ -313,4 +386,8 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'deleteHeader',
   'insertAppliedHead',
   'updateAppliedHeadCas',
+  'insertSwmAuthorHead',
+  'updateSwmAuthorHeadCas',
+  'upsertSwmAuthorRow',
+  'deleteSwmAuthorRow',
 ] as const satisfies readonly InventoryV1StatementKey[]);
