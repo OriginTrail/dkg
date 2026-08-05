@@ -19,6 +19,10 @@ export interface QueryableStore {
 }
 
 export class VectorEntityRetriever implements EntityRetriever {
+  /** Bounded VM-graph discovery cap — mirrors gatherVerifiedFacts's max cap. */
+  private static readonly MAX_VM_GRAPHS = 1000;
+  /** Graph IRIs per VALUES clause — keeps individual query strings bounded. */
+  private static readonly VALUES_CHUNK = 200;
   readonly model: string;
   private readonly warming = new Set<string>();
 
@@ -96,47 +100,81 @@ export class VectorEntityRetriever implements EntityRetriever {
     // before the id ever reaches a SPARQL string.
     if (!validateContextGraphId(cgName).valid) return;
     const vmPrefix = `did:dkg:context-graph:${cgName}/_verifiable_memory/`;
-    const currentCount = await this.countIndexableRecords(vmPrefix);
+    const graphs = await this.listVmGraphs(vmPrefix);
+    if (graphs.length === 0) return;
+    const currentCount = await this.countIndexableRecords(graphs);
     if (currentCount === 0) return;
     const indexedCount = await this.vectorStore.count(cgName, this.model, 'vm');
     if (indexedCount >= currentCount) return; // up to date for this model
-    await this.buildIndex(cgName, vmPrefix);
+    await this.buildIndex(cgName, graphs);
   }
 
-  /** Distinct (graph, subject) pairs under the VM prefix — matches buildIndex's one-row-per-pair insert granularity. */
-  private async countIndexableRecords(vmPrefix: string): Promise<number> {
+  /**
+   * Bounded VM-graph discovery: enumerate graph NAMES once (top-level LIMIT, no
+   * ORDER BY), so every downstream scan runs with the graph term BOUND via
+   * VALUES — never the all-variable `GRAPH ?g { ?s ?p ?o }` store scan
+   * (sparql-scale R2, the #1597 listGraphs-storm shape). A CG with more than
+   * MAX_VM_GRAPHS per-KA graphs gets a truncated index; the freshness gate
+   * stays consistent because countIndexableRecords runs over the SAME bounded
+   * list. Mirrors gatherVerifiedFacts's bounded discovery in dkg-agent-drag.
+   */
+  private async listVmGraphs(vmPrefix: string): Promise<string[]> {
     const r = await this.store
       .query(
-        `SELECT (COUNT(*) AS ?n) WHERE { SELECT DISTINCT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) } }`,
+        `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) } LIMIT ${VectorEntityRetriever.MAX_VM_GRAPHS}`,
       )
       .catch(() => null);
-    const v = r && r.type === 'bindings' && r.bindings?.[0] ? r.bindings[0]['n'] : '0';
-    const m = String(v ?? '0').match(/\d+/);
-    return m ? parseInt(m[0], 10) : 0;
+    if (!r || r.type !== 'bindings' || !r.bindings) return [];
+    return r.bindings
+      .map((b) => strip(b['g']))
+      .filter((g): g is string => g.length > 0 && !/[<>"\s]/.test(g));
   }
 
-  private async buildIndex(cgName: string, vmPrefix: string): Promise<void> {
+  /** Distinct (graph, subject) pairs across the discovered VM graphs — matches buildIndex's one-row-per-pair insert granularity. */
+  private async countIndexableRecords(graphs: string[]): Promise<number> {
+    let total = 0;
+    for (const chunk of chunked(graphs, VectorEntityRetriever.VALUES_CHUNK)) {
+      const values = chunk.map((g) => `<${g}>`).join(' ');
+      // sparql-scan-allow: R2 -- ?g is VALUES-bound to ≤VALUES_CHUNK concrete IRIs from the LIMIT-bounded listVmGraphs discovery (interpolated, so the linter cannot see they are concrete)
+      const r = await this.store
+        .query(
+          `SELECT (COUNT(*) AS ?n) WHERE { SELECT DISTINCT ?g ?s WHERE { VALUES ?g { ${values} } GRAPH ?g { ?s ?p ?o } } }`,
+        )
+        .catch(() => null);
+      const v = r && r.type === 'bindings' && r.bindings?.[0] ? r.bindings[0]['n'] : '0';
+      const m = String(v ?? '0').match(/\d+/);
+      total += m ? parseInt(m[0], 10) : 0;
+    }
+    return total;
+  }
+
+  private async buildIndex(cgName: string, graphs: string[]): Promise<void> {
     // Incremental: skip entities already embedded under this model so a re-scan
     // only embeds newly-published entities (embedding is the expensive step).
     const existing = await this.vectorStore.listIds(cgName, this.model);
-    const r = await this.store
-      .query(`SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) }`)
-      .catch(() => null);
-    if (!r || r.type !== 'bindings' || !r.bindings) return;
-
     // Group all triples by (graph, subject) → one embedded record per entity.
+    // Chunk-local grouping is safe: an entity's triples all live in ONE per-KA
+    // graph, and each graph belongs to exactly one VALUES chunk.
     const byEntity = new Map<string, { g: string; s: string; props: Array<[string, string]> }>();
-    for (const b of r.bindings) {
-      const g = strip(b['g']);
-      const s = strip(b['s']);
-      if (!g || !s) continue;
-      const key = `${g}|${s}`;
-      let e = byEntity.get(key);
-      if (!e) {
-        e = { g, s, props: [] };
-        byEntity.set(key, e);
+    for (const chunk of chunked(graphs, VectorEntityRetriever.VALUES_CHUNK)) {
+      const values = chunk.map((g) => `<${g}>`).join(' ');
+      // sparql-scan-allow: R2 -- ?g is VALUES-bound to ≤VALUES_CHUNK concrete IRIs from the LIMIT-bounded listVmGraphs discovery (interpolated, so the linter cannot see they are concrete)
+      const r = await this.store
+        .query(`SELECT ?g ?s ?p ?o WHERE { VALUES ?g { ${values} } GRAPH ?g { ?s ?p ?o } }`)
+        .catch(() => null);
+      if (!r || r.type !== 'bindings' || !r.bindings) continue;
+      for (const b of r.bindings) {
+        const g = strip(b['g']);
+        const s = strip(b['s']);
+        if (!g || !s) continue;
+        const key = `${g}|${s}`;
+        let e = byEntity.get(key);
+        if (!e) {
+          e = { g, s, props: [] };
+          byEntity.set(key, e);
+        }
+        e.props.push([strip(b['p']), b['o'] ?? '']);
       }
-      e.props.push([strip(b['p']), b['o'] ?? '']);
     }
 
     for (const { g, s, props } of byEntity.values()) {
@@ -162,6 +200,12 @@ export class VectorEntityRetriever implements EntityRetriever {
       });
     }
   }
+}
+
+function chunked<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 function strip(v: string | undefined): string {
