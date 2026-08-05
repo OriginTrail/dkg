@@ -1003,7 +1003,7 @@ function validateSignatureEntry(
       exactNoneEvidence(entry.evidence);
       assertCanonicalEip191SignatureV1(entry.signature);
     } else if (entry.suite === 'eip1271-current-finalized-v1') {
-      validateEip1271Evidence(entry.evidence, issuer);
+      validateEip1271Evidence(entry.evidence, issuer, object.networkId);
       try {
         assertCanonicalHexBytes(
           entry.signature,
@@ -2436,7 +2436,11 @@ function isIssuedTooFarInFuture(issuedAt: CanonicalRfc3339SecondsV1, nowMs: numb
   return Date.parse(issuedAt) > nowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS;
 }
 
-function validateEip1271Evidence(value: unknown, issuer: string): void {
+function validateEip1271Evidence(
+  value: unknown,
+  issuer: string,
+  networkId: NetworkIdV1,
+): void {
   const evidence = snapshotExactDataRecord(
     value,
     ['kind', 'chainId', 'contractAddress', 'finalizedBlockNumber', 'finalizedBlockHash'],
@@ -2455,6 +2459,16 @@ function validateEip1271Evidence(value: unknown, issuer: string): void {
   }
   if (evidence.contractAddress !== issuer) {
     fail('system-record-binding', 'EIP-1271 contract does not match signer');
+  }
+  const separator = networkId.lastIndexOf(':');
+  const expectedChainId = separator <= 0 ? '' : networkId.slice(separator + 1);
+  try {
+    assertCanonicalChainId(expectedChainId, 'network chainId');
+  } catch (cause) {
+    fail('system-record-binding', 'EIP-1271 requires a numeric chain-bound networkId', cause);
+  }
+  if (evidence.chainId !== expectedChainId) {
+    fail('system-record-binding', 'EIP-1271 evidence chainId does not match the record network');
   }
 }
 

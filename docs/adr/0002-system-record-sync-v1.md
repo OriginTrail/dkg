@@ -206,7 +206,9 @@ use exactly `0x` plus 130 lowercase hex characters and canonical low-s/recovery 
 EIP-1271 opaque signatures use `0x` plus 2-8,192 lowercase hex characters (1-4,096
 bytes). EIP-1271 evidence uses the canonical unsigned-u256 decimal `chainId`,
 the lowercase nonzero contract-address grammar above, u64-decimal `finalizedBlockNumber`, and a
-lowercase 32-byte `finalizedBlockHash`; all four are JSON strings. V1 reuses only
+lowercase 32-byte `finalizedBlockHash`; all four are JSON strings. Its `chainId` must equal
+the canonical decimal suffix after the final `:` in the signed object's `networkId`; a
+network ID without a numeric suffix cannot authorize EIP-1271 evidence. V1 reuses only
 `assertCanonicalDecimalU64`, `assertCanonicalChainId`, `assertCanonicalDigest`,
 `assertCanonicalEvmAddress`, and `assertCanonicalHexBytes` from
 `packages/core/src/sync-wire-scalars.ts`,

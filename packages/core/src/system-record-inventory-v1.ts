@@ -1123,13 +1123,17 @@ export function updateSystemRecordInventoryTreeV1(
     const rightRows = leftRows !== undefined && leftRows.length > SYSTEM_RECORD_LEAF_MIN_ROWS
       ? undefined
       : rightIndex === undefined ? undefined : loadLeafRows(rightIndex);
-    const siblingIsLeft = leftRows !== undefined && (leftRows.length > SYSTEM_RECORD_LEAF_MIN_ROWS
-      || rightRows === undefined || rightRows.length <= SYSTEM_RECORD_LEAF_MIN_ROWS);
+    const rebalance = chooseSystemRecordRebalanceV1(
+      leftRows?.length,
+      rightRows?.length,
+      SYSTEM_RECORD_LEAF_MIN_ROWS,
+    );
+    const siblingIsLeft = rebalance.endsWith('left');
     const siblingIndex = siblingIsLeft ? leftIndex! : rightIndex!;
     const siblingRows = siblingIsLeft ? leftRows! : rightRows!;
     parentReplaceIndex = Math.min(parent.childIndex, siblingIndex);
     parentReplaceCount = 2;
-    if (siblingRows.length > SYSTEM_RECORD_LEAF_MIN_ROWS) {
+    if (rebalance.startsWith('borrow')) {
       if (siblingIsLeft) rows.unshift(siblingRows.pop()!);
       else rows.push(siblingRows.shift()!);
       replacement = siblingIsLeft
@@ -1177,12 +1181,16 @@ export function updateSystemRecordInventoryTreeV1(
     const right = left !== undefined && left.entries.length > SYSTEM_RECORD_INTERNAL_MIN_ENTRIES
       ? undefined
       : rightIndex === undefined ? undefined : loadInternalSibling(rightIndex);
-    const siblingIsLeft = left !== undefined && (left.entries.length > SYSTEM_RECORD_INTERNAL_MIN_ENTRIES
-      || right === undefined || right.entries.length <= SYSTEM_RECORD_INTERNAL_MIN_ENTRIES);
+    const rebalance = chooseSystemRecordRebalanceV1(
+      left?.entries.length,
+      right?.entries.length,
+      SYSTEM_RECORD_INTERNAL_MIN_ENTRIES,
+    );
+    const siblingIsLeft = rebalance.endsWith('left');
     const siblingIndex = siblingIsLeft ? leftIndex! : rightIndex!;
     const sibling = siblingIsLeft ? left! : right!;
     let rootReplaceIndex = Math.min(rootParent.childIndex, siblingIndex);
-    if (sibling.entries.length > SYSTEM_RECORD_INTERNAL_MIN_ENTRIES) {
+    if (rebalance.startsWith('borrow')) {
       const siblingEntries = [...sibling.entries];
       if (siblingIsLeft) parentEntries.unshift(siblingEntries.pop()!);
       else parentEntries.push(siblingEntries.shift()!);

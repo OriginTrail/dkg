@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -78,8 +79,18 @@ describe('independently generated system-record V1 golden vectors', () => {
         )).toString('hex')).toBe(vector.messages[entry.role]);
       }
       expect(await verifySignedSystemRecordEnvelopeV1(envelope, {
-        verifyEip1271: (entry, hash) => entry.evidence.kind === 'eip1271-current-finalized'
-          && hash.byteLength === 32,
+        verifyEip1271: (entry, hash) => {
+          const messageHex = vector.messages[entry.role];
+          if (entry.evidence.kind !== 'eip1271-current-finalized' || messageHex === undefined) {
+            return false;
+          }
+          const message = Buffer.from(messageHex, 'hex');
+          const expected = keccak_256(Buffer.concat([
+            Buffer.from(`\x19Ethereum Signed Message:\n${message.byteLength}`),
+            message,
+          ]));
+          return Buffer.from(hash).equals(Buffer.from(expected));
+        },
       })).toBe(true);
     }
   });
@@ -96,6 +107,22 @@ describe('independently generated system-record V1 golden vectors', () => {
         verifyEip1271: () => false,
       })).toBe(false);
     }
+
+    const valid = vectors.signed.activeEip1271.envelope;
+    const crossNetwork = {
+      ...valid,
+      signatures: valid.signatures.map((entry) => entry.suite === 'eip1271-current-finalized-v1'
+        ? { ...entry, evidence: { ...entry.evidence, chainId: '1' } }
+        : entry),
+    } as unknown as typeof valid;
+    let verifierCalled = false;
+    await expect(verifySignedSystemRecordEnvelopeV1(crossNetwork, {
+      verifyEip1271: () => {
+        verifierCalled = true;
+        return true;
+      },
+    })).rejects.toThrow(/chainId.*record network/);
+    expect(verifierCalled).toBe(false);
   });
 
   it('pins provider descriptor message/signature independently of authority', async () => {
