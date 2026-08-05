@@ -14,7 +14,7 @@ import {
   type ResolvedRfc64PublicCatalogActivationConfigV1,
   type Rfc64PublicCatalogActivationChainIdentityV1,
   type Rfc64PublicCatalogActivationConfigV1,
-} from '@origintrail-official/dkg-agent';
+} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,

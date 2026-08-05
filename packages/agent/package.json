@@ -13,6 +13,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./rfc64/public-catalog-activation-config-v1": {
+      "types": "./dist/rfc64/public-catalog-activation-config-v1.d.ts",
+      "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
+      "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
+    },
     "./package.json": "./package.json",
     "./dist/rfc64/author-catalog-producer.js": "./dist/rfc64/author-catalog-producer.js",
     "./dist/rfc64/catalog-row-authorship.js": "./dist/rfc64/catalog-row-authorship.js",

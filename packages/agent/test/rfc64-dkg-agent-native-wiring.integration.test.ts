@@ -394,6 +394,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     agents.push(agent);
 
     expect(agent).toBeInstanceOf(DKGAgent);
+    const internals = agent as unknown as {
+      chain: { chainId: string };
+      config: { networkIdentity?: { chainId?: string } };
+    };
+    expect(internals.chain.chainId).toBe('evm:31337');
+    expect(internals.config.networkIdentity?.chainId).toBe('evm:31337');
   });
 
   it('snapshots and canonicalizes the deterministic local deployment override', () => {

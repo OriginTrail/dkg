@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const publicCatalogActivation = await import(
-  '@origintrail-official/dkg-agent/dist/rfc64/public-catalog-activation-config-v1.js'
+  '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
