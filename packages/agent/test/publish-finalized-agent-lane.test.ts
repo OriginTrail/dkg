@@ -141,6 +141,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const remainingClearCalls: any[][] = [];
     const rfc64CatalogCalls: any[] = [];
+    const rfc64SwmInventoryRemovalCalls: any[] = [];
     const warnings: string[] = [];
 
     const agent = Object.create(DKGAgent.prototype) as any;
@@ -182,6 +183,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.recordConfirmedRfc64PublicCatalogAssetV1 = async (input: any) => {
       rfc64CatalogCalls.push(input);
       throw new Error('simulated finalized RFC-64 catalog failure');
+    };
+    agent.removeRfc64SwmAuthorInventoryShadowV1 = async (input: any) => {
+      rfc64SwmInventoryRemovalCalls.push(input);
+      throw new Error('simulated escaped RFC-64 SWM inventory removal failure');
     };
 
     // GH#1778 — a genuinely absent name still yields "is not finalized":
@@ -241,8 +246,18 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       reservedKaId: RESERVED_KA_ID,
       kaUal: KA_UAL,
     });
+    expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
+    expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
+      contextGraphId: CG,
+      seal: {
+        authorAddress: AGENT_B,
+        reservedKaId: RESERVED_KA_ID,
+        kaUal: KA_UAL,
+      },
+    });
     expect(warnings).toEqual(expect.arrayContaining([
       expect.stringContaining('simulated finalized RFC-64 catalog failure'),
+      expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
     ]));
   });
 

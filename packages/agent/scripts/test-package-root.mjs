@@ -113,6 +113,7 @@ const publicRfc64Modules = [
   'inventory-v1/sql.js',
   'inventory-v1/statements.js',
   'public-catalog-activation-config-v1.js',
+  'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
   'catalog-access-policy-v1.js',

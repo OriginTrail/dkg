@@ -1,0 +1,419 @@
+import {
+  MAX_DECIMAL_U64,
+  SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+  assertCanonicalDeterministicUalV1,
+  assertSignedSwmAuthorInventoryHeadEnvelopeV1,
+  assertSwmAuthorInventoryScopeV1,
+  canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
+  canonicalizeSwmAuthorInventoryRowsBytesV1,
+  computeSwmAuthorInventoryHeadObjectDigestV1,
+  computeSwmAuthorInventoryRowsDigestV1,
+  computeSwmAuthorInventoryScopeDigestV1,
+  deriveSwmAuthorInventoryScopeFromHeadV1,
+  parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
+  parseCanonicalSwmAuthorInventoryRowsV1,
+  parseCanonicalDecimalU64,
+  parseDeterministicKnowledgeAssetUal,
+  type DecimalU64V1,
+  type Digest32V1,
+  type SignedSwmAuthorInventoryHeadEnvelopeV1,
+  type SwmAuthorInventoryRowV1,
+  type SwmAuthorInventoryScopeV1,
+  type SwmAuthorInventorySnapshotV1,
+  type TimestampMsV1,
+  type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
+} from '@origintrail-official/dkg-core';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
+
+import {
+  InventoryV1CandidateError,
+  type Rfc64InventoryV1OperationsV1,
+} from './inventory-v1/index.js';
+import type { Rfc64AuthorCatalogEip191SignerV1 } from './author-catalog-producer.js';
+
+export const RFC64_SWM_AUTHOR_INVENTORY_PRODUCER_MAX_CAS_ATTEMPTS_V1 = 4;
+
+export type Rfc64SwmAuthorInventoryProducerErrorCodeV1 =
+  | 'swm-inventory-producer-input'
+  | 'swm-inventory-producer-history'
+  | 'swm-inventory-producer-signer'
+  | 'swm-inventory-producer-conflict';
+
+export class Rfc64SwmAuthorInventoryProducerErrorV1 extends Error {
+  constructor(
+    readonly code: Rfc64SwmAuthorInventoryProducerErrorCodeV1,
+    message: string,
+    options: ErrorOptions = {},
+  ) {
+    super(`[${code}] ${message}`, options);
+    this.name = 'Rfc64SwmAuthorInventoryProducerErrorV1';
+  }
+}
+
+export interface MaintainRfc64SwmAuthorInventoryInputV1 {
+  readonly scope: SwmAuthorInventoryScopeV1;
+  readonly row: SwmAuthorInventoryRowV1;
+  readonly issuedAt: TimestampMsV1;
+  readonly signer: Rfc64AuthorCatalogEip191SignerV1;
+  readonly maxCasAttempts?: number;
+}
+
+export interface MaintainRfc64SwmAuthorInventoryResultV1 {
+  readonly status: 'applied' | 'existing';
+  readonly attempts: number;
+  readonly snapshot: SwmAuthorInventorySnapshotV1;
+}
+
+export interface RemoveRfc64SwmAuthorInventoryInputV1 {
+  readonly scope: SwmAuthorInventoryScopeV1;
+  readonly kaUal: SwmAuthorInventoryRowV1['kaUal'];
+  readonly issuedAt: TimestampMsV1;
+  readonly signer: Rfc64AuthorCatalogEip191SignerV1;
+  readonly maxCasAttempts?: number;
+}
+
+export interface RemoveRfc64SwmAuthorInventoryResultV1 {
+  readonly status: 'applied' | 'absent';
+  readonly attempts: number;
+  readonly snapshot: SwmAuthorInventorySnapshotV1 | null;
+}
+
+/**
+ * Sign and atomically maintain one author's exact SWM-only live set.
+ *
+ * The producer trusts neither persisted history nor a signer callback. Every
+ * predecessor signature is recovered before it is extended, and every newly
+ * signed head is recovered before the inventory CAS can see it. Concurrent
+ * writers re-read and rebuild a successor from the winning head; an exact
+ * replay returns without advancing the version.
+ */
+export async function maintainRfc64SwmAuthorInventoryV1(
+  inventory: Pick<
+    Rfc64InventoryV1OperationsV1,
+    'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
+  >,
+  input: MaintainRfc64SwmAuthorInventoryInputV1,
+): Promise<MaintainRfc64SwmAuthorInventoryResultV1> {
+  const prepared = prepareInput(input);
+  const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
+
+  for (let attempt = 1; attempt <= prepared.maxCasAttempts; attempt += 1) {
+    const current = inventory.readSwmAuthorInventorySnapshotV1(
+      inventoryScopeDigest,
+      prepared.scope.authorAddress,
+    );
+    if (current !== null) await verifyCurrentHistory(current, prepared.scope);
+
+    const currentRow = current?.rows.find(({ kaUal }) => kaUal === prepared.row.kaUal);
+    if (current !== null && currentRow !== undefined && rowsEqual(currentRow, prepared.row)) {
+      return Object.freeze({
+        status: 'existing' as const,
+        attempts: attempt,
+        snapshot: current,
+      });
+    }
+
+    const rows = upsertRow(current?.rows ?? [], prepared.row);
+    const head = await signHead({
+      scope: prepared.scope,
+      rows,
+      issuedAt: prepared.issuedAt,
+      previous: current?.head ?? null,
+      signer: prepared.signer,
+    });
+
+    try {
+      const committed = inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: Object.freeze({ head, rows }),
+        mutation: Object.freeze({ kind: 'upsert' as const, row: prepared.row }),
+        expectedCurrentHeadDigest:
+          (current?.head.objectDigest as Digest32V1 | undefined) ?? null,
+      });
+      return Object.freeze({
+        status: committed.status,
+        attempts: attempt,
+        snapshot: committed.snapshot,
+      });
+    } catch (cause) {
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'swm-inventory-cas-conflict'
+        && attempt < prepared.maxCasAttempts
+      ) continue;
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'swm-inventory-cas-conflict'
+      ) {
+        throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+          'swm-inventory-producer-conflict',
+          `SWM inventory did not converge after ${attempt} CAS attempts`,
+          { cause },
+        );
+      }
+      throw cause;
+    }
+  }
+
+  throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+    'swm-inventory-producer-conflict',
+    'SWM inventory CAS attempt bound was exhausted',
+  );
+}
+
+/** Remove one KA after it leaves the active SWM-only set (normally VM confirmation). */
+export async function removeRfc64SwmAuthorInventoryRowV1(
+  inventory: Pick<
+    Rfc64InventoryV1OperationsV1,
+    'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
+  >,
+  input: RemoveRfc64SwmAuthorInventoryInputV1,
+): Promise<RemoveRfc64SwmAuthorInventoryResultV1> {
+  const prepared = prepareRemovalInput(input);
+  const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
+
+  for (let attempt = 1; attempt <= prepared.maxCasAttempts; attempt += 1) {
+    const current = inventory.readSwmAuthorInventorySnapshotV1(
+      inventoryScopeDigest,
+      prepared.scope.authorAddress,
+    );
+    if (current === null) {
+      return Object.freeze({ status: 'absent' as const, attempts: attempt, snapshot: null });
+    }
+    await verifyCurrentHistory(current, prepared.scope);
+    if (!current.rows.some(({ kaUal }) => kaUal === prepared.kaUal)) {
+      return Object.freeze({ status: 'absent' as const, attempts: attempt, snapshot: current });
+    }
+    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
+      canonicalizeSwmAuthorInventoryRowsBytesV1(
+        current.rows.filter(({ kaUal }) => kaUal !== prepared.kaUal),
+      ),
+    );
+    const head = await signHead({
+      scope: prepared.scope,
+      rows,
+      issuedAt: prepared.issuedAt,
+      previous: current.head,
+      signer: prepared.signer,
+    });
+    try {
+      const committed = inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: Object.freeze({ head, rows }),
+        mutation: Object.freeze({ kind: 'remove' as const, kaUal: prepared.kaUal }),
+        expectedCurrentHeadDigest: current.head.objectDigest as Digest32V1,
+      });
+      return Object.freeze({
+        status: 'applied' as const,
+        attempts: attempt,
+        snapshot: committed.snapshot,
+      });
+    } catch (cause) {
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'swm-inventory-cas-conflict'
+        && attempt < prepared.maxCasAttempts
+      ) continue;
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'swm-inventory-cas-conflict'
+      ) {
+        throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+          'swm-inventory-producer-conflict',
+          `SWM inventory removal did not converge after ${attempt} CAS attempts`,
+          { cause },
+        );
+      }
+      throw cause;
+    }
+  }
+
+  throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+    'swm-inventory-producer-conflict',
+    'SWM inventory removal CAS attempt bound was exhausted',
+  );
+}
+
+function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{
+  scope: Readonly<SwmAuthorInventoryScopeV1>;
+  row: Readonly<SwmAuthorInventoryRowV1>;
+  issuedAt: TimestampMsV1;
+  signer: Rfc64AuthorCatalogEip191SignerV1;
+  maxCasAttempts: number;
+}> {
+  try {
+    assertSwmAuthorInventoryScopeV1(input.scope);
+    const scope = Object.freeze({ ...input.scope });
+    const row = parseCanonicalSwmAuthorInventoryRowsV1(
+      canonicalizeSwmAuthorInventoryRowsBytesV1([input.row]),
+    )[0]!;
+    const signer = Object.freeze({
+      issuer: input.signer.issuer,
+      signDigest: input.signer.signDigest,
+    });
+    if (typeof signer.signDigest !== 'function' || signer.issuer !== scope.authorAddress) {
+      throw new Error('inventory signer must be the scoped author');
+    }
+    parseCanonicalDecimalU64(input.issuedAt, 'issuedAt');
+    if (BigInt(input.issuedAt) < BigInt(row.sharedAt)) {
+      throw new Error('inventory issuedAt must not precede the shared row');
+    }
+    const maxCasAttempts = input.maxCasAttempts
+      ?? RFC64_SWM_AUTHOR_INVENTORY_PRODUCER_MAX_CAS_ATTEMPTS_V1;
+    if (!Number.isSafeInteger(maxCasAttempts) || maxCasAttempts < 1 || maxCasAttempts > 16) {
+      throw new Error('maxCasAttempts must be an integer in 1..16');
+    }
+    return Object.freeze({ scope, row, issuedAt: input.issuedAt, signer, maxCasAttempts });
+  } catch (cause) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-input',
+      'SWM inventory producer input is not canonical or internally bound',
+      { cause },
+    );
+  }
+}
+
+function prepareRemovalInput(input: RemoveRfc64SwmAuthorInventoryInputV1): Readonly<{
+  scope: Readonly<SwmAuthorInventoryScopeV1>;
+  kaUal: SwmAuthorInventoryRowV1['kaUal'];
+  issuedAt: TimestampMsV1;
+  signer: Rfc64AuthorCatalogEip191SignerV1;
+  maxCasAttempts: number;
+}> {
+  try {
+    assertSwmAuthorInventoryScopeV1(input.scope);
+    const scope = Object.freeze({ ...input.scope });
+    const signer = Object.freeze({
+      issuer: input.signer.issuer,
+      signDigest: input.signer.signDigest,
+    });
+    if (typeof signer.signDigest !== 'function' || signer.issuer !== scope.authorAddress) {
+      throw new Error('inventory signer must be the scoped author');
+    }
+    const canonicalUal = assertCanonicalDeterministicUalV1(input.kaUal);
+    if (
+      canonicalUal.agentAddress !== scope.authorAddress
+      || parseDeterministicKnowledgeAssetUal(canonicalUal.ual).chainId !== scope.networkId
+    ) throw new Error('removal UAL does not belong to the scoped network and author');
+    parseCanonicalDecimalU64(input.issuedAt, 'issuedAt');
+    const maxCasAttempts = input.maxCasAttempts
+      ?? RFC64_SWM_AUTHOR_INVENTORY_PRODUCER_MAX_CAS_ATTEMPTS_V1;
+    if (!Number.isSafeInteger(maxCasAttempts) || maxCasAttempts < 1 || maxCasAttempts > 16) {
+      throw new Error('maxCasAttempts must be an integer in 1..16');
+    }
+    return Object.freeze({
+      scope,
+      kaUal: canonicalUal.ual,
+      issuedAt: input.issuedAt,
+      signer,
+      maxCasAttempts,
+    });
+  } catch (cause) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-input',
+      'SWM inventory removal input is not canonical or internally bound',
+      { cause },
+    );
+  }
+}
+
+async function verifyCurrentHistory(
+  current: SwmAuthorInventorySnapshotV1,
+  expectedScope: SwmAuthorInventoryScopeV1,
+): Promise<void> {
+  try {
+    const currentScope = deriveSwmAuthorInventoryScopeFromHeadV1(current.head.payload);
+    if (
+      computeSwmAuthorInventoryScopeDigestV1(currentScope)
+      !== computeSwmAuthorInventoryScopeDigestV1(expectedScope)
+      || current.head.issuer !== expectedScope.authorAddress
+    ) throw new Error('persisted inventory head belongs to a different scope or author');
+    await verifyControlEnvelopeIssuerSignatureV1(current.head);
+  } catch (cause) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-history',
+      'persisted SWM inventory head is not valid signed predecessor history',
+      { cause },
+    );
+  }
+}
+
+function upsertRow(
+  current: readonly SwmAuthorInventoryRowV1[],
+  next: SwmAuthorInventoryRowV1,
+): readonly SwmAuthorInventoryRowV1[] {
+  const rows = current.filter(({ kaUal }) => kaUal !== next.kaUal);
+  rows.push(next);
+  rows.sort((left, right) => left.kaUal < right.kaUal ? -1 : left.kaUal > right.kaUal ? 1 : 0);
+  return parseCanonicalSwmAuthorInventoryRowsV1(
+    canonicalizeSwmAuthorInventoryRowsBytesV1(rows),
+  );
+}
+
+async function signHead(input: Readonly<{
+  scope: SwmAuthorInventoryScopeV1;
+  rows: readonly SwmAuthorInventoryRowV1[];
+  issuedAt: TimestampMsV1;
+  previous: SignedSwmAuthorInventoryHeadEnvelopeV1 | null;
+  signer: Rfc64AuthorCatalogEip191SignerV1;
+}>): Promise<SignedSwmAuthorInventoryHeadEnvelopeV1> {
+  const previousVersion = input.previous === null
+    ? -1n
+    : BigInt(input.previous.payload.version);
+  if (previousVersion >= BigInt(MAX_DECIMAL_U64)) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-history',
+      'SWM inventory version space is exhausted',
+    );
+  }
+  const payload = Object.freeze({
+    ...input.scope,
+    version: (previousVersion + 1n).toString() as DecimalU64V1,
+    previousHeadDigest:
+      (input.previous?.objectDigest as Digest32V1 | undefined) ?? null,
+    totalRows: input.rows.length.toString() as DecimalU64V1,
+    rowsDigest: computeSwmAuthorInventoryRowsDigestV1(input.rows),
+    issuedAt: input.issuedAt,
+  });
+  const unsigned = Object.freeze({
+    issuer: input.signer.issuer,
+    objectType: SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+    payload,
+    signatureEvidence: Object.freeze({ kind: 'none' as const }),
+    signatureSuite: 'eip191-personal-sign-digest-v1' as const,
+  }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
+  const objectDigest = computeSwmAuthorInventoryHeadObjectDigestV1(unsigned);
+  let signature: string;
+  try {
+    signature = await input.signer.signDigest(ethers.getBytes(objectDigest));
+  } catch (cause) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-signer',
+      'SWM inventory signer callback failed',
+      { cause },
+    );
+  }
+  try {
+    const candidate = { ...unsigned, objectDigest, signature };
+    assertSignedSwmAuthorInventoryHeadEnvelopeV1(candidate);
+    await verifyControlEnvelopeIssuerSignatureV1(candidate);
+    return parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
+      canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(candidate),
+    );
+  } catch (cause) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-signer',
+      'SWM inventory signer did not produce a canonical author signature',
+      { cause },
+    );
+  }
+}
+
+function rowsEqual(
+  left: SwmAuthorInventoryRowV1,
+  right: SwmAuthorInventoryRowV1,
+): boolean {
+  const leftBytes = canonicalizeSwmAuthorInventoryRowsBytesV1([left]);
+  const rightBytes = canonicalizeSwmAuthorInventoryRowsBytesV1([right]);
+  return leftBytes.length === rightBytes.length
+    && leftBytes.every((byte, index) => byte === rightBytes[index]);
+}

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -297,6 +297,9 @@ describe('publishJsonLd', () => {
     const { agent, store } = await createAgent('AsyncMaxRetriesBot', { publisherMaxRetries: 0 });
     await agent.createContextGraph({ id: 'async-maxretries', name: 'AsyncMaxRetries', description: '' });
     await agent.registerContextGraph('async-maxretries');
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockRejectedValue(new Error('simulated escaped RFC-64 SWM inventory shadow failure'));
 
     const { captureID } = await agent.publishAsync(
       'did:dkg:context-graph:async-maxretries',
@@ -314,6 +317,14 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(job?.retries.maxRetries).toBe(0);
+    expect(shadow).toHaveBeenCalledOnce();
+    expect(shadow).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: 'async-maxretries',
+      assertionCoordinate: expect.any(String),
+      lifecycleAgentAddress: expect.any(String),
+      shareOperationId: expect.any(String),
+    }));
+    shadow.mockRestore();
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async private-only JSON-LD enqueues one rootless KA with one non-root challenge anchor', async () => {

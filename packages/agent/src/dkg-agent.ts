@@ -2802,6 +2802,22 @@ export class DKGAgent extends DKGAgentBase {
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). Best-effort; never blocks the share result.
         await agent._stampSwmPointer(contextGraphId, name, promoteAgentAddress, opts?.subGraphName);
+        if (shareOperationId) {
+          try {
+            await agent.recordRfc64SwmAuthorInventoryShadowV1({
+              contextGraphId,
+              subGraphName: opts?.subGraphName,
+              assertionCoordinate: name,
+              lifecycleAgentAddress: promoteAgentAddress,
+              shareOperationId,
+            });
+          } catch (err) {
+            agent.log.warn(
+              createOperationContext('share'),
+              `RFC-64 SWM inventory shadow escaped its failure boundary: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
         // same isFullCompletePromote), so it stays in lockstep with the rows for

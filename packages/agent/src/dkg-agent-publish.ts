@@ -1519,6 +1519,20 @@ export class PublishMethods extends DKGAgentBase {
       lifecycleAgentAddress,
       opts?.subGraphName,
     );
+    try {
+      await this.recordRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId,
+        subGraphName: opts?.subGraphName,
+        assertionCoordinate: assertionName,
+        lifecycleAgentAddress,
+        shareOperationId: promoted.shareOperationId,
+      });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `RFC-64 SWM inventory shadow escaped its failure boundary: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     const intent = await this.resolveFinalizedAssertionVmPublishIntent(
       contextGraphId,
@@ -6180,6 +6194,19 @@ export class PublishMethods extends DKGAgentBase {
         input.ctx,
         `Confirmed ${input.publicationLabel} for <${input.assertionUri}> but `
           + `RFC-64 catalog advancement failed: `
+          + (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    try {
+      await this.removeRfc64SwmAuthorInventoryShadowV1({
+        contextGraphId: input.contextGraphId,
+        subGraphName: input.subGraphName,
+        seal: input.seal,
+      });
+    } catch (err) {
+      this.log.warn(
+        input.ctx,
+        `Confirmed ${input.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: `
           + (err instanceof Error ? err.message : String(err)),
       );
     }

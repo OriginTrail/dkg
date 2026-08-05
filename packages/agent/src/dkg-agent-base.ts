@@ -1122,6 +1122,22 @@ export class DKGAgentBase {
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
+  /** Process-local observability for the non-blocking RFC-64 SWM inventory shadow. */
+  protected readonly rfc64SwmAuthorInventoryShadowStatsV1 = {
+    attemptedUpserts: 0,
+    appliedUpserts: 0,
+    existingUpserts: 0,
+    attemptedRemovals: 0,
+    appliedRemovals: 0,
+    absentRemovals: 0,
+    failed: 0,
+    casRetries: 0,
+    lastAction: null as 'upsert' | 'remove' | null,
+    lastContextGraphId: null as string | null,
+    lastKaUal: null as string | null,
+    lastHeadDigest: null as string | null,
+    lastError: null as string | null,
+  };
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
   protected readonly contextGraphBindingGenerations = new Map<string, number>();

@@ -165,6 +165,43 @@ describe('Memory layer isolation (single agent)', () => {
     expect(data.bindings.length).toBe(0);
   }, 15_000);
 
+  it('keeps a named WM to SWM promote successful when the RFC-64 inventory shadow rejects', async () => {
+    const contextGraphId = 'shadow-promote-nonblocking';
+    const name = 'shadow-nonblocking';
+    const agent = await createAgent('ShadowPromoteNonblockingBot');
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Shadow Promote Nonblocking',
+    });
+    await agent.registerContextGraph(contextGraphId);
+    await agent.assertion.create(contextGraphId, name);
+    await agent.assertion.write(contextGraphId, name, [{
+      subject: `${ENTITY_BASE}:shadow`,
+      predicate: 'http://schema.org/name',
+      object: '"Shadow remains observational"',
+    }]);
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockRejectedValue(new Error('simulated escaped RFC-64 SWM inventory shadow failure'));
+
+    const result = await agent.assertion.promote(contextGraphId, name);
+
+    expect(result.sealed).toBe(true);
+    expect(result.publishReady).toBe(true);
+    expect(result.shareOperationId).toEqual(expect.any(String));
+    expect(shadow).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      assertionCoordinate: name,
+      shareOperationId: result.shareOperationId,
+    }));
+    const swm = await agent.query(
+      `SELECT ?name WHERE { <${ENTITY_BASE}:shadow> <http://schema.org/name> ?name }`,
+      { contextGraphId, graphSuffix: '_shared_memory' },
+    );
+    expect(swm.bindings).toHaveLength(1);
+    shadow.mockRestore();
+  }, 30_000);
+
   it('published data is in data graph but not SWM', async () => {
     const agent = await createAgent('PublishedBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Memory Layers E2E' });

@@ -8,10 +8,14 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
+  buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   computeContextGraphPolicyObjectDigestV1,
   computeNetworkId,
+  computeSwmAuthorInventoryScopeDigestV1,
+  contextGraphAssertionUri,
+  contextGraphMetaUri,
   contextGraphLayerUri,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
@@ -25,8 +29,12 @@ import {
   type TimestampMsV1,
   type UnsignedContextGraphPolicyEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  computeFlatKCRootV10,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -454,6 +462,164 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
     expect(agent).toBeInstanceOf(DKGAgent);
   });
+
+  it('maintains and restarts the selected public SWM-only shadow inventory, then removes VM-confirmed rows', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-swm-shadow-restart-'));
+    tempDirs.push(dataDir);
+    const autoPublish = {
+      peers: [],
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    };
+    const author = await startNativeAgent(
+      'swm-shadow-author',
+      NATIVE_DEPLOYMENT,
+      dataDir,
+      undefined,
+      undefined,
+      autoPublish,
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const publicQuads: Quad[] = [
+      {
+        subject: 'https://example.org/swm-only',
+        predicate: 'https://schema.org/name',
+        object: '"SWM only"',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/swm-only',
+        predicate: 'https://schema.org/version',
+        object: '"1"',
+        graph: '',
+      },
+    ];
+    const canonicalSeal = await authorSeal(21n, publicQuads);
+    const seal = assertionSealFromCanonical(canonicalSeal);
+    const assertionCoordinate = 'swm-only-shadow';
+    const shareOperationId = 'swm-only-shadow-operation';
+    const assertionUri = contextGraphAssertionUri(
+      CONTEXT_GRAPH_ID,
+      AUTHOR,
+      assertionCoordinate,
+    );
+    await author.store.insert(buildAssertionSealQuads({
+      assertionUri,
+      metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      merkleRoot: seal.merkleRoot,
+      authorAddress: seal.authorAddress,
+      authorAttestationR: seal.authorAttestationR,
+      authorAttestationVS: seal.authorAttestationVS,
+      authorSchemeVersion: seal.authorSchemeVersion,
+      chainId: seal.chainId,
+      kav10Address: seal.kav10Address,
+      reservedKaId: seal.reservedKaId!,
+      finalizedAtIso: seal.finalizedAtIso,
+      contentScopeVersion: seal.contentScopeVersion!,
+      kaUal: seal.kaUal!,
+      assertionVersion: seal.assertionVersion!,
+      publicTripleCount: seal.publicTripleCount!,
+      privateTripleCount: seal.privateTripleCount!,
+    }));
+    const graphManager = new GraphManager(author.store);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: author.store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: author.peerId,
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-07-19T12:35:00.000Z'),
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store: author.store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      shareOperationId,
+    });
+
+    const first = await author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    });
+    expect(first).toMatchObject({ status: 'applied', action: 'upsert', attempts: 1 });
+    const scopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { version: '0', totalRows: '1' } },
+      rows: [{ kaUal: canonicalSeal.kaUal, shareOperationId }],
+    });
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'existing', attempts: 1 });
+    expect(author.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
+      attemptedUpserts: 2,
+      appliedUpserts: 1,
+      existingUpserts: 1,
+      failed: 0,
+    });
+
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+    const restarted = await startNativeAgent(
+      'swm-shadow-author-restarted',
+      NATIVE_DEPLOYMENT,
+      dataDir,
+      undefined,
+      undefined,
+      autoPublish,
+    );
+    vi.spyOn(restarted, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    restarted.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toHaveLength(1);
+    await expect(restarted.removeRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      seal,
+    })).resolves.toMatchObject({ status: 'applied', action: 'remove', attempts: 1 });
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { version: '1', totalRows: '0' } },
+      rows: [],
+    });
+  }, 60_000);
 
   it('normalizes legacy and selected auto-publish into one internal policy', () => {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID);
