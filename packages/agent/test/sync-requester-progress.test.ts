@@ -10,8 +10,13 @@ import {
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
-import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
-import { runSharedMemorySync, selectSwmSnapshotCoverage } from '../src/sync/requester/shared-memory-sync.js';
+import { generateShareMetadata, workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
+import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import {
+  collectPublicSnapshotMetadata,
+  runSharedMemorySync,
+  selectSwmSnapshotCoverage,
+} from '../src/sync/requester/shared-memory-sync.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
   SyncPageAccumulationLimitError,
@@ -1624,12 +1629,17 @@ describe('public SWM snapshot coverage (#2050)', () => {
     // passes could ever clear it.
     //
     // THE MANIFEST MUST BE MIXED, and that is the whole difficulty of this
-    // fixture. `onSnapshotReady` is wired only when `snapshotDescriptorsByRef`
-    // is non-empty, so a manifest in which NO ref has a descriptor never calls
+    // fixture. `onSnapshotReady` USED TO BE wired only when
+    // `snapshotDescriptorsByRef` was non-empty, so on the pre-fix tree a
+    // manifest in which NO ref had a descriptor never called
     // `materializeReadySnapshot` at all: it would report `0/N` for a reason
     // that has nothing to do with the code under test, and would read green
     // both with the fix and without it. At least one described ref is what
-    // opens the hook the undescribed ref then has to travel through.
+    // opened the hook the undescribed ref then had to travel through — which is
+    // why THIS row, and not an all-undescribed one, is the row that fails on
+    // the pre-fix tree. The hook is now wired unconditionally, and the
+    // all-undescribed manifest that guard hid — the entity-share shape, which
+    // is most Context Graphs — is pinned by the row below.
     //
     // The two halves are the real production shape rather than two invented
     // rows: ONE Knowledge Asset shared TWICE. `replaceHeadMetadata` is
@@ -1753,6 +1763,192 @@ describe('public SWM snapshot coverage (#2050)', () => {
         peerIdSuffix: '5a5a5a5a',
         snapshotsResolved: 2,
         snapshotsTotal: 2,
+        manifestComplete: true,
+        missingCount: 0,
+        missingSample: [],
+        materializationFailures: 0,
+      });
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
+
+  it('counts a complete manifest with NO descriptor on ANY ref as resolved, so an entity-share Context Graph stops nominating its peer', async () => {
+    // The row above has to build a MIXED manifest — one described ref, one
+    // undescribed — because the old `snapshotDescriptorsByRef.size > 0` guard
+    // wired `onSnapshotReady` only when SOMETHING was described. That guard hid
+    // the larger case: a Context Graph in which NOTHING is described.
+    //
+    // That case is not a corner, it is the primary shared-memory write API.
+    // `storeWorkspaceOperationPublicQuads` (packages/publisher/src/
+    // workspace-resolution.ts) — the entity-level share — writes each root's
+    // public slice under a `urn:dkg:public-stage:<cg>:<subGraph>:<op>:<root>`
+    // subject carrying `dkg:publicQuadsDigest` + `dkg:publicQuadsCount`, and
+    // writes NO `#dkg-swm-head` row at all; heads belong to the graph-scoped KA
+    // path (`storeKnowledgeAssetOperationPublicQuads`). The two readers then
+    // disagree about the very same metadata: `collectPublicSnapshotMetadata`
+    // accepts ANY subject with digest+count, so the slice IS a manifest ref,
+    // while `parseGraphScopedSwmRecoveryDescriptors` anchors ONLY on head
+    // subjects, so it yields nothing. A Context Graph written entirely by
+    // entity shares therefore advertises refs and produces zero descriptors —
+    // for EVERY ref, not just one.
+    //
+    // Pre-fix such a graph could not reach `snapshotsResolved ===
+    // snapshotsTotal` by ANY path: the hook was never wired, so
+    // `materializeReadySnapshot` — and with it the vacuity branch the row above
+    // pins — never ran. `snapshotsResolved < snapshotsTotal` is exactly the
+    // predicate `capablePeersForNextPass` (packages/cli/src/
+    // catchup-runner-worker-impl.ts) reads as "this peer still owes us
+    // Knowledge Assets", so it nominated a peer that owed nothing on every pass
+    // of every catch-up job, at O(KA size) per cached ref, for ever.
+    //
+    // BOTH writers are wired here, and that is the whole difference from
+    // 'carries the round coverage onto the summary when the snapshot phase does
+    // not finish' above, which asserts `0/2` with NO materializer. The two must
+    // stay distinct: missing WIRING means nothing CAN be written, so those refs
+    // are unresolved; no DESCRIPTOR under a COMPLETE manifest means there is
+    // nothing to write, so these are resolved. Wiring the hook unconditionally
+    // must not collapse that.
+    //
+    // The meta graph comes from `swmFixtures(COVERAGE_CG)` — the same builder
+    // whose rows parse into REAL descriptors in the row above — so the empty
+    // descriptor list asserted below is attributable to the subject shape
+    // alone, not to a meta-graph URI the parser refuses to visit.
+    const { metaGraph } = swmFixtures(COVERAGE_CG);
+    const SHARE_OP = 'op-entity-share-1';
+    const ROOT = 'https://example.org/thing/1';
+    // One root's public slice, as `filterQuadsForRoot` hands it to
+    // `putSnapshot`. Digest and count are taken FROM this payload because
+    // `hasValidSnapshot` re-checks both against the cached blob: a hand-written
+    // count would turn a cache hit into a network fetch and quietly move the
+    // row onto a different branch of the walk.
+    const payload: Quad[] = [
+      { subject: ROOT, predicate: 'https://schema.org/name', object: '"Thing One"', graph: '' } as Quad,
+      { subject: ROOT, predicate: 'https://schema.org/color', object: '"blue"', graph: '' } as Quad,
+    ];
+    const digest = workspacePublicQuadsDigest(payload);
+    const sliceSubject = `urn:dkg:public-stage:${[COVERAGE_CG, '_', SHARE_OP, ROOT].map(encodeURIComponent).join(':')}`;
+    const meta: Quad[] = [
+      // Production-generated, not invented: these are the share-operation rows
+      // an entity share writes alongside the slice. They contribute neither a
+      // manifest ref (no digest/count) nor a descriptor (no head names this
+      // operation), which is what leaves the slice row as the only thing under
+      // test while keeping the fixture the shape a real peer would serve.
+      ...generateShareMetadata({
+        shareOperationId: SHARE_OP,
+        contextGraphId: COVERAGE_CG,
+        rootEntities: [ROOT],
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+      }, metaGraph),
+      // The slice rows themselves, in `storeWorkspaceOperationPublicQuads`
+      // order. Deliberately NO `dkg:publicSnapshotGraph` row: with a snapshot
+      // store configured the blob is keyed by its digest and `ref === digest`,
+      // and that absence is precisely what makes this row a snapshot-FETCH
+      // target instead of a graph-sync one. `publicQuadsCount` keeps its
+      // `xsd:integer` type because that is how production writes it.
+      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/contextGraphId', object: `"${COVERAGE_CG}"`, graph: metaGraph } as Quad,
+      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/shareOperationId', object: `"${SHARE_OP}"`, graph: metaGraph } as Quad,
+      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publicSliceRootEntity', object: ROOT, graph: metaGraph } as Quad,
+      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publicQuadsDigest', object: `"${digest}"`, graph: metaGraph } as Quad,
+      {
+        subject: sliceSubject,
+        predicate: 'http://dkg.io/ontology/publicQuadsCount',
+        object: `"${payload.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        graph: metaGraph,
+      } as Quad,
+      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publisherPeerId', object: '"peer-source"', graph: metaGraph } as Quad,
+      { subject: sliceSubject, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${new Date(0).toISOString()}"`, graph: metaGraph } as Quad,
+    ];
+
+    // Fixture integrity across BOTH readers, asserted before the sync so a
+    // fixture that drifted names itself instead of surfacing as an unexplained
+    // count. The manifest must really carry this one ref (or `snapshotsTotal:
+    // 1` below would be measuring something else), and NOTHING may be
+    // described (or this row would silently become a second copy of the mixed
+    // row above, travelling the described path it is meant to avoid).
+    expect(collectPublicSnapshotMetadata(meta)).toEqual([{ ref: digest, digest, count: payload.length }]);
+    expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
+
+    // The blob is already cached: the state of a node whose earlier pass
+    // fetched it. Nothing here is missing — the peer owes this node nothing.
+    const cached = new Map<string, Quad[]>([[digest, payload]]);
+    const snapshotFetches: string[] = [];
+
+    // A real store and the real materializer, as the rows above use them: with
+    // a hand-rolled stub, "nothing was written" would be unfalsifiable, and the
+    // `insertedDataTriples` witness below could not distinguish a vacuous
+    // resolution from a materializer that silently does nothing.
+    const store = new OxigraphStore();
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx,
+        remotePeerId: 'peer-entity-share-1a2b3c4d',
+        contextGraphIds: [COVERAGE_CG],
+        createContextGraphSyncDeadline: () => Date.now() + 60_000,
+        fetchSyncPages: async (
+          _ctx: OperationContext,
+          _peer: string,
+          contextGraphId: string,
+          _includeSharedMemory: boolean,
+          phase: string,
+          _graph: string,
+          _deadline: number,
+          snapshotRef?: string,
+        ) => {
+          if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
+          // Every phase completes cleanly, so `manifestComplete` is true — the
+          // other half of the vacuity gate. A truncated meta phase parses no
+          // descriptors either, and there "no descriptor" means "not known
+          // yet"; that boundary is a separate row and is not smuggled in here.
+          return pageResult(contextGraphId, phase);
+        },
+        processSharedMemoryBatch: async () => ({
+          ...sharedMemoryProcessResult(),
+          emptyResponses: 0,
+          verifiedMeta: meta,
+          totalFetchedMetaQuads: meta.length,
+        }),
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads: Quad[]) => { await store.insert(quads); },
+        snapshotMaterializer: materializer,
+        publicSnapshotStore: {
+          getSnapshot: async (ref: string) => cached.get(ref) ?? null,
+          putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map(),
+        logInfo: noop,
+        logWarn: noop,
+        logDebug: noop,
+      });
+
+      // Pre-cached, so the ref must not touch the transport; a digest that
+      // stopped matching the payload would turn this into a fetch.
+      expect(snapshotFetches).toEqual([]);
+      expect(summary.failedPhases).toBe(0);
+      // The vacuity witness, and what separates this row from the mixed one
+      // above, where the described half genuinely writes: here there is nothing
+      // to write, so nothing IS written. The ref is resolved because a complete
+      // manifest does not describe it — not because a materializer ran.
+      expect(summary.insertedDataTriples).toBe(0);
+      // Pre-fix: `0/1`, `missingCount: 1`, permanently — for a peer this node
+      // was fully synced with, and for EVERY Context Graph written by entity
+      // shares. `snapshotsResolved === snapshotsTotal` is what makes
+      // `capablePeersForNextPass`'s `resolved < total` false and finally stops
+      // the nomination.
+      expect(summary.swmCoverage).toEqual({
+        contextGraphId: COVERAGE_CG,
+        peerIdSuffix: '1a2b3c4d',
+        snapshotsResolved: 1,
+        snapshotsTotal: 1,
         manifestComplete: true,
         missingCount: 0,
         missingSample: [],

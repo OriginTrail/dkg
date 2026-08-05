@@ -778,9 +778,33 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Fires for BOTH 'cache' and 'network' sources, so a node whose earlier
         // runs already cached the blobs materializes them on the next pass
         // without refetching a byte.
-        ...(snapshotDescriptorsByRef.size > 0
-          ? { onSnapshotReady: (snapshot: PublicSnapshotMetadata) => materializeReadySnapshot(snapshot.ref) }
-          : {}),
+        //
+        // Wired UNCONDITIONALLY. It used to be gated on
+        // `snapshotDescriptorsByRef.size > 0`, which looked like an optimisation
+        // and was the reason a whole class of Context Graph reported `0/N`
+        // snapshots for ever.
+        //
+        // The manifest and the descriptors come from different readers.
+        // `collectPublicSnapshotMetadata` accepts any subject carrying
+        // `dkg:publicQuadsDigest` + `dkg:publicQuadsCount`, while
+        // `parseGraphScopedSwmRecoveryDescriptors` anchors on `#dkg-swm-head`
+        // subjects only. An entity-level share writes its public slice under a
+        // `urn:dkg:public-stage:...` subject and no head row, so a CG written
+        // entirely by that path — the primary shared-memory write API — produces
+        // refs in the manifest and NO descriptors at all. The hook was then never
+        // wired, `materializeReadySnapshot` never ran, and the ref could not be
+        // counted resolved by any path.
+        //
+        // `snapshotsResolved < snapshotsTotal` therefore held permanently, so
+        // `capablePeersForNextPass` kept nominating a peer that owed us nothing,
+        // on every pass of every catch-up job, at O(KA size) per cached ref.
+        //
+        // Wiring it always is what makes the descriptor-less branch inside
+        // `materializeReadySnapshot` reachable, and that branch is where the
+        // vacuity decision — and its `manifestComplete` guard — actually lives.
+        // The hook still early-returns when the materializer or the store is
+        // absent, so this costs nothing when there is genuinely no wiring.
+        onSnapshotReady: (snapshot: PublicSnapshotMetadata) => materializeReadySnapshot(snapshot.ref),
       });
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
