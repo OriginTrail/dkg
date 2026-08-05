@@ -78,7 +78,9 @@ function unquoteLiteral(o: string): string | null {
  * sub-graph) — so the rules are themselves chain-proven — then append any
  * request-supplied `rules`. Rules are MANAGED: a rule whose `drag:ruleStatus` is
  * `"disabled"` is skipped, and (governance) when `ruleAuthors` is set, only rules
- * whose on-chain author is allow-listed are trusted.
+ * whose on-chain author is allow-listed are trusted. A `disabled` status is only
+ * honored from the rule's own on-chain author or an allow-listed author — an
+ * arbitrary publisher cannot disable (or subject-squat) someone else's rule.
  */
 const MAX_RULES = 50;
 const MAX_RULES_BYTES = 64 * 1024;
@@ -87,18 +89,38 @@ function resolveRules(
   requestRules?: string,
   ruleAuthors?: string[],
 ): { rulesN3: string; ruleCitations: VerifiableCitation[] } {
+  const allow = ruleAuthors && ruleAuthors.length ? new Set(ruleAuthors.map((a) => a.toLowerCase())) : null;
+  const authorOf = (c: VerifiableCitation): string => String(c.onChain?.author ?? '').toLowerCase();
+  const isAllowListed = (c: VerifiableCitation): boolean => allow !== null && allow.has(authorOf(c));
   // Index by rule subject so a rule's body, status and author travel together.
   const bodies = new Map<string, { n3: string; citation: VerifiableCitation }>();
-  const disabled = new Set<string>();
+  const statusFacts: Array<{ subject: string; citation: VerifiableCitation }> = [];
   for (const f of facts) {
     if (f.triple.predicate === DRAG_RULE_PREDICATE) {
       const n3 = unquoteLiteral(f.triple.object);
-      if (n3) bodies.set(f.triple.subject, { n3, citation: f.citation });
+      if (!n3) continue;
+      // First writer wins, except governance upgrades trust: on a public CG any
+      // publisher can reuse a rule's subject IRI, and letting a later fact
+      // overwrite an allow-listed author's body would suppress the trusted rule
+      // (the impostor body is then dropped by the allowlist check below).
+      const existing = bodies.get(f.triple.subject);
+      if (existing && !(isAllowListed(f.citation) && !isAllowListed(existing.citation))) continue;
+      bodies.set(f.triple.subject, { n3, citation: f.citation });
     } else if (f.triple.predicate === DRAG_RULE_STATUS && unquoteLiteral(f.triple.object) === 'disabled') {
-      disabled.add(f.triple.subject);
+      statusFacts.push({ subject: f.triple.subject, citation: f.citation });
     }
   }
-  const allow = ruleAuthors && ruleAuthors.length ? new Set(ruleAuthors.map((a) => a.toLowerCase())) : null;
+  // Status facts are themselves governed: only the rule's own author — or, when
+  // an allowlist is configured, an allow-listed author — can disable a rule.
+  // Anyone else's `drag:ruleStatus "disabled"` fact about the subject is ignored
+  // (otherwise any public-CG publisher could switch off trusted rules).
+  const disabled = new Set<string>();
+  for (const s of statusFacts) {
+    const statusAuthor = authorOf(s.citation);
+    const body = bodies.get(s.subject);
+    const isRuleAuthor = statusAuthor !== '' && body !== undefined && statusAuthor === authorOf(body.citation);
+    if (isRuleAuthor || isAllowListed(s.citation)) disabled.add(s.subject);
+  }
   // Bound rule count + total size. NOTE: caps do NOT bound an adversarial rule's
   // RUNTIME — EYE runs in-process and an in-process timeout can't interrupt the
   // blocking WASM (worker-thread isolation is the planned hardening). On public

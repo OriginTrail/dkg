@@ -310,6 +310,74 @@ describe('POST /api/answer authorization and validation', () => {
     expect(applied.map((c) => c.kaId)).toEqual(['ka-active']);
   });
 
+  it('ignores a "disabled" status published by a different author than the rule', async () => {
+    const agent = reasoningAgent([
+      ruleFact('urn:rule:trusted', RULE_N3, 'ka-trusted', '0xaaa'),
+      // Attacker on the public CG publishes a status fact about the victim's rule.
+      statusFact('urn:rule:trusted', 'disabled', 'ka-attacker', '0xbbb'),
+    ]);
+
+    const result = await postAnswer(
+      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+      { agent, config: { drag: { reasoning: true } } },
+    );
+
+    expect(result.status).toBe(200);
+    const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
+    expect(applied.map((c) => c.kaId)).toEqual(['ka-trusted']);
+  });
+
+  it('honors a "disabled" status from an allow-listed author for another author\'s rule', async () => {
+    const agent = reasoningAgent([
+      ruleFact('urn:rule:governed', RULE_N3, 'ka-governed', '0xAbCdef0000000000000000000000000000000001'),
+      statusFact('urn:rule:governed', 'disabled', 'ka-governor', '0xABCDEF0000000000000000000000000000000009'),
+    ]);
+
+    const result = await postAnswer(
+      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+      {
+        agent,
+        config: {
+          drag: {
+            reasoning: true,
+            reasoningRuleAuthors: [
+              '0xabcdef0000000000000000000000000000000001',
+              '0xabcdef0000000000000000000000000000000009',
+            ],
+          },
+        },
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body.reasoning.derived).toEqual([]);
+    expect(result.body.reasoning.note).toMatch(/no rules found/);
+  });
+
+  it('does not let a later publisher overwrite an allow-listed author\'s rule body', async () => {
+    const agent = reasoningAgent([
+      ruleFact('urn:rule:trusted', RULE_N3, 'ka-trusted', '0xAbCdef0000000000000000000000000000000001'),
+      // Subject-squat: attacker re-publishes the same rule subject with their own
+      // body; the impostor body would then be dropped by the allowlist, silently
+      // suppressing the trusted rule.
+      ruleFact('urn:rule:trusted', '{ ?s ?p ?o } => { ?o ?p ?s } .', 'ka-squatter', '0x9999990000000000000000000000000000000002'),
+    ]);
+
+    const result = await postAnswer(
+      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+      {
+        agent,
+        config: {
+          drag: { reasoning: true, reasoningRuleAuthors: ['0xabcdef0000000000000000000000000000000001'] },
+        },
+      },
+    );
+
+    expect(result.status).toBe(200);
+    const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
+    expect(applied.map((c) => c.kaId)).toEqual(['ka-trusted']);
+  });
+
   it('trusts only allow-listed rule authors when reasoningRuleAuthors is set (case-insensitive)', async () => {
     const agent = reasoningAgent([
       ruleFact('urn:rule:trusted', RULE_N3, 'ka-trusted', '0xAbCdef0000000000000000000000000000000001'),
