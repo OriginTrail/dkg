@@ -6576,11 +6576,9 @@ export class PublishMethods extends DKGAgentBase {
     // derives a detached catalog commitment without altering the exact KA
     // graph or its author seal.
     const graphScopedPublish = options?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
-    const hasLocallyGeneratedPrivateCatalog = onChainId != null && (await this.isPrivateContextGraph(contextGraphId));
-    const localTrustedNonManifestCatalogTriples = hasLocallyGeneratedPrivateCatalog
-      ? generatedPrivateCatalogTripleKeys(contextGraphId)
-      : undefined;
-    if (hasLocallyGeneratedPrivateCatalog && !graphScopedPublish) {
+    let localTrustedNonManifestCatalogTriples: PublishOptions['trustedNonManifestCatalogTriples'];
+    if (!graphScopedPublish && onChainId != null && (await this.isPrivateContextGraph(contextGraphId))) {
+      localTrustedNonManifestCatalogTriples = generatedPrivateCatalogTripleKeys(contextGraphId);
       selection = await this._ensureCuratedCatalogInSwm(
         contextGraphId,
         selection,

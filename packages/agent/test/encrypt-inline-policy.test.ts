@@ -838,9 +838,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
       { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
     );
 
-    expect(agentLike.isPrivateContextGraph.calls).toEqual([
-      ['0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal'],
-    ]);
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
     const publishOptions = agentLike.publisher.publishFromSharedMemory.calls.at(-1)?.[2];
     expect(publishOptions).toEqual(expect.objectContaining({
       onChainContextGraphId: '4',
@@ -850,6 +848,35 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
         '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal',
       ),
     }));
+  });
+
+  it('keeps local-meta catalog mutation for legacy private SWM publishes', async () => {
+    const agentLike = makeSwmPublishAgentLike('4');
+    agentLike.isPrivateContextGraph = recorder(async () => true);
+    agentLike._ensureCuratedCatalogInSwm = recorder(async (
+      _contextGraphId: string,
+      selection: 'all' | { rootEntities: string[] },
+    ) => selection);
+
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
+      'private-cg',
+      'all',
+    );
+
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([['private-cg']]);
+    expect(agentLike._ensureCuratedCatalogInSwm.calls.at(-1)?.slice(0, 2)).toEqual([
+      'private-cg',
+      'all',
+    ]);
+    expect(agentLike.publisher.publishFromSharedMemory.calls.at(-1)).toEqual([
+      'private-cg',
+      'all',
+      expect.objectContaining({
+        onChainContextGraphId: '4',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
+      }),
+    ]);
   });
 });
 
