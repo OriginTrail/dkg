@@ -386,7 +386,6 @@ export {
   type PositiveDecimalU64V1,
   type SealTripleCountV1,
   type CanonicalIsoUtcMillisV1,
-  type CanonicalDeterministicUalV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealRowV1,

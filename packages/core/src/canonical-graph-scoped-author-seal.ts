@@ -26,7 +26,8 @@ import {
 } from './canonical-json.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  parseDeterministicKnowledgeAssetUal,
+  assertCanonicalDeterministicUalV1 as assertSharedCanonicalDeterministicUalV1,
+  type CanonicalDeterministicUalV1,
 } from './ka-content-scope.js';
 import { isSafeIri } from './sparql-safe.js';
 import {
@@ -47,7 +48,6 @@ declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
 declare const SEAL_TRIPLE_COUNT_V1_BRAND: unique symbol;
 declare const CANONICAL_ISO_UTC_MILLIS_V1_BRAND: unique symbol;
-declare const CANONICAL_DETERMINISTIC_UAL_V1_BRAND: unique symbol;
 
 export type Hex32V1 = string & { readonly [HEX_32_V1_BRAND]: true };
 export type PositiveDecimalU64V1 = DecimalU64V1 & {
@@ -59,9 +59,7 @@ export type SealTripleCountV1 = DecimalU64V1 & {
 export type CanonicalIsoUtcMillisV1 = string & {
   readonly [CANONICAL_ISO_UTC_MILLIS_V1_BRAND]: true;
 };
-export type CanonicalDeterministicUalV1 = string & {
-  readonly [CANONICAL_DETERMINISTIC_UAL_V1_BRAND]: true;
-};
+export type { CanonicalDeterministicUalV1 } from './ka-content-scope.js';
 
 export const CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_DIGEST_DOMAIN_V1 =
   'dkg-ka-author-seal-v1\n' as const;
@@ -289,7 +287,7 @@ export function assertCanonicalGraphScopedAuthorSealV1(
   if (payload.contentScopeVersion !== '2') {
     fail('canonical-seal-schema', 'contentScopeVersion must be the exact string "2"');
   }
-  const ual = assertCanonicalDeterministicUalV1(payload.kaUal);
+  const ual = assertCanonicalSealDeterministicUalV1(payload.kaUal);
   const assertionVersion = assertSealU64(payload.assertionVersion, 'assertionVersion');
   if (assertionVersion < 1n) {
     fail('canonical-seal-scalar', 'assertionVersion must be in 1..2^64-1');
@@ -769,23 +767,16 @@ function assertCanonicalIsoUtcMillisV1(
   }
 }
 
-export function assertCanonicalDeterministicUalV1(value: unknown): {
+function assertCanonicalSealDeterministicUalV1(value: unknown): {
   ual: CanonicalDeterministicUalV1;
   agentAddress: EvmAddressV1;
   kaNumber: string;
 } {
-  if (typeof value !== 'string') {
-    fail('canonical-seal-ual', 'kaUal must be a string');
-  }
   try {
-    const parsed = parseDeterministicKnowledgeAssetUal(value);
-    assertCanonicalEvmAddress(parsed.agentAddress, 'kaUal author');
-    if (parsed.ual !== value) {
-      fail('canonical-seal-ual', 'kaUal must already be in canonical form');
-    }
+    const parsed = assertSharedCanonicalDeterministicUalV1(value);
     return {
-      ual: parsed.ual as CanonicalDeterministicUalV1,
-      agentAddress: parsed.agentAddress as EvmAddressV1,
+      ual: parsed.ual,
+      agentAddress: parsed.agentAddress,
       kaNumber: parsed.kaNumber,
     };
   } catch (cause) {

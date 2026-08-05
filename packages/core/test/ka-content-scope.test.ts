@@ -6,6 +6,7 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   MAX_KNOWLEDGE_ASSET_NUMBER,
   MemoryLayer,
+  assertCanonicalDeterministicUalV1,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   parseDeterministicKnowledgeAssetUal,
@@ -32,6 +33,16 @@ describe('KA content scope', () => {
       assertionVersion: '2',
       access: 'read-write',
     });
+  });
+
+  it('asserts one canonical deterministic UAL and returns every identity part', () => {
+    expect(assertCanonicalDeterministicUalV1(CANONICAL_UAL)).toEqual({
+      ual: CANONICAL_UAL,
+      chainId: 'base:8453',
+      agentAddress: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
+      kaNumber: '7',
+    });
+    expect(() => assertCanonicalDeterministicUalV1(UAL)).toThrow(/canonical form/);
   });
 
   it('rejects KA numbers outside the uint96 on-chain identity domain', () => {

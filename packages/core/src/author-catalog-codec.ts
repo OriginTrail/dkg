@@ -89,14 +89,29 @@ export interface CatalogLaneV1 {
   readonly subGraphName: SubGraphNameV1 | null;
 }
 
-/** Exact nine-key scope committed by every author-catalog era. */
-export interface AuthorCatalogScopeV1 extends CatalogLaneV1 {
+/** Shared author lane governed by one exact public-CG policy era. */
+export interface AuthorLaneScopeV1 extends CatalogLaneV1 {
   readonly networkId: NetworkIdV1;
   readonly governanceChainId: ChainIdV1 | null;
   readonly governanceContractAddress: EvmAddressV1 | null;
   readonly ownershipTransitionDigest: Digest32V1 | null;
   readonly authorAddress: EvmAddressV1;
   readonly era: DecimalU64V1;
+}
+
+export const AUTHOR_LANE_SCOPE_KEYS_V1 = Object.freeze([
+  'authorAddress',
+  'contextGraphId',
+  'era',
+  'governanceChainId',
+  'governanceContractAddress',
+  'networkId',
+  'ownershipTransitionDigest',
+  'subGraphName',
+] as const);
+
+/** Exact nine-key scope committed by every author-catalog era. */
+export interface AuthorCatalogScopeV1 extends AuthorLaneScopeV1 {
   readonly bucketCount: CountV1;
 }
 
@@ -252,23 +267,47 @@ export function assertAuthorCatalogScopeV1(
     fail('catalog-schema', 'author catalog scope must be a plain JSON object');
   }
   assertClosedKeys(scope, [
-    'authorAddress',
+    ...AUTHOR_LANE_SCOPE_KEYS_V1,
     'bucketCount',
-    'contextGraphId',
-    'era',
-    'governanceChainId',
-    'governanceContractAddress',
-    'networkId',
-    'ownershipTransitionDigest',
-    'subGraphName',
   ], 'author catalog scope');
 
+  assertAuthorLaneScopeFieldsV1(scope);
+  assertAuthorCatalogBucketCountV1(scope.bucketCount);
+}
+
+/** Validate the exact shared author-lane scope used by catalog and SWM commitments. */
+export function assertAuthorLaneScopeV1(
+  scope: unknown,
+): asserts scope is AuthorLaneScopeV1 {
+  if (!isPlainRecord(scope)) {
+    fail('catalog-schema', 'author lane scope must be a plain JSON object');
+  }
+  assertClosedKeys(scope, AUTHOR_LANE_SCOPE_KEYS_V1, 'author lane scope');
+  assertAuthorLaneScopeFieldsV1(scope);
+}
+
+/** Copy a validated structural superset into one exact immutable author-lane scope. */
+export function snapshotAuthorLaneScopeV1(scope: AuthorLaneScopeV1): AuthorLaneScopeV1 {
+  const snapshot = {
+    authorAddress: scope.authorAddress,
+    contextGraphId: scope.contextGraphId,
+    era: scope.era,
+    governanceChainId: scope.governanceChainId,
+    governanceContractAddress: scope.governanceContractAddress,
+    networkId: scope.networkId,
+    ownershipTransitionDigest: scope.ownershipTransitionDigest,
+    subGraphName: scope.subGraphName,
+  };
+  assertAuthorLaneScopeV1(snapshot);
+  return Object.freeze(snapshot);
+}
+
+function assertAuthorLaneScopeFieldsV1(scope: Record<string, unknown>): void {
   assertNetworkIdV1(scope.networkId);
   assertContextGraphIdV1(scope.contextGraphId);
   if (scope.subGraphName !== null) assertSubGraphNameV1(scope.subGraphName);
   assertCatalogScalar(() => assertCanonicalEvmAddress(scope.authorAddress, 'authorAddress'));
   assertCatalogU64(scope.era, 'era');
-  assertAuthorCatalogBucketCountV1(scope.bucketCount);
 
   const chainIsNull = scope.governanceChainId === null;
   const contractIsNull = scope.governanceContractAddress === null;

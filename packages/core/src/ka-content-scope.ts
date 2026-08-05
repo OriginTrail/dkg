@@ -5,9 +5,20 @@ import {
 import type { MemoryLayer } from './memory-model.js';
 import { assertSafeIri, isSafeIri } from './sparql-safe.js';
 import {
+  assertCanonicalEvmAddress,
+  type EvmAddressV1,
+} from './sync-wire-scalars.js';
+import {
   assertNetworkIdV1,
   type NetworkIdV1,
 } from './sync-wire-identifiers.js';
+
+declare const CANONICAL_DETERMINISTIC_UAL_V1_BRAND: unique symbol;
+
+/** A deterministic KA UAL that has already passed the canonical wire check. */
+export type CanonicalDeterministicUalV1 = string & {
+  readonly [CANONICAL_DETERMINISTIC_UAL_V1_BRAND]: true;
+};
 
 /** Existing V10 KAs may be resolved through the quarantined read-only path. */
 export const LEGACY_ROOT_CONTENT_SCOPE_VERSION = 1 as const;
@@ -62,6 +73,13 @@ export interface DeterministicKnowledgeAssetUalParts {
   readonly chainId: string;
   readonly agentAddress: string;
   readonly kaNumber: string;
+}
+
+/** Complete canonical identity returned to every seal/catalog/inventory consumer. */
+export interface CanonicalDeterministicKnowledgeAssetUalPartsV1
+  extends Omit<DeterministicKnowledgeAssetUalParts, 'ual' | 'agentAddress'> {
+  readonly ual: CanonicalDeterministicUalV1;
+  readonly agentAddress: EvmAddressV1;
 }
 
 export interface DeterministicRootlessKnowledgeAssetIdentity
@@ -125,6 +143,30 @@ export function parseDeterministicKnowledgeAssetUal(
     agentAddress,
     kaNumber,
   };
+}
+
+/**
+ * Assert the exact deterministic KA wire identity without coupling callers to
+ * an author-seal codec. Unlike the lower-level canonicalizer, this refuses
+ * aliases and returns every parsed identity component in one pass.
+ */
+export function assertCanonicalDeterministicUalV1(
+  value: unknown,
+): Readonly<CanonicalDeterministicKnowledgeAssetUalPartsV1> {
+  if (typeof value !== 'string') {
+    throw new Error('kaUal must be a string');
+  }
+  const parsed = parseDeterministicKnowledgeAssetUal(value);
+  assertCanonicalEvmAddress(parsed.agentAddress, 'kaUal author');
+  if (parsed.ual !== value) {
+    throw new Error('kaUal must already be in canonical form');
+  }
+  return Object.freeze({
+    ual: parsed.ual as CanonicalDeterministicUalV1,
+    chainId: parsed.chainId,
+    agentAddress: parsed.agentAddress as EvmAddressV1,
+    kaNumber: parsed.kaNumber,
+  });
 }
 
 /**

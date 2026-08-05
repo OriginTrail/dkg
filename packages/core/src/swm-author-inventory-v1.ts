@@ -1,14 +1,12 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import {
+  AUTHOR_LANE_SCOPE_KEYS_V1,
+  assertAuthorLaneScopeV1,
   assertAssertionCoordinateV1,
-  assertContextGraphIdV1,
-  assertNetworkIdV1,
-  assertSubGraphNameV1,
+  snapshotAuthorLaneScopeV1,
   type AssertionCoordinateV1,
-  type ContextGraphIdV1,
-  type NetworkIdV1,
-  type SubGraphNameV1,
+  type AuthorLaneScopeV1,
 } from './author-catalog-codec.js';
 import {
   canonicalizeJson,
@@ -19,7 +17,7 @@ import {
 import {
   assertCanonicalDeterministicUalV1,
   type CanonicalDeterministicUalV1,
-} from './canonical-graph-scoped-author-seal.js';
+} from './ka-content-scope.js';
 import {
   assertUnsignedControlEnvelope,
   assertSignedControlEnvelope,
@@ -30,18 +28,13 @@ import {
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from './sync-control-object.js';
-import { parseDeterministicKnowledgeAssetUal } from './ka-content-scope.js';
 import {
-  assertCanonicalChainId,
   assertCanonicalDigest,
-  assertCanonicalEvmAddress,
   assertCanonicalTimestampMs,
   parseCanonicalDecimalU64,
-  type ChainIdV1,
   type CountV1,
   type DecimalU64V1,
   type Digest32V1,
-  type EvmAddressV1,
   type TimestampMsV1,
 } from './sync-wire-scalars.js';
 import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
@@ -60,16 +53,7 @@ export const MAX_SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_BYTES_V1 = 256;
 const UTF8 = new TextEncoder();
 const SCOPE_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_SCOPE_DIGEST_DOMAIN_V1);
 const ROWS_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_ROWS_DIGEST_DOMAIN_V1);
-const SWM_AUTHOR_INVENTORY_SCOPE_KEYS = Object.freeze([
-  'networkId',
-  'contextGraphId',
-  'governanceChainId',
-  'governanceContractAddress',
-  'ownershipTransitionDigest',
-  'subGraphName',
-  'authorAddress',
-  'era',
-] as const);
+const SWM_AUTHOR_INVENTORY_SCOPE_KEYS = AUTHOR_LANE_SCOPE_KEYS_V1;
 const SWM_AUTHOR_INVENTORY_HEAD_ONLY_KEYS = Object.freeze([
   'version',
   'previousHeadDigest',
@@ -87,16 +71,7 @@ const SWM_AUTHOR_INVENTORY_HEAD_KEYS = Object.freeze([
  * The separate object type and digest domain deliberately prevent this
  * pre-finalization claim from being mistaken for a finalized-VM catalog.
  */
-export interface SwmAuthorInventoryScopeV1 {
-  readonly networkId: NetworkIdV1;
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly governanceChainId: ChainIdV1 | null;
-  readonly governanceContractAddress: EvmAddressV1 | null;
-  readonly ownershipTransitionDigest: Digest32V1 | null;
-  readonly subGraphName: SubGraphNameV1 | null;
-  readonly authorAddress: EvmAddressV1;
-  readonly era: DecimalU64V1;
-}
+export interface SwmAuthorInventoryScopeV1 extends AuthorLaneScopeV1 {}
 
 /** One active, completely committed SWM assertion. */
 export interface SwmAuthorInventoryRowV1 {
@@ -160,17 +135,7 @@ export function assertSwmAuthorInventoryScopeV1(
 ): asserts value is SwmAuthorInventoryScopeV1 {
   if (!isPlainRecord(value)) fail('swm-inventory-schema', 'scope must be a plain object');
   assertExactKeysAdapted(value, SWM_AUTHOR_INVENTORY_SCOPE_KEYS, 'scope');
-  adaptScalars(() => {
-    assertNetworkIdV1(value.networkId);
-    assertContextGraphIdV1(value.contextGraphId);
-    assertGovernanceTuple(value);
-    if (value.ownershipTransitionDigest !== null) {
-      assertCanonicalDigest(value.ownershipTransitionDigest, 'ownershipTransitionDigest');
-    }
-    if (value.subGraphName !== null) assertSubGraphNameV1(value.subGraphName);
-    assertCanonicalEvmAddress(value.authorAddress, 'authorAddress');
-    parseCanonicalDecimalU64(value.era, 'era');
-  });
+  adaptScalars(() => assertAuthorLaneScopeV1(value));
 }
 
 export function canonicalizeSwmAuthorInventoryScopeV1(
@@ -281,7 +246,7 @@ export function assertSwmAuthorInventoryHeadV1(
 ): asserts value is SwmAuthorInventoryHeadV1 {
   if (!isPlainRecord(value)) fail('swm-inventory-schema', 'head must be a plain object');
   assertExactKeysAdapted(value, SWM_AUTHOR_INVENTORY_HEAD_KEYS, 'head');
-  const scope = scopeFromHead(value);
+  const scope = scopeCandidateFromHead(value);
   assertSwmAuthorInventoryScopeV1(scope);
   adaptScalars(() => {
     const version = parseCanonicalDecimalU64(value.version, 'version');
@@ -309,7 +274,7 @@ export function deriveSwmAuthorInventoryScopeFromHeadV1(
   head: SwmAuthorInventoryHeadV1,
 ): SwmAuthorInventoryScopeV1 {
   assertSwmAuthorInventoryHeadV1(head);
-  return Object.freeze(scopeFromHead(head as unknown as Record<string, unknown>));
+  return snapshotAuthorLaneScopeV1(head);
 }
 
 export function assertUnsignedSwmAuthorInventoryHeadEnvelopeV1(
@@ -412,8 +377,7 @@ export function assertSwmAuthorInventorySnapshotBindingV1(
   }
   for (const row of snapshot.rows) {
     const parsedUal = assertCanonicalDeterministicUalV1(row.kaUal);
-    const parsedNetworkId = parseDeterministicKnowledgeAssetUal(row.kaUal).chainId;
-    if (parsedNetworkId !== snapshot.head.payload.networkId) {
+    if (parsedUal.chainId !== snapshot.head.payload.networkId) {
       fail('swm-inventory-binding', 'row kaUal network does not equal the scoped networkId');
     }
     if (parsedUal.agentAddress !== snapshot.head.payload.authorAddress) {
@@ -462,16 +426,6 @@ function assertSwmAuthorInventoryRowsV1(
   }
 }
 
-function assertGovernanceTuple(value: Record<string, unknown>): void {
-  const chain = value.governanceChainId;
-  const contract = value.governanceContractAddress;
-  if ((chain === null) !== (contract === null)) {
-    throw new Error('governanceChainId and governanceContractAddress must both be null or non-null');
-  }
-  if (chain !== null) assertCanonicalChainId(chain, 'governanceChainId');
-  if (contract !== null) assertCanonicalEvmAddress(contract, 'governanceContractAddress');
-}
-
 function assertBoundedIdentifier(value: unknown, label: string): void {
   if (typeof value !== 'string' || value.length === 0 || value.normalize('NFC') !== value) {
     throw new Error(`${label} must be a nonempty NFC string`);
@@ -488,10 +442,17 @@ function assertBoundedIdentifier(value: unknown, label: string): void {
   }
 }
 
-function scopeFromHead(value: Record<string, unknown>): SwmAuthorInventoryScopeV1 {
-  const scope: Record<string, unknown> = {};
-  for (const key of SWM_AUTHOR_INVENTORY_SCOPE_KEYS) scope[key] = value[key];
-  return scope as unknown as SwmAuthorInventoryScopeV1;
+function scopeCandidateFromHead(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    authorAddress: value.authorAddress,
+    contextGraphId: value.contextGraphId,
+    era: value.era,
+    governanceChainId: value.governanceChainId,
+    governanceContractAddress: value.governanceContractAddress,
+    networkId: value.networkId,
+    ownershipTransitionDigest: value.ownershipTransitionDigest,
+    subGraphName: value.subGraphName,
+  };
 }
 
 function assertSwmAuthorInventoryEnvelopeBinding(
