@@ -73,6 +73,15 @@ export default defineConfig({
           // a fake worker thread; no hardhat.
           'test/daemon-catchup-telemetry-shutdown.test.ts',
           'test/catchup-runner-worker-killswitch.test.ts',
+          // #2050 — `DKG_SWM_CATCHUP_PASS_BUDGET_MS=0` continuation-pass kill
+          // switch, end to end through the worker. Its own file because the
+          // budget constant freezes at module load, so the env must be set
+          // before the policy module is imported.
+          'test/catchup-runner-worker-pass-budget-killswitch.test.ts',
+          // #2050 — the sibling lever, `DKG_SWM_CATCHUP_MAX_PASSES=1`. Separate
+          // file from the budget one because `max-passes-reached` is checked
+          // first, so one file holding both switches would mask the budget row.
+          'test/catchup-runner-worker-max-passes-cap.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
