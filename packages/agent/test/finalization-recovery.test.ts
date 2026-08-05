@@ -270,7 +270,7 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
-  it('emits due metrics even when the due-inbox read fails', async () => {
+  it('emits deferred admission and due metrics even when the due-inbox read fails', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-metrics-'));
     const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
     const meterProvider = new MeterProvider({
@@ -286,24 +286,29 @@ describe('graph-scoped finalization recovery admission', () => {
     expect(metrics.setGlobalMeterProvider(meterProvider)).toBe(true);
     rebuildMetrics();
     try {
-      store = await openSqliteFinalizationRecoveryStore(directory);
-      vi.spyOn(store, 'listDue').mockRejectedValueOnce(
-        new Error('sqlite due read unavailable'),
-      );
-      vi.spyOn(store, 'health').mockResolvedValue({
-        available: true,
-        closed: false,
-        stateCounts: { RECEIVED: 7 },
-        livePayloadBytes: 123,
-        dueEntries: 7,
-        oldestDueAgeMs: 4_321,
-      });
+      store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
       const warn = vi.fn();
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
         { info: () => {}, warn },
         recoveryMaterializer(),
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      const deferredTxHash = `0x${'bc'.repeat(32)}`;
+      await expect(recovery.receive({
+        rawMessage: encodeFinalizationMessage(message({ txHash: deferredTxHash })),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage({ txHash: deferredTxHash }),
+      })).resolves.toBeUndefined();
+      vi.spyOn(store, 'listDue').mockRejectedValueOnce(
+        new Error('sqlite due read unavailable'),
       );
 
       await expect(recovery.processDueBatch(16)).resolves.toBe(0);
@@ -314,20 +319,42 @@ describe('graph-scoped finalization recovery admission', () => {
         expect.stringContaining('metrics snapshot failed'),
       );
       await meterProvider.forceFlush();
-      const datapoints = new Map<string, number>();
+      const datapoints: Array<{
+        name: string;
+        value: number;
+        attributes: Record<string, unknown>;
+      }> = [];
       for (const resourceMetrics of exporter.getMetrics()) {
         for (const scopeMetrics of resourceMetrics.scopeMetrics) {
           for (const metric of scopeMetrics.metrics) {
             for (const point of metric.dataPoints) {
               if (typeof point.value === 'number') {
-                datapoints.set(metric.descriptor.name, point.value);
+                datapoints.push({
+                  name: metric.descriptor.name,
+                  value: point.value,
+                  attributes: point.attributes,
+                });
               }
             }
           }
         }
       }
-      expect(datapoints.get('dkg.finalization_recovery.due_entries')).toBe(7);
-      expect(datapoints.get('dkg.finalization_recovery.oldest_due_age_ms')).toBe(4_321);
+      expect(datapoints).toContainEqual(expect.objectContaining({
+        name: 'dkg.finalization_recovery.admission_total',
+        value: 1,
+        attributes: { outcome: 'deferred' },
+      }));
+      expect(datapoints).toContainEqual(expect.objectContaining({
+        name: 'dkg.finalization_recovery.due_entries',
+        value: 1,
+      }));
+      expect(datapoints.some(
+        (point) => point.name === 'dkg.finalization_recovery.oldest_due_age_ms',
+      )).toBe(true);
+      expect(datapoints).toContainEqual(expect.objectContaining({
+        name: 'dkg.finalization_recovery.deferred_entries',
+        value: 1,
+      }));
     } finally {
       await store?.close().catch(() => {});
       await meterProvider.shutdown().catch(() => {});

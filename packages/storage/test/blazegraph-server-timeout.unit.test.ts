@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BlazegraphStore,
   serverSideQueryTimeoutMillis,
@@ -10,10 +10,11 @@ describe('serverSideQueryTimeoutMillis', () => {
   it('expires server work before the client deadline', () => {
     expect(serverSideQueryTimeoutMillis(30_000)).toBe(28_000);
     expect(serverSideQueryTimeoutMillis(500_000)).toBe(498_000);
+    expect(serverSideQueryTimeoutMillis(1_000)).toBe(900);
   });
 
   it('never sends zero, which Blazegraph treats as unlimited', () => {
-    expect(serverSideQueryTimeoutMillis(6_000)).toBe(4_000);
+    expect(serverSideQueryTimeoutMillis(6_000)).toBe(5_400);
     expect(serverSideQueryTimeoutMillis(0)).toBe(1);
   });
 });
@@ -72,8 +73,37 @@ describe('BlazegraphStore server-side timeout header', () => {
   it('derives the bound from the remaining instance deadline', async () => {
     const store = new BlazegraphStore(baseUrl, { timeout: 10_000 });
     await store.query('SELECT ?s WHERE { ?s ?p ?o }');
-    expect(header(0)).toBeGreaterThan(7_000);
-    expect(header(0)).toBeLessThanOrEqual(8_000);
+    expect(header(0)).toBeGreaterThan(8_000);
+    expect(header(0)).toBeLessThanOrEqual(9_000);
+  });
+
+  it('derives the bound after scheduler queue wait, not from the original timeout', async () => {
+    const releases: Array<() => void> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push([input, init]);
+      if (calls.length <= 2) {
+        await new Promise<void>((resolve) => releases.push(resolve));
+      }
+      return new Response(
+        JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const store = new BlazegraphStore(baseUrl, { timeout: 2_500 });
+    const first = store.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const second = store.query('SELECT ?s WHERE { ?s ?p ?o }');
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+
+    const queued = store.query('SELECT ?s WHERE { ?s ?p ?o }');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(calls).toHaveLength(2);
+    releases.shift()?.();
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+
+    expect(header(2)).toBeLessThan((header(0) ?? 0) - 150);
+    expect(header(2)).toBeGreaterThan(1);
+    releases.shift()?.();
+    await Promise.all([first, second, queued]);
   });
 
   it('keeps an operator escape hatch without a restart-time code change', async () => {

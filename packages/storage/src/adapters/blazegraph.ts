@@ -79,12 +79,15 @@ function resolveOperationTimeout(configured: number | undefined): number {
 }
 
 /**
- * Kill Blazegraph work shortly before the client abandons the request. A 1 ms
- * floor avoids sending 0, which Blazegraph interprets as an unlimited query,
- * while preserving the server-first deadline even after a long queue wait.
+ * Kill Blazegraph work shortly before the client abandons the request. Keep a
+ * 10% unwind margin for short budgets and cap that margin at two seconds for
+ * normal operations. A 1 ms floor avoids sending 0, which Blazegraph treats as
+ * unlimited, while preserving the server-first deadline after queue wait.
  */
 export function serverSideQueryTimeoutMillis(remainingMs: number): number {
-  return Math.max(1, Math.floor(remainingMs) - 2_000);
+  const budget = Math.max(1, Math.floor(remainingMs));
+  const unwindMargin = Math.min(2_000, Math.max(1, Math.floor(budget / 10)));
+  return Math.max(1, budget - unwindMargin);
 }
 
 function serverTimeoutHeaders(deadline: StoreOperationDeadline): Record<string, string> {
