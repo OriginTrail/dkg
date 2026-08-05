@@ -9,6 +9,7 @@ import {
   type EvmAddressV1,
 } from './sync-wire-scalars.js';
 import {
+  MAX_NETWORK_ID_BYTES_V1,
   assertNetworkIdV1,
   type NetworkIdV1,
 } from './sync-wire-identifiers.js';
@@ -112,6 +113,16 @@ const DETERMINISTIC_KA_UAL_RE = /^did:dkg:([^/]+)\/(0x[0-9a-fA-F]{40})\/([0-9]+)
  * through the packed identity are valid graph identities.
  */
 export const MAX_KNOWLEDGE_ASSET_NUMBER = (1n << 96n) - 1n;
+export const MAX_CANONICAL_KNOWLEDGE_ASSET_NUMBER_DIGITS_V1 =
+  MAX_KNOWLEDGE_ASSET_NUMBER.toString(10).length;
+export const MAX_CANONICAL_DETERMINISTIC_UAL_BYTES_V1 =
+  'did:dkg:'.length
+  + MAX_NETWORK_ID_BYTES_V1
+  + '/'.length
+  + '0x'.length
+  + 40
+  + '/'.length
+  + MAX_CANONICAL_KNOWLEDGE_ASSET_NUMBER_DIGITS_V1;
 const MAX_PACKED_ROOTLESS_KNOWLEDGE_ASSET_ID = (1n << 256n) - 1n;
 const PACKED_ROOTLESS_KNOWLEDGE_ASSET_NUMBER_BITS = 96n;
 
@@ -124,6 +135,13 @@ export function parseDeterministicKnowledgeAssetUal(
   rawUal: string,
 ): DeterministicKnowledgeAssetUalParts {
   const input = String(rawUal ?? '').trim();
+  // Every canonical component is ASCII. Bound the full hostile scalar before
+  // IRI validation, regexp traversal, or BigInt parsing can allocate from it.
+  if (input.length > MAX_CANONICAL_DETERMINISTIC_UAL_BYTES_V1) {
+    throw new Error(
+      `Graph-scoped KA UAL exceeds ${MAX_CANONICAL_DETERMINISTIC_UAL_BYTES_V1} bytes`,
+    );
+  }
   if (!isSafeIri(input)) {
     throw new Error(`Invalid graph-scoped KA UAL: ${input || '(empty)'}`);
   }
@@ -135,6 +153,14 @@ export function parseDeterministicKnowledgeAssetUal(
   }
 
   const [, chainId, rawAgentAddress, rawKaNumber] = match;
+  if (chainId.length > MAX_NETWORK_ID_BYTES_V1) {
+    throw new Error(`Graph-scoped KA network exceeds ${MAX_NETWORK_ID_BYTES_V1} bytes`);
+  }
+  if (rawKaNumber.length > MAX_CANONICAL_KNOWLEDGE_ASSET_NUMBER_DIGITS_V1) {
+    throw new Error(
+      'Graph-scoped KA number exceeds the packed uint96 decimal width',
+    );
+  }
   const agentAddress = canonicalKnowledgeAssetAgentAddress(rawAgentAddress);
   // BigInt canonicalisation prevents leading-zero aliases for one graph.
   const kaNumberValue = BigInt(rawKaNumber);

@@ -271,6 +271,12 @@ describe('SWM author inventory v1', () => {
       ...ROW_A,
       shareOperationId: 'x'.repeat(257),
     } as SwmAuthorInventoryRowV1])).toThrow(/byte limit/);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([{
+      ...ROW_A,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/${'9'.repeat(1_000_000)}`,
+    } as SwmAuthorInventoryRowV1])).toThrowError(expect.objectContaining({
+      code: 'swm-inventory-scalar',
+    }));
 
     const payload = signedHead([ROW_A]).payload;
     const oversizedUnsigned = Object.freeze({

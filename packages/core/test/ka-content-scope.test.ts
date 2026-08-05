@@ -58,6 +58,13 @@ describe('KA content scope', () => {
       .toThrow(/packed uint96 identity domain/);
   });
 
+  it('rejects oversized deterministic UAL components before numeric parsing', () => {
+    const oversizedNumber = '9'.repeat(1_000_000);
+    const ual = `did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/${oversizedNumber}`;
+
+    expect(() => assertCanonicalDeterministicUalV1(ual)).toThrow(/UAL exceeds/);
+  });
+
   it('canonically unpacks rootless ids and rejects legacy or out-of-range ids', () => {
     const author = 0x70997970c51812dc3a010c7d01b50e0d17dc79c8n;
     const packed = (author << 96n) | 7n;

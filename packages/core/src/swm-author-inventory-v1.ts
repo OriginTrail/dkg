@@ -461,7 +461,15 @@ function assertSwmAuthorInventoryRowsV1(
 }
 
 function assertBoundedIdentifier(value: unknown, label: string): void {
-  if (typeof value !== 'string' || value.length === 0 || value.normalize('NFC') !== value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${label} must be a nonempty NFC string`);
+  }
+  // One UTF-16 code unit always encodes to at least one UTF-8 byte. Reject an
+  // oversized hostile scalar before normalization performs proportional work.
+  if (value.length > MAX_SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_BYTES_V1) {
+    throw new Error(`${label} exceeds its v1 byte limit`);
+  }
+  if (value.normalize('NFC') !== value) {
     throw new Error(`${label} must be a nonempty NFC string`);
   }
   const bytes = UTF8.encode(value);
