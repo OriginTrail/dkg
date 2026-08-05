@@ -11,6 +11,36 @@ import {
 } from './finalization-recovery-sqlite-test-helpers.js';
 
 describe('SQLite finalization recovery deferred spool', () => {
+  it('preserves a deferred envelope across reopen and promotes it later', async () => {
+    const directory = await temporaryDirectory();
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
+      await store.receive(received());
+      await expect(store.receive(received({
+        key: 'entry-2',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      await store.close();
+
+      store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.transition('entry-1', 0, 'SUPERSEDED');
+      await expect(store.promotePending(1)).resolves.toBe(1);
+      expect(await store.get('entry-2')).toMatchObject({
+        key: 'entry-2',
+        state: 'RECEIVED',
+        txHash: `0x${'ef'.repeat(32)}`,
+      });
+      expect(await store.health()).toMatchObject({ deferredEntries: 0 });
+      await store.close();
+      store = undefined;
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('durably defers a new envelope when live capacity is full', async () => {
     const directory = await temporaryDirectory();
     try {

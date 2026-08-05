@@ -120,6 +120,29 @@ function recoveryMaterializer() {
 }
 
 describe('graph-scoped finalization recovery admission', () => {
+  it('preserves boolean fallback behavior for callers using the original API', async () => {
+    const recovery = new FinalizationRecovery(
+      undefined,
+      recoveryChain(),
+      { info: () => {}, warn: () => {} },
+      recoveryMaterializer(),
+    );
+    const processUnjournaled = vi.spyOn(recovery, 'processUnjournaled')
+      .mockResolvedValue('applied');
+    const input = {
+      rawMessage: encodeFinalizationMessage(message()),
+      contextGraphId: CONTEXT_GRAPH,
+      sourcePeerId: '12D3KooWPublisher',
+      candidate: parsedMessage(),
+    };
+
+    if (!await recovery.processLive(input)) {
+      await recovery.processUnjournaled(input);
+    }
+    expect(processUnjournaled).toHaveBeenCalledOnce();
+    expect(processUnjournaled).toHaveBeenCalledWith(input);
+  });
+
   it('autonomously settles a durable RECEIVED entry without a chain-cursor replay', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-worker-'));
     try {
@@ -499,7 +522,7 @@ describe('graph-scoped finalization recovery admission', () => {
         attemptCount: 3,
         lastError: 'autonomous retry budget exhausted after 3 attempts over 10000ms',
       }]);
-      await expect(recovery.processLive({
+      await expect(recovery.processLiveOutcome({
         rawMessage: encodeFinalizationMessage(message()),
         contextGraphId: CONTEXT_GRAPH,
         sourcePeerId: '12D3KooWPublisher',
@@ -1028,7 +1051,7 @@ describe('graph-scoped finalization recovery admission', () => {
           },
         );
         const initialMessage = message();
-        await expect(recovery.processLive({
+        await expect(recovery.processLiveOutcome({
           rawMessage: encodeFinalizationMessage(initialMessage),
           contextGraphId: CONTEXT_GRAPH,
           sourcePeerId: '12D3KooWPublisher',
@@ -1158,7 +1181,7 @@ describe('graph-scoped finalization recovery admission', () => {
           { info: () => {}, warn: () => {} },
           recoveryMaterializer(),
         );
-        await expect(recovery.processLive({
+        await expect(recovery.processLiveOutcome({
           rawMessage: encodeFinalizationMessage(message()),
           contextGraphId: CONTEXT_GRAPH,
           sourcePeerId: '12D3KooWPublisher',

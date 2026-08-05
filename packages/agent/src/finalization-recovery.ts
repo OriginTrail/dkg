@@ -296,10 +296,29 @@ export class FinalizationRecovery<
 
   /**
    * Applies a live graph-scoped finalization behind the durable write-ahead
-   * boundary. Returns fallback when durable recovery is unavailable so the caller
-   * can preserve the legacy live-verification path.
+   * boundary. Preserves the original boolean contract for external callers:
+   * false means the caller must run the unjournaled compatibility path.
    */
   async processLive(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<boolean> {
+    const result = await this.processLiveOutcome(input);
+    switch (result.status) {
+      case 'fallback':
+        return false;
+      case 'handled':
+        return true;
+      case 'retryable-capacity':
+        throw new FinalizationRecoveryCapacityError(result.ual);
+      default: {
+        const exhaustive: never = result;
+        throw new Error(`Unhandled finalization recovery result: ${JSON.stringify(exhaustive)}`);
+      }
+    }
+  }
+
+  /** Structured result used by internal callers that must distinguish capacity. */
+  async processLiveOutcome(
     input: FinalizationRecoveryLiveInput,
   ): Promise<FinalizationRecoveryLiveProcessResult> {
     const store = this.getStore();

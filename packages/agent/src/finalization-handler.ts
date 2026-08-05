@@ -489,7 +489,7 @@ export class FinalizationHandler {
       candidate = liveAdmission.input.candidate;
       let recoveryResult: FinalizationRecoveryLiveProcessResult;
       try {
-        recoveryResult = await this.recovery.processLive(liveAdmission.input);
+        recoveryResult = await this.recovery.processLiveOutcome(liveAdmission.input);
       } catch (error) {
         if (
           error instanceof StoreSchedulerBusyError
