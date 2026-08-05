@@ -52,6 +52,10 @@ const SCOPE_DIGEST = computeSwmAuthorInventoryScopeDigestV1(SCOPE);
 const ROW_A = row('7', 'draft-a', 'share-a', '11', '22');
 const ROW_B = row('8', 'draft-b', 'share-b', '33', '44');
 const ROW_C = row('9', 'draft-c', 'share-c', '55', '66');
+const ROW_FUTURE = Object.freeze({
+  ...row('10', 'draft-future', 'share-future', '12', '23'),
+  sharedAt: '1700000000500',
+}) as SwmAuthorInventoryRowV1;
 const ROW_A_V2 = Object.freeze({
   ...ROW_A,
   assertionCoordinate: 'draft-a-v2',
@@ -97,6 +101,30 @@ describe('RFC-64 SWM author inventory producer', () => {
     });
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)?.head.payload.version)
       .toBe('1');
+  });
+
+  it('clamps successor timestamps across older upserts and removals', async () => {
+    const inventory = await createInventory();
+    const future = await maintainRfc64SwmAuthorInventoryV1(inventory, {
+      ...input(ROW_FUTURE),
+      issuedAt: '1700000000500' as TimestampMsV1,
+    });
+    const olderUpsert = await maintainRfc64SwmAuthorInventoryV1(
+      inventory,
+      input(ROW_B),
+    );
+    expect(olderUpsert.snapshot.head.payload.issuedAt).toBe('1700000000500');
+    expect(olderUpsert.snapshot.head.payload.previousHeadDigest)
+      .toBe(future.snapshot.head.objectDigest);
+
+    const olderRemoval = await removeRfc64SwmAuthorInventoryRowV1(inventory, {
+      scope: SCOPE,
+      expectedRow: exactRemovalIdentity(ROW_B),
+      issuedAt: '1700000000100' as TimestampMsV1,
+      signer: input(ROW_B).signer,
+    });
+    expect(olderRemoval.snapshot?.head.payload.issuedAt).toBe('1700000000500');
+    expect(olderRemoval.snapshot?.rows).toEqual([ROW_FUTURE]);
   });
 
   it('re-reads a real winning writer before rebuilding an upsert retry', async () => {

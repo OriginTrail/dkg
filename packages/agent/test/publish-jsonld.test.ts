@@ -297,22 +297,38 @@ describe('publishJsonLd', () => {
     const { agent, store } = await createAgent('AsyncMaxRetriesBot', { publisherMaxRetries: 0 });
     await agent.createContextGraph({ id: 'async-maxretries', name: 'AsyncMaxRetries', description: '' });
     await agent.registerContextGraph('async-maxretries');
+    let releaseShadow!: () => void;
+    const deferredShadow = new Promise<void>((resolve) => { releaseShadow = resolve; });
     const shadow = vi
       .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
-      .mockRejectedValue(new Error('simulated escaped RFC-64 SWM inventory shadow failure'));
+      .mockImplementation(async () => {
+        await deferredShadow;
+        return {
+          status: 'dormant',
+          action: 'upsert',
+          attempts: 0,
+          headObjectDigest: null,
+          error: null,
+        };
+      });
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-maxretries',
-      {
-        private: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/AsyncMaxRetries',
-          '@type': 'Thing',
-          'name': 'Async MaxRetries',
+    const { captureID } = await Promise.race([
+      agent.publishAsync(
+        'did:dkg:context-graph:async-maxretries',
+        {
+          private: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/AsyncMaxRetries',
+            '@type': 'Thing',
+            'name': 'Async MaxRetries',
+          },
         },
-      },
-      { localOnly: true },
-    );
+        { localOnly: true },
+      ),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('publishAsync waited for shadow observer')), 2_000);
+      }),
+    ]);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
@@ -324,6 +340,10 @@ describe('publishJsonLd', () => {
       lifecycleAgentAddress: expect.any(String),
       shareOperationId: expect.any(String),
     }));
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(1);
+    releaseShadow();
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
     shadow.mockRestore();
   }, CHAIN_JSONLD_TIMEOUT_MS);
 

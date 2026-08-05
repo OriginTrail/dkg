@@ -254,10 +254,15 @@ async function mutateRfc64SwmAuthorInventoryV1<TResult>(
     if (current !== null) await verifyCurrentHistory(current, prepared.scope);
     const next = policy.plan(current, attempt);
     if (next.kind === 'return') return next.result;
+    const issuedAt = clampSuccessorIssuedAtV1(
+      prepared.issuedAt,
+      current,
+      next.rows,
+    );
     const head = await signHead({
       scope: prepared.scope,
       rows: next.rows,
-      issuedAt: prepared.issuedAt,
+      issuedAt,
       previous: current?.head ?? null,
       signer: prepared.signer,
     });
@@ -290,6 +295,23 @@ async function mutateRfc64SwmAuthorInventoryV1<TResult>(
     'swm-inventory-producer-conflict',
     `SWM inventory ${policy.operation} CAS attempt bound was exhausted`,
   );
+}
+
+function clampSuccessorIssuedAtV1(
+  requested: TimestampMsV1,
+  current: SwmAuthorInventorySnapshotV1 | null,
+  rows: readonly SwmAuthorInventoryRowV1[],
+): TimestampMsV1 {
+  let issuedAt = BigInt(requested);
+  if (current !== null) {
+    const currentIssuedAt = BigInt(current.head.payload.issuedAt);
+    if (currentIssuedAt > issuedAt) issuedAt = currentIssuedAt;
+  }
+  for (const row of rows) {
+    const sharedAt = BigInt(row.sharedAt);
+    if (sharedAt > issuedAt) issuedAt = sharedAt;
+  }
+  return issuedAt.toString() as TimestampMsV1;
 }
 
 function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{

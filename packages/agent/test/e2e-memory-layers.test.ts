@@ -165,7 +165,7 @@ describe('Memory layer isolation (single agent)', () => {
     expect(data.bindings.length).toBe(0);
   }, 15_000);
 
-  it('keeps a named WM to SWM promote successful when the RFC-64 inventory shadow rejects', async () => {
+  it('returns a named WM to SWM promote before the RFC-64 inventory shadow settles', async () => {
     const contextGraphId = 'shadow-promote-nonblocking';
     const name = 'shadow-nonblocking';
     const agent = await createAgent('ShadowPromoteNonblockingBot');
@@ -180,11 +180,25 @@ describe('Memory layer isolation (single agent)', () => {
       predicate: 'http://schema.org/name',
       object: '"Shadow remains observational"',
     }]);
+    let releaseShadow!: () => void;
+    const deferredShadow = new Promise<void>((resolve) => { releaseShadow = resolve; });
     const shadow = vi
       .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
-      .mockRejectedValue(new Error('simulated escaped RFC-64 SWM inventory shadow failure'));
+      .mockImplementation(async () => {
+        await deferredShadow;
+        return {
+          status: 'dormant',
+          action: 'upsert',
+          attempts: 0,
+          headObjectDigest: null,
+          error: null,
+        };
+      });
 
-    const result = await agent.assertion.promote(contextGraphId, name);
+    const result = await Promise.race([
+      agent.assertion.promote(contextGraphId, name),
+      sleep(2_000).then(() => { throw new Error('promote waited for shadow observer'); }),
+    ]);
 
     expect(result.sealed).toBe(true);
     expect(result.publishReady).toBe(true);
@@ -194,6 +208,10 @@ describe('Memory layer isolation (single agent)', () => {
       assertionCoordinate: name,
       shareOperationId: result.shareOperationId,
     }));
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(1);
+    releaseShadow();
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
     const swm = await agent.query(
       `SELECT ?name WHERE { <${ENTITY_BASE}:shadow> <http://schema.org/name> ?name }`,
       { contextGraphId, graphSuffix: '_shared_memory' },

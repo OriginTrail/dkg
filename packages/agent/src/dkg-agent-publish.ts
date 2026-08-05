@@ -1510,13 +1510,7 @@ export class PublishMethods extends DKGAgentBase {
         promoted.shareOperationId,
       );
     }
-    await this._stampSwmPointer(
-      contextGraphId,
-      assertionName,
-      lifecycleAgentAddress,
-      opts?.subGraphName,
-    );
-    await this.observeRfc64DurableSwmPromotionV1({
+    await this.afterDurableSwmPromotionV1({
       contextGraphId,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: assertionName,

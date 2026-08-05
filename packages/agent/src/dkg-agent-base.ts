@@ -1138,6 +1138,12 @@ export class DKGAgentBase {
     lastHeadDigest: null as string | null,
     lastError: null as string | null,
   };
+  /**
+   * Detached post-promotion shadow observers. Admission is capped by the
+   * canonical scheduler so a stalled local store or signer cannot couple user
+   * latency to the preview feature or grow background work without bound.
+   */
+  protected readonly inFlightRfc64SwmInventoryObserversV1 = new Set<Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
   protected readonly contextGraphBindingGenerations = new Map<string, number>();

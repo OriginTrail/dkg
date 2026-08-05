@@ -681,6 +681,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       head: { payload: { version: '1', totalRows: '0' } },
       rows: [],
     });
+    await expect(restarted.removeRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      seal,
+    })).resolves.toMatchObject({ status: 'absent', action: 'remove', attempts: 1 });
+    expect(restarted.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
+      attemptedRemovals: 2,
+      appliedRemovals: 1,
+      absentRemovals: 1,
+      failed: 0,
+    });
   }, 60_000);
 
   it('normalizes legacy and selected auto-publish into one internal policy', () => {

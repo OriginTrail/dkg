@@ -57,6 +57,8 @@ import {
   removeRfc64SwmAuthorInventoryRowV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 
+const RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 = 16;
+
 /** Internal normal-publication handoff after VM confirmation is durable locally. */
 export interface RecordConfirmedRfc64PublicCatalogAssetParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
@@ -93,6 +95,12 @@ export interface RemoveRfc64SwmAuthorInventoryShadowParamsV1 {
 
 export interface ObserveRfc64DurableSwmPromotionParamsV1
   extends RecordRfc64SwmAuthorInventoryShadowParamsV1 {
+  readonly ctx: OperationContext;
+}
+
+export interface AfterDurableSwmPromotionParamsV1
+  extends Omit<RecordRfc64SwmAuthorInventoryShadowParamsV1, 'shareOperationId'> {
+  readonly shareOperationId: string | null;
   readonly ctx: OperationContext;
 }
 
@@ -140,7 +148,30 @@ interface ResolvedRfc64AcceptedPublicRootLaneV1 {
 }
 
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
-  /** Canonical non-blocking observer for every durable WM to SWM promotion path. */
+  /**
+   * One post-commit hook shared by every durable WM to SWM promotion path.
+   * Pointer maintenance retains its existing best-effort ordering; the RFC-64
+   * shadow observer is admitted to a bounded detached scheduler and therefore
+   * cannot delay an already-committed user operation.
+   */
+  async afterDurableSwmPromotionV1(
+    this: DKGAgent,
+    params: AfterDurableSwmPromotionParamsV1,
+  ): Promise<void> {
+    await this._stampSwmPointer(
+      params.contextGraphId,
+      params.assertionCoordinate,
+      params.lifecycleAgentAddress,
+      params.subGraphName ?? undefined,
+    );
+    if (params.shareOperationId === null) return;
+    this.scheduleRfc64SwmInventoryObserverV1({
+      ...params,
+      shareOperationId: params.shareOperationId,
+    });
+  }
+
+  /** Background observer body; failures are contained and logged. */
   async observeRfc64DurableSwmPromotionV1(
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
@@ -153,6 +184,38 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         `RFC-64 SWM inventory shadow escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
+  }
+
+  /** Await a point-in-time observer snapshot for tests and controlled drains. */
+  async awaitInFlightRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
+    await Promise.allSettled([...this.inFlightRfc64SwmInventoryObserversV1]);
+  }
+
+  inFlightRfc64SwmInventoryObserverCountV1(this: DKGAgent): number {
+    return this.inFlightRfc64SwmInventoryObserversV1.size;
+  }
+
+  private scheduleRfc64SwmInventoryObserverV1(
+    this: DKGAgent,
+    params: ObserveRfc64DurableSwmPromotionParamsV1,
+  ): void {
+    if (
+      this.inFlightRfc64SwmInventoryObserversV1.size
+      >= RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1
+    ) {
+      this.log.warn(
+        params.ctx,
+        `RFC-64 SWM inventory shadow observer skipped at bounded concurrency ${RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1}`,
+      );
+      return;
+    }
+    const observer = this.observeRfc64DurableSwmPromotionV1(params);
+    let tracked: Promise<void>;
+    tracked = observer.finally(() => {
+      this.inFlightRfc64SwmInventoryObserversV1.delete(tracked);
+    });
+    this.inFlightRfc64SwmInventoryObserversV1.add(tracked);
+    void tracked.catch(() => undefined);
   }
 
   /** Canonical non-blocking observer for catalog advancement and exact SWM removal. */
@@ -243,19 +306,19 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RecordRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    const stats = this.rfc64SwmAuthorInventoryShadowStatsV1;
-    stats.attemptedUpserts += 1;
+    let kaUal: string | null = null;
     try {
       const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
         params.contextGraphId,
         params.subGraphName,
       );
       if (lane === null) {
-        stats.attemptedUpserts -= 1;
-        return shadowResult('dormant', 'upsert', 0, null, null);
+        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+          shadowResult('dormant', 'upsert', 0, null, null),
+          params.contextGraphId,
+          null,
+        );
       }
-      stats.lastAction = 'upsert';
-      stats.lastContextGraphId = params.contextGraphId;
       assertContextGraphIdV1(params.contextGraphId, 'SWM inventory contextGraphId');
       assertAssertionCoordinateV1(
         params.assertionCoordinate,
@@ -293,6 +356,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         throw new Error('durable SWM author seal coordinate differs from the committed share');
       }
       const canonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
+      kaUal = canonicalSeal.kaUal;
       const graphManager = new GraphManager(this.store);
       const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
         store: this.store,
@@ -312,8 +376,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       // may still contain restricted individual shares, which must remain
       // invisible to this lane rather than leaking their UAL or operation id.
       if (head.accessPolicy !== 'public') {
-        stats.attemptedUpserts -= 1;
-        return shadowResult('dormant', 'upsert', 0, null, null);
+        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+          shadowResult('dormant', 'upsert', 0, null, null),
+          params.contextGraphId,
+          kaUal,
+        );
       }
       const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
         store: this.store,
@@ -358,25 +425,22 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           }),
         },
       );
-      stats.casRetries += maintained.attempts - 1;
-      if (maintained.status === 'applied') stats.appliedUpserts += 1;
-      else stats.existingUpserts += 1;
-      stats.lastKaUal = canonicalSeal.kaUal;
-      stats.lastHeadDigest = maintained.snapshot.head.objectDigest;
-      stats.lastError = null;
-      return shadowResult(
-        maintained.status,
-        'upsert',
-        maintained.attempts,
-        maintained.snapshot.head.objectDigest,
-        null,
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        shadowResult(
+          maintained.status,
+          'upsert',
+          maintained.attempts,
+          maintained.snapshot.head.objectDigest,
+          null,
+        ),
+        params.contextGraphId,
+        kaUal,
       );
     } catch (cause) {
-      return this.failRfc64SwmAuthorInventoryShadowV1(
-        'upsert',
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
         params.contextGraphId,
-        null,
-        cause,
+        kaUal,
       );
     }
   }
@@ -386,8 +450,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RemoveRfc64SwmAuthorInventoryShadowParamsV1,
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    const stats = this.rfc64SwmAuthorInventoryShadowStatsV1;
-    stats.attemptedRemovals += 1;
     let kaUal: string | null = null;
     try {
       const lane = this.resolveRfc64AcceptedPublicRootLaneV1(
@@ -395,11 +457,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         params.subGraphName,
       );
       if (lane === null) {
-        stats.attemptedRemovals -= 1;
-        return shadowResult('dormant', 'remove', 0, null, null);
+        return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+          shadowResult('dormant', 'remove', 0, null, null),
+          params.contextGraphId,
+          null,
+        );
       }
-      stats.lastAction = 'remove';
-      stats.lastContextGraphId = params.contextGraphId;
       assertContextGraphIdV1(params.contextGraphId, 'SWM inventory contextGraphId');
       const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
       kaUal = seal.kaUal;
@@ -423,25 +486,22 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           signDigest: signer.signMessage,
         }),
       });
-      stats.casRetries += removed.attempts - 1;
-      if (removed.status === 'applied') stats.appliedRemovals += 1;
-      else stats.absentRemovals += 1;
-      stats.lastKaUal = seal.kaUal;
-      stats.lastHeadDigest = removed.snapshot?.head.objectDigest ?? null;
-      stats.lastError = null;
-      return shadowResult(
-        removed.status,
-        'remove',
-        removed.attempts,
-        removed.snapshot?.head.objectDigest ?? null,
-        null,
-      );
-    } catch (cause) {
-      return this.failRfc64SwmAuthorInventoryShadowV1(
-        'remove',
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        shadowResult(
+          removed.status,
+          'remove',
+          removed.attempts,
+          removed.snapshot?.head.objectDigest ?? null,
+          null,
+        ),
         params.contextGraphId,
         kaUal,
-        cause,
+      );
+    } catch (cause) {
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        this.failRfc64SwmAuthorInventoryShadowV1('remove', cause),
+        params.contextGraphId,
+        kaUal,
       );
     }
   }
@@ -549,22 +609,43 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   private failRfc64SwmAuthorInventoryShadowV1(
     this: DKGAgent,
     action: 'upsert' | 'remove',
-    contextGraphId: string,
-    kaUal: string | null,
     cause: unknown,
   ): Rfc64SwmAuthorInventoryShadowMutationResultV1 {
     const error = cause instanceof Error ? cause.message : String(cause);
-    const stats = this.rfc64SwmAuthorInventoryShadowStatsV1;
-    stats.failed += 1;
-    stats.lastAction = action;
-    stats.lastContextGraphId = contextGraphId;
-    stats.lastKaUal = kaUal;
-    stats.lastError = error;
     this.log.warn(
       createOperationContext('share'),
       `RFC-64 SWM inventory shadow ${action} failed after the user operation committed: ${error}`,
     );
     return shadowResult('failed', action, 0, null, error);
+  }
+
+  private recordRfc64SwmAuthorInventoryShadowStatsV1(
+    this: DKGAgent,
+    result: Rfc64SwmAuthorInventoryShadowMutationResultV1,
+    contextGraphId: string,
+    kaUal: string | null,
+  ): Rfc64SwmAuthorInventoryShadowMutationResultV1 {
+    if (result.status === 'dormant') return result;
+    const stats = this.rfc64SwmAuthorInventoryShadowStatsV1;
+    if (result.action === 'upsert') stats.attemptedUpserts += 1;
+    else stats.attemptedRemovals += 1;
+    stats.casRetries += Math.max(0, result.attempts - 1);
+    if (result.status === 'applied') {
+      if (result.action === 'upsert') stats.appliedUpserts += 1;
+      else stats.appliedRemovals += 1;
+    } else if (result.status === 'existing') {
+      stats.existingUpserts += 1;
+    } else if (result.status === 'absent') {
+      stats.absentRemovals += 1;
+    } else {
+      stats.failed += 1;
+    }
+    stats.lastAction = result.action;
+    stats.lastContextGraphId = contextGraphId;
+    stats.lastKaUal = kaUal;
+    if (result.status !== 'failed') stats.lastHeadDigest = result.headObjectDigest;
+    stats.lastError = result.error;
+    return result;
   }
 
   private createRfc64CatalogAuthorSignerV1(
