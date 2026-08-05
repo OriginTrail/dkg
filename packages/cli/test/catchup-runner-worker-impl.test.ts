@@ -14,12 +14,16 @@
 //     transfers one payload instead of one per peer. A non-authoritative peer's
 //     clean round settles nothing — it can neither stop the walk nor narrow a
 //     later peer to one plane.
+import {
+  durableCatchupResult as durableResult,
+  runWorkerCatchup,
+  sharedCatchupResult as sharedResult,
+} from './helpers/catchup-runner-worker-test-harness.js';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
 } from '@origintrail-official/dkg-agent';
-import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 
 // The foreground backpressure budget is wall-clock (default 180s). Shrink it
 // for this file so the persistently-deferred case settles quickly; the exact
@@ -48,109 +52,7 @@ afterAll(() => {
   else process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = previousCATCHUPBACKPRESSUREMAXWAITMS;
 });
 
-// The worker impl wires itself to `parentPort` at module load, so a
-// controllable port has to be in place BEFORE the module is imported.
-// Everything else from node:worker_threads stays real.
-const fakeParentPort = vi.hoisted(() => {
-  const messageListeners: Array<(message: any) => void> = [];
-  const port = {
-    on(event: string, listener: (message: any) => void) {
-      if (event === 'message') messageListeners.push(listener);
-    },
-    /** Set per run by `runWorkerCatchup`; receives what the impl posts back. */
-    onPosted: undefined as ((message: any) => void) | undefined,
-    postMessage(message: any) {
-      port.onPosted?.(message);
-    },
-    emitMessage(message: any) {
-      for (const listener of messageListeners) listener(message);
-    },
-  };
-  return port;
-});
-
-vi.mock('node:worker_threads', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('node:worker_threads')>()),
-  parentPort: fakeParentPort,
-}));
-
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-function durableResult() {
-  return {
-    insertedTriples: 1,
-    complete: true,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 1,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 1,
-    bytesReceived: 10,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 1,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    metaOnlyResponses: 0,
-    dataRejectedMissingMeta: 0,
-    rejectedKcs: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-  };
-}
-
-function sharedResult() {
-  return {
-    insertedTriples: 1,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 1,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 1,
-    bytesReceived: 10,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 1,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-  };
-}
-
-type InvokeHandler = (method: string, args: unknown[]) => Promise<unknown>;
-
-let nextRunId = 1;
-
-async function runWorkerCatchup(request: CatchupRunRequest, handler: InvokeHandler): Promise<CatchupJobResult> {
-  // The first call loads the module, which registers its message listener on
-  // the mocked parentPort; later calls reuse it (distinct runIds).
-  await import('../src/catchup-runner-worker-impl.js');
-  const runId = nextRunId++;
-  return new Promise<CatchupJobResult>((resolve, reject) => {
-    fakeParentPort.onPosted = (message: any) => {
-      if (message.type === 'invoke') {
-        handler(message.method, message.args).then(
-          (result) => fakeParentPort.emitMessage({ type: 'invoke-result', invokeId: message.invokeId, result }),
-          (error: unknown) => fakeParentPort.emitMessage({
-            type: 'invoke-result',
-            invokeId: message.invokeId,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-        return;
-      }
-      if (message.type === 'run-result' && message.runId === runId) {
-        if (message.error) reject(new Error(message.error));
-        else resolve(message.result as CatchupJobResult);
-      }
-    };
-    fakeParentPort.emitMessage({ type: 'run', runId, request });
-  });
-}
 
 /**
  * SCOPE OF THESE TESTS — read before trusting a green run.
@@ -1870,6 +1772,62 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
     // `peersNotAttempted` negative once a pass repeated.
     expect(result.peersTried).toBe(1);
     expect(result.peersNotAttempted).toBe(0);
+  });
+
+  it('still runs a selected SWM continuation after authority proof', async () => {
+    const CURATOR = 'peer-curator-0001';
+    const OTHER = 'peer-capable-0002';
+    const sharedCalls: string[] = [];
+    const durableCalls: string[] = [];
+    let otherSharedCalls = 0;
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        const peerId = String(args[0]);
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              authoritativePeerId: CURATOR,
+              isPrivateContextGraph: false,
+              // Same opening wave: the authority can prove SWM while the other
+              // peer reports the still-capable record the next pass must retry.
+              peerIds: [OTHER, CURATOR],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(peerId);
+            return {
+              ...durableResult(),
+              complete: false,
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              failedPhases: 1,
+            };
+          case 'syncSharedMemory':
+            sharedCalls.push(peerId);
+            if (peerId === CURATOR) return sharedResult();
+            otherSharedCalls += 1;
+            return otherSharedCalls === 1
+              ? partialSharedRound(2, 3)
+              : partialSharedRound(3, 3);
+          default:
+            return null;
+        }
+      },
+    );
+
+    expect(sharedCalls.filter((peerId) => peerId === CURATOR)).toHaveLength(1);
+    expect(sharedCalls.filter((peerId) => peerId === OTHER)).toHaveLength(2);
+    expect(durableCalls.filter((peerId) => peerId === OTHER)).toHaveLength(1);
+    expect(result.diagnostics?.sharedMemory?.swmCoverage).toMatchObject({
+      snapshotsResolved: 3,
+      snapshotsTotal: 3,
+    });
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(1);
   });
 
   it('emits one per-pass log line carrying the coverage transition', async () => {

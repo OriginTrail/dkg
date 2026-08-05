@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SWM_CATCHUP_MAX_PASSES,
   DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS,
+  SwmCatchupPassTracker,
   resolveSwmCatchupMaxPasses,
+  resolveSwmCatchupPassConfig,
   resolveSwmCatchupPassBudgetMs,
   shouldRunAnotherCatchupPass,
   type CatchupPassPolicyInput,
@@ -196,7 +198,40 @@ describe('shouldRunAnotherCatchupPass', () => {
   });
 });
 
+describe('SwmCatchupPassTracker', () => {
+  it('owns last-round capability and monotone per-peer progress', () => {
+    const tracker = new SwmCatchupPassTracker();
+    tracker.recordPeerRound('peer-a', {
+      snapshotsResolved: 2,
+      snapshotsTotal: 5,
+      manifestComplete: true,
+    }, false);
+
+    expect(tracker.capablePeers()).toEqual(['peer-a']);
+    expect(tracker.progress()).toBe(2);
+    expect(tracker.startContinuationPass()).toBe(2);
+
+    tracker.recordPeerRound('peer-a', {
+      snapshotsResolved: 1,
+      snapshotsTotal: 5,
+      manifestComplete: true,
+    }, false);
+    expect(tracker.progress()).toBe(2);
+
+    tracker.recordPeerRound('peer-a', undefined, true);
+    expect(tracker.capablePeers()).toEqual([]);
+    expect(tracker.progress()).toBe(2);
+  });
+});
+
 describe('pass budget and cap env contract', () => {
+  it('resolves both operator levers into one explicit job config', () => {
+    expect(resolveSwmCatchupPassConfig({
+      DKG_SWM_CATCHUP_PASS_BUDGET_MS: '0',
+      DKG_SWM_CATCHUP_MAX_PASSES: '2',
+    })).toEqual({ budgetMs: 0, maxPasses: 2 });
+  });
+
   it('treats a blank assignment as unset, not as zero', () => {
     // `DKG_SWM_CATCHUP_PASS_BUDGET_MS=` is the normal docker-compose/.env shape
     // for "not set", and `Number('')` is 0 — which would silently leave the node

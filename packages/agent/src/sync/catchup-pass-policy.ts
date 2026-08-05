@@ -91,6 +91,104 @@ export interface CatchupPassDecision {
   reason: CatchupPassDecisionReason;
 }
 
+export interface CatchupPassConfig {
+  /** Wall-clock budget for continuation passes only. */
+  budgetMs: number;
+  /** Total passes permitted, including the initial walk. */
+  maxPasses: number;
+}
+
+/** The coverage fields needed by the shared continuation ledger. */
+export interface CatchupPassCoverage {
+  snapshotsResolved: number;
+  snapshotsTotal: number;
+  manifestComplete: boolean;
+}
+
+/**
+ * Shared state owner for both catch-up drivers.
+ *
+ * Last-round coverage decides which peers are still capable, while a separate
+ * monotone per-peer high-water ledger decides whether the most recent pass made
+ * progress. Keeping both maps here prevents the worker and inline agent from
+ * silently acquiring different retry semantics.
+ */
+export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
+  private readonly lastCoverageByPeer = new Map<string, TCoverage>();
+
+  private readonly peerProgressHighWater = new Map<string, number>();
+
+  private coverageHighWaterMark = 0;
+
+  private completedContinuationPasses = 0;
+
+  recordPeerRound(
+    peerId: string,
+    coverage: TCoverage | undefined,
+    completedWithoutFailure: boolean,
+  ): void {
+    if (coverage) {
+      this.lastCoverageByPeer.set(peerId, coverage);
+      const seen = this.peerProgressHighWater.get(peerId) ?? 0;
+      if (coverage.snapshotsResolved > seen) {
+        this.peerProgressHighWater.set(peerId, coverage.snapshotsResolved);
+      }
+      return;
+    }
+
+    // A clean coverage-free response is evidence that this peer has no manifest.
+    // A failed response proves no such thing, so retain the last positive record.
+    if (completedWithoutFailure) this.lastCoverageByPeer.delete(peerId);
+  }
+
+  capablePeers(): string[] {
+    const capable: string[] = [];
+    for (const [peerId, coverage] of this.lastCoverageByPeer) {
+      if (
+        coverage.manifestComplete
+        && coverage.snapshotsTotal > 0
+        && coverage.snapshotsResolved < coverage.snapshotsTotal
+      ) {
+        capable.push(peerId);
+      }
+    }
+    return capable;
+  }
+
+  progress(): number {
+    let total = 0;
+    for (const resolved of this.peerProgressHighWater.values()) total += resolved;
+    return total;
+  }
+
+  continuationPasses(): number {
+    return this.completedContinuationPasses;
+  }
+
+  decide(input: {
+    nowMs: number;
+    deadlineMs: number;
+    maxPasses: number;
+    planeProven: boolean;
+  }): CatchupPassDecision {
+    return shouldRunAnotherCatchupPass({
+      ...input,
+      passesRun: 1 + this.completedContinuationPasses,
+      coverageHighWaterMark: this.coverageHighWaterMark,
+      lastPassCoverage: this.progress(),
+      capablePeers: this.capablePeers(),
+    });
+  }
+
+  /** Mark a continuation as started and return the progress reading before it. */
+  startContinuationPass(): number {
+    const before = this.progress();
+    this.coverageHighWaterMark = before;
+    this.completedContinuationPasses += 1;
+    return before;
+  }
+}
+
 /**
  * Decide whether the walk gets another pass, and over which peers.
  *
@@ -178,8 +276,8 @@ export const DEFAULT_SWM_CATCHUP_MAX_PASSES = 4;
  * Parse the operator-facing pass budget.
  *
  * Exported as a pure function for the same reason `resolveCatchupBackpressureMaxWaitMs`
- * is: the constant below resolves once at module load, which makes the env
- * contract untestable in place — and it has the same sharp edge. A BLANK
+ * is: configuration is resolved into an explicit per-job value, and the parser
+ * has the same sharp edge. A BLANK
  * assignment is the normal docker-compose / `.env` / systemd shape for "not set",
  * but `Number('')` is `0`, which here would silently disable every extra pass and
  * leave the node with exactly the #2050 behaviour the operator was trying to fix.
@@ -214,8 +312,24 @@ export function resolveSwmCatchupMaxPasses(raw: string | undefined): number {
     : DEFAULT_SWM_CATCHUP_MAX_PASSES;
 }
 
-export const SWM_CATCHUP_PASS_BUDGET_MS: number =
-  resolveSwmCatchupPassBudgetMs(process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS);
-
-export const SWM_CATCHUP_MAX_PASSES: number =
-  resolveSwmCatchupMaxPasses(process.env.DKG_SWM_CATCHUP_MAX_PASSES);
+/**
+ * Resolve continuation limits at job start rather than module load.
+ *
+ * Long-lived agents and worker test processes may run many jobs. Capturing the
+ * environment on first import made later jobs depend on import order and forced
+ * every configuration test into a separate module registry. Returning one
+ * explicit value keeps parsing pure and lets each driver inject the same shape
+ * into its continuation loop.
+ */
+export function resolveSwmCatchupPassConfig(environment: {
+  DKG_SWM_CATCHUP_PASS_BUDGET_MS?: string;
+  DKG_SWM_CATCHUP_MAX_PASSES?: string;
+} = {
+  DKG_SWM_CATCHUP_PASS_BUDGET_MS: process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS,
+  DKG_SWM_CATCHUP_MAX_PASSES: process.env.DKG_SWM_CATCHUP_MAX_PASSES,
+}): CatchupPassConfig {
+  return {
+    budgetMs: resolveSwmCatchupPassBudgetMs(environment.DKG_SWM_CATCHUP_PASS_BUDGET_MS),
+    maxPasses: resolveSwmCatchupMaxPasses(environment.DKG_SWM_CATCHUP_MAX_PASSES),
+  };
+}

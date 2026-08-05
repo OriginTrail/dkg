@@ -1260,9 +1260,12 @@ describe('DKGAgent sync fetch coalescing', () => {
         };
       };
 
-      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
-        includeSharedMemory: true,
-      });
+      const result = await (agent as any).runCatchupOverPeers(
+        'coalesced-cg',
+        true,
+        [peerA, peerB],
+        { swmCatchupPassConfig: { budgetMs: 0, maxPasses: 4 } },
+      );
 
       // Guard the fixture itself: if the SWM plane were skipped (for example by
       // a durable result carrying deferredBackpressure), every assertion below
@@ -1296,6 +1299,61 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(
         (swm.replayPhaseBytesReceived ?? 0) + (swm.snapshotPhaseBytesReceived ?? 0),
       ).toBe(swm.bytesReceived);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('runs the bounded SWM continuation policy on the inline agent path', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const coverage = (resolved: number): SwmSnapshotCoverage => ({
+      contextGraphId: 'coalesced-cg',
+      peerIdSuffix: PEER_A.slice(-8),
+      snapshotsResolved: resolved,
+      snapshotsTotal: 3,
+      manifestComplete: true,
+      missingCount: 3 - resolved,
+      missingSample: resolved < 3 ? ['sha256:remaining'] : [],
+      materializationFailures: 0,
+    });
+
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).resolvePreferredSyncPeerId = async () => undefined;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async () => true;
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent.node.libp2p as any).getConnections = () => [{ remotePeer }];
+      (agent.node.libp2p.peerStore as any).get = async () => ({ protocols: [PROTOCOL_SYNC] });
+      (agent as any).syncFromPeerDetailed = async (peerId: string) => {
+        durableCalls.push(peerId);
+        return cleanDurableSyncResult();
+      };
+      (agent as any).syncSharedMemoryFromPeerDetailed = async (peerId: string) => {
+        sharedCalls.push(peerId);
+        const resolved = sharedCalls.length === 1 ? 2 : 3;
+        return {
+          ...cleanSharedMemorySyncResult(),
+          ...(resolved < 3 ? { failedPhases: 1, snapshotPlaneIncomplete: 1 } : {}),
+          swmCoverage: coverage(resolved),
+        };
+      };
+
+      const result = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
+        includeSharedMemory: true,
+      });
+
+      expect(durableCalls).toEqual([PEER_A]);
+      expect(sharedCalls).toEqual([PEER_A, PEER_A]);
+      expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
+      expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
+      expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
     } finally {
       await agent.stop().catch(() => {});
     }

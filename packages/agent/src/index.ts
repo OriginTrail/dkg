@@ -354,10 +354,14 @@ export {
 // retry policy's do: in-package tests import them from
 // `./sync/catchup-pass-policy.js` directly rather than pinning them here.
 export {
-  SWM_CATCHUP_MAX_PASSES,
-  SWM_CATCHUP_PASS_BUDGET_MS,
+  DEFAULT_SWM_CATCHUP_MAX_PASSES,
+  DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS,
+  SwmCatchupPassTracker,
   catchupPassNowMs,
+  resolveSwmCatchupPassConfig,
   shouldRunAnotherCatchupPass,
+  type CatchupPassConfig,
+  type CatchupPassCoverage,
   type CatchupPassDecision,
   type CatchupPassDecisionReason,
   type CatchupPassPolicyInput,
