@@ -463,7 +463,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(agent).toBeInstanceOf(DKGAgent);
   });
 
-  it('maintains and restarts the selected public SWM-only shadow inventory, then removes VM-confirmed rows', async () => {
+  it('excludes restricted shares, restarts the public SWM-only inventory, then removes VM-confirmed rows', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-swm-shadow-restart-'));
     tempDirs.push(dataDir);
     const autoPublish = {
@@ -536,7 +536,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       quads: publicQuads,
       privateTripleCount: 0,
       publisherPeerId: author.peerId,
-      accessPolicy: 'public',
+      accessPolicy: 'ownerOnly',
       agentAddress: AUTHOR,
       timestamp: new Date('2026-07-19T12:35:00.000Z'),
     });
@@ -549,13 +549,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       shareOperationId,
     });
 
-    const first = await author.recordRfc64SwmAuthorInventoryShadowV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      assertionCoordinate,
-      lifecycleAgentAddress: AUTHOR,
-      shareOperationId,
-    });
-    expect(first).toMatchObject({ status: 'applied', action: 'upsert', attempts: 1 });
     const scopeDigest = computeSwmAuthorInventoryScopeDigestV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -566,6 +559,39 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
       era: '0',
     });
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'dormant', action: 'upsert', attempts: 0 });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: author.store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: author.peerId,
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-07-19T12:35:00.000Z'),
+    });
+
+    const first = await author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    });
+    expect(first).toMatchObject({ status: 'applied', action: 'upsert', attempts: 1 });
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,

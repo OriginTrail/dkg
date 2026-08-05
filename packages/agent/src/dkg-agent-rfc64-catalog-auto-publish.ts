@@ -275,6 +275,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
         || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)
       ) throw new Error('durable SWM head does not match the committed share and author seal');
+      // This inventory is a public-discovery artifact. A public Context Graph
+      // may still contain restricted individual shares, which must remain
+      // invisible to this lane rather than leaking their UAL or operation id.
+      if (head.accessPolicy !== 'public') {
+        stats.attemptedUpserts -= 1;
+        return shadowResult('dormant', 'upsert', 0, null, null);
+      }
       const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
         store: this.store,
         graphManager,

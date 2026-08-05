@@ -31,6 +31,7 @@ import {
   InventoryV1CandidateError,
   type Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
+import { applySwmAuthorInventoryMutationV1 } from './inventory-v1/swm-author-inventory-mutation.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './author-catalog-producer.js';
 
 export const RFC64_SWM_AUTHOR_INVENTORY_PRODUCER_MAX_CAS_ATTEMPTS_V1 = 4;
@@ -102,14 +103,15 @@ export async function maintainRfc64SwmAuthorInventoryV1(
 ): Promise<MaintainRfc64SwmAuthorInventoryResultV1> {
   const prepared = prepareInput(input);
   return mutateRfc64SwmAuthorInventoryV1(inventory, prepared, 'upsert', (current) => {
-    const currentRow = current?.rows.find(({ kaUal }) => kaUal === prepared.row.kaUal);
-    if (current !== null && currentRow !== undefined && rowsEqual(currentRow, prepared.row)) {
+    const mutation = Object.freeze({ kind: 'upsert' as const, row: prepared.row });
+    const transition = applySwmAuthorInventoryMutationV1(current?.rows ?? [], mutation);
+    if (transition.status === 'existing') {
       return Object.freeze({ kind: 'noop' as const, status: 'existing' as const });
     }
     return Object.freeze({
       kind: 'commit' as const,
-      rows: upsertRow(current?.rows ?? [], prepared.row),
-      mutation: Object.freeze({ kind: 'upsert' as const, row: prepared.row }),
+      rows: transition.rows,
+      mutation,
     });
   }, (status) => status) as Promise<MaintainRfc64SwmAuthorInventoryResultV1>;
 }
@@ -134,18 +136,21 @@ export async function removeRfc64SwmAuthorInventoryRowV1(
     ) {
       return Object.freeze({ kind: 'noop' as const, status: 'absent' as const });
     }
-    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
-      canonicalizeSwmAuthorInventoryRowsBytesV1(
-        current!.rows.filter(({ kaUal }) => kaUal !== prepared.expectedRow.kaUal),
-      ),
-    );
+    const mutation = Object.freeze({
+      kind: 'remove' as const,
+      kaUal: prepared.expectedRow.kaUal,
+    });
+    const transition = applySwmAuthorInventoryMutationV1(current!.rows, mutation);
+    if (transition.status !== 'applied') {
+      throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+        'swm-inventory-producer-history',
+        'exact removal target disappeared while planning its mutation',
+      );
+    }
     return Object.freeze({
       kind: 'commit' as const,
-      rows,
-      mutation: Object.freeze({
-        kind: 'remove' as const,
-        kaUal: prepared.expectedRow.kaUal,
-      }),
+      rows: transition.rows,
+      mutation,
     });
   // A durable exact-CAS replay means this removal already committed; expose
   // that as `applied`, never the persistence layer's generic `existing`.
@@ -356,18 +361,6 @@ async function verifyCurrentHistory(
   }
 }
 
-function upsertRow(
-  current: readonly SwmAuthorInventoryRowV1[],
-  next: SwmAuthorInventoryRowV1,
-): readonly SwmAuthorInventoryRowV1[] {
-  const rows = current.filter(({ kaUal }) => kaUal !== next.kaUal);
-  rows.push(next);
-  rows.sort((left, right) => left.kaUal < right.kaUal ? -1 : left.kaUal > right.kaUal ? 1 : 0);
-  return parseCanonicalSwmAuthorInventoryRowsV1(
-    canonicalizeSwmAuthorInventoryRowsBytesV1(rows),
-  );
-}
-
 async function signHead(input: Readonly<{
   scope: SwmAuthorInventoryScopeV1;
   rows: readonly SwmAuthorInventoryRowV1[];
@@ -425,14 +418,4 @@ async function signHead(input: Readonly<{
       { cause },
     );
   }
-}
-
-function rowsEqual(
-  left: SwmAuthorInventoryRowV1,
-  right: SwmAuthorInventoryRowV1,
-): boolean {
-  const leftBytes = canonicalizeSwmAuthorInventoryRowsBytesV1([left]);
-  const rightBytes = canonicalizeSwmAuthorInventoryRowsBytesV1([right]);
-  return leftBytes.length === rightBytes.length
-    && leftBytes.every((byte, index) => byte === rightBytes[index]);
 }
