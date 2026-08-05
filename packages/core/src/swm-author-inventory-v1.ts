@@ -21,11 +21,16 @@ import {
   type CanonicalDeterministicUalV1,
 } from './canonical-graph-scoped-author-seal.js';
 import {
+  assertUnsignedControlEnvelope,
   assertSignedControlEnvelope,
+  canonicalizeUnsignedControlEnvelopeBytes,
   canonicalizeSignedControlEnvelopeBytes,
+  computeControlObjectDigestHex,
   parseCanonicalSignedControlEnvelope,
   type SignedControlEnvelopeV1,
+  type UnsignedControlEnvelopeV1,
 } from './sync-control-object.js';
+import { parseDeterministicKnowledgeAssetUal } from './ka-content-scope.js';
 import {
   assertCanonicalChainId,
   assertCanonicalDigest,
@@ -55,6 +60,27 @@ export const MAX_SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_BYTES_V1 = 256;
 const UTF8 = new TextEncoder();
 const SCOPE_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_SCOPE_DIGEST_DOMAIN_V1);
 const ROWS_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_ROWS_DIGEST_DOMAIN_V1);
+const SWM_AUTHOR_INVENTORY_SCOPE_KEYS = Object.freeze([
+  'networkId',
+  'contextGraphId',
+  'governanceChainId',
+  'governanceContractAddress',
+  'ownershipTransitionDigest',
+  'subGraphName',
+  'authorAddress',
+  'era',
+] as const);
+const SWM_AUTHOR_INVENTORY_HEAD_ONLY_KEYS = Object.freeze([
+  'version',
+  'previousHeadDigest',
+  'totalRows',
+  'rowsDigest',
+  'issuedAt',
+] as const);
+const SWM_AUTHOR_INVENTORY_HEAD_KEYS = Object.freeze([
+  ...SWM_AUTHOR_INVENTORY_SCOPE_KEYS,
+  ...SWM_AUTHOR_INVENTORY_HEAD_ONLY_KEYS,
+] as const);
 
 /**
  * Exact public-CG lane whose active, author-sealed SWM-only set is attested.
@@ -95,6 +121,11 @@ export interface SwmAuthorInventoryHeadV1 extends SwmAuthorInventoryScopeV1 {
   readonly issuedAt: TimestampMsV1;
 }
 
+export type UnsignedSwmAuthorInventoryHeadEnvelopeV1 = UnsignedControlEnvelopeV1 & {
+  readonly objectType: typeof SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1;
+  readonly payload: SwmAuthorInventoryHeadV1;
+};
+
 export type SignedSwmAuthorInventoryHeadEnvelopeV1 = SignedControlEnvelopeV1 & {
   readonly objectType: typeof SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1;
   readonly payload: SwmAuthorInventoryHeadV1;
@@ -128,16 +159,7 @@ export function assertSwmAuthorInventoryScopeV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryScopeV1 {
   if (!isPlainRecord(value)) fail('swm-inventory-schema', 'scope must be a plain object');
-  assertExactKeysAdapted(value, [
-    'networkId',
-    'contextGraphId',
-    'governanceChainId',
-    'governanceContractAddress',
-    'ownershipTransitionDigest',
-    'subGraphName',
-    'authorAddress',
-    'era',
-  ], 'scope');
+  assertExactKeysAdapted(value, SWM_AUTHOR_INVENTORY_SCOPE_KEYS, 'scope');
   adaptScalars(() => {
     assertNetworkIdV1(value.networkId);
     assertContextGraphIdV1(value.contextGraphId);
@@ -258,21 +280,7 @@ export function assertSwmAuthorInventoryHeadV1(
   value: unknown,
 ): asserts value is SwmAuthorInventoryHeadV1 {
   if (!isPlainRecord(value)) fail('swm-inventory-schema', 'head must be a plain object');
-  assertExactKeysAdapted(value, [
-    'networkId',
-    'contextGraphId',
-    'governanceChainId',
-    'governanceContractAddress',
-    'ownershipTransitionDigest',
-    'subGraphName',
-    'authorAddress',
-    'era',
-    'version',
-    'previousHeadDigest',
-    'totalRows',
-    'rowsDigest',
-    'issuedAt',
-  ], 'head');
+  assertExactKeysAdapted(value, SWM_AUTHOR_INVENTORY_HEAD_KEYS, 'head');
   const scope = scopeFromHead(value);
   assertSwmAuthorInventoryScopeV1(scope);
   adaptScalars(() => {
@@ -304,6 +312,43 @@ export function deriveSwmAuthorInventoryScopeFromHeadV1(
   return Object.freeze(scopeFromHead(head as unknown as Record<string, unknown>));
 }
 
+export function assertUnsignedSwmAuthorInventoryHeadEnvelopeV1(
+  value: unknown,
+): asserts value is UnsignedSwmAuthorInventoryHeadEnvelopeV1 {
+  try {
+    assertUnsignedControlEnvelope(value as UnsignedControlEnvelopeV1);
+  } catch (cause) {
+    fail('swm-inventory-schema', 'head envelope is not an unsigned control object', cause);
+  }
+  const envelope = value as UnsignedControlEnvelopeV1;
+  assertSwmAuthorInventoryEnvelopeBinding(envelope);
+  try {
+    const bytes = canonicalizeUnsignedControlEnvelopeBytes(envelope);
+    if (bytes.length > MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1) {
+      fail('swm-inventory-too-large', 'unsigned head exceeds the v1 byte limit');
+    }
+  } catch (cause) {
+    if (cause instanceof SwmAuthorInventoryCodecErrorV1) throw cause;
+    fail('swm-inventory-too-large', 'unsigned head exceeds control-object bounds', cause);
+  }
+}
+
+export function canonicalizeUnsignedSwmAuthorInventoryHeadEnvelopeBytesV1(
+  envelope: UnsignedSwmAuthorInventoryHeadEnvelopeV1,
+): Uint8Array {
+  assertUnsignedSwmAuthorInventoryHeadEnvelopeV1(envelope);
+  return canonicalizeUnsignedControlEnvelopeBytes(envelope);
+}
+
+export function computeSwmAuthorInventoryHeadObjectDigestV1(
+  envelope: UnsignedSwmAuthorInventoryHeadEnvelopeV1,
+): Digest32V1 {
+  assertUnsignedSwmAuthorInventoryHeadEnvelopeV1(envelope);
+  const digest = computeControlObjectDigestHex(envelope);
+  assertCanonicalDigest(digest, 'SWM author inventory head objectDigest');
+  return digest;
+}
+
 export function assertSignedSwmAuthorInventoryHeadEnvelopeV1(
   value: unknown,
 ): asserts value is SignedSwmAuthorInventoryHeadEnvelopeV1 {
@@ -313,13 +358,7 @@ export function assertSignedSwmAuthorInventoryHeadEnvelopeV1(
     fail('swm-inventory-schema', 'head envelope is not a signed control object', cause);
   }
   const envelope = value as SignedControlEnvelopeV1;
-  if (envelope.objectType !== SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1) {
-    fail('swm-inventory-schema', 'head envelope has the wrong objectType');
-  }
-  assertSwmAuthorInventoryHeadV1(envelope.payload);
-  if (envelope.issuer !== envelope.payload.authorAddress) {
-    fail('swm-inventory-binding', 'head issuer must equal the scoped authorAddress');
-  }
+  assertSwmAuthorInventoryEnvelopeBinding(envelope);
   try {
     const bytes = canonicalizeSignedControlEnvelopeBytes(envelope);
     if (bytes.length > MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1) {
@@ -373,11 +412,21 @@ export function assertSwmAuthorInventorySnapshotBindingV1(
   }
   for (const row of snapshot.rows) {
     const parsedUal = assertCanonicalDeterministicUalV1(row.kaUal);
+    const parsedNetworkId = parseDeterministicKnowledgeAssetUal(row.kaUal).chainId;
+    if (parsedNetworkId !== snapshot.head.payload.networkId) {
+      fail('swm-inventory-binding', 'row kaUal network does not equal the scoped networkId');
+    }
     if (parsedUal.agentAddress !== snapshot.head.payload.authorAddress) {
       fail('swm-inventory-binding', 'row kaUal author does not equal the scoped authorAddress');
     }
     if (BigInt(row.sharedAt) > BigInt(snapshot.head.payload.issuedAt)) {
       fail('swm-inventory-binding', 'row sharedAt must not be later than head issuedAt');
+    }
+    if (
+      row.expiresAt !== null
+      && BigInt(row.expiresAt) <= BigInt(snapshot.head.payload.issuedAt)
+    ) {
+      fail('swm-inventory-binding', 'row expiresAt must be later than head issuedAt');
     }
   }
 }
@@ -440,16 +489,21 @@ function assertBoundedIdentifier(value: unknown, label: string): void {
 }
 
 function scopeFromHead(value: Record<string, unknown>): SwmAuthorInventoryScopeV1 {
-  return {
-    networkId: value.networkId as NetworkIdV1,
-    contextGraphId: value.contextGraphId as ContextGraphIdV1,
-    governanceChainId: value.governanceChainId as ChainIdV1 | null,
-    governanceContractAddress: value.governanceContractAddress as EvmAddressV1 | null,
-    ownershipTransitionDigest: value.ownershipTransitionDigest as Digest32V1 | null,
-    subGraphName: value.subGraphName as SubGraphNameV1 | null,
-    authorAddress: value.authorAddress as EvmAddressV1,
-    era: value.era as DecimalU64V1,
-  };
+  const scope: Record<string, unknown> = {};
+  for (const key of SWM_AUTHOR_INVENTORY_SCOPE_KEYS) scope[key] = value[key];
+  return scope as unknown as SwmAuthorInventoryScopeV1;
+}
+
+function assertSwmAuthorInventoryEnvelopeBinding(
+  envelope: UnsignedControlEnvelopeV1,
+): void {
+  if (envelope.objectType !== SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1) {
+    fail('swm-inventory-schema', 'head envelope has the wrong objectType');
+  }
+  assertSwmAuthorInventoryHeadV1(envelope.payload);
+  if (envelope.issuer !== envelope.payload.authorAddress) {
+    fail('swm-inventory-binding', 'head issuer must equal the scoped authorAddress');
+  }
 }
 
 function adaptScalars(operation: () => void): void {

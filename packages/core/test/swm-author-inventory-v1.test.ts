@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_SWM_AUTHOR_INVENTORY_ROWS_V1,
   SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
   SwmAuthorInventoryCodecErrorV1,
   assertSignedSwmAuthorInventoryHeadEnvelopeV1,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
+  canonicalizeUnsignedSwmAuthorInventoryHeadEnvelopeBytesV1,
+  computeSwmAuthorInventoryHeadObjectDigestV1,
   computeSwmAuthorInventoryRowsDigestV1,
   computeSwmAuthorInventoryScopeDigestV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
@@ -15,6 +18,7 @@ import {
   type SwmAuthorInventoryHeadV1,
   type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
+  type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
 } from '../src/swm-author-inventory-v1.js';
 import {
   computeControlObjectDigestHex,
@@ -82,10 +86,10 @@ function signedHead(
     payload,
     signatureEvidence: Object.freeze({ kind: 'none' }),
     signatureSuite: 'eip191-personal-sign-digest-v1',
-  }) as UnsignedControlEnvelopeV1;
+  }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
   return Object.freeze({
     ...unsigned,
-    objectDigest: computeControlObjectDigestHex(unsigned),
+    objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(unsigned),
     signature: SIGNATURE,
   }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
 }
@@ -113,6 +117,13 @@ describe('SWM author inventory v1', () => {
     expect(parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(head),
     )).toEqual(head);
+    expect(canonicalizeUnsignedSwmAuthorInventoryHeadEnvelopeBytesV1({
+      issuer: head.issuer,
+      objectType: head.objectType,
+      payload: head.payload,
+      signatureEvidence: head.signatureEvidence,
+      signatureSuite: head.signatureSuite,
+    })).toBeInstanceOf(Uint8Array);
   });
 
   it('rejects row reordering and duplicate active identities', () => {
@@ -146,10 +157,26 @@ describe('SWM author inventory v1', () => {
       head: signedHead([foreignRow]),
       rows: [foreignRow],
     })).toThrow(/row kaUal author/);
+    const foreignNetworkRow = Object.freeze({
+      ...ROW_A,
+      kaUal: `did:dkg:base:8453/${AUTHOR}/7`,
+    }) as SwmAuthorInventoryRowV1;
+    expect(() => assertSwmAuthorInventorySnapshotBindingV1({
+      head: signedHead([foreignNetworkRow]),
+      rows: [foreignNetworkRow],
+    })).toThrow(/row kaUal network/);
     expect(() => assertSwmAuthorInventorySnapshotBindingV1({
       head: signedHead([ROW_A], { issuedAt: '1699999999999' }),
       rows: [ROW_A],
     })).toThrow(/sharedAt/);
+    const expiredRow = Object.freeze({
+      ...ROW_A,
+      expiresAt: '1700000000100',
+    }) as SwmAuthorInventoryRowV1;
+    expect(() => assertSwmAuthorInventorySnapshotBindingV1({
+      head: signedHead([expiredRow]),
+      rows: [expiredRow],
+    })).toThrow(/expiresAt/);
   });
 
   it('keeps SWM authority distinct and chains every non-genesis head', () => {
@@ -167,6 +194,19 @@ describe('SWM author inventory v1', () => {
       version: '0',
       previousHeadDigest: `0x${'55'.repeat(32)}`,
     }))).toThrow(/only version 0/);
+    const valid = signedHead(rows);
+    const wrongTypeUnsigned = Object.freeze({
+      issuer: valid.issuer,
+      objectType: 'AuthorCatalogHeadV1',
+      payload: valid.payload,
+      signatureEvidence: valid.signatureEvidence,
+      signatureSuite: valid.signatureSuite,
+    }) as UnsignedControlEnvelopeV1;
+    expect(() => assertSignedSwmAuthorInventoryHeadEnvelopeV1(Object.freeze({
+      ...wrongTypeUnsigned,
+      objectDigest: computeControlObjectDigestHex(wrongTypeUnsigned),
+      signature: SIGNATURE,
+    }))).toThrow(/wrong objectType/);
   });
 
   it('rejects noncanonical wire JSON and invalid expiry', () => {
@@ -178,5 +218,35 @@ describe('SWM author inventory v1', () => {
       ...ROW_A,
       expiresAt: ROW_A.sharedAt,
     } as SwmAuthorInventoryRowV1])).toThrow(/expiresAt must be later/);
+  });
+
+  it('enforces SWM-specific row, scalar, and signed-head size limits', () => {
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(
+      new Array(MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1) as SwmAuthorInventoryRowV1[],
+    )).toThrowError(expect.objectContaining({ code: 'swm-inventory-too-large' }));
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([{
+      ...ROW_A,
+      shareOperationId: 'x'.repeat(257),
+    } as SwmAuthorInventoryRowV1])).toThrow(/byte limit/);
+
+    const payload = signedHead([ROW_A]).payload;
+    const oversizedUnsigned = Object.freeze({
+      issuer: AUTHOR,
+      objectType: SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+      payload,
+      signatureEvidence: Object.freeze({
+        kind: 'eip1271-current-finalized',
+        chainId: '20430',
+        contractAddress: AUTHOR,
+      }),
+      signatureSuite: 'eip1271-current-finalized-v1',
+    }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
+    expect(() => canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1({
+      ...oversizedUnsigned,
+      objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(oversizedUnsigned),
+      signature: `0x${'77'.repeat(4096)}`,
+    } as SignedSwmAuthorInventoryHeadEnvelopeV1)).toThrowError(
+      expect.objectContaining({ code: 'swm-inventory-too-large' }),
+    );
   });
 });
