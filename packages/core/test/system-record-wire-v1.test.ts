@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { digestSystemRecordBytesV1 } from '../src/system-record-objects-v1.js';
 import {
+  canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
+  computeSystemRecordRootDescriptorDigestV1,
+} from '../src/system-record-inventory-v1.js';
+import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
@@ -130,5 +134,28 @@ describe('system-record wire response framing', () => {
       objectDigest: DIGEST, payloadBytes: String(payload.byteLength),
     } as const;
     expect(() => verifySystemRecordResponsePayloadV1(request, response, payload)).toThrow(/digest/);
+  });
+
+  it('rejects a valid root descriptor from a different requested network', () => {
+    const object = {
+      objectType: 'root-descriptor', kind: 'agents', networkId: 'otp:9999',
+      epoch: '0', version: '0', treeRootDigest: DIGEST, totalRows: '0',
+    } as const;
+    const objectDigest = computeSystemRecordRootDescriptorDigestV1(object);
+    const payload = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1({
+      object,
+      objectDigest,
+      providerPeerId: '12D3KooWDxBauQDeJjCmcvWiREFALfKsr5VfTzGUJbZJ6CUcc7aF',
+      signatureSuite: 'ed25519-v1',
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const request = { ...COMMON, operation: 'get-root' } as const;
+    const response = {
+      wireVersion: '1', requestId: REQUEST_ID, status: 'ok', objectKind: 'root-descriptor',
+      objectDigest, payloadBytes: String(payload.byteLength),
+    } as const;
+
+    expect(() => verifySystemRecordResponsePayloadV1(request, response, payload))
+      .toThrow(/requested kind\/network/);
   });
 });

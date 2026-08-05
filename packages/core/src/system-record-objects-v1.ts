@@ -1288,7 +1288,7 @@ export function evaluateAgentProfileHeadAdvanceV1(
       return { decision: 'accept' };
     }
     const summary = evidence.verifiedAuthoritySummary;
-    if (summary === undefined || !VERIFIED_AUTHORITY_SUMMARIES_V1.has(summary)
+    if (!(summary instanceof AgentProfileVerifiedAuthoritySummaryValueV1)
       || summary.candidateHeadDigest !== candidateDigest) {
       return { decision: 'reject', reason: 'cold noninitial head requires its verified authority closure' };
     }
@@ -1585,19 +1585,22 @@ export interface SystemRecordVerificationClosureV1 {
   readonly authoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
 }
 
-/**
- * Runtime-opaque authority facts derived from a fully verified closure. Structural clones
- * deliberately fail the WeakSet gate in evaluateAgentProfileHeadAdvanceV1.
- */
-export interface AgentProfileVerifiedAuthoritySummaryV1 {
-  readonly candidateHeadDigest: Digest32V1;
-  readonly transitionLineage: readonly AgentProfileAppliedTransitionV1[];
-  readonly historicalRoots: readonly string[];
-  readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1;
-  readonly deletionTableDigest?: Digest32V1;
+class AgentProfileVerifiedAuthoritySummaryValueV1 {
+  private declare readonly __opaqueAgentProfileVerifiedAuthoritySummaryV1: void;
+
+  constructor(
+    public readonly candidateHeadDigest: Digest32V1,
+    public readonly transitionLineage: readonly AgentProfileAppliedTransitionV1[],
+    public readonly historicalRoots: readonly string[],
+    public readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1,
+    public readonly deletionTableDigest?: Digest32V1,
+  ) {
+    Object.freeze(this);
+  }
 }
 
-const VERIFIED_AUTHORITY_SUMMARIES_V1 = new WeakSet<AgentProfileVerifiedAuthoritySummaryV1>();
+/** Factory-only nominal authority facts derived from a fully verified closure. */
+export type AgentProfileVerifiedAuthoritySummaryV1 = AgentProfileVerifiedAuthoritySummaryValueV1;
 
 export interface SystemRecordClosureArtifactV1 {
   readonly objectKind: SystemRecordObjectKindV1;
@@ -1969,17 +1972,13 @@ export async function buildAgentProfileVerificationClosureV1(
     if (tombstonePredecessor !== undefined && tombstonePredecessor.state !== 'active') {
       fail('system-record-history', 'verified tombstone closure lost its active predecessor');
     }
-    const summary = Object.freeze({
-      candidateHeadDigest: currentHeadDigest,
-      transitionLineage: Object.freeze(reverseLineage.reverse()),
-      historicalRoots: Object.freeze(reverseRoots.reverse()),
-      ...(tombstonePredecessor === undefined ? {} : {
-        tombstonePredecessor,
-        deletionTableDigest: tombstonePredecessor.ownedSubjectTableDigest,
-      }),
-    }) as AgentProfileVerifiedAuthoritySummaryV1;
-    VERIFIED_AUTHORITY_SUMMARIES_V1.add(summary);
-    return summary;
+    return new AgentProfileVerifiedAuthoritySummaryValueV1(
+      currentHeadDigest,
+      Object.freeze(reverseLineage.reverse()),
+      Object.freeze(reverseRoots.reverse()),
+      tombstonePredecessor?.state === 'active' ? tombstonePredecessor : undefined,
+      tombstonePredecessor?.ownedSubjectTableDigest,
+    );
   }
 }
 
@@ -2014,23 +2013,35 @@ export function assertSystemRecordClosureAlgebraV1(
   return objects;
 }
 
-export interface SystemRecordCacheReferenceV1 {
+const READ_SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1 = Symbol('system-record-cache-reference-facts-v1');
+
+class SystemRecordCacheReferenceValueV1 {
+  readonly #facts: SystemRecordCacheReferenceFactsV1;
+
+  constructor(
   /** Semantic object identity used by authority, closure edges, and inventory rows. */
-  readonly digest: Digest32V1;
+    public readonly digest: Digest32V1,
   /** Exact physical cache identity; signed controls bind their complete envelope bytes. */
-  readonly cacheDigest: Digest32V1;
-  readonly objectKind: SystemRecordObjectKindV1;
+    public readonly cacheDigest: Digest32V1,
+    public readonly objectKind: SystemRecordObjectKindV1,
+    facts: SystemRecordCacheReferenceFactsV1,
+  ) {
+    this.#facts = Object.freeze({ ...facts });
+    Object.freeze(this);
+  }
+
+  [READ_SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1](): SystemRecordCacheReferenceFactsV1 {
+    return this.#facts;
+  }
 }
+
+/** Factory-only nominal reference whose accounting facts bind exact canonical bytes. */
+export type SystemRecordCacheReferenceV1 = SystemRecordCacheReferenceValueV1;
 
 interface SystemRecordCacheReferenceFactsV1 {
   readonly byteLength: number;
   readonly fingerprint: string;
 }
-
-const SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1 = new WeakMap<
-  SystemRecordCacheReferenceV1,
-  SystemRecordCacheReferenceFactsV1
->();
 
 /** Create an exact byte-derived accounting reference; unbranded caller counters are rejected. */
 export function createSystemRecordCacheReferenceV1(
@@ -2049,16 +2060,15 @@ export function createSystemRecordCacheReferenceV1(
   if (identities.semanticDigest !== objectDigest) {
     fail('system-record-closure', 'cache reference semantic digest does not bind its canonical bytes');
   }
-  const reference = Object.freeze({
-    digest: identities.semanticDigest,
-    cacheDigest: identities.cacheDigest,
+  return new SystemRecordCacheReferenceValueV1(
+    identities.semanticDigest,
+    identities.cacheDigest,
     objectKind,
-  });
-  SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1.set(reference, Object.freeze({
+    {
     byteLength: canonicalBytes.byteLength,
     fingerprint: Buffer.from(sha256(canonicalBytes)).toString('hex'),
-  }));
-  return reference;
+    },
+  );
 }
 
 export interface SystemRecordCacheRowAccountingV1 {
@@ -2068,12 +2078,23 @@ export interface SystemRecordCacheRowAccountingV1 {
   readonly sidecarMetadata?: SystemRecordCacheMetadataV1;
 }
 
-export interface SystemRecordCacheMetadataV1 {}
+const READ_SYSTEM_RECORD_CACHE_METADATA_BYTES_V1 = Symbol('system-record-cache-metadata-bytes-v1');
 
-const SYSTEM_RECORD_CACHE_METADATA_FACTS_V1 = new WeakMap<
-  SystemRecordCacheMetadataV1,
-  Readonly<{ byteLength: number }>
->();
+class SystemRecordCacheMetadataValueV1 {
+  readonly #byteLength: number;
+
+  constructor(byteLength: number) {
+    this.#byteLength = byteLength;
+    Object.freeze(this);
+  }
+
+  [READ_SYSTEM_RECORD_CACHE_METADATA_BYTES_V1](): number {
+    return this.#byteLength;
+  }
+}
+
+/** Factory-only nominal metadata accounting value. */
+export type SystemRecordCacheMetadataV1 = SystemRecordCacheMetadataValueV1;
 
 /** Brand the exact encoded metadata bytes that B2 will include in its atomic baseline preflight. */
 export function createSystemRecordCacheMetadataV1(
@@ -2083,11 +2104,7 @@ export function createSystemRecordCacheMetadataV1(
     || encodedMetadata.byteLength > SYSTEM_RECORD_MAX_CLOSURE_SIDECAR_LIVE_METADATA_BYTES) {
     fail('system-record-closure', 'cache metadata bytes exceed the live metadata bound');
   }
-  const metadata = Object.freeze({});
-  SYSTEM_RECORD_CACHE_METADATA_FACTS_V1.set(metadata, Object.freeze({
-    byteLength: encodedMetadata.byteLength,
-  }));
-  return metadata;
+  return new SystemRecordCacheMetadataValueV1(encodedMetadata.byteLength);
 }
 
 export interface SystemRecordCachePreflightResultV1 {
@@ -2312,36 +2329,27 @@ function hasOwnProperty(value: unknown, key: string): boolean {
 }
 
 function requireCacheMetadataBytes(value: unknown, label: string): number {
-  if (value === null || typeof value !== 'object') {
-    fail('system-record-closure', `${label} is invalid`);
-  }
-  snapshotExactDataRecord(value, [], label);
-  const facts = SYSTEM_RECORD_CACHE_METADATA_FACTS_V1.get(value);
-  if (facts === undefined) {
+  if (!(value instanceof SystemRecordCacheMetadataValueV1)
+    || Object.keys(value).length !== 0) {
     fail('system-record-closure', `${label} was not derived from encoded bytes`);
   }
-  return facts.byteLength;
+  return value[READ_SYSTEM_RECORD_CACHE_METADATA_BYTES_V1]();
 }
 
 function requireCacheReferenceFacts(
   reference: SystemRecordCacheReferenceV1,
   label: string,
 ): SystemRecordCacheReferenceFactsV1 {
-  if (reference === null || typeof reference !== 'object') {
-    fail('system-record-closure', `${label} reference is invalid`);
-  }
-  const exact = snapshotExactDataRecord(reference, ['digest', 'cacheDigest', 'objectKind'], `${label} reference`);
-  digest(exact.digest, `${label} digest`);
-  digest(exact.cacheDigest, `${label} cache digest`);
-  if (typeof exact.objectKind !== 'string'
-    || !Object.prototype.hasOwnProperty.call(SYSTEM_RECORD_OBJECT_CAPS_V1, exact.objectKind)) {
-    fail('system-record-closure', `${label} object kind is invalid`);
-  }
-  const facts = SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1.get(reference);
-  if (facts === undefined) {
+  if (!(reference instanceof SystemRecordCacheReferenceValueV1)
+    || Object.keys(reference).sort().join('\u0000') !== 'cacheDigest\u0000digest\u0000objectKind') {
     fail('system-record-closure', `${label} reference was not derived from canonical bytes`);
   }
-  return facts;
+  digest(reference.digest, `${label} digest`);
+  digest(reference.cacheDigest, `${label} cache digest`);
+  if (!Object.prototype.hasOwnProperty.call(SYSTEM_RECORD_OBJECT_CAPS_V1, reference.objectKind)) {
+    fail('system-record-closure', `${label} object kind is invalid`);
+  }
+  return reference[READ_SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1]();
 }
 
 function deriveCacheReferenceArtifactIdentitiesV1(

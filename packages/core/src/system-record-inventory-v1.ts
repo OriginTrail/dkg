@@ -15,6 +15,7 @@ import {
   type SystemRecordPeerPublicKeyV1,
 } from './system-record-objects-v1.js';
 import {
+  SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
   SYSTEM_RECORD_ED25519_SIGNATURE_BYTES,
@@ -1459,7 +1460,9 @@ function validateInventoryRow(row: SystemRecordInventoryRowV1, networkId?: Netwo
   } catch {
     throw new Error('inventory row peerId is not canonical');
   }
-  assertCanonicalDecimalU64(row.authoritySequence);
+  if (parseCanonicalDecimalU64(row.authoritySequence) > SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX) {
+    throw new Error('inventory row authoritySequence exceeds the V1 cap');
+  }
   assertCanonicalDecimalU64(row.version);
   assertCanonicalDigest(row.headDigest);
   if (row.conflictEvidenceDigest !== undefined) {

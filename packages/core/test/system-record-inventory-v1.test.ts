@@ -62,6 +62,17 @@ describe('system-record compact inventory rows', () => {
     expect(() => decodeSystemRecordInventoryRowV1('other:network' as typeof NETWORK, encoded))
       .toThrow(/stable key/);
   });
+
+  it('accepts authority sequence 14 and rejects sequence 15', () => {
+    const atCap = { ...row(PEER_A), authoritySequence: '14' as const };
+    expect(decodeSystemRecordInventoryRowV1(
+      NETWORK,
+      encodeSystemRecordInventoryRowV1(NETWORK, atCap),
+    )).toEqual(atCap);
+    expect(() => encodeSystemRecordInventoryRowV1(NETWORK, {
+      ...row(PEER_A), authoritySequence: '15',
+    })).toThrow(/authoritySequence.*V1 cap/);
+  });
 });
 
 describe('system-record immutable B+tree objects', () => {

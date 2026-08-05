@@ -621,7 +621,7 @@ describe('system-record owned subjects and verification closure', () => {
     })).toThrow(/present together/);
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'live',
-      rows: [{ closure: [], metadata: {} }],
+      rows: [{ closure: [], metadata: {} as unknown as typeof emptyMetadata }],
     })).toThrow(/not derived from encoded bytes/);
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'live',
@@ -679,7 +679,7 @@ describe('system-record owned subjects and verification closure', () => {
       { closure: [first], metadata },
     ] })).toMatchObject({ cohortPhysicalObjects: 1, closureReferences: 2 });
     expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
-      closure: [{ ...first, cacheDigest: DIGEST_C }], metadata,
+      closure: [{ ...first, cacheDigest: DIGEST_C } as unknown as typeof first], metadata,
     }] })).toThrow(/not derived/);
   });
 
@@ -723,6 +723,45 @@ describe('system-record owned subjects and verification closure', () => {
       verifyAuthorityEnvelope: () => true,
       verifyCurrentBundle: () => true,
     })).rejects.toThrow(/missing/);
+  });
+
+  it('fails closed when authority verification rejects each closure control kind', async () => {
+    const fixture = await authorityFixture();
+    const initial = { ...activeHead(fixture), bundleDigest: CLOSURE_BUNDLE_DIGEST };
+    const initialDigest = computeAgentProfileHeadObjectDigestV1(initial);
+    await expect(buildClosure(
+      initial,
+      closureArtifacts(initial, [], []),
+      initialDigest,
+    )).rejects.toThrow(/head authority verification failed/);
+
+    const transition = authorityTransition(fixture, initial);
+    const transitionDigest = computeAgentProfileAuthorityTransitionDigestV1(transition);
+    const rotated = {
+      ...activeForIssuer(initial, transition.nextEvmIssuer, '1', '0', {
+        acceptedTransitionDigest: transitionDigest,
+      }),
+      bundleDigest: CLOSURE_BUNDLE_DIGEST,
+    };
+    const rotatedArtifacts = closureArtifacts(rotated, [initial], [transition]);
+    await expect(buildClosure(rotated, rotatedArtifacts, initialDigest))
+      .rejects.toThrow(/head authority verification failed/);
+    await expect(buildClosure(rotated, rotatedArtifacts, transitionDigest))
+      .rejects.toThrow(/authority-transition verification failed/);
+
+    const conflicting = { ...initial, bundleDigest: DIGEST_C };
+    const resolution = forkResolution(fixture, initial, [initial, conflicting]);
+    const successor = {
+      ...initial,
+      version: '3' as const,
+      forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+      bundleDigest: CLOSURE_BUNDLE_DIGEST,
+    };
+    await expect(buildClosure(
+      successor,
+      closureArtifacts(successor, [initial, conflicting], [], [resolution]),
+      computeAgentProfileForkResolutionDigestV1(resolution),
+    )).rejects.toThrow(/fork-resolution verification failed/);
   });
 
   it('rejects cold cross-network and cross-peer transition reuse', async () => {
@@ -776,7 +815,9 @@ describe('system-record owned subjects and verification closure', () => {
       { disposition: 'discoverable', transitionLineage: [], historicalRoots: [] },
       current,
       { nowMs: Date.parse('2026-08-08T00:00:00Z'),
-        verifiedAuthoritySummary: { ...closure.authoritySummary } },
+        verifiedAuthoritySummary: {
+          ...closure.authoritySummary,
+        } as unknown as typeof closure.authoritySummary },
     )).toMatchObject({ decision: 'reject', reason: expect.stringMatching(/verified authority closure/) });
   });
 
@@ -997,11 +1038,12 @@ function closureArtifacts(
 async function buildClosure(
   current: AgentProfileHeadObjectV1,
   artifacts: ReturnType<typeof closureArtifacts>,
+  rejectAuthorityDigest?: string,
 ) {
   return buildAgentProfileVerificationClosureV1(computeAgentProfileHeadObjectDigestV1(current), {
     nowMs: Date.parse('2026-08-08T00:00:00Z'),
     resolve: async (reference) => artifacts.get(`${reference.objectKind}:${reference.digest}`),
-    verifyAuthorityEnvelope: () => true,
+    verifyAuthorityEnvelope: (envelope) => envelope.objectDigest !== rejectAuthorityDigest,
     verifyCurrentBundle: (_head, bytes) => Buffer.from(bytes).equals(Buffer.from(CLOSURE_BUNDLE)),
   });
 }

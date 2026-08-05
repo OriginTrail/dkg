@@ -256,7 +256,13 @@ function computePayloadObjectDigestV1(
         maxBytes: SYSTEM_RECORD_OBJECT_CAPS_V1['root-descriptor'], maxDepth: SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH,
       });
       assertSignedSystemRecordRootDescriptorEnvelopeV1(parsed);
-      return (parsed as unknown as SignedSystemRecordRootDescriptorEnvelopeV1).objectDigest;
+      const envelope = parsed as unknown as SignedSystemRecordRootDescriptorEnvelopeV1;
+      if (request.operation !== 'get-root'
+        || envelope.object.kind !== request.kind
+        || envelope.object.networkId !== request.networkId) {
+        throw new Error('root descriptor does not bind the requested kind/network');
+      }
+      return envelope.objectDigest;
     }
     case 'inventory-internal': {
       if (request.operation !== 'get-inventory-object') throw new Error('inventory response/request mismatch');

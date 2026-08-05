@@ -84,6 +84,20 @@ describe('independently generated system-record V1 golden vectors', () => {
     }
   });
 
+  it('fails closed when EIP-1271 verification is absent or rejects', async () => {
+    for (const name of [
+      'activeEip1271',
+      'coSignedTransitionEip1271',
+      'forkV1Eip1271',
+    ] as const) {
+      const envelope = vectors.signed[name].envelope;
+      expect(await verifySignedSystemRecordEnvelopeV1(envelope)).toBe(false);
+      expect(await verifySignedSystemRecordEnvelopeV1(envelope, {
+        verifyEip1271: () => false,
+      })).toBe(false);
+    }
+  });
+
   it('pins provider descriptor message/signature independently of authority', async () => {
     const envelope: SignedSystemRecordRootDescriptorEnvelopeV1 = {
       object: vectors.provider.rootDescriptor,
