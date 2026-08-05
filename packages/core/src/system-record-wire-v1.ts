@@ -278,20 +278,23 @@ function computePayloadObjectDigestV1(
     }
     case 'agent-profile-head': {
       const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(payload);
+      assertRequestedControlContextV1(request, envelope.object);
       return computeAgentProfileHeadObjectDigestV1(envelope.object);
     }
     case 'authority-transition': {
       const envelope = parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1(payload);
+      assertRequestedControlContextV1(request, envelope.object);
       return computeAgentProfileAuthorityTransitionDigestV1(envelope.object);
     }
     case 'fork-resolution': {
       const envelope = parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1(payload);
+      assertRequestedControlContextV1(request, envelope.object);
       return computeAgentProfileForkResolutionDigestV1(envelope.object);
     }
     case 'conflict-evidence': {
-      return computeAgentProfileConflictEvidenceDigestV1(
-        parseCanonicalAgentProfileConflictEvidenceV1(payload),
-      );
+      const evidence = parseCanonicalAgentProfileConflictEvidenceV1(payload);
+      assertRequestedControlContextV1(request, evidence);
+      return computeAgentProfileConflictEvidenceDigestV1(evidence);
     }
     case 'owned-subject-table': {
       const canonical = parseCanonicalJson(payload, {
@@ -302,6 +305,17 @@ function computePayloadObjectDigestV1(
     }
     case 'profile-bundle':
       return digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, payload);
+  }
+}
+
+function assertRequestedControlContextV1(
+  request: SystemRecordRequestHeaderV1,
+  object: Readonly<{ kind: string; networkId: string }>,
+): void {
+  if (request.operation !== 'get-control-object'
+    || object.kind !== request.kind
+    || object.networkId !== request.networkId) {
+    throw new Error('control object does not bind the requested kind/network');
   }
 }
 

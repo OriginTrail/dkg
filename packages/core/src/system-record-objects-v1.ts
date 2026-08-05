@@ -1599,7 +1599,11 @@ class AgentProfileVerifiedAuthoritySummaryValueV1 {
   }
 }
 
-/** Factory-only nominal authority facts derived from a fully verified closure. */
+/**
+ * Process-local, non-serializable authority capability minted only by closure verification.
+ * Consume it with this physical package instance; copying, persistence, worker transfer, or
+ * reconstruction intentionally destroys its authority.
+ */
 export type AgentProfileVerifiedAuthoritySummaryV1 = AgentProfileVerifiedAuthoritySummaryValueV1;
 
 export interface SystemRecordClosureArtifactV1 {
@@ -2035,7 +2039,10 @@ class SystemRecordCacheReferenceValueV1 {
   }
 }
 
-/** Factory-only nominal reference whose accounting facts bind exact canonical bytes. */
+/**
+ * Process-local, factory-only accounting capability bound to exact canonical bytes.
+ * It must not be reconstructed, cloned, serialized, or transferred between module instances.
+ */
 export type SystemRecordCacheReferenceV1 = SystemRecordCacheReferenceValueV1;
 
 interface SystemRecordCacheReferenceFactsV1 {
@@ -2093,7 +2100,10 @@ class SystemRecordCacheMetadataValueV1 {
   }
 }
 
-/** Factory-only nominal metadata accounting value. */
+/**
+ * Process-local, factory-only metadata accounting capability. Serialization or cloning
+ * intentionally loses the private byte-accounting authority.
+ */
 export type SystemRecordCacheMetadataV1 = SystemRecordCacheMetadataValueV1;
 
 /** Brand the exact encoded metadata bytes that B2 will include in its atomic baseline preflight. */
