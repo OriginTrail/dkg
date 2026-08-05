@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "captureStartedAt": "2026-08-04T14:35:12.427Z",
+  "captureEndedAt": "2026-08-04T16:05:09.398Z",
+  "diagnosticsArtifactSha256": "sha256:30d3f690d2cc106f3ce97f872d89291d3d687831637ff19ca035b54779fb7f47",
+  "sourceUrls": [
+    "https://github.com/OriginTrail/dkg/issues/2052",
+    "https://github.com/OriginTrail/dkg/issues/2052#issuecomment-5181539933"
+  ],
+  "observations": [
+    {
+      "graph": "agents",
+      "topLevelAttempts": 14,
+      "distinctPeers": 10,
+      "pageRetries": 26,
+      "failedAttempts": 13,
+      "verifiedTriples": 0,
+      "insertedTriples": 0
+    },
+    {
+      "graph": "ontology",
+      "topLevelAttempts": 3,
+      "distinctPeers": 3,
+      "pageRetries": 10,
+      "failedAttempts": null,
+      "verifiedTriples": 15697,
+      "insertedTriples": null
+    }
+  ]
+}
