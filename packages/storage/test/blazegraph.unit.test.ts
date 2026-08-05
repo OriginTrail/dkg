@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
-import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { BlazegraphStore, SERVER_QUERY_DEADLINE_FACTOR } from '../src/adapters/blazegraph.js';
 import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
 
 async function waitForCondition(
@@ -237,6 +237,86 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const [, init] = fetchCalls[0];
     expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query; charset=utf-8');
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
+  });
+
+  it('sends a server-side query deadline on SELECT and CONSTRUCT, wider than the client deadline', async () => {
+    // Without a server-side bound, a client abort leaves the query executing
+    // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s
+    // abort, queryErrorCount=0 across 20,953 queries). The bound must be
+    // WIDER than the client deadline so the client always aborts first —
+    // see SERVER_QUERY_DEADLINE_FACTOR.
+    setFetch(async () => blazeSelectResponse());
+    const s = new BlazegraphStore(baseUrl, { timeout: 30_000 });
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const selectHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
+    const sent = Number(selectHeaders['X-BIGDATA-MAX-QUERY-MILLIS']);
+    expect(sent).toBe(30_000 * SERVER_QUERY_DEADLINE_FACTOR);
+    expect(sent).toBeGreaterThan(30_000);
+
+    fetchCalls.length = 0;
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    await s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    const constructHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(Number(constructHeaders['X-BIGDATA-MAX-QUERY-MILLIS']))
+      .toBe(30_000 * SERVER_QUERY_DEADLINE_FACTOR);
+  });
+
+  it('scales the server-side deadline with a custom client timeout', async () => {
+    setFetch(async () => blazeSelectResponse());
+    const s = new BlazegraphStore(baseUrl, { timeout: 5_000 });
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(Number(headers['X-BIGDATA-MAX-QUERY-MILLIS']))
+      .toBe(5_000 * SERVER_QUERY_DEADLINE_FACTOR);
+  });
+
+  it('rejects a CONSTRUCT body truncated by an engine error instead of parsing it as partial data', async () => {
+    // Blazegraph commits 200 and streams before it knows the query will fail,
+    // then appends the error into the committed body. The tolerant n-quads
+    // parser skips unmatched lines, so without the guard this returns a short
+    // but structurally valid quad set — silent data loss.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + 'java.util.concurrent.TimeoutException: query deadline exceeded\n'
+      + '\tat com.bigdata.rdf.sail.webapp.BigdataRDFContext.run(BigdataRDFContext.java:1)\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('rejects a CONSTRUCT body cut mid-statement', async () => {
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + '<http://ex.org/s2> <http://ex.org/p2> <http://ex.or',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('still accepts complete CONSTRUCT bodies, including empty results and comments', async () => {
+    // The guard must not start rejecting shapes the tolerant parser has
+    // always accepted, or it becomes a worse bug than the one it fixes.
+    setFetch(async () => new Response('', { status: 200, headers: { 'Content-Type': 'text/x-nquads' } }));
+    const empty = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(empty.type).toBe('quads');
+    expect((empty as { quads: unknown[] }).quads).toHaveLength(0);
+
+    setFetch(async () => new Response(
+      '# a comment line\n'
+      + '<http://ex.org/s> <http://ex.org/p> "lit"@en <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const ok = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect((ok as { quads: unknown[] }).quads).toHaveLength(1);
   });
 
   it.each([

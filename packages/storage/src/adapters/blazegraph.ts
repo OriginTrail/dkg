@@ -36,6 +36,44 @@ import { readResponseTextBounded } from '../http-response-limit.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
+/**
+ * Blazegraph's per-request server-side query deadline. The deployed 2.1.x
+ * engine honours this header (`BigdataRDFContext$AbstractQueryTask` reads it
+ * via `getQueryTimeout`); `web.xml`'s `queryTimeout` context-param is the
+ * global equivalent and ships as `0` — unbounded.
+ */
+const MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
+
+/**
+ * Multiplier applied to the client deadline to derive the server-side bound.
+ *
+ * This is deliberately > 1: the server deadline must be WIDER than the
+ * client's, never tighter. Two reasons, and the second is a correctness trap:
+ *
+ * 1. The problem being solved is *abandoned* work. When the client aborts at
+ *    its deadline the HTTP connection goes away but Blazegraph keeps executing
+ *    the query — observed on mainnet running 10-32+ minutes past a 30s client
+ *    abort, with `queryErrorCount = 0` across 20,953 queries confirming the
+ *    server never cancelled anything. A handful of these saturate a core. Any
+ *    finite server bound fixes that; it does not need to be tight.
+ *
+ * 2. A tight bound introduces silent data loss. Blazegraph commits `200 OK`
+ *    and begins streaming before the deadline fires, then appends its error
+ *    into the already-committed body. A CONSTRUCT killed mid-stream therefore
+ *    returns a SHORT BUT STRUCTURALLY VALID n-quads document. Since the client
+ *    is still reading at that point, it parses the truncated result as a
+ *    complete one — a sync page that looks whole and is not. Keeping the
+ *    server bound comfortably above the client deadline means the client
+ *    always aborts first, so no caller is ever parsing a truncated body.
+ *    ({@link assertCompleteNQuads} is the belt-and-braces guard for the
+ *    residual case.)
+ *
+ * With the 30s default this yields a 120s server bound: orphan lifetime drops
+ * from unbounded to at most 2 minutes, while the truncation path stays
+ * unreachable.
+ */
+export const SERVER_QUERY_DEADLINE_FACTOR = 4;
+
 export interface BlazegraphStoreOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
   timeout?: number;
@@ -434,6 +472,7 @@ export class BlazegraphStore implements TripleStore {
         headers: {
           'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
           Accept: 'application/sparql-results+json',
+          [MAX_QUERY_MILLIS_HEADER]: String(this.serverQueryDeadlineMs()),
         },
         body: trimmed,
         signal: deadline.signal,
@@ -463,6 +502,15 @@ export class BlazegraphStore implements TripleStore {
     });
   }
 
+  /**
+   * Server-side query bound sent with every read. See
+   * {@link SERVER_QUERY_DEADLINE_FACTOR} for why this is wider than the
+   * client deadline rather than tighter.
+   */
+  private serverQueryDeadlineMs(): number {
+    return this.operationTimeoutMs * SERVER_QUERY_DEADLINE_FACTOR;
+  }
+
   private async queryConstruct(
     sparql: string,
     deadline: StoreOperationDeadline,
@@ -473,6 +521,7 @@ export class BlazegraphStore implements TripleStore {
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
         Accept: 'text/x-nquads, application/n-quads',
+        [MAX_QUERY_MILLIS_HEADER]: String(this.serverQueryDeadlineMs()),
       },
       body: sparql,
       signal: deadline.signal,
@@ -487,6 +536,7 @@ export class BlazegraphStore implements TripleStore {
     const text = await deadline.waitFor(options?.maxResponseBytes === undefined
       ? res.text()
       : readResponseTextBounded(res, options.maxResponseBytes));
+    assertCompleteNQuads(text);
     const quads = parseNQuadsText(text);
     deadline.check();
     return { type: 'quads', quads };
@@ -624,6 +674,46 @@ function formatTerm(term: string): string {
   if (term.startsWith('_:')) return term;
   if (term.startsWith('<')) return term;
   return `<${term}>`;
+}
+
+/**
+ * Reject a CONSTRUCT body that Blazegraph cut short.
+ *
+ * Blazegraph commits `200 OK` and starts streaming before it knows whether the
+ * query will finish. If the query is then killed — by the server-side deadline,
+ * or by an engine error mid-result — the error text is appended to the
+ * already-committed body. {@link parseNQuadsText} skips any line it cannot
+ * match, so without this check that body parses into a short, structurally
+ * valid, silently-incomplete quad set: a sync page that looks whole and is not.
+ *
+ * The check is deliberately narrow — it looks for *truncation*, not for any
+ * unparseable line — so it cannot start rejecting the odd-but-harmless
+ * serialisations the tolerant parser has always accepted:
+ *
+ *  - a well-formed n-quads document ends its last statement with `.`
+ *  - Blazegraph's appended failure text carries a Java exception marker
+ */
+function assertCompleteNQuads(text: string): void {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return;
+
+  const javaError = /^(?:[\w.$]+\.)?(?:\w*Exception|\w*Error)\b|\bat com\.bigdata\./m.exec(trimmed);
+  if (javaError) {
+    throw new Error(
+      'Blazegraph returned a truncated CONSTRUCT result: the response body carries an engine error '
+      + `(${javaError[0].slice(0, 120)}). Treating this as a failure rather than as an empty/partial `
+      + 'result — see assertCompleteNQuads.',
+    );
+  }
+
+  const lastLine = trimmed.slice(trimmed.lastIndexOf('\n') + 1).trim();
+  if (!lastLine.endsWith('.')) {
+    throw new Error(
+      'Blazegraph returned a truncated CONSTRUCT result: the final statement is incomplete '
+      + `(${JSON.stringify(lastLine.slice(-120))}). Treating this as a failure rather than as a `
+      + 'partial result — see assertCompleteNQuads.',
+    );
+  }
 }
 
 function parseNQuadsText(text: string): DKGQuad[] {
