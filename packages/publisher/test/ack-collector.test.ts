@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { QuorumUnmetError } from '../src/ack-errors.js';
 import {
   decodePublishIntent,
   encodeStorageACK,
@@ -679,20 +680,28 @@ describe('ACKCollector', () => {
     };
 
     const collector = new ACKCollector(deps);
-    await expect(collector.collect({
-      merkleRoot,
-      contextGraphId: testCGId,
-      contextGraphIdStr: testCGIdStr,
-      publisherPeerId: 'publisher-0',
-      publicByteSize: 100n,
-      isPrivate: false,
-      kaCount: 1,
-      rootEntities: ['urn:a'],
-      chainId: TEST_CHAIN_ID,
-      kav10Address: TEST_KAV10_ADDR,
-      merkleLeafCount,
-      ackMode: { kind: 'public' },
-    })).rejects.toMatchObject({
+    let caught: QuorumUnmetError | undefined;
+    try {
+      await collector.collect({
+        merkleRoot,
+        contextGraphId: testCGId,
+        contextGraphIdStr: testCGIdStr,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 100n,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:a'],
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    } catch (err) {
+      caught = err as QuorumUnmetError;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught).toMatchObject({
       peerOutcomes: expect.arrayContaining([
         expect.objectContaining({
           dialOk: true,
@@ -701,6 +710,8 @@ describe('ACKCollector', () => {
         }),
       ]),
     });
+    expect(caught!.message).toContain('storage_ack_insufficient');
+    expect(caught!.message).toContain('PROTOCOL_UNSUPPORTED');
 
     for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
       expect(callsByPeer.get(peerId)).toBe(1);

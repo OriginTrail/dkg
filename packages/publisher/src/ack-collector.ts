@@ -208,6 +208,111 @@ function declineLogMessage(message: string): string {
   return sanitizeDeclineField(message, MAX_DECLINE_LOG_MESSAGE_CHARS);
 }
 
+type PeerStatus =
+  | { kind: 'ack'; ack: CollectedACK }
+  | { kind: 'storage-decline'; code: string; message: string }
+  | { kind: 'ack-validation'; reason: string }
+  | { kind: 'protocol-unsupported'; message: string }
+  | { kind: 'transport-error'; message: string };
+
+/**
+ * Owns the terminal status for every peer participating in one ACK round.
+ * Recording a new status replaces stale evidence from an earlier attempt, and
+ * the two projections keep structured telemetry and legacy operator text in
+ * sync as new status categories are added.
+ */
+class PeerStatusLedger {
+  private readonly statuses = new Map<string, PeerStatus>();
+
+  recordACK(ack: CollectedACK): void {
+    this.statuses.set(ack.peerId, { kind: 'ack', ack });
+  }
+
+  recordStorageDecline(peerId: string, code: string, message: string): void {
+    this.statuses.set(peerId, { kind: 'storage-decline', code, message });
+  }
+
+  recordACKValidation(peerId: string, reason: string): void {
+    this.statuses.set(peerId, { kind: 'ack-validation', reason });
+  }
+
+  recordProtocolUnsupported(peerId: string, message: string): void {
+    this.statuses.set(peerId, { kind: 'protocol-unsupported', message });
+  }
+
+  recordTransportError(peerId: string, message: string): void {
+    this.statuses.set(peerId, { kind: 'transport-error', message });
+  }
+
+  clear(peerId: string): void {
+    this.statuses.delete(peerId);
+  }
+
+  snapshot(corePeers: string[]): PeerOutcome[] {
+    return corePeers.map((peerId): PeerOutcome => {
+      const status = this.statuses.get(peerId);
+      if (!status) return { peerId, reason: 'no_response' };
+      switch (status.kind) {
+        case 'ack': {
+          const advertised = status.ack.subscriptionSource !== undefined ? true : undefined;
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            ...(advertised !== undefined ? { swmHostModeAdvertised: advertised } : {}),
+            reason: status.ack.subscriptionSource
+              ? `ACK:${status.ack.subscriptionSource}`
+              : 'ACK',
+          };
+        }
+        case 'storage-decline':
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            reason: `STORAGE_ACK_DECLINE:${status.code}`,
+          };
+        case 'ack-validation':
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: true,
+            reason: status.reason,
+          };
+        case 'protocol-unsupported':
+          return {
+            peerId,
+            dialOk: true,
+            protocolSupported: false,
+            reason: 'PROTOCOL_UNSUPPORTED',
+          };
+        case 'transport-error':
+          return { peerId, dialOk: false, reason: 'TRANSPORT_ERROR' };
+      }
+    });
+  }
+
+  formatLegacyDetail(): string {
+    const declineDetails: string[] = [];
+    const terminalDetails: string[] = [];
+    for (const [peerId, status] of this.statuses) {
+      const tagPrefix = peerId.slice(-8);
+      if (status.kind === 'storage-decline') {
+        const tag = `${tagPrefix}→${status.code}`;
+        declineDetails.push(status.message ? `${tag} (${status.message})` : tag);
+      } else if (status.kind === 'protocol-unsupported' || status.kind === 'transport-error') {
+        const code = status.kind === 'protocol-unsupported'
+          ? 'PROTOCOL_UNSUPPORTED'
+          : 'TRANSPORT_ERROR';
+        const tag = `${tagPrefix}→${code}`;
+        terminalDetails.push(status.message ? `${tag} (${status.message})` : tag);
+      }
+    }
+    const formatted = [...declineDetails, ...terminalDetails].join('; ');
+    return formatted ? ` Declines: ${formatted}.` : '';
+  }
+}
+
 /**
  * ACKCollector implements V10 spec §9.0 Phase 3: collecting 3 core node
  * StorageACKs via direct P2P before the chain TX.
@@ -742,49 +847,11 @@ export class ACKCollector {
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();
     const seenIdentityIds = new Set<bigint>();
-    // Per-peer typed declines from core nodes that ran the StorageACK
-    // handler against the request and decided they cannot sign. The
-    // publisher records the reason, skips retries against the declining
-    // peer, and surfaces all collected reasons in the final
-    // `storage_ack_insufficient` message when quorum can't be reached.
-    // Cores that pre-date the typed wire shape continue to throw / reset
-    // and follow the legacy retry path below — declines are strictly
-    // additive on the wire.
-    const declines = new Map<string, { code: string; message: string }>();
-    type TerminalPeerOutcome =
-      | { kind: 'ack-validation'; reason: string }
-      | { kind: 'protocol-unsupported'; message: string }
-      | { kind: 'transport-error'; message: string };
-    // Terminal local outcomes are not StorageACK declines. Keep them separate
-    // so protocol capability, transport, and signed responder decisions remain
-    // distinct evidence in QuorumUnmetError.peerOutcomes.
-    const terminalOutcomes = new Map<string, TerminalPeerOutcome>();
-    const recordACKFailure = (peerId: string, reason: string): void => {
-      terminalOutcomes.set(peerId, { kind: 'ack-validation', reason });
-      // A later terminal ACK-validation failure is more actionable than an
-      // earlier transient decline from the same peer.
-      declines.delete(peerId);
-    };
-
-    const formatDeclineDetail = (): string => {
-      const declineDetails = [...declines.entries()]
-        .map(([peer, { code, message }]) => {
-          const tag = `${peer.slice(-8)}→${code}`;
-          return message ? `${tag} (${message})` : tag;
-        });
-      const terminalDetails = [...terminalOutcomes.entries()]
-        .flatMap(([peer, outcome]) => {
-          if (outcome.kind === 'ack-validation') return [];
-          const code = outcome.kind === 'protocol-unsupported'
-            ? 'PROTOCOL_UNSUPPORTED'
-            : 'TRANSPORT_ERROR';
-          const tag = `${peer.slice(-8)}→${code}`;
-          return [outcome.message ? `${tag} (${outcome.message})` : tag];
-        });
-      const formatted = [...declineDetails, ...terminalDetails].join('; ');
-      if (!formatted) return '';
-      return ` Declines: ${formatted}.`;
-    };
+    // A single per-peer ledger owns replacement and rendering rules for ACKs,
+    // responder declines, validation failures, unsupported protocols, and
+    // transport errors. This keeps the busy retry loop from growing one-off
+    // maps and projections for every new terminal outcome.
+    const peerStatuses = new PeerStatusLedger();
 
     // Build the per-peer outcome list `QuorumUnmetError` carries
     // through to PR5 telemetry. Snapshots the collector's bookkeeping at
@@ -799,57 +866,7 @@ export class ACKCollector {
     // its existing sanitized form, and the test
     // `sanitizes and truncates peer-controlled decline messages` pins
     // a per-error length bound that double-rendering would blow past.
-    const snapshotPeerOutcomes = (): PeerOutcome[] => {
-      const ackedById = new Map(collected.map(a => [a.peerId, a] as const));
-      return corePeers.map((peerId): PeerOutcome => {
-        const ack = ackedById.get(peerId);
-        if (ack) {
-          // PR5: an ACK from a peer with `source=member` or any of
-          // the four host-mode sources is, by construction, advertising
-          // host-mode (or the stronger "I'm a member, decrypt+apply
-          // handler is authoritative") for this CG. Peers that ACKed
-          // without a source field are pre-PR5; we leave
-          // `swmHostModeAdvertised` undefined rather than asserting
-          // either way.
-          const advertised = ack.subscriptionSource !== undefined ? true : undefined;
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            ...(advertised !== undefined ? { swmHostModeAdvertised: advertised } : {}),
-            reason: ack.subscriptionSource ? `ACK:${ack.subscriptionSource}` : 'ACK',
-          };
-        }
-        const terminal = terminalOutcomes.get(peerId);
-        if (terminal?.kind === 'ack-validation') return {
-          peerId,
-          dialOk: true,
-          protocolSupported: true,
-          reason: terminal.reason,
-        };
-        if (terminal?.kind === 'protocol-unsupported') return {
-          peerId,
-          dialOk: true,
-          protocolSupported: false,
-          reason: 'PROTOCOL_UNSUPPORTED',
-        };
-        if (terminal?.kind === 'transport-error') return {
-          peerId,
-          dialOk: false,
-          reason: 'TRANSPORT_ERROR',
-        };
-        const decline = declines.get(peerId);
-        if (decline) {
-          return {
-            peerId,
-            dialOk: true,
-            protocolSupported: true,
-            reason: `STORAGE_ACK_DECLINE:${decline.code}`,
-          };
-        }
-        return { peerId, reason: 'no_response' };
-      });
-    };
+    const snapshotPeerOutcomes = (): PeerOutcome[] => peerStatuses.snapshot(corePeers);
 
     // PR #896 review (🟡): once the round is decided — quorum reached, timed
     // out, or proven impossible — any `requestACK` loop still sleeping
@@ -915,7 +932,7 @@ export class ACKCollector {
                   result: 'decline',
                   // `declineCode` is peer-supplied and untrusted — bound it to the
                   // known enum so a peer can't explode metric cardinality with
-                  // unique codes. Full code stays on the span + declines map.
+                  // unique codes. Full code stays on the span + status ledger.
                   decline_code: boundedDeclineCodeLabel(declineCode),
                 });
               }
@@ -946,8 +963,7 @@ export class ACKCollector {
             // final `storage_ack_insufficient` error. Overwriting any
             // prior entry is intentional — operators care most about
             // why the peer ultimately could not ACK.
-            declines.set(peerId, { code, message: declineMessage });
-            terminalOutcomes.delete(peerId);
+            peerStatuses.recordStorageDecline(peerId, code, declineMessage);
 
             // Transient declines (SWM replication catching up via
             // gossip) can resolve on a retry, so re-send with backoff
@@ -1002,14 +1018,14 @@ export class ACKCollector {
 
           const recoveredAddress = this.recoverACKSigner(ack, ackDigest);
           if (!recoveredAddress) {
-            recordACKFailure(peerId, 'INVALID_SIGNATURE');
+            peerStatuses.recordACKValidation(peerId, 'INVALID_SIGNATURE');
             getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
             log(`[ACKCollector] Invalid ACK signature from ${peerId.slice(-8)}`);
             return null;
           }
 
           if (!this.merkleRootsMatch(ack.merkleRoot, merkleRoot)) {
-            recordACKFailure(peerId, 'MERKLE_ROOT_MISMATCH');
+            peerStatuses.recordACKValidation(peerId, 'MERKLE_ROOT_MISMATCH');
             getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
             log(`[ACKCollector] Merkle root mismatch from ${peerId.slice(-8)}`);
             return null;
@@ -1043,7 +1059,7 @@ export class ACKCollector {
             );
             if (!verdict.valid) {
               const reason = sanitizeDeclineField(verdict.reason ?? 'unknown', MAX_DECLINE_CODE_CHARS) || 'unknown';
-              recordACKFailure(peerId, `ACK_VERIFY:${reason}`);
+              peerStatuses.recordACKValidation(peerId, `ACK_VERIFY:${reason}`);
               getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
               log(
                 `[ACKCollector] ACK from ${peerId.slice(-8)} rejected: ${reason}` +
@@ -1067,7 +1083,7 @@ export class ACKCollector {
               { attributes: { 'dkg.identity_id': String(identityId) } },
             );
             if (!valid) {
-              recordACKFailure(peerId, 'ACK_VERIFY:key-not-registered');
+              peerStatuses.recordACKValidation(peerId, 'ACK_VERIFY:key-not-registered');
               getMetrics().ackPeerTotal.add(1, { result: 'rejected' });
               log(`[ACKCollector] Signer ${recoveredAddress.slice(0, 10)}... not registered for identity ${identityId} — rejecting ACK from ${peerId.slice(-8)}`);
               return null;
@@ -1078,8 +1094,7 @@ export class ACKCollector {
           // has produced a valid ACK on a later retry — otherwise the
           // stale decline would still appear in `storage_ack_insufficient`
           // if quorum fails for unrelated reasons.
-          declines.delete(peerId);
-          terminalOutcomes.delete(peerId);
+          peerStatuses.clear(peerId);
 
           // PR5: capture the peer-reported ACK-provenance source if
           // present. Pre-PR5 cores never set the field; treat any
@@ -1108,11 +1123,10 @@ export class ACKCollector {
           const msg = err instanceof Error ? err.message : String(err);
           if (isProtocolUnsupportedError(err)) {
             getMetrics().ackPeerTotal.add(1, { result: 'protocol_unsupported' });
-            terminalOutcomes.set(peerId, {
-              kind: 'protocol-unsupported',
-              message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
-            });
-            declines.delete(peerId);
+            peerStatuses.recordProtocolUnsupported(
+              peerId,
+              sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
+            );
             log(
               `[ACKCollector] Peer ${peerId.slice(-8)} does not negotiate ${ackProtocolId}; `
                 + 'settling it without transport retries',
@@ -1154,11 +1168,10 @@ export class ACKCollector {
           // sanitized, bounded message here makes the terminal cause ride
           // `QuorumUnmetError.peerOutcomes` (reason `TRANSPORT_ERROR`) and
           // the `Declines:` detail on the aggregated message.
-          terminalOutcomes.set(peerId, {
-            kind: 'transport-error',
-            message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
-          });
-          declines.delete(peerId);
+          peerStatuses.recordTransportError(
+            peerId,
+            sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
+          );
           log(`[ACKCollector] Failed to get ACK from ${peerId.slice(-8)} after ${MAX_RETRIES} attempts: ${msg}`);
           return null;
         }
@@ -1192,7 +1205,7 @@ export class ACKCollector {
           peerOutcomes: snapshotPeerOutcomes(),
           legacyMessage:
             `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs after ` +
-            `${peersSettled}/${corePeers.length} core peer(s) settled — quorum no longer reachable.${formatDeclineDetail()}`,
+            `${peersSettled}/${corePeers.length} core peer(s) settled — quorum no longer reachable.${peerStatuses.formatLegacyDetail()}`,
         }));
       }
     };
@@ -1211,6 +1224,7 @@ export class ACKCollector {
                 seenPeers.add(ack.peerId);
                 seenIdentityIds.add(ack.nodeIdentityId);
                 collected.push(ack);
+                peerStatuses.recordACK(ack);
                 if (collected.length >= REQUIRED_ACKS) {
                   // Eagerly mark the round settled so any peers still mid-
                   // backoff bail before their next dial (see `roundIsOver`).
@@ -1232,7 +1246,7 @@ export class ACKCollector {
             dialled: corePeers.length,
             peerOutcomes: snapshotPeerOutcomes(),
             legacyMessage:
-              `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${formatDeclineDetail()}`,
+              `storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms.${peerStatuses.formatLegacyDetail()}`,
           })),
             ACK_TIMEOUT_MS,
           ),
@@ -1253,7 +1267,7 @@ export class ACKCollector {
         peerOutcomes: snapshotPeerOutcomes(),
         legacyMessage:
           `storage_ack_insufficient: got ${collected.length}/${REQUIRED_ACKS} valid ACKs. ` +
-          `Tried ${corePeers.length} core peers.${formatDeclineDetail()}`,
+          `Tried ${corePeers.length} core peers.${peerStatuses.formatLegacyDetail()}`,
       });
     }
 
