@@ -27,6 +27,9 @@ if (
   || typeof root.FinalizedVmCompositionErrorV1 !== 'function'
   || typeof root.assertRecoverableAuthorAttestationV1 !== 'function'
   || typeof root.RecoverableAuthorAttestationErrorV1 !== 'function'
+  || typeof root.maintainRfc64SwmAuthorInventoryV1 !== 'function'
+  || typeof root.removeRfc64SwmAuthorInventoryRowV1 !== 'function'
+  || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }

@@ -800,6 +800,15 @@ function makeQueuedAgentHarness(options: {
   };
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
+  agentLike.observeRfc64ConfirmedVmV1 =
+    (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
+  agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => ({
+    status: 'dormant',
+    action: 'remove',
+    attempts: 0,
+    headObjectDigest: null,
+    error: null,
+  }));
   if (options.onChainContextGraphId !== undefined) {
     agentLike.getContextGraphOnChainId = recorder(
       async () => options.onChainContextGraphId,
