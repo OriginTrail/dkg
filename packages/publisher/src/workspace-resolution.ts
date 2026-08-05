@@ -1,9 +1,23 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
-import { assertSafeIri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  assertSafeIri,
+  createGraphKnowledgeAssetScope,
+  isSafeIri,
+  knowledgeAssetLayerGraphUri,
+  validateSubGraphName,
+} from '@origintrail-official/dkg-core';
 import type { LiftPublishSnapshotRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
-import { agentDid, generateShareMetadata } from './metadata.js';
+import {
+  agentDid,
+  generateKnowledgeAssetShareMetadata,
+  generateShareMetadata,
+  toHex,
+} from './metadata.js';
+import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -31,6 +45,265 @@ interface CompactWorkspaceOperationPublicSnapshot extends WorkspaceOperationPubl
   readonly complete: boolean;
   readonly missingRoots: string[];
   readonly staleRoots: string[];
+}
+
+export interface KnowledgeAssetOperationPublicSnapshot {
+  readonly quads: Quad[];
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly publisherPeerId?: string;
+}
+
+/** Immutable operation snapshot is absent, not corrupt. */
+export class KnowledgeAssetOperationPublicSnapshotNotFoundError extends Error {
+  readonly code = 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'KnowledgeAssetOperationPublicSnapshotNotFoundError';
+  }
+}
+
+/** A durable graph-scoped workspace head exists but is incomplete or invalid. */
+export class KnowledgeAssetWorkspaceHeadCorruptError extends Error {
+  readonly code = 'KA_WORKSPACE_HEAD_CORRUPT';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'KnowledgeAssetWorkspaceHeadCorruptError';
+  }
+}
+
+/** Durable last-applied state for one graph-scoped KA in SWM. */
+export interface KnowledgeAssetWorkspaceHead {
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly assertionGraph: string;
+  readonly publicQuadsDigest: string;
+  readonly publicTripleCount: number;
+  readonly privateMerkleRoot?: string;
+  readonly privateTripleCount: number;
+  readonly shareOperationId: string;
+  /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
+  readonly publisherPeerId: string;
+  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: string[];
+}
+
+/**
+ * Resolve the latest complete graph-scoped assertion accepted into SWM.
+ * Missing means this node has not accepted this KA yet; malformed rows fail
+ * closed so a corrupt head cannot allow an older assertion to overwrite data.
+ */
+export async function resolveKnowledgeAssetWorkspaceHead(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  kaUal: string;
+  subGraphName?: string;
+}): Promise<KnowledgeAssetWorkspaceHead | undefined> {
+  const scope = createGraphKnowledgeAssetScope(params.kaUal, 1);
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const metaGraph = params.graphManager.sharedMemoryMetaUri(
+    params.contextGraphId,
+    subGraphName,
+  );
+  const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
+  const result = await params.store.query(
+    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?accessPolicy WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
+          <${DKG}kaUal> ?kaUal ;
+          <${DKG}assertionVersion> ?assertionVersion ;
+          <${DKG}assertionGraph> ?assertionGraph ;
+          <${DKG}shareOperationId> ?shareOperationId .
+        ?operation <${DKG}shareOperationId> ?shareOperationId ;
+          <${DKG}kaUal> ?operationUal ;
+          <${DKG}assertionVersion> ?operationVersion ;
+          <${DKG}publicQuadsDigest> ?digest ;
+          <${DKG}publicQuadsCount> ?publicCount ;
+          <${DKG}privateTripleCount> ?privateCount ;
+          <${DKG}publisherPeerId> ?publisherPeerId .
+        OPTIONAL { ?operation <${DKG}privateMerkleRoot> ?privateRoot }
+        OPTIONAL { ?operation <${DKG}accessPolicy> ?accessPolicy }
+      }
+    } LIMIT 1`,
+  );
+  if (result.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${result.type}`,
+    );
+  }
+  if (result.bindings.length === 0) {
+    const existence = await params.store.query(
+      `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+      `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+    );
+    if (existence.type !== 'boolean') {
+      throw new Error(
+        `Unexpected graph-scoped SWM head existence result for ${scope.ual}: ${existence.type}`,
+      );
+    }
+    if (existence.value) {
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
+      );
+    }
+    return undefined;
+  }
+
+  const row = result.bindings[0];
+  if (parseIntegerLiteral(row?.['scopeVersion']) !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid scope version`,
+    );
+  }
+  const actualUal = row?.['kaUal'];
+  let assertionVersion: bigint;
+  let actualScope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  try {
+    assertionVersion = parsePositiveBigIntLiteral(row?.['assertionVersion']);
+    actualScope = createGraphKnowledgeAssetScope(actualUal ?? '', assertionVersion);
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid assertion identity ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (actualScope.ual !== scope.ual) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: UAL mismatch`,
+    );
+  }
+  const assertionGraph = row?.['assertionGraph'] ?? '';
+  const expectedGraph = knowledgeAssetLayerGraphUri(
+    params.contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    actualScope,
+    subGraphName,
+  );
+  if (assertionGraph !== expectedGraph) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: assertion graph mismatch`,
+    );
+  }
+  const publicQuadsDigest = stripLiteral(row?.['digest'])?.trim() ?? '';
+  const publicTripleCount = parseIntegerLiteral(row?.['publicCount']);
+  const privateTripleCount = parseIntegerLiteral(row?.['privateCount']);
+  const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
+  const shareOperationId = stripLiteral(row?.['shareOperationId'])?.trim() ?? '';
+  const publisherPeerId = stripLiteral(row?.['publisherPeerId'])?.trim() ?? '';
+  const rawAccessPolicy = stripLiteral(row?.['accessPolicy'])?.trim();
+  const accessPolicy = rawAccessPolicy === 'public'
+    || rawAccessPolicy === 'ownerOnly'
+    || rawAccessPolicy === 'allowList'
+    ? rawAccessPolicy
+    : undefined;
+  let expectedOperationSubject = '';
+  try {
+    expectedOperationSubject = shareOperationId
+      ? workspaceOperationSubject(params.contextGraphId, shareOperationId)
+      : '';
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid share operation ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  const operationUal = row?.['operationUal'] ?? '';
+  let operationVersion: bigint;
+  try {
+    operationVersion = parsePositiveBigIntLiteral(row?.['operationVersion']);
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid operation version ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (
+    !publicQuadsDigest ||
+    !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
+    !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
+    !shareOperationId ||
+    !publisherPeerId ||
+    row?.['operation'] !== expectedOperationSubject ||
+    operationUal !== actualScope.ual ||
+    operationVersion.toString() !== actualScope.assertionVersion ||
+    (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
+    (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+    || (rawAccessPolicy !== undefined && accessPolicy === undefined)
+  ) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete commitment metadata`,
+    );
+  }
+  const peersResult = await params.store.query(
+    `SELECT ?peer WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+      `<${assertSafeIri(expectedOperationSubject)}> <${DKG}allowedPeer> ?peer } }`,
+  );
+  if (peersResult.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM access query result for ${scope.ual}: ${peersResult.type}`,
+    );
+  }
+  const allowedPeers = [...new Set(peersResult.bindings
+    .map((binding) => stripLiteral(binding['peer'])?.trim())
+    .filter((peer): peer is string => Boolean(peer)))];
+  if (
+    (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid access envelope`,
+    );
+  }
+  return {
+    kaUal: actualScope.ual,
+    assertionVersion: actualScope.assertionVersion,
+    assertionGraph,
+    publicQuadsDigest,
+    publicTripleCount,
+    privateMerkleRoot,
+    privateTripleCount,
+    shareOperationId,
+    publisherPeerId,
+    ...(accessPolicy ? { accessPolicy } : {}),
+    allowedPeers,
+  };
+}
+
+/** Replace the durable current-assertion pointer after data and snapshot land. */
+export async function storeKnowledgeAssetWorkspaceHead(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  kaUal: string;
+  assertionVersion: string | number | bigint;
+  shareOperationId: string;
+  subGraphName?: string;
+}): Promise<void> {
+  const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const metaGraph = params.graphManager.sharedMemoryMetaUri(
+    params.contextGraphId,
+    subGraphName,
+  );
+  const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
+  const assertionGraph = knowledgeAssetLayerGraphUri(
+    params.contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    scope,
+    subGraphName,
+  );
+  await params.store.deleteByPattern({ graph: metaGraph, subject });
+  const rows: Quad[] = [
+    { subject, predicate: `${DKG}contentScopeVersion`, object: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), graph: metaGraph },
+    { subject, predicate: `${DKG}kaUal`, object: scope.ual, graph: metaGraph },
+    { subject, predicate: `${DKG}assertionVersion`, object: intLit(BigInt(scope.assertionVersion)), graph: metaGraph },
+    { subject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
+    { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: metaGraph },
+  ];
+  await params.store.insert(rows);
 }
 
 export async function resolveWorkspaceSelection(params: {
@@ -171,6 +444,222 @@ export async function storeWorkspaceOperationPublicQuads(params: {
 }
 
 /**
+ * Store one immutable public snapshot for one complete graph-scoped KA.
+ * Metadata and snapshot count are constant in the number of RDF subjects.
+ */
+export async function storeKnowledgeAssetOperationPublicQuads(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  shareOperationId: string;
+  kaUal: string;
+  assertionVersion: string | number | bigint;
+  quads: readonly Quad[];
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  publisherPeerId?: string;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: readonly string[];
+  agentAddress?: string;
+  subGraphName?: string;
+  timestamp?: Date;
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+}): Promise<void> {
+  const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(
+    params.contextGraphId,
+    subGraphName,
+  );
+  const operationSubject = workspaceOperationSubject(
+    params.contextGraphId,
+    params.shareOperationId,
+  );
+  const publisherPeerId = params.publisherPeerId?.trim() || 'unknown';
+  const timestamp = params.timestamp ?? new Date();
+  const normalizedQuads = params.quads.map((quad) => ({ ...quad, graph: '' }));
+  const digest = workspacePublicQuadsDigest(normalizedQuads);
+  let snapshotGraph: string | undefined;
+  if (params.publicSnapshotStore) {
+    await params.publicSnapshotStore.putSnapshot({ digest, quads: normalizedQuads });
+  } else {
+    snapshotGraph = workspaceKnowledgeAssetOperationSnapshotGraph(
+      params.contextGraphId,
+      params.shareOperationId,
+      subGraphName,
+    );
+    await params.store.dropGraph(snapshotGraph);
+    await params.store.insert(
+      normalizedQuads.map((quad) => ({ ...quad, graph: snapshotGraph! })),
+    );
+  }
+
+  await params.store.deleteByPattern({
+    graph: workspaceMetaGraph,
+    subject: operationSubject,
+  });
+  const metadata = generateKnowledgeAssetShareMetadata(
+    {
+      shareOperationId: params.shareOperationId,
+      contextGraphId: params.contextGraphId,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      publicTripleCount: normalizedQuads.length,
+      privateMerkleRoot: params.privateMerkleRoot,
+      privateTripleCount: params.privateTripleCount,
+      publisherPeerId,
+      accessPolicy: params.accessPolicy,
+      allowedPeers: params.allowedPeers,
+      agentAddress: params.agentAddress?.trim() || undefined,
+      timestamp,
+      subGraphName,
+    },
+    workspaceMetaGraph,
+  );
+  metadata.push({
+    subject: operationSubject,
+    predicate: `${DKG}publicQuadsDigest`,
+    object: lit(digest),
+    graph: workspaceMetaGraph,
+  });
+  if (snapshotGraph) {
+    metadata.push({
+      subject: operationSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+      object: snapshotGraph,
+      graph: workspaceMetaGraph,
+    });
+  }
+  await params.store.insert(metadata);
+}
+
+/** Resolve and integrity-check a complete graph-scoped KA operation snapshot. */
+export async function resolveKnowledgeAssetOperationPublicQuads(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  shareOperationId: string;
+  kaUal: string;
+  assertionVersion: string | number | bigint;
+  subGraphName?: string;
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+}): Promise<KnowledgeAssetOperationPublicSnapshot> {
+  const expectedScope = createGraphKnowledgeAssetScope(
+    params.kaUal,
+    params.assertionVersion,
+  );
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(
+    params.contextGraphId,
+    subGraphName,
+  );
+  const subject = workspaceOperationSubject(params.contextGraphId, params.shareOperationId);
+  const result = await params.store.query(
+    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?snapshotRef ?snapshotGraph ?digest ?count ?publisherPeerId WHERE {
+      GRAPH <${assertSafeIri(workspaceMetaGraph)}> {
+        <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
+          <${DKG}kaUal> ?kaUal ;
+          <${DKG}assertionVersion> ?assertionVersion ;
+          <${DKG}publicQuadsDigest> ?digest ;
+          <${DKG}publicQuadsCount> ?count .
+        OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publicSnapshotRef> ?snapshotRef }
+        OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publicSnapshotGraph> ?snapshotGraph }
+        OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publisherPeerId> ?publisherPeerId }
+      }
+    } LIMIT 1`,
+  );
+  if (result.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped public snapshot query result for share operation ` +
+      `${params.shareOperationId}: ${result.type}`,
+    );
+  }
+  if (result.bindings.length === 0) {
+    const existence = await params.store.query(
+      `ASK { GRAPH <${assertSafeIri(workspaceMetaGraph)}> { ` +
+      `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+    );
+    if (existence.type !== 'boolean') {
+      throw new Error(
+        `Unexpected graph-scoped public snapshot existence result for share operation ` +
+        `${params.shareOperationId}: ${existence.type}`,
+      );
+    }
+    if (existence.value) {
+      throw new Error(
+        `Immutable graph-scoped public snapshot metadata is corrupt for ` +
+        `share operation ${params.shareOperationId}`,
+      );
+    }
+    throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
+      `No graph-scoped public snapshot for context graph ${params.contextGraphId} ` +
+      `share operation ${params.shareOperationId}`,
+    );
+  }
+
+  const row = result.bindings[0];
+  const scopeVersion = parseIntegerLiteral(row?.['scopeVersion']);
+  const actualUal = stripLiteral(row?.['kaUal'])?.trim() ?? '';
+  const actualVersion = stripLiteral(row?.['assertionVersion'])?.trim() ?? '';
+  if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(`Share operation ${params.shareOperationId} is not graph-scoped v2`);
+  }
+  const actualScope = createGraphKnowledgeAssetScope(actualUal, actualVersion);
+  if (
+    actualScope.ual !== expectedScope.ual ||
+    actualScope.assertionVersion !== expectedScope.assertionVersion
+  ) {
+    throw new Error(
+      `Graph-scoped public snapshot identity mismatch for share operation ${params.shareOperationId}`,
+    );
+  }
+
+  const expectedDigest = stripLiteral(row?.['digest'])?.trim();
+  const expectedCount = parseIntegerLiteral(row?.['count']);
+  const snapshotGraph = row?.['snapshotGraph'];
+  const snapshotRef = stripLiteral(row?.['snapshotRef'])?.trim()
+    ?? (snapshotGraph ? undefined : expectedDigest);
+  let quads: Quad[] | null = null;
+  if (snapshotRef) {
+    if (!params.publicSnapshotStore) {
+      throw new Error(`Snapshot store is required for share operation ${params.shareOperationId}`);
+    }
+    quads = await params.publicSnapshotStore.getSnapshot(snapshotRef);
+  } else if (snapshotGraph) {
+    if (!isSafeIri(snapshotGraph)) {
+      throw new Error(
+        `Immutable graph-scoped public snapshot metadata is corrupt for ` +
+        `share operation ${params.shareOperationId}: unsafe snapshot graph`,
+      );
+    }
+    quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph);
+  }
+  if (!quads) {
+    throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
+      `Immutable graph-scoped public snapshot is missing for ` +
+      `share operation ${params.shareOperationId}`,
+    );
+  }
+  if (
+    !expectedDigest ||
+    !Number.isInteger(expectedCount) ||
+    quads.length !== expectedCount ||
+    workspacePublicQuadsDigest(quads) !== expectedDigest
+  ) {
+    throw new Error(
+      `Immutable graph-scoped public snapshot is missing or corrupt for ` +
+      `share operation ${params.shareOperationId}`,
+    );
+  }
+  return {
+    quads,
+    kaUal: actualScope.ual,
+    assertionVersion: actualScope.assertionVersion,
+    publisherPeerId: stripLiteral(row?.['publisherPeerId'])?.trim() || undefined,
+  };
+}
+
+/**
  * @internal — exported strictly for backwards compatibility with
  * external consumers that deep-imported this helper before
  * `@origintrail-official/dkg-publisher` had an `exports` map.
@@ -234,6 +723,80 @@ export async function resolveLiftWorkspaceSlice(params: {
   const request = params.request;
   const shareOperationId = request.shareOperationId;
   const subGraphName = normalizeOptionalSubGraphName(request.subGraphName);
+  if (request.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    if (request.roots.length !== 0) {
+      throw new Error('Graph-scoped Lift snapshot must not contain root entities');
+    }
+    if (
+      request.kaUal === undefined
+      || request.assertionVersion === undefined
+      || request.publicTripleCount === undefined
+      || request.privateTripleCount === undefined
+    ) {
+      throw new Error('Graph-scoped Lift snapshot is missing its KA content envelope');
+    }
+    if (
+      !Number.isSafeInteger(request.publicTripleCount)
+      || request.publicTripleCount < 0
+      || !Number.isSafeInteger(request.privateTripleCount)
+      || request.privateTripleCount < 0
+      || (request.publicTripleCount === 0 && request.privateTripleCount === 0)
+    ) {
+      throw new Error('Graph-scoped Lift snapshot has invalid public/private triple counts');
+    }
+    const scope = createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
+    const publicSnapshot = await resolveKnowledgeAssetOperationPublicQuads({
+      store: params.store,
+      graphManager: params.graphManager,
+      contextGraphId: request.contextGraphId,
+      shareOperationId,
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      subGraphName,
+      publicSnapshotStore: params.publicSnapshotStore,
+    });
+    if (publicSnapshot.quads.length !== request.publicTripleCount) {
+      throw new Error(
+        `Graph-scoped Lift public triple count mismatch for ${scope.ual}: ` +
+          `snapshot=${publicSnapshot.quads.length}, request=${request.publicTripleCount}`,
+      );
+    }
+    const privateStore = new PrivateContentStore(params.store, params.graphManager);
+    const privateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+      request.contextGraphId,
+      scope,
+      subGraphName,
+    );
+    if (privateQuads.length !== request.privateTripleCount) {
+      throw new Error(
+        `Graph-scoped Lift private triple count mismatch for ${scope.ual}: ` +
+          `store=${privateQuads.length}, request=${request.privateTripleCount}`,
+      );
+    }
+    const privateRoot = computePrivateRoot(privateQuads);
+    const actualPrivateRoot = privateRoot ? `0x${toHex(privateRoot)}`.toLowerCase() : undefined;
+    const expectedPrivateRoot = request.privateMerkleRoot?.toLowerCase();
+    if (actualPrivateRoot !== expectedPrivateRoot) {
+      throw new Error(
+        `Graph-scoped Lift private Merkle commitment mismatch for ${scope.ual}`,
+      );
+    }
+    const publishContextGraphId = await resolveOnChainContextGraphId({
+      store: params.store,
+      contextGraphId: request.contextGraphId,
+    });
+    return {
+      quads: publicSnapshot.quads,
+      privateQuads: privateQuads.length > 0 ? privateQuads : undefined,
+      publisherPeerId: publicSnapshot.publisherPeerId,
+      accessPolicy: request.accessPolicy,
+      allowedPeers: request.allowedPeers ? [...request.allowedPeers] : undefined,
+      publishContextGraphId,
+    };
+  }
+  // Raw Lift jobs retain their existing root-scoped staging contract until
+  // the dedicated mutation-cutover PR. Named KA jobs are guarded at enqueue
+  // and therefore never reach this compatibility branch.
   const requestedRoots = normalizeRoots(request.roots);
   if (requestedRoots.length === 0) {
     throw new Error(`No valid Lift shared-memory roots provided for context graph ${request.contextGraphId}`);
@@ -277,16 +840,19 @@ export async function resolveLiftWorkspaceSlice(params: {
   const privateQuads = (
     await Promise.all(
       requestedRoots.map((root) =>
-        privateStore.getPrivateTriplesForOperation(request.contextGraphId, shareOperationId, root, subGraphName),
+        privateStore.getPrivateTriplesForOperation(
+          request.contextGraphId,
+          shareOperationId,
+          root,
+          subGraphName,
+        ),
       ),
     )
   ).flat();
-
   const publishContextGraphId = await resolveOnChainContextGraphId({
     store: params.store,
     contextGraphId: request.contextGraphId,
   });
-
   return {
     quads: publicSnapshot.quads,
     privateQuads: privateQuads.length > 0 ? privateQuads : undefined,
@@ -566,6 +1132,13 @@ function workspaceOperationSubject(contextGraphId: string, shareOperationId: str
   return subject;
 }
 
+function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
+  const scope = createGraphKnowledgeAssetScope(kaUal, 1);
+  const subject = `${scope.ual}#dkg-swm-head`;
+  assertSafeIri(subject);
+  return subject;
+}
+
 function workspaceOperationPublicSliceSubject(
   contextGraphId: string,
   shareOperationId: string,
@@ -588,6 +1161,18 @@ function workspaceOperationPublicSnapshotGraph(
   const parts = [contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity]
     .map((part) => encodeURIComponent(part));
   const graph = `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/${parts[3]}/_shared_memory`;
+  assertSafeIri(graph);
+  return graph;
+}
+
+function workspaceKnowledgeAssetOperationSnapshotGraph(
+  contextGraphId: string,
+  shareOperationId: string,
+  subGraphName?: string,
+): string {
+  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId]
+    .map((part) => encodeURIComponent(part));
+  const graph = `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/ka`;
   assertSafeIri(graph);
   return graph;
 }
@@ -633,7 +1218,7 @@ function lit(value: string): string {
   return JSON.stringify(value);
 }
 
-function intLit(value: number): string {
+function intLit(value: number | bigint): string {
   return `"${value}"^^<${XSD}integer>`;
 }
 
@@ -664,6 +1249,16 @@ function stripLiteral(value: string | undefined): string | undefined {
 function parseIntegerLiteral(value: string | undefined): number {
   const parsed = Number(stripLiteral(value));
   return Number.isInteger(parsed) ? parsed : NaN;
+}
+
+function parsePositiveBigIntLiteral(value: string | undefined): bigint {
+  try {
+    const parsed = BigInt(stripLiteral(value) ?? '');
+    if (parsed < 1n) throw new Error('non-positive');
+    return parsed;
+  } catch {
+    throw new Error(`Invalid positive integer literal: ${value ?? '(missing)'}`);
+  }
 }
 
 function isPresent<T>(value: T | undefined): value is T {

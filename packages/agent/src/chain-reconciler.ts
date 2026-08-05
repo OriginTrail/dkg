@@ -48,8 +48,38 @@ import {
 export type OrdinalOutcome =
   | { status: 'reconciled'; blockNumber: number }
   | { status: 'already'; blockNumber: number }
-  | { status: 'pending' }
+  | { status: 'pending'; recovery?: OrdinalRecoveryTarget }
   | { status: 'skip' };
+
+export interface OrdinalRecoveryTarget {
+  localCgId: string;
+  onChainCgId: string;
+  ordinal: number;
+  ual: string;
+  merkleRoot: string;
+  kaId: string;
+  reason: 'no-swm' | 'verified-vm-metadata-pending';
+}
+
+export interface PendingOrdinalRecoveryResult {
+  /** Revalidated outcomes for ordinals attempted during this recovery pass. */
+  outcomes: ReadonlyMap<number, OrdinalOutcome>;
+  /** Ordinals whose exact-fetch attempts consumed this pass's recovery budget. */
+  attemptedOrdinals: readonly number[];
+  /**
+   * First target remaining in the ordered recovery queue. This survives a
+   * cooldown-only pass so the next network-eligible pass resumes fairly
+   * instead of snapping back to the watermark.
+   */
+  continuationOrdinal: number | undefined;
+  /**
+   * True only when recovery intentionally skipped networking because its
+   * per-CG cooldown is active. This preserves the continuation without
+   * scheduling an immediate retry; ordinary no-eligible-peer outcomes keep
+   * the fair scan moving through unvisited ordinals.
+   */
+  cooldownOnly?: boolean;
+}
 
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
@@ -74,6 +104,26 @@ export interface ChainReconcilerDeps {
     ordinal: number,
     headBlock: number | undefined,
   ) => Promise<OrdinalOutcome>;
+  /** Maximum ordinals attempted before yielding the global VM worker. */
+  maxOrdinalsPerPass?: number;
+  /** Maximum ordinal reconciliations allowed to run concurrently in one pass. */
+  maxOrdinalConcurrency?: number;
+  /**
+   * Fetch one exact batch containing only locally-missing KAs, then re-run
+   * local verification for those ordinals. Undefined preserves scan-only
+   * behavior for callers/tests that do not provide network recovery.
+   */
+  recoverPendingOrdinals?: (
+    localCgId: string,
+    onChainCgId: bigint,
+    targets: readonly OrdinalRecoveryTarget[],
+    headBlock: number | undefined,
+  ) => Promise<PendingOrdinalRecoveryResult>;
+  /**
+   * Revalidate the local-CG -> on-chain-CG binding between ordinals. An active
+   * pass must stop when discovery repairs a stale/reused chain id.
+   */
+  isTargetCurrent?: (localCgId: string, onChainCgId: bigint) => boolean | Promise<boolean>;
   /** Persist the watermark. Called ONLY when it actually moves. */
   persistWatermark: (localCgId: string, watermark: number) => void;
   /** Confirmation depth (blocks) before a completed ordinal advances the watermark. */
@@ -86,13 +136,19 @@ export interface ReconcileResult {
   watermark: number;
   reconciled: number;
   pending: number;
+  processed: number;
+  /** True when another bounded slice should be queued immediately. */
+  hasMore: boolean;
+  /** True when this pass stopped because its captured chain binding changed. */
+  staleTarget: boolean;
 }
 
 /**
- * One sweep pass for a single CG: reconcile every ordinal in `[watermark, head)`
- * (skipping ones already completed and held in the cursor), then advance the
- * contiguous, confirmation-depth-buried watermark. Persists the watermark only
- * if it moved. Mutates `state` in place (the agent owns one `CursorState` per CG).
+ * One bounded sweep slice for a single CG: reconcile up to
+ * `maxOrdinalsPerPass` ordinals in `[watermark, head)` (skipping ones already
+ * completed and held in the cursor), then advance the contiguous,
+ * confirmation-depth-buried watermark. Persists the watermark only if it
+ * moved. Mutates `state` in place (the agent owns one `CursorState` per CG).
  */
 export async function reconcileContextGraph(
   deps: ChainReconcilerDeps,
@@ -108,7 +164,16 @@ export async function reconcileContextGraph(
   // work. A watermark ahead of the observed head is surfaced by the caller as
   // an evidence mismatch, but is equally non-actionable in this pass.
   if (before >= head) {
-    return { head, watermark: before, reconciled: 0, pending: 0 };
+    state.scanOrdinal = before;
+    return {
+      head,
+      watermark: before,
+      reconciled: 0,
+      pending: 0,
+      processed: 0,
+      hasMore: false,
+      staleTarget: false,
+    };
   }
 
   // Keep transient head-fetch failures distinct from truly head-less chains.
@@ -130,13 +195,109 @@ export async function reconcileContextGraph(
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
   let reconciled = 0;
-  let pending = 0;
-  const ordinals = ordinalsToReconcile(state, head);
+  let processed = 0;
+  let staleTarget = false;
+  let recoveryContinuationOrdinal: number | undefined;
+  let recoveryAttempted = false;
+  let recoveryCooldownOnly = false;
+  const outstandingBefore = ordinalsToReconcile(state, head);
+  const configuredLimit = deps.maxOrdinalsPerPass;
+  const passLimit = configuredLimit === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, Math.floor(configuredLimit));
+  const scanStart = Math.max(state.watermark, state.scanOrdinal);
+  let candidates = outstandingBefore.filter((ordinal) => ordinal >= scanStart);
+  if (candidates.length === 0 && outstandingBefore.length > 0) {
+    // A prior slice reached the observed head. A later periodic pass starts a
+    // fresh cycle from the first still-missing contiguous gap.
+    state.scanOrdinal = state.watermark;
+    candidates = outstandingBefore;
+  }
+  const ordinals = candidates.slice(0, passLimit);
+  const hasUnvisitedCandidates = candidates.length > ordinals.length;
   if (headUnavailable) {
-    pending = ordinals.length;
+    state.scanOrdinal = state.watermark;
   } else {
-    for (const ordinal of ordinals) {
-      const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+    const configuredConcurrency = deps.maxOrdinalConcurrency;
+    const ordinalConcurrency = configuredConcurrency === undefined
+      ? 1
+      : Math.max(1, Math.floor(configuredConcurrency));
+    const outcomes = new Map<number, OrdinalOutcome>();
+    let nextOrdinalIndex = 0;
+    let workerFailed = false;
+    let workerError: unknown;
+
+    const runOrdinalWorker = async (): Promise<void> => {
+      // Contain failures instead of racing them: a thrown ordinal must not
+      // leave sibling workers running past this pass's lifetime (their network
+      // and store side effects would overlap the caller's retry). The first
+      // error stops dispatch across all workers, every in-flight ordinal is
+      // drained, and only then does the pass reject with that error.
+      try {
+        while (!staleTarget && !workerFailed) {
+          const index = nextOrdinalIndex;
+          nextOrdinalIndex += 1;
+          if (index >= ordinals.length) return;
+
+          if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+            staleTarget = true;
+            return;
+          }
+          const ordinal = ordinals[index]!;
+          const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+          processed += 1;
+          if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+            staleTarget = true;
+            return;
+          }
+          outcomes.set(ordinal, outcome);
+        }
+      } catch (error) {
+        if (!workerFailed) {
+          workerFailed = true;
+          workerError = error;
+        }
+      }
+    };
+
+    const workerCount = Math.min(ordinalConcurrency, ordinals.length);
+    await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
+    if (workerFailed) throw workerError;
+
+    const recoveryTargets = ordinals
+      .map((ordinal) => outcomes.get(ordinal))
+      .filter((outcome): outcome is Extract<OrdinalOutcome, { status: 'pending' }> =>
+        outcome?.status === 'pending' && outcome.recovery !== undefined,
+      )
+      .map((outcome) => outcome.recovery!);
+    if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
+      const recovery = await deps.recoverPendingOrdinals(
+        localCgId,
+        onChainCgId,
+        recoveryTargets,
+        headBlock,
+      );
+      // Recovery is the longest await in the pass; the binding can be repaired
+      // while it runs. Outcomes recovered under the old binding must never
+      // advance or persist cursor state for the rebound CG, so re-check before
+      // merging and treat staleness exactly like staleness during ordinal work.
+      if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
+        staleTarget = true;
+      } else {
+        for (const [ordinal, outcome] of recovery.outcomes) outcomes.set(ordinal, outcome);
+        recoveryContinuationOrdinal = recovery.continuationOrdinal;
+        recoveryAttempted = recovery.attemptedOrdinals.length > 0;
+        recoveryCooldownOnly = recovery.cooldownOnly === true;
+      }
+    }
+
+    // Cursor state is deliberately updated in ordinal order even though chain
+    // reads, store verification, and independent per-KA materializations ran in
+    // parallel. This preserves the contiguous-watermark contract and makes the
+    // observable result deterministic.
+    if (!staleTarget) for (const ordinal of ordinals) {
+      const outcome = outcomes.get(ordinal);
+      if (!outcome) continue;
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
         // With a known head, apply the reorg-depth gate; otherwise (no chain
@@ -148,20 +309,49 @@ export async function reconcileContextGraph(
           headBlock ?? outcome.blockNumber,
           headBlock !== undefined ? deps.confirmationDepth : 0,
         );
-      } else {
-        pending += 1;
       }
     }
   }
 
-  if (state.watermark !== before) {
-    deps.persistWatermark(localCgId, state.watermark);
-    deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
-  } else if (reconciled > 0 || pending > 0) {
-    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
+  if (staleTarget || headUnavailable) {
+    state.scanOrdinal = state.watermark;
+  } else if (
+    recoveryContinuationOrdinal !== undefined
+    && (recoveryAttempted || recoveryCooldownOnly || !hasUnvisitedCandidates)
+  ) {
+    state.scanOrdinal = Math.max(state.watermark, recoveryContinuationOrdinal);
+  } else if (!hasUnvisitedCandidates) {
+    state.scanOrdinal = state.watermark;
+  } else if (ordinals.length > 0) {
+    state.scanOrdinal = ordinals[ordinals.length - 1]! + 1;
   }
 
-  return { head, watermark: state.watermark, reconciled, pending };
+  const pending = ordinalsToReconcile(state, head).length;
+  const hasMore = !headUnavailable
+    && !staleTarget
+    && !recoveryCooldownOnly
+    && (
+      recoveryAttempted
+        ? recoveryContinuationOrdinal !== undefined || hasUnvisitedCandidates
+        : hasUnvisitedCandidates
+    );
+
+  if (state.watermark !== before) {
+    deps.persistWatermark(localCgId, state.watermark);
+    deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, processed=${processed}, reconciled=${reconciled}, pending=${pending})`);
+  } else if (reconciled > 0 || pending > 0) {
+    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, processed=${processed}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
+  }
+
+  return {
+    head,
+    watermark: state.watermark,
+    reconciled,
+    pending,
+    processed,
+    hasMore,
+    staleTarget,
+  };
 }
 
 /**

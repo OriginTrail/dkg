@@ -186,7 +186,9 @@ export interface OnChainPublishResult {
    * GH#842 last-writer-wins guard so a publish and a same-block update don't
    * compare equal (which would let a late stale publish-promotion clobber the
    * already-applied update). Optional for back-compat with adapters that
-   * don't yet populate it; callers MUST fall back to `0`.
+   * don't yet populate it. Best-effort callers may fall back to `0`; recovery
+   * paths that persist trusted provenance MUST defer or independently resolve
+   * the receipt index rather than inventing ordering evidence.
    */
   txIndex?: number;
   blockTimestamp: number;
@@ -223,6 +225,42 @@ export interface OnChainPublishResult {
     drawnFromEpoch: bigint;
     drawnFromTopUp: bigint;
   };
+}
+
+/**
+ * Canonical receipt evidence required by durable finalization recovery.
+ *
+ * This is deliberately separate from {@link OnChainPublishResult}: legacy
+ * publish consumers may tolerate incomplete ordering metadata, while recovery
+ * must never persist or materialize provenance without an exact block hash and
+ * transaction index.
+ */
+export interface CanonicalFinalizationReceipt {
+  txHash: string;
+  blockNumber: number;
+  blockHash: string;
+  txIndex: number;
+  merkleRoot: Uint8Array;
+  publisherAddress: string;
+  authorAddress?: string;
+  batchId: bigint;
+  kaId: bigint;
+  startKAId: bigint;
+  endKAId: bigint;
+  knowledgeAssetsContract?: string;
+}
+
+export type CanonicalFinalizationReceiptResolution =
+  | { status: 'confirmed'; receipt: CanonicalFinalizationReceipt }
+  | { status: 'pending' }
+  | { status: 'reorged' }
+  | { status: 'rejected' }
+  | { status: 'not-found' };
+
+export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
+  /** Persisted block identity supplied during replay canonicality checks. */
+  expectedBlockHash?: string;
+  expectedBlockNumber?: number;
 }
 
 export interface UpdateKAParams {
@@ -271,6 +309,8 @@ export interface KAUpdateVerification {
   blockNumber?: number;
   /** The transaction index within the block (for deterministic same-block ordering). */
   txIndex?: number;
+  /** Chain-truth Merkle-root array length after this update. */
+  merkleRootCount?: bigint;
 }
 
 export interface ChainEvent {
@@ -909,6 +949,11 @@ export interface OperationalWalletRegistrationResult {
   taken: Array<{ address: string; identityId: bigint }>;
 }
 
+/** Optional cancellation boundary for caller-owned, read-only chain work. */
+export interface ChainReadOptions {
+  signal?: AbortSignal;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -965,7 +1010,20 @@ export interface ChainAdapter {
    * Recover a publish transaction by txHash and reconstruct its on-chain publish result.
    * Returns null when the tx is absent, pending, failed, or not a recognized publish tx.
    */
-  resolvePublishByTxHash?(txHash: string): Promise<OnChainPublishResult | null>;
+  resolvePublishByTxHash?(
+    txHash: string,
+    options?: ChainReadOptions,
+  ): Promise<OnChainPublishResult | null>;
+
+  /**
+   * Recovery-only receipt capability with mandatory canonical ordering.
+   * Adapters that omit it are explicitly unsupported for durable graph-scoped
+   * finalization recovery; callers must not fabricate missing fields.
+   */
+  resolveCanonicalFinalizationReceipt?(
+    txHash: string,
+    options?: CanonicalFinalizationReceiptReadOptions,
+  ): Promise<CanonicalFinalizationReceiptResolution>;
 
   /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).
@@ -980,7 +1038,12 @@ export interface ChainAdapter {
    * root and block number so the caller can bind the gossip payload to
    * on-chain state.
    */
-  verifyKAUpdate?(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification>;
+  verifyKAUpdate?(
+    txHash: string,
+    batchId: bigint,
+    publisherAddress: string,
+    options?: ChainReadOptions,
+  ): Promise<KAUpdateVerification>;
 
   /**
    * Verify that a publisher address owns the UAL range [startKAId, endKAId] on-chain.
@@ -1240,6 +1303,17 @@ export interface ChainAdapter {
    */
   hasContractCode?(address: string): Promise<boolean>;
 
+  /**
+   * Verify an EIP-1271 signature for a contract-backed author. Update
+   * preparation uses this before durable staging; omitting the capability for
+   * an address with code makes that preparation fail closed.
+   */
+  verifyContractSignature?(
+    address: string,
+    digest: string,
+    signature: string,
+  ): Promise<boolean>;
+
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
@@ -1274,6 +1348,13 @@ export interface ChainAdapter {
 
   /** Deployed `DKGKnowledgeAssets` (or legacy `KnowledgeCollectionStorage`) address. */
   getDKGKnowledgeAssetsAddress?(): Promise<string>;
+
+  /**
+   * Live ERC-721 owner of a V10 Knowledge Asset. Update preparation requires
+   * this capability before it may replace durable local SWM/private staging;
+   * adapters that cannot resolve ownership must fail that preparation closed.
+   */
+  getKnowledgeAssetOwner?(kaId: bigint): Promise<string>;
 
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;
@@ -1530,7 +1611,10 @@ export interface ChainAdapter {
    * deployed on this Hub. Optional so non-V10 / no-chain adapters can
    * stub the prover surface.
    */
-  getLatestMerkleRoot?(kaId: bigint): Promise<Uint8Array>;
+  getLatestMerkleRoot?(kaId: bigint, options?: ChainReadOptions): Promise<Uint8Array>;
+
+  /** Number of committed roots for the KA (initial publish is version one). */
+  getMerkleRootCount?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
@@ -1580,7 +1664,7 @@ export interface ChainAdapter {
    * this as the compatibility path for update adapters whose successful
    * `TxResult` cannot directly include `publisherAddress`.
    */
-  getLatestMerkleRootPublisher?(kaId: bigint): Promise<string>;
+  getLatestMerkleRootPublisher?(kaId: bigint, options?: ChainReadOptions): Promise<string>;
 
   /**
    * Verified author identity for the latest merkle-root entry of `kaId`.
@@ -1612,7 +1696,7 @@ export interface ChainAdapter {
    * default-zero mapping). Callers MUST treat zero as "not found" and
    * skip the period rather than blindly querying CG `_meta:0`.
    */
-  getKAContextGraphId?(kaId: bigint): Promise<bigint>;
+  getKAContextGraphId?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
    * Number of Knowledge Assets registered to `contextGraphId`, sourced from
@@ -1752,7 +1836,10 @@ export interface ChainAdapter {
    * value is write-once at create time (no setter exists), so stale
    * entries can't occur.
    */
-  getContextGraphNameHash?(contextGraphId: bigint): Promise<string | null>;
+  getContextGraphNameHash?(
+    contextGraphId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<string | null>;
 }
 
 // ----- Backward-compat deprecated aliases -----

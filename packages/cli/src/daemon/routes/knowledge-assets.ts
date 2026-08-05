@@ -62,6 +62,7 @@ import {
   handleKaShareJobsList,
   handleKaShareJobStatus,
   handleKaShareJobCancel,
+  handleKaShareJobClear,
   handleKaShareJobRecover,
 } from "./knowledge-assets-async-share.js";
 import {
@@ -74,14 +75,28 @@ import {
 } from "./shared-assertion-helpers.js";
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import {
+  validateAssertionName,
+  contextGraphAssertionUri,
+  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
+} from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
   parseHttpFinalizedPublishOptions,
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
+import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 
 const PREFIX = "/api/knowledge-assets";
+type FinalizedPublishResult = Awaited<
+  ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
+> & {
+  /** Backward-compatible response aliases still accepted by the HTTP route. */
+  authorAddress?: string;
+  kas?: unknown[];
+};
 
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
@@ -148,6 +163,50 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "preSignedAuthorAttestation",
   "schemeVersion",
 ] as const;
+
+/**
+ * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
+ * by both `vm/publish` and `vm/publish-async` so the `{ code, error, candidates }`
+ * response shape cannot drift between the two routes. Returns `true` (and writes
+ * the response) when it handled the error, `false` otherwise.
+ */
+function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== AMBIGUOUS_ASSERTION_AUTHOR_CODE) return false;
+  jsonResponse(res, 409, {
+    code: AMBIGUOUS_ASSERTION_AUTHOR_CODE,
+    error: e.message ?? String(e),
+    candidates: e.candidates ?? [],
+  });
+  return true;
+}
+
+/**
+ * GH#1786 — author-selection outcomes that are permanent, caller-actionable
+ * state rather than server faults. Unmapped they would fall through to a generic
+ * 500 on both publish lanes; they are answered here, and are matched BEFORE the
+ * precondition / message-keyed branches so a future reword of either message
+ * cannot be captured by those looser predicates.
+ *
+ *  - `ASSERTION_AUTHOR_NOT_RESIDENT`: the selected author has no finalized
+ *    assertion at this coordinate. Echoes the resident `candidates` so the client
+ *    can retry without a second round-trip.
+ *  - `PUBLISH_AUTHOR_NOT_CUSTODIAL`: the selected author's KA needs an UPDATE,
+ *    which the node cannot re-sign without that author's custodial key.
+ */
+function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolean {
+  if (
+    e?.code !== ASSERTION_AUTHOR_NOT_RESIDENT_CODE
+    && e?.code !== PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
+  ) {
+    return false;
+  }
+  jsonResponse(res, 409, {
+    code: e.code,
+    error: e.message ?? String(e),
+    ...(e.candidates ? { candidates: e.candidates } : {}),
+  });
+  return true;
+}
 
 /**
  * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
@@ -244,11 +303,25 @@ function classifyKaIdentifier(
 ): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
   const includeCompact = opts.includeCompact ?? true;
   if (seg.startsWith("did:dkg:")) {
-    // The kaId is the last `/`-delimited segment of the UAL.
+    // Rootless V2 uses the author-scoped identity
+    //   did:dkg:<chain>/<author>/<per-author-number>
+    // while the legacy/canonical on-chain form carries an already-packed id
+    // in the last segment. Reconstruct the packed id for the rootless form so
+    // resolveByKaId can recover the lifecycle author after a cross-node sync.
+    // A value larger than the 96-bit per-author range is already packed and
+    // must remain byte-for-byte unchanged.
     const idPart = seg.slice(seg.lastIndexOf("/") + 1);
     if (/^[0-9]+$/.test(idPart)) {
       try {
-        return { kind: "kaId", kaId: BigInt(idPart) };
+        const numericId = BigInt(idPart);
+        if (numericId <= ((1n << 96n) - 1n)) {
+          const withoutId = seg.slice(0, seg.lastIndexOf("/"));
+          const authorPart = withoutId.slice(withoutId.lastIndexOf("/") + 1);
+          if (/^0x[0-9a-fA-F]{40}$/.test(authorPart)) {
+            return { kind: "kaId", kaId: (BigInt(authorPart) << 96n) | numericId };
+          }
+        }
+        return { kind: "kaId", kaId: numericId };
       } catch {
         /* fall through to name */
       }
@@ -316,12 +389,18 @@ export function resolveFinalizeOptions(
     schemeVersion,
     layer,
   } = raw;
-  // #1116: optional `layer` selects WHERE the content to seal lives. "wm"
-  // (default) seals the Working-Memory draft; "swm" seals content already
-  // shared to SWM (reconstructs a transient WM draft from SWM, then finalizes)
-  // — mirrors the body-field `layer` precedent on pull-from.
-  if (layer != null && layer !== "wm" && layer !== "swm") {
-    jsonResponse(res, 400, { error: 'finalize "layer" must be "wm" or "swm" when supplied' });
+  // Rootless KAs are sealed in WM and shared atomically. Retain a deliberate,
+  // stable response for older clients that still send `layer:"swm"`, while
+  // rejecting the request before any legacy SWM read or mutation.
+  if (layer === "swm") {
+    jsonResponse(res, 409, {
+      code: "LEGACY_KA_READ_ONLY",
+      error: "Legacy root-scoped Knowledge Assets are read-only",
+    });
+    return null;
+  }
+  if (layer != null && layer !== "wm") {
+    jsonResponse(res, 400, { error: 'finalize "layer" must be "wm" when supplied' });
     return null;
   }
   if (authorAgentAddress != null && preSignedAuthorAttestation != null) {
@@ -383,7 +462,6 @@ export function resolveFinalizeOptions(
     ...(typeof effectiveAuthorAgentAddress === "string" ? { authorAgentAddress: effectiveAuthorAgentAddress } : {}),
     ...(resolvedPreSignedAttestation ? { preSignedAuthorAttestation: resolvedPreSignedAttestation } : {}),
     ...(schemeVersion != null ? { schemeVersion } : {}),
-    ...(layer === "swm" ? { layer } : {}),
   };
 }
 
@@ -406,6 +484,16 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
 
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
   return agentAddress ? { agentAddress } : {};
+}
+
+/**
+ * GH#1778 — the VM-publish caller hint. The token holder is the CALLER, not
+ * necessarily the KA author, so it is passed as `callerAgentAddress` (a
+ * resolution hint), never as `agentAddress` (an authoritative author selector).
+ * Centralised so both publish routes construct the same option.
+ */
+function publishCallerHintLane(agentAddress?: string): { callerAgentAddress?: string } {
+  return agentAddress ? { callerAgentAddress: agentAddress } : {};
 }
 
 function resolveBatchRejectionReporterIdentity(
@@ -551,6 +639,7 @@ function resolveInlineVmPublishOptions(
   source: Record<string, unknown>,
 ): NormalizedFinalizedPublishOptions | null {
   if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
+  if (!rejectSelectedAuthorOnCreate(ctx, source)) return null;
   return resolveFinalizedPublishOptions(ctx, source);
 }
 
@@ -562,8 +651,67 @@ function resolveStandaloneVmPublishOptions(
   const raw = source.options;
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     if (!validateFinalizedAssertionPublishShape(raw as Record<string, unknown>, ctx.res)) return null;
+    // GH#1786 — the author selector is a TOP-LEVEL field. `parseHttpFinalizedPublishOptions`
+    // ignores unknown keys, so a nested one would be silently dropped and the publish would
+    // resolve the author as if nothing was selected — spending real TRAC/gas on the wrong
+    // author. Fail closed instead of no-op, matching this file's both-positions convention.
+    if ((raw as Record<string, unknown>)[SELECTED_AUTHOR_FIELD] !== undefined) {
+      jsonResponse(ctx.res, 400, {
+        error:
+          `"${SELECTED_AUTHOR_FIELD}" must be supplied at the top level of the request body, not inside "options".`,
+      });
+      return null;
+    }
   }
   return resolveFinalizedPublishOptions(ctx, raw);
+}
+
+const SELECTED_AUTHOR_FIELD = "selectedAuthorAgentAddress";
+
+/**
+ * GH#1786 — read + validate the resident-author selector. Distinct from the
+ * rejected `authorAgentAddress` (which would OVERRIDE authorship — the seal
+ * already encodes the author): this only SELECTS among authors who already have
+ * a finalized assertion at this coordinate, so a client can act on a
+ * 409 `AMBIGUOUS_ASSERTION_AUTHOR`. Returns `{ ok: false }` after having written
+ * a 400 (caller must return).
+ */
+function resolveSelectedAuthorAgentAddress(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+): { ok: true; value?: string } | { ok: false } {
+  const raw = source[SELECTED_AUTHOR_FIELD];
+  // Only `undefined` counts as absent. A PRESENT `null` (a common client
+  // serialization of "nothing selected") must fail closed like any other malformed
+  // value — treating it as absent would fall back to normal author resolution and
+  // could publish a different author with 200 instead of a request-shape error.
+  if (raw === undefined) return { ok: true };
+  if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(raw)) {
+    jsonResponse(ctx.res, 400, {
+      error: `"${SELECTED_AUTHOR_FIELD}" must be a 0x-prefixed 20-byte EVM address`,
+    });
+    return { ok: false };
+  }
+  return { ok: true, value: raw };
+}
+
+/**
+ * GH#1786 — the create route publishes the KA it just created, whose author is
+ * fixed by the create itself, so selecting a foreign resident author there is
+ * contradictory rather than merely a no-op. Rejected in BOTH positions because
+ * the create handler reads only named top-level keys and would otherwise never
+ * see it.
+ */
+function rejectSelectedAuthorOnCreate(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+): boolean {
+  if (source[SELECTED_AUTHOR_FIELD] === undefined) return true;
+  jsonResponse(ctx.res, 400, {
+    error:
+      `"${SELECTED_AUTHOR_FIELD}" is not accepted when creating a knowledge asset — the created assertion's author is the publish author. Use POST /api/knowledge-assets/:name/vm/publish to select among resident authors.`,
+  });
+  return false;
 }
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
@@ -613,6 +761,21 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       );
       if (jobId === null) return;
       return handleKaShareJobRecover(ctx, jobId);
+    }
+    // POST /api/knowledge-assets/swm/share-jobs/:jobId/clear — #1837 atomic terminal
+    // record removal (idempotent). DISTINCT from the DELETE cancellation below (which
+    // rewrites a queued job to failed+cancelled and RETAINS the row).
+    if (
+      method === "POST" &&
+      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
+      path.endsWith("/clear")
+    ) {
+      const jobId = decodePromoteJobId(
+        path.slice(`${SHARE_JOBS_PREFIX}/`.length, -"/clear".length),
+        res,
+      );
+      if (jobId === null) return;
+      return handleKaShareJobClear(ctx, jobId);
     }
     // GET /api/knowledge-assets/swm/share-jobs/:jobId — status (#3)
     if (
@@ -817,6 +980,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         error: '"authorAgentAddress", "preSignedAuthorAttestation", and "schemeVersion" require non-empty "quads" with finalize !== false',
       });
     }
+    // GH#1786 — the create body's top level is not otherwise inspected for this field
+    // (only named keys are destructured), so without this a top-level selector here
+    // would be silently ignored while the KA published under the created author.
+    if (!rejectSelectedAuthorOnCreate(ctx, parsed)) return;
     const finalizeOptions = shouldFinalize
       ? resolveFinalizeOptions(
           { subGraphName, authorAgentAddress, preSignedAuthorAttestation, schemeVersion },
@@ -913,7 +1080,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       if (alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null)) {
         try {
-          const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
+          const pub: FinalizedPublishResult = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             subGraphName,
             ...alsoPublishVmOptions,
             ...atomicAuthorLane,
@@ -921,6 +1088,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
+          const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
+          if (storageAckPeerIds.length > 0) {
+            result.storageAckPeerIds = storageAckPeerIds;
+          }
           if (pub?.onChainResult?.convictionCostCovered) {
             result.convictionCostCovered = pub.onChainResult.convictionCostCovered;
           }
@@ -1155,26 +1326,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           finalizeOptions,
           writePreflightCallerAgentAddress,
         );
-        let seal;
-        try {
-          seal = await agent.assertion.finalize(contextGraphId, name, {
-            ...finalizeOptions,
-            ...finalizeStorageLane,
-          });
-        } catch (e: any) {
-          // #1116 (review A1): a finalize(layer:"swm") on an asset that was only
-          // SUBSET-shared is rejected — subset shares are SWM-only, not
-          // publishable. Map it to a 409 (parity with the swm/share
-          // UNSEALED_SHARE_BLOCKED mapping) carrying the recovery hint in the
-          // message; everything else propagates to the outer handler unchanged.
-          if (e?.code === "SWM_SUBSET_NOT_SEALABLE") {
-            return jsonResponse(res, 409, { code: "SWM_SUBSET_NOT_SEALABLE", error: e.message });
-          }
-          throw e;
-        }
-        // #1116: a layer:"swm" finalize touches SWM (it reconstructs a WM draft
-        // from SWM, then seals), so reflect both layers in the change event.
-        emitMemoryGraphChanged?.({ contextGraphId, layers: finalizeOptions.layer === "swm" ? ["wm", "swm"] : ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
+        const seal = await agent.assertion.finalize(contextGraphId, name, {
+          ...finalizeOptions,
+          ...finalizeStorageLane,
+        });
+        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_finalized", source: "api" });
         // Full seal payload (PR #971) — clients inspect the attestation.
         return jsonResponse(res, 200, {
           assertionUri: seal.assertionUri,
@@ -1216,14 +1372,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           if (e?.code === "WM_DRAFT_CONFLICT") {
             return jsonResponse(res, 409, { code: "WM_DRAFT_CONFLICT", error: e.message });
           }
-          // #1116 (round 5): the seal-less SWM reconstruction is also reachable
-          // here (pull-from swm + a plain finalize bypasses the finalize(layer:
-          // "swm") wrapper guard). The publisher now rejects a subset-only asset
-          // at the source with SWM_SUBSET_NOT_SEALABLE — map it to 409 (parity
-          // with the wm/finalize verb's mapping) so a partial asset can't be
-          // reconstructed/published under the KA name.
-          if (e?.code === "SWM_SUBSET_NOT_SEALABLE") {
-            return jsonResponse(res, 409, { code: "SWM_SUBSET_NOT_SEALABLE", error: e.message });
+          if (
+            e?.code === "UNSEALED_PULL_FROM_BLOCKED"
+            || e?.code === "PULL_FROM_EMPTY_SOURCE"
+            || e?.code === "LEGACY_KA_READ_ONLY"
+          ) {
+            return jsonResponse(res, 409, { code: e.code, error: e.message });
           }
           throw e; // -> outer catch -> 500
         }
@@ -1236,13 +1390,26 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
       const awaitCuratorAck = typeof parsed?.awaitCuratorAck === "boolean" ? parsed.awaitCuratorAck : undefined;
-      // #1116: a full share SEALS BY DEFAULT; `skipSeal:true` opts out into an
-      // unsealed SWM share. Strict-boolean: a stray "false" string must 400, not
-      // silently flip the default.
+      if (!validateEntities(parsed.entities, res)) return;
+      if (Array.isArray(parsed.entities)) {
+        return jsonResponse(res, 400, {
+          code: "KA_ATOMIC_SHARE_REQUIRED",
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+        });
+      }
+      // Graph-scoped KAs are seal-before-share. Retain strict parsing and accept
+      // an explicit false for older clients, but reject the removed true mode
+      // before any lifecycle mutation.
       let skipSeal: boolean | undefined;
       if (parsed?.skipSeal !== undefined) {
         if (typeof parsed.skipSeal !== "boolean") {
           return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
+        }
+        if (parsed.skipSeal === true) {
+          return jsonResponse(res, 400, {
+            code: "UNSEALED_SHARE_UNSUPPORTED",
+            error: "skipSeal:true is not supported for graph-scoped Knowledge Assets; finalize and share the complete KA atomically",
+          });
         }
         skipSeal = parsed.skipSeal;
       }
@@ -1258,10 +1425,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
           recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
         }
-        // #1116: ownership conflicts are advisory skips. A zero-row outcome is
-        // still HTTP 200, but it did not create an SWM share and must not report
-        // the pre-share WM seal as a sealed share.
-        const swmShared = share.promotedCount > 0;
+        // A durable idempotent replay returns zero newly-promoted rows together
+        // with the original shareOperationId. That is an already-completed share,
+        // not an ownership skip, so preserve its sealed/publish-ready status.
+        const durableReplay = share.promotedCount === 0 && Boolean(share.shareOperationId);
+        const swmShared = share.promotedCount > 0 || durableReplay;
         return jsonResponse(res, 200, {
           swmShared,
           promotedCount: share.promotedCount,
@@ -1270,8 +1438,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
         });
       } catch (e: any) {
-        // #1116 D1: a default full share that can't seal (a residual capability
-        // gap, no skipSeal) fails CLOSED with WM preserved — map to a 409 that
+        // A full share that cannot seal fails closed with WM preserved. Map to a 409 that
         // carries the recovery hint. Everything else (e.g. the curator-ack 503)
         // propagates to the outer handler unchanged.
         if (e?.code === "UNSEALED_SHARE_BLOCKED") {
@@ -1302,6 +1469,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (asyncPromoteUnavailable(res)) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
+      if (Array.isArray(entities)) {
+        return jsonResponse(res, 400, {
+          code: "KA_ATOMIC_SHARE_REQUIRED",
+          error: '"entities" selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+        });
+      }
       // #1116 (round 5): the sync swm/share validates `skipSeal` as a strict
       // boolean; the async queue ALWAYS seals (the safe default) and can't carry
       // skipSeal through the job, so it was silently dropped — a footgun where a
@@ -1313,7 +1486,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, { error: '"skipSeal" must be a boolean when supplied' });
         }
         if (parsed.skipSeal === true) {
-          return jsonResponse(res, 400, { error: "skipSeal is not supported for async share; use swm/share (the synchronous route) to share without sealing" });
+          return jsonResponse(res, 400, { error: "skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share" });
         }
       }
       try {
@@ -1359,10 +1532,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
+        const asyncSelectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
+        if (!asyncSelectedAuthor.ok) return;
         const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
-          ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+          ...publishCallerHintLane(writePreflightCallerAgentAddress),
+          ...(asyncSelectedAuthor.value !== undefined
+            ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
+            : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
@@ -1379,9 +1557,17 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           contextGraphId,
           name,
           shareOperationId: intent.shareOperationId,
-          rootsCount: intent.roots.length,
+          contentScopeVersion: intent.contentScopeVersion,
+          kaUal: intent.kaUal,
+          assertionVersion: intent.assertionVersion,
+          publicTripleCount: intent.publicTripleCount,
+          privateTripleCount: intent.privateTripleCount,
           sealMerkleRoot: intent.sealMerkleRoot,
           intentKey: intent.intentKey,
+          // GH#1786 — echo the RESOLVED author so a client can verify which author
+          // will be published before the job runs, and can detect a daemon that
+          // ignored a supplied selector (the sync 200 body already echoes it).
+          ...(intent.agentAddress ? { agentAddress: intent.agentAddress } : {}),
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
@@ -1394,6 +1580,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
           return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
         }
+        // GH#1778 — several authors share this KA name; the caller must
+        // disambiguate. Surface the candidate authors so the UI/CLI can pick.
+        if (respondAmbiguousAssertionAuthor(res, err)) return;
+        // GH#1786 — must precede the message-keyed 400 below, which would otherwise
+        // capture any author-selection message containing "Invalid"/"must be".
+        if (respondAuthorSelectionError(res, err)) return;
         if (
           err.message?.includes("required") ||
           err.message?.includes("Invalid") ||
@@ -1425,8 +1617,19 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // first; ONLY if the sole remaining blocker is an unregistered CG do we
         // transparently register and retry (idempotent). All other errors
         // propagate to the precondition/500 mapping below unchanged.
-        let pub: any;
-        const publishStorageLane = scopedTokenStorageLane(writePreflightCallerAgentAddress);
+        let pub: FinalizedPublishResult;
+        const selectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
+        if (!selectedAuthor.ok) return;
+        // GH#1786 — the selector MUST live in this shared lane object, not at a call
+        // site: it is spread into BOTH the first publish and the CG-registration
+        // retry below, and the retry re-runs author resolution from scratch. A
+        // per-call-site key would be dropped on the retry and publish the wrong
+        // author with HTTP 200 and real spend (the unregistered-CG first publish is
+        // exactly the curator's first publish of a member KA).
+        const publishStorageLane = {
+          ...publishCallerHintLane(writePreflightCallerAgentAddress),
+          ...(selectedAuthor.value !== undefined ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
+        };
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
         } catch (firstErr: any) {
@@ -1452,6 +1655,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
         }
         recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
+        const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
         return jsonResponse(res, httpStatus, {
           kaId: pub?.kaId,
@@ -1467,6 +1671,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
           ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
+          ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {
@@ -1485,9 +1690,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // #1116 (round 9): PUBLISH_NOT_FULL_SHARE — the marker gate (a publish
         // requires a complete full share resident in SWM) is also a pre-chain
         // caller precondition; map it to the same 409 (code-first).
+        // GH#1786 — must precede the precondition branch below, which would otherwise
+        // relabel an author-selection failure whose message happens to contain
+        // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
+        if (respondAuthorSelectionError(res, e)) return;
         if (e?.code === "PUBLISH_NOT_FULL_SHARE" || /is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: e?.code === "PUBLISH_NOT_FULL_SHARE" ? "PUBLISH_NOT_FULL_SHARE" : "VM_PUBLISH_PRECONDITION", error: msg });
         }
+        // GH#1778 — several authors share this KA name; the caller must
+        // disambiguate. Surface the candidate authors so the UI/CLI can pick.
+        if (respondAmbiguousAssertionAuthor(res, e)) return;
         // Funded-wallet selection found no operational wallet holding the
         // gas + TRAC a publish needs. This is a user-actionable funding
         // condition (4xx), not a server/on-chain bug. Classification + body are

@@ -66,6 +66,16 @@ export interface SendOptions {
   /** Overall send timeout (resolver + dial + write + read). Default {@link DEFAULT_SEND_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
+   * Whether these exact payload bytes may be reused by router-level delivery
+   * optimizations. Defaults to `reusable`.
+   *
+   * `single-use` forces the one-shot transport, disables internal retries, and
+   * rejects multi-path fan-out. Use it for authenticated envelopes containing
+   * a single-use nonce; any retry must happen above `ProtocolRouter` after the
+   * caller rebuilds the payload.
+   */
+  payloadReuse?: 'reusable' | 'single-use';
+  /**
    * Race up to N parallel `newStream` attempts across the peer's live
    * connections (different relay paths where the natural connection
    * list provides them). First successful response wins; loser
@@ -586,7 +596,12 @@ export class ProtocolRouter {
     const opts: SendOptions =
       typeof timeoutMsOrOpts === 'number' ? { timeoutMs: timeoutMsOrOpts } : timeoutMsOrOpts;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    const singleUsePayload = opts.payloadReuse === 'single-use';
+    const maxAttempts = singleUsePayload ? 1 : 3;
     const parallelPaths = Math.max(1, Math.floor(opts.parallelPaths ?? 1));
+    if (singleUsePayload && parallelPaths > 1) {
+      throw new Error('single-use payloads cannot use parallelPaths > 1');
+    }
     const overallStartedAt = Date.now();
     const overallDeadline = AbortSignal.timeout(timeoutMs);
     const stopSignal = this.node.stopSignal;
@@ -649,6 +664,15 @@ export class ProtocolRouter {
           // variant. Pin to one-shot for future sends; fall through
           // to existing single-path / multi-path logic below.
           this.memoizePeerWire(peerIdStr, protocolId, 'one-shot');
+        } else if (singleUsePayload) {
+          // The authenticated sync envelope is single-use. A pooled request is
+          // itself one wire attempt, but after any ambiguous transport failure
+          // we MUST NOT fall through and replay those bytes on a one-shot
+          // stream. Bubble to sync's outer retry, which rebuilds a fresh signed
+          // envelope before trying again. Protocol-unsupported is the one safe
+          // fallback above: multistream negotiation fails before payload bytes
+          // are written.
+          throw err;
         } else if (memoizedVariant === 'pooled') {
           // Peer is KNOWN to speak the pooled wire (we've delivered
           // on it before). This is a transient failure on the held
@@ -747,8 +771,9 @@ export class ProtocolRouter {
     // libp2p internally upgrades relay connections to direct during
     // dialProtocol/newStream (peerStore.merge triggers the connection manager
     // to dial the peer directly, closing the relay and any in-flight streams).
-    // We retry up to 3 times with back-off so the direct connection can
-    // stabilise before the next attempt.
+    // By default we retry up to 3 times with back-off so the direct connection
+    // can stabilise before the next attempt. A single-use payload gets exactly
+    // one one-shot attempt and must be rebuilt by its caller before retrying.
     //
     // Per-call exclude-set for the fast path: when an existing-connection
     // reuse hits a recoverable failure (stream came back live but
@@ -762,8 +787,15 @@ export class ProtocolRouter {
     // ever exercising the resolver + dialProtocol path that exists
     // specifically to recover from this case.
     const triedConnections = new WeakSet<ReusableConnection>();
+    // A peer can retain stale direct addresses in peerStore while its only
+    // usable path is an already-open inbound relay connection. Preserve the
+    // DCUtR safety guard on the first attempt, but once a normal dial has
+    // actually failed, allow the next attempt to reuse that live relay.
+    // Otherwise all retries repeat the same dead direct-address dials and
+    // ignore the one transport path we already know is open.
+    let normalDialFailed = false;
     let lastErr: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const remaining = timeoutMs - (Date.now() - startedAt);
       if (remaining <= 0) {
         lastErr = new Error('send timeout elapsed');
@@ -777,6 +809,7 @@ export class ProtocolRouter {
       // without needing to inspect stream/connection internals from
       // the error.
       let pickedConnection: ReusableConnection | null = null;
+      let attemptedNormalDial = false;
       try {
         // RFC 07 §3.2: re-prime the libp2p peerStore on EVERY attempt.
         //
@@ -891,6 +924,7 @@ export class ProtocolRouter {
               }
               return false;
             },
+            allowLimitedWithDirectAddrs: normalDialFailed,
             excludeConnections: triedConnections,
           },
         );
@@ -904,12 +938,16 @@ export class ProtocolRouter {
         }
 
         const dialStartedAt = Date.now();
-        const stream =
-          fastStream ??
-          (await libp2p.dialProtocol(peerId, protocolId, {
+        let stream: Stream;
+        if (fastStream) {
+          stream = fastStream;
+        } else {
+          attemptedNormalDial = true;
+          stream = await libp2p.dialProtocol(peerId, protocolId, {
             runOnLimitedConnection: true,
             signal: attemptSignal,
-          }));
+          });
+        }
         const dialDurationMs = Date.now() - dialStartedAt;
 
         if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
@@ -936,6 +974,9 @@ export class ProtocolRouter {
         return response;
       } catch (err: unknown) {
         lastErr = err;
+        if (attemptedNormalDial) {
+          normalDialFailed = true;
+        }
         // If this attempt opened the stream via the fast path, mark
         // the underlying connection as tried-and-failed so subsequent
         // attempts don't pick it again. The half-dead-connection case
@@ -950,7 +991,7 @@ export class ProtocolRouter {
           triedConnections.add(pickedConnection);
         }
         if (attemptSignal.aborted || overallSignal.aborted) throw err;
-        if (!isRecoverableSendError(err) || attempt >= 2) throw err;
+        if (!isRecoverableSendError(err) || attempt >= maxAttempts - 1) throw err;
         const backoff = (attempt + 1) * 500;
         // Make the backoff abortable so the overall deadline is
         // honored. Codex PR #560 round-5 caught: if the pool burned
@@ -1045,6 +1086,12 @@ interface ReusableConnection {
 interface TryReuseExistingConnectionOptions {
   peerHasDirectAddrs: () => Promise<boolean>;
   /**
+   * Reuse an open limited connection even when peerStore still contains
+   * direct addresses. The caller enables this only after a normal dial has
+   * failed, proving that the cached direct route is not currently usable.
+   */
+  allowLimitedWithDirectAddrs?: boolean;
+  /**
    * Connections to skip when iterating candidates.
    *
    * Lives across multiple `tryReuseExistingConnection` calls within
@@ -1137,11 +1184,18 @@ export async function tryReuseExistingConnection(
     return peerStoreHasDirectAddrsMemo;
   };
 
-  for (const conn of candidates) {
+  // libp2p does not guarantee that a direct connection precedes a limited
+  // relay connection in the raw connection walk. Always prefer direct while
+  // preserving the original order within each class.
+  const orderedCandidates = [...candidates].sort(
+    (a, b) => Number(Boolean(a.limits)) - Number(Boolean(b.limits)),
+  );
+
+  for (const conn of orderedCandidates) {
     if (conn.status && conn.status !== 'open') continue;
     if (exclude?.has(conn)) continue;
     if ((conn as unknown as { limits?: unknown }).limits) {
-      if (await peerStoreHasDirectAddrs()) {
+      if (!options.allowLimitedWithDirectAddrs && await peerStoreHasDirectAddrs()) {
         continue;
       }
     }

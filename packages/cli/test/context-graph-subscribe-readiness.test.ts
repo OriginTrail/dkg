@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import type { CatchupJobResult } from '../src/catchup-runner.js';
+import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 
 function cleanEmptyResult(): CatchupJobResult {
@@ -103,6 +104,25 @@ function privateSharedMemoryOnlyResult(): CatchupJobResult {
   return result;
 }
 
+function publicDurableAndSharedMemoryResult(): CatchupJobResult {
+  const result = cleanEmptyResult();
+  if (!result.diagnostics?.durable || !result.diagnostics.sharedMemory) {
+    throw new Error('catch-up diagnostics missing');
+  }
+  if (!result.cleanPlaneCompletions) throw new Error('clean completion proof missing');
+  result.dataSynced = 3;
+  result.sharedMemorySynced = 4;
+  result.diagnostics.durable.emptyResponses = 0;
+  result.diagnostics.durable.fetchedDataTriples = 3;
+  result.diagnostics.durable.insertedDataTriples = 3;
+  result.diagnostics.sharedMemory.emptyResponses = 0;
+  result.diagnostics.sharedMemory.fetchedDataTriples = 4;
+  result.diagnostics.sharedMemory.insertedDataTriples = 4;
+  result.cleanPlaneCompletions.durable = { verifiedDataPeers: 1, emptyPeers: 0 };
+  result.cleanPlaneCompletions.sharedMemory = { verifiedDataPeers: 1, emptyPeers: 0 };
+  return result;
+}
+
 describe('context graph subscribe readiness requires authoritative metadata', () => {
   const previousCatchupRunner = daemonState.catchupRunner;
   let server: Server | undefined;
@@ -121,6 +141,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     hasConfirmedMeta: boolean;
     hasConfirmedMetaAfterCatchup?: boolean;
     isPrivate?: boolean;
+    allowedAgents?: string[];
+    callerAddress?: string;
     result?: CatchupJobResult;
     includeSharedMemory?: boolean;
     readiness?: {
@@ -133,9 +155,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     response: any;
     job: any;
     runCalls: number;
+    runRequests: CatchupRunRequest[];
     state: Record<string, any>;
     patches: Array<Record<string, unknown>>;
     readiness: Record<string, unknown> | undefined;
+    statusResponse: any;
   }> {
     const contextGraphId = `readiness-${Math.random().toString(36).slice(2, 8)}`;
     const state = new Map<string, Record<string, any>>();
@@ -146,20 +170,22 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    const runRequests: CatchupRunRequest[] = [];
     let readiness = opts.readiness
       ? { ...opts.readiness, updatedAt: opts.readiness.updatedAt ?? Date.now() }
       : undefined;
 
     daemonState.catchupRunner = {
-      run: async () => {
+      run: async (request) => {
         runCalls += 1;
+        runRequests.push(request);
         return opts.result ?? cleanEmptyResult();
       },
       close: async () => {},
     };
 
     const agent = {
-      getContextGraphAllowedAgents: async () => [],
+      getContextGraphAllowedAgents: async () => opts.allowedAgents ?? [],
       getSubscribedContextGraphs: () => state,
       subscribeToContextGraph: (id: string) => {
         state.set(id, {
@@ -178,12 +204,12 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       resolveAgentByToken: () => undefined,
-      getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+      getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
     };
 
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      await handleContextGraphRoutes({
+      const routeContext = {
         req,
         res,
         agent,
@@ -219,7 +245,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         path: url.pathname,
         requestToken: undefined,
         requestAgentAddress: undefined,
-      } as any);
+      } as any;
+      await handleContextGraphRoutes(routeContext);
+      if (!res.writableEnded) await handleQueryRoutes(routeContext);
       if (!res.writableEnded) {
         res.statusCode = 404;
         res.end();
@@ -245,13 +273,20 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
+    const statusHttpResponse = await fetch(
+      `http://127.0.0.1:${address.port}/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`,
+    );
+    const statusResponse = await statusHttpResponse.json() as any;
+
     return {
       response,
       job: catchupTracker.jobs.get(jobId),
       runCalls,
+      runRequests,
       state: state.get(contextGraphId) ?? {},
       patches,
       readiness,
+      statusResponse,
     };
   }
 
@@ -447,7 +482,57 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
-  it('keeps a public clean-empty peer valid when another peer denies', async () => {
+  it('backfills both public planes and exposes the completed subscription job through catchup status', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      // Publishing is allowlisted to a different wallet. Explicit public read
+      // policy must still bypass the private membership gate.
+      allowedAgents: ['0x1111111111111111111111111111111111111111'],
+      callerAddress: '0x2222222222222222222222222222222222222222',
+      result: publicDurableAndSharedMemoryResult(),
+      initial: {
+        subscribed: false,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup).toMatchObject({
+      status: 'queued',
+      jobId: expect.any(String),
+    });
+    expect(result.runRequests).toEqual([{
+      contextGraphId: result.response.subscribed,
+      includeSharedMemory: true,
+    }]);
+    expect(result.statusResponse).toMatchObject({
+      jobId: result.response.catchup.jobId,
+      status: 'done',
+      result: {
+        dataSynced: 3,
+        sharedMemorySynced: 4,
+      },
+    });
+    expect(result.state).toMatchObject({
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      pendingMeta: false,
+    });
+    expect(result.readiness).toMatchObject({
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: true,
+    });
+  });
+
+  // Issue #2006: an empty response cannot distinguish "hosts an empty graph"
+  // from "never heard of this graph", so a clean-empty peer only proves the
+  // plane when the whole round was content-free and failure-free. A denial or a
+  // failed data-bearing peer means we did not hear from everyone.
+  it('does not keep a public clean-empty peer valid when another peer denies', async () => {
     const mixed = cleanEmptyResult();
     mixed.connectedPeers = 2;
     mixed.totalPeers = 2;
@@ -472,17 +557,45 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
     });
 
-    expect(result.job.status).toBe('done');
-    expect(result.job.error).toBeUndefined();
-    expect(result.state).toMatchObject({
-      synced: true,
-      sharedMemorySynced: false,
-      metaSynced: true,
-    });
+    expect(result.job.status).not.toBe('done');
+    expect(result.job.status).toBe('unreachable');
+    expect(result.state).toMatchObject({ synced: false });
     expect(result.readiness).toMatchObject({
-      durableVerified: true,
+      durableVerified: false,
       sharedMemoryVerified: false,
     });
+  });
+
+  it('does not settle as done when a data-bearing peer failed and an unrelated peer answered empty', async () => {
+    // The reported field shape: 122,705 data triples fetched, five failed
+    // phases, nothing verified, and unrelated peers answering empty — which
+    // previously settled the job as `done` with 1 KA out of 40.
+    const masked = cleanEmptyResult();
+    masked.connectedPeers = 6;
+    masked.totalPeers = 6;
+    masked.selectedPeers = 6;
+    masked.syncCapablePeers = 6;
+    masked.peersTried = 6;
+    masked.peersResponded = 6;
+    if (!masked.diagnostics?.durable) throw new Error('durable diagnostics missing');
+    masked.diagnostics.durable.fetchedDataTriples = 122_705;
+    masked.diagnostics.durable.failedPhases = 5;
+
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      includeSharedMemory: false,
+      result: masked,
+      initial: {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.job.status).not.toBe('done');
+    expect(result.state).toMatchObject({ synced: false });
+    expect(result.readiness).toMatchObject({ durableVerified: false });
   });
 
   it('does not promote private data readiness from unrelated empty responders after metadata is local', async () => {

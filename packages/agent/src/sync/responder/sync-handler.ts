@@ -1,11 +1,16 @@
 import {
   createOperationContext,
+  DEFAULT_MAX_READ_BYTES,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+} from '../../dkg-agent-constants.js';
 import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
@@ -14,17 +19,23 @@ import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
+  createResponderExactGraphPagePlanMemo,
+  createResponderFreshSwmDataGraphPlanMemo,
+  createResponderFreshSwmMetaPlanMemo,
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
+  DurableMetaPageFrameError,
   readCatalogPage,
   readDurableDataPage,
   readDurableMetaPage,
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
+  serializeResponderRowsWithinByteBudget,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
+import { exactAssetFilterKey } from '../exact-assets.js';
 import {
   createSyncResponderSnapshotBudget,
   SyncRowSnapshotBudgetError,
@@ -43,6 +54,7 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
+import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -433,6 +445,26 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
     { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
+  const freshSwmDataGraphPlanMemo = createResponderFreshSwmDataGraphPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
+  const freshSwmMetaPlanMemo = createResponderFreshSwmMetaPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+    // #1847 review: retained TTL meta session plans are control-plane state and
+    // must be charged to the same process-wide budget as retained snapshots —
+    // peers cannot stack uncharged plans, and global pressure evicts idle ones.
+    responderSnapshotBudget,
+  );
+  const durableDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+  );
+  const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
@@ -504,11 +536,41 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // recorded by its own .then/.catch (no double counting).
     try {
     const request = parseSyncRequest(data);
-    const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
+    // A durable rootless snapshot can legitimately contain millions of rows.
+    // Never clamp a valid cursor: doing so silently replays the row slice at
+    // the clamp boundary forever while the requester keeps advancing its local
+    // offset. That produces duplicates and makes an otherwise valid manifest
+    // fail integrity verification once the snapshot crosses the old 1M cap.
+    // Exact-graph paging already rejects offsets beyond the plan with an empty
+    // page, so accepting every non-negative safe integer remains bounded.
+    const requestedOffset = Number(request.offset);
+    const offset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+      ? requestedOffset
+      : 0;
     const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : syncPageSize, syncPageSize));
     const phase = request.phase ?? 'data';
     const isWorkspace = request.includeSharedMemory;
     const contextGraphId = request.contextGraphId;
+    const assetUals = request.assetUals;
+    const assetSelectionKey = assetUals === undefined
+      ? 'full'
+      : exactAssetFilterKey(assetUals);
+    const durableDataPolicy = resolveDurableDataRequestPolicy({
+      legacyLimit: limit,
+      includeSharedMemory: isWorkspace,
+      phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: assetUals !== undefined,
+    });
+    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
+    // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
+    // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
+    // the page ≤ budget for BOTH modes, so this only selects the belt-and-
+    // suspenders response serializer and records the explicit contract.
+    const usesMetaByteBudget = !isWorkspace &&
+      phase === 'meta' &&
+      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -583,11 +645,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (!snapshotRef || !publicSnapshotStore) {
             return new TextEncoder().encode('');
           }
-          const snapshot = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
-          if (!snapshot) {
-            return new TextEncoder().encode('');
-          }
-          const page = snapshot.slice(offset, offset + limit);
+          const page = publicSnapshotStore.getSnapshotPage
+            ? await raceAgainstAbort(
+              publicSnapshotStore.getSnapshotPage(snapshotRef, offset, limit, { signal }),
+              signal,
+            )
+            : (await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal))
+              ?.slice(offset, offset + limit);
+          if (!page) return new TextEncoder().encode('');
           if (page.length === 0) {
             return new TextEncoder().encode('');
           }
@@ -625,6 +690,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            freshMetaPlanMemo: freshSwmMetaPlanMemo,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -664,6 +730,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
+            exactGraphPlanMemo: swmDataExactGraphPlanMemo,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
@@ -696,7 +764,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
             'Durable meta',
-            `${peerId}:durable-meta:${contextGraphId}`,
+            `${peerId}:durable-meta:${contextGraphId}:${assetSelectionKey}`,
             request.syncSessionId,
             offset,
           );
@@ -718,10 +786,36 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            assetUals,
+            maxResponseBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+            // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
+            // loud on an oversized `_meta` subject rather than receive a byte-fit
+            // SHORT page they would read as EOF — silent metadata loss + a #1788
+            // seal split. Negotiated (testnet-canary+) requesters keep the
+            // verified byte-fit behavior (empty=EOF pagination, so short≠EOF).
+            oversizedSubjectPolicy: usesMetaByteBudget ? 'byte-fit' : 'fail-loud',
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          // Byte-cap the durable-meta response (#1916) exactly like durable data:
+          // the subject-atomic extend can return a whole (or oversized) subject,
+          // so serialize within the frame budget rather than emitting unbounded
+          // N-Quads. The extend keeps every valid seal well under the budget, so
+          // this only ever truncates a pathological oversized subject.
+          //
+          // Pagination contract: durable meta uses byte-budget pagination where a
+          // SHORT page is NOT EOF — only an empty page is. The requester's
+          // short≠EOF handling is a requester-side default (page-fetch:
+          // syncPageSize=8192 > SYNC_PAGE_SIZE), and since #1923 it is ALSO
+          // negotiated on the wire via `pageMode` (usesMetaByteBudget). The
+          // subject-atomic byte-fit in readDurableMetaPage already bounds every
+          // page ≤ budget AND to whole subjects, so both the negotiated
+          // (byte-budget serializer) and the non-negotiated (plain serializer)
+          // branches are frame-safe and never split a subject; the gate here just
+          // honours the explicit contract.
+          const serialized = usesMetaByteBudget
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -730,7 +824,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
           'Durable data',
-          `${peerId}:durable-data:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`,
+          `${peerId}:durable-data:${contextGraphId}:${assetUals === undefined
+            ? (sinceBatchId == null ? 'full' : sinceBatchId.toString())
+            : assetSelectionKey}`,
           request.syncSessionId,
           offset,
         );
@@ -744,16 +840,29 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit,
+          limit: durableDataPolicy.limit,
           signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
+          rowListMemo: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? durableDataRowsMemo
+            : undefined,
+          rowListCacheScope: session && durableDataPolicy.cacheMode === 'session-snapshot'
+            ? peerId
+            : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
+          exactGraphPlanMemo: durableDataExactGraphPlanMemo,
+          // A byte-bounded response may contain only a prefix of the row slice
+          // loaded above. Do not release the immutable session snapshot merely
+          // because that slice was short; the explicit empty request is EOF.
+          releaseCacheOnShortPage: !usesByteBudgetPage,
+          assetUals,
+          exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
+        const serialized = usesByteBudgetPage
+          ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+          : serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
         logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -807,9 +916,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           },
         );
 
+    const guardSyncResponseBytes = (bytes: Uint8Array): Uint8Array => {
+      if (bytes.byteLength <= DEFAULT_MAX_READ_BYTES) return bytes;
+      const message = `Sync responder refused ${bytes.byteLength}-byte response for `
+        + `"${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): exceeds `
+        + `${DEFAULT_MAX_READ_BYTES}-byte transport frame cap; response must be paginated below the transport ceiling`;
+      logWarn(createOperationContext('sync'), message);
+      throw new Error(message);
+    };
+
     return response.then((res) => {
+      const guarded = guardSyncResponseBytes(res);
       getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
-      return res;
+      return guarded;
     }).catch((err) => {
       if (err instanceof SyncResponderBusyError) {
         getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
@@ -838,6 +957,21 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           `bytesEstimate=${err.bytesEstimate}, key=${err.key})`,
         );
         throw new QuietRetryableHandlerError(err.message);
+      }
+      if (err instanceof DurableMetaPageFrameError) {
+        // Loud, non-retryable failure (#1788/#1916): an oversized `_meta` subject
+        // cannot be served frame-safe to a non-negotiated legacy requester, and
+        // byte-fitting it would be a silent short=EOF metadata loss. Retrying
+        // cannot help — surface it as a hard error so the round fails visibly
+        // rather than completing with partial metadata. Root fix: #1921.
+        getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
+        span.setAttribute('dkg.sync_response_outcome', 'error');
+        logWarn(
+          createOperationContext('sync'),
+          `Sync responder cannot serve durable meta frame-safe to a non-negotiated (legacy) `
+          + `requester for "${contextGraphId}" from peer ${peerId}: ${err.message}`,
+        );
+        throw err;
       }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;

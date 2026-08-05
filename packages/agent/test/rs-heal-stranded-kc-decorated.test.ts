@@ -134,6 +134,66 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(typeof store.update).toBe('function');
   });
 
+  it('forwards atomic graph-and-subject replacement through the agent decorator', async () => {
+    const replaceGraphAndSubject = vi.fn(async () => undefined);
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'replaceGraphAndSubject') return replaceGraphAndSubject;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    const dirtyQuads: Quad[][] = [];
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => { invalidations += 1; },
+      (quads) => { dirtyQuads.push([...(quads ?? [])]); },
+    );
+    const graphQuads: Quad[] = [{
+      subject: 'urn:data:s', predicate: 'urn:data:p', object: '"data"', graph: 'urn:data',
+    }];
+    const metadataQuads: Quad[] = [{
+      subject: 'urn:ual', predicate: 'urn:meta:p', object: '"meta"', graph: 'urn:meta',
+    }];
+    const options: QueryOptions = { source: 'test.atomic-replace', priority: 'background' };
+
+    await expect(wrapped.replaceGraphAndSubject?.(
+      'urn:data',
+      graphQuads,
+      'urn:meta',
+      'urn:ual',
+      metadataQuads,
+      options,
+    )).resolves.toBeUndefined();
+    expect(replaceGraphAndSubject).toHaveBeenCalledWith(
+      'urn:data',
+      graphQuads,
+      'urn:meta',
+      'urn:ual',
+      metadataQuads,
+      options,
+    );
+    expect(invalidations).toBe(1);
+    expect(dirtyQuads).toEqual([[...graphQuads, ...metadataQuads]]);
+
+    await wrapped.close();
+  });
+
+  it('does not advertise graph-and-subject replacement when the inner store lacks it', () => {
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'replaceGraphAndSubject') return undefined;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+
+    expect(wrapped.replaceGraphAndSubject).toBeUndefined();
+    return wrapped.close();
+  });
+
   it('forwards pressure telemetry and hasGraph admission options through the agent decorator', async () => {
     const pressure = {
       ackInflight: 1,
@@ -242,12 +302,35 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     // heal sends through the top of the production stack and assert each INSERT
     // declares its scoped target graph + source tag.
     const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    const operationOptions: Array<{ method: string; options?: QueryOptions }> = [];
     const capturing = new Proxy(store, {
       get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (sparql: string, options?: QueryOptions) => {
+            operationOptions.push({ method: 'query', options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        if (prop === 'insert') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['insert'];
+          return (quads: Quad[], options?: QueryOptions) => {
+            operationOptions.push({ method: 'insert', options });
+            return orig.call(target, quads, options);
+          };
+        }
+        if (prop === 'deleteByPattern') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['deleteByPattern'];
+          return (pattern: Partial<Quad>, options?: QueryOptions) => {
+            operationOptions.push({ method: 'deleteByPattern', options });
+            return orig.call(target, pattern, options);
+          };
+        }
         if (prop === 'update') {
           const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
           return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
             updateCalls.push({ sparql, options });
+            operationOptions.push({ method: 'update', options });
             return orig.call(target, sparql, options);
           };
         }
@@ -256,7 +339,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     }) as TripleStore;
 
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store: capturing, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store: capturing,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       TEST_CG,
       { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
     );
@@ -265,8 +352,57 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
     const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
     const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
-    expect(dataInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedData] });
-    expect(metaInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedMeta] });
+    expect(dataInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedData],
+    });
+    expect(metaInsert?.options).toMatchObject({
+      priority: 'background',
+      source: 'agent.swm.rsHeal.materialize',
+      touchedGraphs: [scopedMeta],
+    });
+    expect(operationOptions.length).toBeGreaterThan(0);
+    expect(operationOptions.every(({ options }) => options?.priority === 'background')).toBe(true);
+    expect(operationOptions.every(({ options }) => options?.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);
+  });
+
+  it('labels RS-heal reads by caller operation through the decorator stack', async () => {
+    const querySources: Array<string | undefined> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          const orig = Reflect.get(target, prop, receiver) as TripleStore['query'];
+          return (
+            sparql: Parameters<TripleStore['query']>[0],
+            options?: Parameters<TripleStore['query']>[1],
+          ) => {
+            querySources.push(options?.source);
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: capturing,
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+    );
+
+    expect(new Set(querySources.filter((source) => source?.startsWith('agent.swm.rsHeal.'))))
+      .toEqual(new Set([
+        'agent.swm.rsHeal.guard',
+        'agent.swm.rsHeal.enumerate',
+        'agent.swm.rsHeal.version.readLegacy',
+        'agent.swm.rsHeal.version.checkScoped',
+        'agent.swm.rsHeal.roots',
+        'agent.swm.rsHeal.rootPresent',
+      ]));
   });
 
   it('relocates a VM-graph-only one-shot strand through the full stack (read-both)', async () => {

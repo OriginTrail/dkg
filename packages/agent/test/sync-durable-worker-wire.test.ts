@@ -1,9 +1,137 @@
 import { describe, expect, it } from 'vitest';
+import {
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+} from '@origintrail-official/dkg-core';
+import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+} from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
 
+const CONTEXT_GRAPH_ID = 'worker-wire-multi-ka';
+const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
+const META_GRAPH = `${CONTEXT_GRAPH_URI}/_meta`;
+const UAL_A = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/19';
+const UAL_B = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000cd/23';
+
+function graphScopedAsset(ual: string, name: string, batchId?: bigint) {
+  const assertionVersion = '1';
+  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
+  const assertionGraph = knowledgeAssetLayerGraphUri(
+    CONTEXT_GRAPH_ID,
+    MemoryLayer.VerifiableMemory,
+    scope,
+  );
+  const payload: Quad[] = [{
+    subject: `urn:worker-wire:${name}`,
+    predicate: 'http://schema.org/name',
+    object: `"${name}"`,
+    graph: assertionGraph,
+  }];
+  const meta = generateGraphKnowledgeAssetMetadata(
+    {
+      ual,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      merkleRoot: computeFlatKCRootV10(payload, []),
+      publisherPeerId: 'publisher-peer',
+      accessPolicy: 'public',
+      timestamp: new Date(0),
+      assertionVersion,
+      publicTripleCount: payload.length,
+      privateTripleCount: 0,
+      assertionGraph,
+    },
+    { status: 'tentative' },
+  );
+  if (batchId !== undefined) {
+    meta.push({
+      subject: ual,
+      predicate: 'http://dkg.io/ontology/batchId',
+      object: `"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      graph: META_GRAPH,
+    });
+  }
+  return { assertionGraph, payload, meta };
+}
+
 describe('durable sync worker result transport', () => {
+  it('carries changelog graph targets and verified bindings across the real worker boundary', async () => {
+    const unchanged = graphScopedAsset(UAL_A, 'unchanged');
+    const changed = graphScopedAsset(UAL_B, 'changed');
+    const fullMetadataSnapshot = [...unchanged.meta, ...changed.meta];
+    const worker = new SyncVerifyWorker();
+
+    try {
+      const result = await worker.processDurableBatch(
+        changed.payload,
+        fullMetadataSnapshot,
+        false,
+        {
+          kind: 'changelogPage',
+          changedDataGraphs: [changed.assertionGraph],
+        },
+      );
+
+      expect(result.rejectedKcs).toBe(0);
+      expect(result.verifiedData).toEqual(changed.payload);
+      expect(result.verifiedData[0]).toBe(changed.payload[0]);
+      expect(result.verifiedMeta).toEqual(changed.meta);
+      expect(result.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('keeps full snapshot verification strict across the real worker boundary', async () => {
+    const missing = graphScopedAsset(UAL_A, 'missing');
+    const present = graphScopedAsset(UAL_B, 'present');
+    const fullMetadataSnapshot = [...missing.meta, ...present.meta];
+    const worker = new SyncVerifyWorker();
+
+    try {
+      const result = await worker.processDurableBatch(
+        present.payload,
+        fullMetadataSnapshot,
+        false,
+      );
+
+      expect(result.rejectedKcs).toBe(1);
+      expect(result.verifiedData).toEqual([]);
+      expect(result.verifiedMeta).toEqual([]);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('carries sinceBatchId scope across the real worker boundary', async () => {
+    const unchanged = graphScopedAsset(UAL_A, 'unchanged', 5n);
+    const changed = graphScopedAsset(UAL_B, 'changed', 6n);
+    const fullMetadataSnapshot = [...unchanged.meta, ...changed.meta];
+    const worker = new SyncVerifyWorker();
+
+    try {
+      const result = await worker.processDurableBatch(
+        changed.payload,
+        fullMetadataSnapshot,
+        false,
+        { kind: 'sinceBatchId', sinceBatchId: '5' },
+      );
+
+      expect(result.rejectedKcs).toBe(0);
+      expect(result.verifiedData).toEqual(changed.payload);
+      expect(result.verifiedData[0]).toBe(changed.payload[0]);
+      expect(result.verifiedMeta).toEqual(changed.meta);
+      expect(result.verifiedMeta[0]).toBe(changed.meta[0]);
+      expect(result.verifiedGraphScopedDataGraphs).toEqual([changed.assertionGraph]);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('reuses caller-owned quads instead of structured-cloning verified payloads back', async () => {
     const worker = new SyncVerifyWorker();
     const dataQuads: Quad[] = [
@@ -177,5 +305,98 @@ describe('durable sync worker result transport', () => {
     expect(wireResult.verifiedMetaIndexes).toEqual([]);
     expect(wireResult).not.toHaveProperty('verifiedData');
     expect(wireResult).not.toHaveProperty('verifiedMeta');
+  });
+
+  it('reports discarded-only sync controls across the worker wire', () => {
+    const subject = 'urn:orphaned:sync-control';
+    const meta: Quad[] = [
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/batchId',
+        object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: META_GRAPH,
+      },
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/assertionGraph',
+        object: 'urn:attacker:graph',
+        graph: META_GRAPH,
+      },
+      {
+        subject,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: META_GRAPH,
+      },
+    ];
+
+    const wireResult = processDurableBatchForWire([], meta, false);
+
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult.droppedSyncControlTriples).toBe(meta.length);
+    // Pure-sync-control page: the requester-facing aggregate equals the
+    // sync-control diagnostic count, preserving the shipped checkpoint semantics.
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(meta.length);
+    expect(wireResult.metaOnlyResponses).toBe(1);
+    expect(wireResult.rejectedKcs).toBe(0);
+  });
+
+  it('reports discarded-only non-IRI meta subjects across the worker wire (#1921)', () => {
+    // Exercises the REAL selection -> processDurableBatchForWire path so a
+    // regression that drops droppedNonIriSubjectTriples between the selector and
+    // the wire result is caught (the requester-progress unit tests inject the
+    // count directly and cannot see this). A metadata-only page of purely
+    // non-IRI subjects must report the full dropped count so the requester can
+    // advance the meta cursor instead of pinning.
+    const meta: Quad[] = [
+      {
+        subject: '_:injected',
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"drop"',
+        graph: META_GRAPH,
+      },
+      {
+        subject: '"literal-subject"',
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"drop-too"',
+        graph: META_GRAPH,
+      },
+    ];
+
+    const wireResult = processDurableBatchForWire([], meta, false);
+
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult.droppedNonIriSubjectTriples).toBe(meta.length);
+    // All-non-IRI page: the aggregate equals the non-IRI diagnostic count.
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(meta.length);
+    expect(wireResult.metaOnlyResponses).toBe(1);
+    expect(wireResult.rejectedKcs).toBe(0);
+  });
+
+  it('aggregates mixed control + non-IRI drops into consumedUnpersistedMetaTriples (#1921)', () => {
+    // Worker-level guard for the consolidated checkpoint contract: the single
+    // requester-facing aggregate equals the SUM of the per-reason diagnostic
+    // counts for a page mixing unverified sync controls and non-IRI subjects.
+    // Neutralizing the worker sum breaks this; the per-reason counts remain as
+    // diagnostics.
+    const control = 'urn:orphaned:sync-control';
+    const meta: Quad[] = [
+      { subject: control, predicate: 'http://dkg.io/ontology/batchId', object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: META_GRAPH },
+      { subject: control, predicate: 'http://dkg.io/ontology/assertionGraph', object: 'urn:attacker:graph', graph: META_GRAPH },
+      { subject: '_:injected', predicate: 'http://dkg.io/ontology/status', object: '"drop"', graph: META_GRAPH },
+      { subject: '"literal-subject"', predicate: 'http://dkg.io/ontology/status', object: '"drop-too"', graph: META_GRAPH },
+    ];
+
+    const wireResult = processDurableBatchForWire([], meta, false);
+
+    expect(wireResult.verifiedMetaIndexes).toEqual([]);
+    expect(wireResult.droppedSyncControlTriples).toBe(2);
+    expect(wireResult.droppedNonIriSubjectTriples).toBe(2);
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(
+      wireResult.droppedSyncControlTriples + wireResult.droppedNonIriSubjectTriples,
+    );
+    expect(wireResult.consumedUnpersistedMetaTriples).toBe(meta.length);
+    expect(wireResult.metaOnlyResponses).toBe(1);
+    expect(wireResult.rejectedKcs).toBe(0);
   });
 });

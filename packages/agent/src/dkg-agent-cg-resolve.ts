@@ -115,8 +115,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -210,6 +209,14 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import {
+  normalizeExactAssetUals,
+  requireExactAssetUals,
+} from './sync/exact-assets.js';
+import {
+  decodePipeSyncRequestTail,
+  normalizeByteBudgetPageHint,
+} from './sync/auth/pipe-request-tail.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
@@ -372,9 +379,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -405,6 +409,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import {
   runCuratorMetaRefresh,
   type CuratorMetaRefreshOptions,
@@ -430,6 +435,30 @@ function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
 type InternalContextGraphListRow = ListContextGraphsRow & {
   policyKnown?: boolean;
 };
+
+function mapContextGraphListRows<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  return mapWithConcurrency(
+    items,
+    DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+    fn,
+  );
+}
+
+async function mapContextGraphListRowsSettled<T, R>(
+  items: readonly T[],
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  return mapContextGraphListRows(items, async (item, index) => {
+    try {
+      return { status: 'fulfilled', value: await fn(item, index) } as const;
+    } catch (reason) {
+      return { status: 'rejected', reason } as const;
+    }
+  });
+}
 
 function listContextGraphsProjectionEnabled(): boolean {
   // Before enabling this default-on: thread the caller signal into getCgMeta
@@ -479,11 +508,11 @@ async function applyContextGraphListPrivacy(
       .map(({ policyKnown: _policyKnown, ...row }) => row);
   }
 
-  const annotated = await Promise.all(visibleRows.map(async (r) => {
+  const annotated = await mapContextGraphListRows(visibleRows, async (r) => {
     const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
     const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
     return { ...r, callerInvolved: curatorMatch || allowlisted };
-  }));
+  });
 
   return annotated
     .filter((r) => {
@@ -493,6 +522,190 @@ async function applyContextGraphListPrivacy(
     .map(({ policyKnown: _policyKnown, ...row }) => row);
 }
 
+/** Where a resolved catch-up sync peer came from; see {@link resolveCuratorSyncPeer}. */
+export interface SyncPeerResolution {
+  peerId?: string;
+  /**
+   * Only `'metadata'` is AUTHORITATIVE — see {@link authoritativeSyncPeerId}.
+   * Everything else ranks the walk and may never end it.
+   *
+   * - `'metadata'`   — the Context Graph's OWN `<cg>/_meta` declares the
+   *                    curator→peer binding, and that binding is internally
+   *                    consistent.
+   * - `'projection'` — the binding came from the merged metadata projection,
+   *                    which unions `_meta` with AGENTS / `_catalog` / ONTOLOGY
+   *                    and discards which graph supplied each fact. Good enough
+   *                    to rank; not a statement the graph made about itself.
+   * - `'registry'`   — a wallet-address curator resolved through the agent
+   *                    registry, which is queried STRICTLY LOCALLY, so even a
+   *                    single local match is not proof of a network-wide binding.
+   * - `'bootstrap-hint'` — the authenticated join-approval hint; can be stale.
+   * - `'none'`       — no peer at all.
+   */
+  provenance: 'metadata' | 'projection' | 'registry' | 'bootstrap-hint' | 'none';
+}
+
+/**
+ * The peer allowed to let one answer stand for a whole Context Graph — a
+ * metadata-resolved curator and nothing else. A single definition so the walk's
+ * early-stop rule cannot be restated slightly differently at another call site.
+ */
+export function authoritativeSyncPeerId(resolution: SyncPeerResolution): string | undefined {
+  return resolution.provenance === 'metadata' ? resolution.peerId : undefined;
+}
+
+/**
+ * Does this DID identify a peer directly, or does it need resolving through a
+ * registry? Wallet-address curators (V10) are the indirect case; a bare libp2p
+ * peer id (legacy) is already the answer.
+ */
+function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
+  return curatorIdentifier.startsWith('0x');
+}
+
+/**
+ * Resolve the curator peer for a Context Graph together with WHERE it came from.
+ *
+ * Two routes produce a peer id here and they are NOT interchangeable:
+ *
+ * - `'metadata'` — `<cg>/_meta` names a curator DID and it resolved to a peer.
+ *   Authoritative: that peer speaks for the whole graph.
+ * - `'projection'` / `'registry'` — a peer was resolved, but not from a source that
+ *   can speak for the graph. `getCgMeta()` is a MERGED projection: it unions
+ *   `<cg>/_meta` with the AGENTS, `_catalog` and ONTOLOGY graphs under first-wins
+ *   precedence and discards which graph supplied each fact, so a creator
+ *   contributed by an AGENTS-only declaration is indistinguishable from one the
+ *   graph declared about itself. The agent registry is queried strictly locally,
+ *   so even a unique local match is not evidence of a network-wide binding.
+ *   Both rank the walk and neither may end it.
+ * - `'bootstrap-hint'` — the authenticated join-approval hint recorded in
+ *   `preferredSyncPeers`, used while `_meta` has not arrived yet (and restored
+ *   from the durable join-approved membership row after restart). It is a fine
+ *   ranking signal but can be stale: peer ids are cryptographic identities, so
+ *   a curator that rotated its libp2p key leaves an ordinary member sitting on
+ *   the id the hint still names.
+ *
+ * Provenance is returned rather than inferred by a caller because the two
+ * routes routinely produce the SAME id — the join approval normally comes from
+ * the curator — so comparing the result against the hint cannot tell
+ * "metadata confirmed the curator" from "metadata found nothing and the hint
+ * was echoed back". Only the resolver knows which branch it took.
+ */
+
+export async function resolveCuratorSyncPeer(
+  agent: DKGAgent,
+  /**
+   * The agent's `preferredSyncPeers`, passed explicitly because it is both read
+   * and evicted here — and because that makes the resolver directly drivable in
+   * a test without standing up an agent.
+   */
+  bootstrapHints: Map<string, string>,
+  contextGraphId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SyncPeerResolution> {
+  const approvedCuratorPeerId = bootstrapHints.get(contextGraphId);
+  const fromHint = (): SyncPeerResolution => (approvedCuratorPeerId
+    ? { peerId: approvedCuratorPeerId, provenance: 'bootstrap-hint' }
+    : { provenance: 'none' });
+
+  const meta = await agent.getCgMeta(contextGraphId, { signal: options.signal });
+  const curatorDid = meta.curator ?? meta.curators[0] ?? '';
+  // Once `_meta` identifies a curator, that authoritative route must win over
+  // the bootstrap hint.
+  if (!curatorDid) return fromHint();
+  const didPrefix = 'did:dkg:agent:';
+  if (!curatorDid.startsWith(didPrefix)) return fromHint();
+  const curatorIdentifier = curatorDid.slice(didPrefix.length);
+
+  // Resolve curator identifier to a peer ID. The DID value is either a
+  // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
+  // wallet addresses, prefer the deterministic DKG_CREATOR triple (which
+  // stores the libp2p peer ID) over the agent registry (which may return
+  // an arbitrary match when multiple agents register the same wallet).
+  let curatorPeerId = curatorIdentifier;
+  // Assume the weaker classification and EARN `'metadata'` below. The previous
+  // comment here claimed the projected `DKG_CREATOR` route came "straight out of
+  // `<cg>/_meta`"; it does not — `getCgMeta()` merges four graphs.
+  let provenance: SyncPeerResolution['provenance'] = 'projection';
+  if (curatorDidNeedsRegistryResolution(curatorIdentifier)) {
+    let resolved = false;
+
+    // Preferred: use the same projected metadata resolution as privacy and
+    // listing reads. AGENTS-only declarations can mark a graph private, so
+    // the refresh path must be able to discover their creator route too.
+    const creatorCandidates = [
+      meta.creator,
+      ...meta.creators,
+    ].filter((value): value is string => Boolean(value));
+    for (const creatorDid of creatorCandidates) {
+      if (creatorDid.startsWith(didPrefix)) {
+        const creatorId = creatorDid.slice(didPrefix.length);
+        if (!creatorId.startsWith('0x')) {
+          curatorPeerId = creatorId;
+          resolved = true;
+          break;
+        }
+      }
+    }
+
+    // Fallback: agent registry lookup (non-deterministic if multiple agents
+    // share the same wallet address, but better than failing outright)
+    if (!resolved) {
+      try {
+        throwIfSyncAuthAborted(options.signal);
+        const agents = await agent.discovery.findAgents({ signal: options.signal });
+        throwIfSyncAuthAborted(options.signal);
+        const matches = agents.filter(
+          (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
+        );
+        const match = matches[0];
+        if (match) {
+          curatorPeerId = match.peerId;
+          resolved = true;
+          // NEVER authoritative, however many matches came back. `findAgents()`
+          // queries the LOCAL Agent Registry only, so "one match" means one match
+          // on this node — not that the wallet has a single registration on the
+          // network. Local cardinality cannot prove a binding.
+          provenance = 'registry';
+        }
+      } catch {
+        throwIfSyncAuthAborted(options.signal);
+        /* registry unavailable */
+      }
+    }
+
+    if (!resolved) return fromHint();
+  }
+
+  // No route here earns `'metadata'`, so nothing this resolver returns may end a
+  // catch-up walk. That is deliberate, and it is a scope decision rather than an
+  // oversight — see #2006 and the follow-up issue.
+  //
+  // Earlier revisions re-derived the binding from the Context Graph's OWN
+  // `<cg>/_meta` graph, on the theory that reading one graph instead of the
+  // merged projection made the fact attributable to the graph itself. It does
+  // not. Source-qualifying by GRAPH establishes which graph holds the rows, not
+  // which WRITER supplied them: ordinary durable-meta catch-up admits
+  // IRI-subject descriptive metadata for the Context Graph's entity subject
+  // (`selectAdmittedMetadataIndexes` falls through for any predicate outside the
+  // control set) and inserts it verbatim into that exact `_meta` graph. A
+  // contacted peer can therefore supply the very rows the check reads —
+  // `rdf:type`, `accessPolicy`, `curator` — and manufacture its own authority.
+  // Tightening the SHAPE of the record (completeness, uniqueness) does not help:
+  // it only raises the number of rows the peer must send.
+  //
+  // Authority needs a binding from a source a peer cannot write: a
+  // curator-signed snapshot, an on-chain curator→peer edge, or the locally
+  // persisted join-approval record. None is available today — join approvals
+  // carry no curator signature, no chain record maps a wallet to a libp2p peer,
+  // and both metadata "proofs" are structural checks with no signature. Until
+  // one exists, every resolution ranks the walk and none ends it.
+  void curatorDid;
+
+  bootstrapHints.delete(contextGraphId);
+  return { peerId: curatorPeerId, provenance };
+}
+
 export class ContextGraphResolveMethods extends DKGAgentBase {
   async getCgMeta(
     this: DKGAgent,
@@ -500,6 +713,22 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetaRecord> {
     return this.contextGraphMetaProjection.get(contextGraphId, { signal: options.signal });
+  }
+
+  /**
+   * Facts from the Context Graph's OWN `<cg>/_meta` graph only — the
+   * source-qualified counterpart of {@link getCgMeta}, which merges four
+   * graphs and discards which one supplied each fact. Used where a fact has to be attributable to
+   * the graph itself; see `resolveCuratorSyncPeer`.
+   */
+  async getOwnCgMetaFacts(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphMetaRecord> {
+    return this.contextGraphMetaProjection.getOwnMetaFacts(contextGraphId, {
+      signal: options.signal,
+    });
   }
 
   async listContextGraphsFromProjection(this: DKGAgent, opts?: { callerAgentAddress?: string | null }): Promise<ListContextGraphsRow[]> {
@@ -517,7 +746,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       candidateIds.add(id);
     }
 
-    const rows = await Promise.all([...candidateIds].sort().map(async (id): Promise<InternalContextGraphListRow | null> => {
+    const rows = await mapContextGraphListRows([...candidateIds].sort(), async (id): Promise<InternalContextGraphListRow | null> => {
       if (!id) return null;
       const sub = this.subscribedContextGraphs.get(id);
       const meta = await this.getCgMeta(id);
@@ -546,7 +775,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         onChainId: sub?.onChainId ?? meta.onChainId,
         policyKnown,
       };
-    }));
+    });
 
     return applyContextGraphListPrivacy(
       this,
@@ -560,12 +789,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * ONTOLOGY/_meta count, and storage-backed graph presence also counts so local
    * shared-memory-only survivors are not treated as nonexistent.
    */
-  async contextGraphExists(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+  async contextGraphExists(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
       } LIMIT 1`,
+      { signal: options.signal, source: 'agent.contextGraph.exists' },
     );
     if (result.type === 'bindings' && result.bindings.length > 0) {
       return true;
@@ -593,7 +827,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       graphManager.sharedMemoryMetaUri(contextGraphId),
     ];
     for (const graphUri of survivorGraphUris) {
-      if (await this.store.hasGraph(graphUri)) return true;
+      if (await this.store.hasGraph(graphUri, { signal: options.signal })) return true;
     }
     return false;
   }
@@ -655,26 +889,49 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const persistedSubscriptionPromise = subscriptionStore?.load
       ? subscriptionStore.load(contextGraphId)
       : Promise.resolve(null);
+    // One bounded point projection over the three trusted metadata sources.
+    // Facts are intentionally collected independently: the established
+    // ContextGraphMetaProjection model permits the declaration to live in one
+    // source and policy/curator/gates in another. Requiring every source to
+    // repeat rdf:type would both reject valid gate-only graphs and, worse,
+    // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
+    // so this path returns at most one gate row per source instead of expanding
+    // a potentially large allowlist.
     const declarationPromise = this.store.query(`
-      SELECT ?access ?curator WHERE {
+      SELECT ?kind ?value WHERE {
+        VALUES (?sourceGraph ?sourceSubject) {
+          (<${ontologyGraph}> <${contextGraphUri}>)
+          (<${agentsGraph}> <${contextGraphUri}>)
+          (<${cgMetaGraph}> <${metaSubjectUri}>)
+        }
         {
-          GRAPH <${ontologyGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          GRAPH ?sourceGraph {
+            ?sourceSubject <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
           }
+          BIND("declared" AS ?kind)
         } UNION {
-          GRAPH <${agentsGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
-            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          GRAPH ?sourceGraph {
+            ?sourceSubject <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?value .
           }
+          BIND("access" AS ?kind)
         } UNION {
-          GRAPH <${cgMetaGraph}> {
-            <${metaSubjectUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-            OPTIONAL { <${metaSubjectUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
-            OPTIONAL { <${metaSubjectUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          GRAPH ?sourceGraph {
+            ?sourceSubject <${DKG_ONTOLOGY.DKG_CURATOR}> ?value .
           }
+          BIND("curator" AS ?kind)
+        } UNION {
+          FILTER EXISTS {
+            VALUES ?gatePredicate {
+              <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>
+              <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}>
+              <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>
+              <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}>
+            }
+            GRAPH ?sourceGraph {
+              ?sourceSubject ?gatePredicate ?gateValue .
+            }
+          }
+          BIND("gate" AS ?kind)
         }
       }
     `);
@@ -721,26 +978,36 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       : noteStoreFailure(declarationRead.reason);
 
     let accessPolicy: 'public' | 'private' | undefined;
-    // Tri-state: stays `undefined` (unknown) when the declaration read
+    // Tri-state: stays `undefined` (unknown) when the metadata projection read
     // failed, so a store outage can never masquerade as "no declaration".
     let declarationFound: boolean | undefined = declarationResult === undefined ? undefined : false;
     const curators: string[] = [];
     if (declarationResult && declarationResult.type === 'bindings') {
-      declarationFound = declarationResult.bindings.length > 0;
       let sawPublic = false;
       let sawPrivate = false;
+      let sawGate = false;
       for (const row of declarationResult.bindings as Record<string, string>[]) {
-        const access = row['access'];
-        if (typeof access === 'string') {
-          const normalized = stripLiteral(access).trim().toLowerCase();
+        const kind = typeof row['kind'] === 'string'
+          ? stripLiteral(row['kind']).trim().toLowerCase()
+          : '';
+        const value = row['value'];
+        if (kind === 'declared') declarationFound = true;
+        if (kind === 'access' && typeof value === 'string') {
+          const normalized = stripLiteral(value).trim().toLowerCase();
           if (normalized === 'private') sawPrivate = true;
           if (normalized === 'public') sawPublic = true;
         }
-        const curator = row['curator'];
-        if (typeof curator === 'string' && curator.trim()) curators.push(curator);
+        if (kind === 'curator' && typeof value === 'string' && value.trim()) {
+          curators.push(value);
+        }
+        if (kind === 'gate') sawGate = true;
       }
       if (sawPrivate) accessPolicy = 'private';
       else if (sawPublic) accessPolicy = 'public';
+      // Match list/projection semantics: an explicit public policy wins, but
+      // legacy/implicit allowlist gates make a graph private when no policy
+      // literal exists. This is a bounded point query for one canonical id.
+      else if (sawGate) accessPolicy = 'private';
     }
 
     let checksum: string | null = null;
@@ -920,6 +1187,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
+        ...normalizeByteBudgetPageHint(parsed.pageMode, parsed.pageRowsHint),
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -931,6 +1199,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         syncSessionId: typeof parsed.syncSessionId === 'string' ? parsed.syncSessionId : undefined,
         // Phase C: unsigned delta hint. Validated/normalised in the responder.
         sinceBatchId: typeof parsed.sinceBatchId === 'string' ? parsed.sinceBatchId : undefined,
+        // Exact-asset filter is narrowing-only. Present-but-invalid must remain
+        // an empty filter so the responder serves nothing instead of silently
+        // expanding the request into a full Context Graph scan.
+        assetUals: normalizeExactAssetUals(parsed.assetUals),
         // R9 (SECURITY): the unsigned member-recovery marker. This is a STRICT
         // FIELD ALLOWLIST — anything not copied here is dropped. If `recovery`
         // were omitted, the responder would never see it, silently fall through
@@ -950,28 +1222,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
     const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const phase = normalizeSyncPhase(parts[3]);
-    // Phase C: parse only the trailing keyed tokens emitted by
-    // `buildSyncRequestEnvelope` (after the optional phase/snapshot suffix).
-    // Scanning every segment would misparse ordinary values literally equal to
-    // "since" or "session" as control tokens. Old encoders never emit them.
-    let sinceBatchId: string | undefined;
-    let syncSessionId: string | undefined;
-    let tail = parts.length;
-    if (
-      tail >= 2 &&
-      parts[tail - 2] === 'since' &&
-      /^\d+$/.test(parts[tail - 1])
-    ) {
-      sinceBatchId = parts[tail - 1];
-      tail -= 2;
-    }
-    if (
-      tail >= 2 &&
-      parts[tail - 2] === 'session' &&
-      parts[tail - 1].length > 0
-    ) {
-      syncSessionId = parts[tail - 1];
-    }
+    const tail = decodePipeSyncRequestTail(parts);
     return {
       contextGraphId,
       offset: parseInt(parts[1], 10) || 0,
@@ -979,8 +1230,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       includeSharedMemory,
       phase,
       snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
-      syncSessionId,
-      sinceBatchId,
+      ...tail,
     };
   }
 
@@ -1058,6 +1308,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     sinceBatchId?: string,
     syncSessionId?: string,
     recovery?: boolean,
+    assetUals?: string[],
   ): Promise<Uint8Array> {
     // Policy-read uncertainty must not abort bootstrap or downgrade it to the
     // public pipe encoding. Treat an unreadable policy as private; catalog is
@@ -1093,6 +1344,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
+    const exactAssetUals = assetUals === undefined ? undefined : requireExactAssetUals(assetUals);
     return buildSyncRequestEnvelope({
       contextGraphId,
       offset,
@@ -1107,6 +1359,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // is gap-safe only when it comes from a CONTIGUOUS watermark, so it is
       // supplied explicitly by callers, never auto-derived from local MAX().
       sinceBatchId: phase === 'data' && !includeSharedMemory ? sinceBatchId : undefined,
+      assetUals: !includeSharedMemory && phase !== 'catalog' ? exactAssetUals : undefined,
       syncSessionId: phase === 'snapshot' ? undefined : syncSessionId,
       needsAuth,
       // R9: forces the EDGE (member-agent-key) signing path so the responder
@@ -1441,8 +1694,26 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    */
   gossipWireIdFor(this: DKGAgent, localId: string): string {
     const sub = this.subscribedContextGraphs.get(localId);
-    if (sub?.onChainHash) return sub.onChainHash;
-    if (/^0x[0-9a-fA-F]{64}$/.test(localId)) return localId.toLowerCase();
+    if (sub?.onChainHash) return this.contextGraphWireId(sub.onChainHash);
+    return this.contextGraphWireId(localId);
+  }
+
+  /** Canonical cleartext-or-hash Context Graph identity used by every index path. */
+  contextGraphWireId(this: DKGAgent, contextGraphId: string): string {
+    if (/^0x[0-9a-f]{64}$/i.test(contextGraphId)) return contextGraphId.toLowerCase();
+    return ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+  }
+
+  /**
+   * Derive the curator commitment for a LOCAL cleartext identifier.
+   *
+   * This deliberately hashes every string, including values that happen to
+   * look like a 32-byte wire id. A hash-shaped user-chosen CG name is still
+   * cleartext and its on-chain commitment is keccak256(utf8(name)). Host-only
+   * subscriptions carry an explicit `onChainHash`, so callers never need to
+   * guess which interpretation applies from the string shape alone.
+   */
+  contextGraphNameCommitment(this: DKGAgent, localId: string): string {
     return ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
   }
 
@@ -1551,32 +1822,45 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     return lower;
   }
 
+  /** Bind a name-hash event to its indexed cleartext or hash-only subscription. */
+  bindOnChainContextGraphIdFromNameHash(
+    this: DKGAgent,
+    nameHash: string,
+    onChainContextGraphId: string,
+    options?: { persist?: boolean },
+  ): string | null {
+    const wireId = this.contextGraphWireId(nameHash);
+    // Chain events may only enrich a subscription that explicitly indexed this
+    // commitment. Falling back to `localId === wireId` is ambiguous: a user may
+    // legitimately choose a cleartext id that itself looks like a 32-byte hash.
+    // Host-only records are indexed under their explicit `onChainHash`, so the
+    // reverse map covers both safe cases without a shape-based fallback.
+    const localId = this.wireIdToLocalCgId.get(wireId);
+    if (localId === undefined) return null;
+    const current = this.subscribedContextGraphs.get(localId);
+    if (current === undefined) return null;
+    const next = { ...current };
+    this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
+    next.onChainHash = wireId;
+    this.setContextGraphSubscription(localId, next, options);
+    return localId;
+  }
+
   /**
-   * Record the curator-committed wire id for a local CG. Keeps the
-   * forward (subscribedContextGraphs) and reverse (wireIdToLocalCgId)
-   * mappings in lockstep. Idempotent.
+   * Compatibility adapter for callers that only enrich an existing
+   * subscription's wire id. The canonical subscription mutator owns both the
+   * forward record and reverse index update.
    *
-   * Pass `null` to clear the mapping (rare — used when a CG is
-   * deactivated and we want to free the reverse-index slot).
+   * Pass `null` to clear the curator commitment and restore the canonical
+   * local-id-derived reverse mapping.
    */
   recordCgWireId(this: DKGAgent, localId: string, wireId: string | null): void {
     const sub = this.subscribedContextGraphs.get(localId);
-    const lower = wireId ? wireId.toLowerCase() : null;
-    if (sub) {
-      sub.onChainHash = lower ?? undefined;
-    }
-    // Drop any stale reverse entry that pointed at this localId under
-    // a different hash (curator rotated the wire id — currently
-    // unsupported but cheap to defend against).
-    if (sub?.onChainHash && (!lower || sub.onChainHash !== lower)) {
-      const prev = sub.onChainHash;
-      if (this.wireIdToLocalCgId.get(prev) === localId) {
-        this.wireIdToLocalCgId.delete(prev);
-      }
-    }
-    if (lower) {
-      this.wireIdToLocalCgId.set(lower, localId);
-    }
+    if (sub === undefined) return;
+    this.setContextGraphSubscription(localId, {
+      ...sub,
+      onChainHash: wireId ? this.contextGraphWireId(wireId) : undefined,
+    }, { persist: false });
   }
 
   /**
@@ -1761,76 +2045,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
-    const approvedCuratorPeerId = this.preferredSyncPeers.get(contextGraphId);
-    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
-    const curatorDid = meta.curator ?? meta.curators[0] ?? '';
-    if (!curatorDid) {
-      // Join approval authenticates the notification sender before recording
-      // this hint. It is the only curator route available during the bootstrap
-      // window where `_meta` has not arrived yet (and is restored from the
-      // durable join-approved membership row after restart). Once `_meta`
-      // identifies a curator, however, that authoritative route must win over
-      // the bootstrap hint.
-      return approvedCuratorPeerId;
-    }
-    const didPrefix = 'did:dkg:agent:';
-    if (!curatorDid.startsWith(didPrefix)) {
-      return approvedCuratorPeerId;
-    }
-    const curatorIdentifier = curatorDid.slice(didPrefix.length);
-
-    // Resolve curator identifier to a peer ID. The DID value is either a
-    // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
-    // wallet addresses, prefer the deterministic DKG_CREATOR triple (which
-    // stores the libp2p peer ID) over the agent registry (which may return
-    // an arbitrary match when multiple agents register the same wallet).
-    let curatorPeerId = curatorIdentifier;
-    if (curatorIdentifier.startsWith('0x')) {
-      let resolved = false;
-
-      // Preferred: use the same projected metadata resolution as privacy and
-      // listing reads. AGENTS-only declarations can mark a graph private, so
-      // the refresh path must be able to discover their creator route too.
-      const creatorCandidates = [
-        meta.creator,
-        ...meta.creators,
-      ].filter((value): value is string => Boolean(value));
-      for (const creatorDid of creatorCandidates) {
-        if (creatorDid.startsWith(didPrefix)) {
-          const creatorId = creatorDid.slice(didPrefix.length);
-          if (!creatorId.startsWith('0x')) {
-            curatorPeerId = creatorId;
-            resolved = true;
-            break;
-          }
-        }
-      }
-
-      // Fallback: agent registry lookup (non-deterministic if multiple agents
-      // share the same wallet address, but better than failing outright)
-      if (!resolved) {
-        try {
-          throwIfSyncAuthAborted(options.signal);
-          const agents = await this.discovery.findAgents();
-          throwIfSyncAuthAborted(options.signal);
-          const match = agents.find(
-            (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
-          );
-          if (match) {
-            curatorPeerId = match.peerId;
-            resolved = true;
-          }
-        } catch {
-          throwIfSyncAuthAborted(options.signal);
-          /* registry unavailable */
-        }
-      }
-
-      if (!resolved) return approvedCuratorPeerId;
-    }
-
-    this.preferredSyncPeers.delete(contextGraphId);
-    return curatorPeerId;
+    return (await resolveCuratorSyncPeer(
+      this,
+      this.preferredSyncPeers,
+      contextGraphId,
+      options,
+    )).peerId;
   }
 
   async refreshMetaFromCurator(
@@ -2035,8 +2255,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         if (!uri || byUri.has(uri)) continue;
         byUri.set(uri, row);
       }
-      // Parallel lookups — sequential await per ontology row multiplied list latency noticeably.
-      const definitionSettled = await Promise.allSettled([...byUri.values()].map(async (row) => {
+      // Bounded parallel lookups avoid multiplying latency without flooding
+      // the store scheduler when the registry contains hundreds of rows.
+      const definitionSettled = await mapContextGraphListRowsSettled([...byUri.values()], async (row) => {
         const uri = row['ctxGraph'] ?? '';
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
@@ -2069,7 +2290,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           synced: sub?.synced ?? false,
           ...(onChainId ? { onChainId } : {}),
         }, policyPrivacy(row['access']));
-      }));
+      });
       for (const entry of definitionSettled) {
         if (entry.status === 'rejected') throw entry.reason;
       }
@@ -2255,7 +2476,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
      * for the same CG; projection resolves policy with _meta-first source
      * precedence, then AGENTS, then ONTOLOGY.
      */
-    const projectedRows = await Promise.allSettled(rows.map(async (r) => {
+    const projectedRows = await mapContextGraphListRowsSettled(rows, async (r) => {
       const metaRead = await withBudget(
         (signal) => this.getCgMeta(r.id, { signal }),
         `projection lookup for ${r.id}`,
@@ -2287,20 +2508,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         isSystem: meta.isSystem || r.isSystem,
         onChainId: meta.onChainId ?? r.onChainId,
       };
-    }));
+    });
     rows = projectedRows.map((entry) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
     });
 
-    const curatorBackfills = await Promise.allSettled(rows.map(async (r) => {
+    const curatorBackfills = await mapContextGraphListRowsSettled(rows, async (r) => {
       if (r.curator?.trim()) return r;
       const c = await optional(
         (signal) => this.getContextGraphCurator(r.id, { signal }),
         `curator lookup for ${r.id}`,
       );
       return c ? { ...r, curator: c } : r;
-    }));
+    });
     rows = curatorBackfills.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
@@ -2320,10 +2541,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       return legacyRead.value ? 'private' : 'public';
     };
-    const privacySettled = await Promise.allSettled(rows.map(async (row) => ({
+    const privacySettled = await mapContextGraphListRowsSettled(rows, async (row) => ({
       uri: row.uri,
       privacy: await resolveRowPrivacy(row),
-    })));
+    }));
     const resolvedPrivacyByUri = new Map<string, ListContextGraphsPrivacy>();
     for (const entry of privacySettled) {
       if (entry.status === 'fulfilled') {
@@ -2349,7 +2570,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     }
 
-    const annotatedSettled = await Promise.allSettled(rows.map(async (r): Promise<{
+    const annotatedSettled = await mapContextGraphListRowsSettled(rows, async (r): Promise<{
       row: ListContextGraphsRow;
       privacy: ListContextGraphsPrivacy;
     }> => {
@@ -2373,7 +2594,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       if (!allowlistRead.ok) return { row: r, privacy };
       return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
-    }));
+    });
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;

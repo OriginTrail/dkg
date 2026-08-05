@@ -72,6 +72,7 @@ import {
   LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
   loadConfig,
   saveConfig,
@@ -106,6 +107,15 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
+import {
+  getApiQueryPriority,
+  type ApiQueryPriority,
+} from '../api-query-priority.js';
+export {
+  configureApiQueryPriority,
+  resolveApiQueryPriority,
+} from '../api-query-priority.js';
+export type { ApiQueryPriority } from '../api-query-priority.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
@@ -330,6 +340,73 @@ import type { RequestContext } from './context.js';
 // HTTP input is rejected before the agent starts VERIFY work.
 const VERIFY_COLLECTION_TIMEOUT_MIN_MS = 1_000;
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
+const API_QUERY_CALLER_DISCONNECTED = 'API_QUERY_CALLER_DISCONNECTED';
+
+export interface ApiQueryRequestLifecycle {
+  readonly signal: AbortSignal;
+  readonly priority: ApiQueryPriority;
+  readonly source: 'api.query';
+  dispose(): void;
+}
+
+class ApiQueryCallerDisconnectedError extends Error {
+  readonly code = API_QUERY_CALLER_DISCONNECTED;
+
+  constructor() {
+    super('API query caller disconnected');
+    this.name = 'ApiQueryCallerDisconnectedError';
+  }
+}
+
+/**
+ * Own the HTTP-disconnect signal and the exact store-admission options passed
+ * by `/api/query`. Exported so the route boundary can be tested without
+ * replacing the real query engine with a hand-typed error stub.
+ */
+export function createApiQueryRequestLifecycle(
+  req: IncomingMessage,
+  res: ServerResponse,
+): ApiQueryRequestLifecycle {
+  const controller = new AbortController();
+  const abortDisconnectedQuery = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(new ApiQueryCallerDisconnectedError());
+    }
+  };
+  req.once('aborted', abortDisconnectedQuery);
+  res.once('close', abortDisconnectedQuery);
+  if (req.aborted || res.destroyed) abortDisconnectedQuery();
+
+  return {
+    signal: controller.signal,
+    priority: getApiQueryPriority(),
+    source: 'api.query',
+    dispose() {
+      req.removeListener('aborted', abortDisconnectedQuery);
+      res.removeListener('close', abortDisconnectedQuery);
+    },
+  };
+}
+
+/** Map retryable, pre-dispatch read shedding without changing write routes. */
+export function respondIfApiQueryStoreBusy(res: ServerResponse, err: unknown): boolean {
+  if (!(err instanceof StoreSchedulerBusyError)) return false;
+
+  jsonResponse(
+    res,
+    503,
+    {
+      error: err.message,
+      code: err.code,
+      reason: err.reason,
+      priority: err.priority,
+      retryable: true,
+    },
+    undefined,
+    { 'Retry-After': '1' },
+  );
+  return true;
+}
 
 function parseVerifyTimeoutMs(
   raw: unknown,
@@ -578,29 +655,45 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           });
         }
       }
-      const result = await agent.query(sparql, {
-        contextGraphId,
-        graphSuffix,
-        includeSharedMemory,
-        includeContextGraphPartitions,
-        view,
-        agentAddress,
-        verifiedGraph,
-        assertionName,
-        subGraphName,
-        callerAgentAddress,
-        // the daemon admin
-        // token is the authorisation anchor for cross-agent WM reads
-        // (adapter-openclaw and the CLI rely on this). Pass it through
-        // so DKGAgent.query knows to skip the multi-agent signed-proof
-        // gate. Per-agent tokens still go through the regular caller-
-        // matches-target invariant inside DKGAgent.query.
-        // NOTE: `adminAuthenticated` pass-through scoped out for the same
-        // reason as `agentAuthSignature` above — DKGAgent.query on this
-        // branch doesn't accept it; it's landing via the agent-side fixes.
-        minTrust: minTrust as TrustLevel | undefined,
-        operationCtx: ctx,
-      });
+      // API reads are untrusted, potentially planner-heavy work. Keep them on
+      // the background lane so a slow dashboard/plugin query cannot occupy the
+      // normal slots needed by promotion, reconciliation, gossip validation,
+      // and SWM catch-up (issue #1989). Thread connection cancellation all the
+      // way to the SPARQL adapter: if the HTTP caller times out or disconnects,
+      // its queued/in-flight store request must not remain as orphan work.
+      const queryLifecycle = createApiQueryRequestLifecycle(req, res);
+
+      let result;
+      try {
+        result = await agent.query(sparql, {
+          contextGraphId,
+          graphSuffix,
+          includeSharedMemory,
+          includeContextGraphPartitions,
+          view,
+          agentAddress,
+          verifiedGraph,
+          assertionName,
+          subGraphName,
+          callerAgentAddress,
+          signal: queryLifecycle.signal,
+          priority: queryLifecycle.priority,
+          source: queryLifecycle.source,
+          // the daemon admin
+          // token is the authorisation anchor for cross-agent WM reads
+          // (adapter-openclaw and the CLI rely on this). Pass it through
+          // so DKGAgent.query knows to skip the multi-agent signed-proof
+          // gate. Per-agent tokens still go through the regular caller-
+          // matches-target invariant inside DKGAgent.query.
+          // NOTE: `adminAuthenticated` pass-through scoped out for the same
+          // reason as `agentAuthSignature` above — DKGAgent.query on this
+          // branch doesn't accept it; it's landing via the agent-side fixes.
+          minTrust: minTrust as TrustLevel | undefined,
+          operationCtx: ctx,
+        });
+      } finally {
+        queryLifecycle.dispose();
+      }
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
@@ -609,6 +702,18 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
       });
     } catch (err: any) {
+      if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
+        tracker.cancel(ctx, err);
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (respondIfApiQueryStoreBusy(res, err)) {
+        // Admission shedding means the operation never reached the store. Keep
+        // it visible with the scheduler reason, but do not count it as an
+        // execution failure in dashboard health rates.
+        tracker.cancel(ctx, err);
+        return;
+      }
       tracker.fail(ctx, err);
       const msg = err?.message ?? "";
       if (
@@ -709,6 +814,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       );
       if (typeT) entityRdfType = typeT.o;
     } catch (err: any) {
+      if (respondIfApiQueryStoreBusy(res, err)) return;
       return jsonResponse(res, 500, {
         error: `Failed to fetch entity triples: ${err.message}`,
       });

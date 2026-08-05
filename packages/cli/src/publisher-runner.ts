@@ -6,11 +6,16 @@ import {
   NoChainAdapter,
   buildKnowledgeAssetUal,
   mergeRpcUsageWindows,
+  type CanonicalFinalizationReceipt,
   type ChainAdapter,
   type OnChainPublishResult,
   type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  TypedEventBus,
+  type Ed25519Keypair,
+} from '@origintrail-official/dkg-core';
 import {
   ACKCollector,
   AsyncLiftRunner,
@@ -26,11 +31,13 @@ import {
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type AsyncLiftPublisherRecoveryResult,
+  type VmPublisherControl,
   type LiftJobBroadcast,
   type LiftJobHex,
   type LiftJobIncluded,
   type PublishOptions,
   type V10ACKProviderParams,
+  type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -176,6 +183,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -194,6 +202,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
+      publicSnapshotStore: args.publicSnapshotStore,
     });
     await runtime.runner.start();
     logPublisherWalletAttribution(runtime.wallets, args.log);
@@ -301,6 +310,8 @@ interface PublisherRuntimeBaseArgs {
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
+  // #1829 — daemon-only append-only journal writes (OFF for standalone `dkg publisher run`).
+  journalWrites?: boolean;
 }
 
 export async function createPublisherRuntime(args: {
@@ -364,9 +375,19 @@ export function createPublisherInspectorFromStore(
 
 export function createPublisherControlFromStore(
   store: TripleStore,
-  publicSnapshotStore?: WorkspacePublicSnapshotStore,
-): AsyncLiftPublisher {
-  return new TripleStoreAsyncLiftPublisher(store, { publicSnapshotStore });
+  options: { publicSnapshotStore?: WorkspacePublicSnapshotStore; maxRetries?: number } = {},
+): VmPublisherControl {
+  // The daemon admission instance also serves the #1828 recovery lookup (route)
+  // and the boot index backfill — segregated capabilities the base
+  // AsyncLiftPublisher runtime contract intentionally does NOT carry.
+  return new TripleStoreAsyncLiftPublisher(store, {
+    publicSnapshotStore: options.publicSnapshotStore,
+    maxRetries: options.maxRetries,
+    // #1829 — daemon admission instance: enable append-only journal writes. Left OFF
+    // for the CLI inspector + standalone runner so a second OS process never races the
+    // node-local per-lineageKey seq allocation.
+    journalWrites: true,
+  });
 }
 
 export async function createPublisherRuntimeFromAgent(args: {
@@ -382,6 +403,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -395,8 +417,12 @@ export async function createPublisherRuntimeFromAgent(args: {
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
-    publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
+    publicSnapshotStore: args.publicSnapshotStore
+      ?? createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
+    // #1829 — this is the daemon publisher runtime (processes named-KA jobs), so it
+    // journals. Standalone `dkg publisher run` (createPublisherRuntime) does not set this.
+    journalWrites: true,
   });
 }
 
@@ -473,6 +499,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
+    journalWrites: args.journalWrites ?? false,
     knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
@@ -709,15 +736,72 @@ export function createKnowledgeAssetVmPublishRecoveryResolver(
   publishers: Map<string, DKGPublisher>,
 ): AsyncKnowledgeAssetVmPublishRecoveryResolver {
   return async (job) => {
-    const recovered = await resolveOnChainPublish(job, publishers);
-    return recovered
-      ? mapOnChainPublishResultToKnowledgeAssetVmRecovery(
-          recovered.result,
-          recovered.chain.chainId,
-          recovered.knowledgeAssetsContract,
-        )
-      : null;
+    const recovered = await resolveCanonicalOnChainPublish(job, publishers);
+    if (!recovered) return null;
+    const evidence = mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
+      recovered.receipt,
+      recovered.chain.chainId,
+      recovered.knowledgeAssetsContract,
+    );
+    if (!evidence) return null;
+
+    // The chain receipt identifies the minted token by its packed id, so the
+    // generic recovery mapper correctly reconstructs the public
+    // contract/token UAL. A graph-scoped named-KA job, however, persisted its
+    // exact WM/SWM/VM graphs under the immutable author/KA-number UAL. Preserve
+    // that queued identity for local materialization; the agent independently
+    // binds it to the receipt's packed batch/start/end id and signed author.
+    const request = job.request?.jobType === 'knowledge-asset-vm-publish'
+      ? job.request.knowledgeAssetVmPublish
+      : undefined;
+    if (
+      request?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || request.kaUal === undefined
+    ) {
+      return evidence;
+    }
+    return {
+      ...evidence,
+      finalization: {
+        ...evidence.finalization,
+        ual: request.kaUal,
+      },
+    };
   };
+}
+
+async function resolveCanonicalOnChainPublish(
+  job: LiftJobBroadcast | LiftJobIncluded,
+  publishers: Map<string, DKGPublisher>,
+): Promise<{
+  receipt: CanonicalFinalizationReceipt;
+  chain: ChainAdapter;
+  knowledgeAssetsContract: string;
+} | null> {
+  const publisher = publishers.get(job.broadcast.walletId);
+  if (!publisher) return null;
+  const chain = (publisher as unknown as { chain?: ChainAdapter }).chain;
+  if (!chain?.resolveCanonicalFinalizationReceipt) return null;
+
+  let resolution;
+  try {
+    resolution = await chain.resolveCanonicalFinalizationReceipt(job.broadcast.txHash);
+  } catch {
+    return null;
+  }
+  if (resolution.status !== 'confirmed') return null;
+
+  let knowledgeAssetsContract = resolution.receipt.knowledgeAssetsContract;
+  if (!knowledgeAssetsContract && chain.getDKGKnowledgeAssetsAddress) {
+    try {
+      knowledgeAssetsContract = await chain.getDKGKnowledgeAssetsAddress();
+    } catch {
+      return null;
+    }
+  }
+  return knowledgeAssetsContract
+    ? { receipt: resolution.receipt, chain, knowledgeAssetsContract }
+    : null;
 }
 
 function asLiftJobHex(value: string): LiftJobHex | null {
@@ -756,24 +840,49 @@ export function mapOnChainPublishResultToLiftRecovery(
   };
 }
 
-export function mapOnChainPublishResultToKnowledgeAssetVmRecovery(
-  result: OnChainPublishResult,
+function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
+  receipt: CanonicalFinalizationReceipt,
   chainId: string,
   knowledgeAssetsContract: string,
 ): AsyncKnowledgeAssetVmPublishRecoveryEvidence | null {
-  const recovery = mapOnChainPublishResultToLiftRecovery(
-    result,
-    chainId,
-    knowledgeAssetsContract,
-  );
-  if (!recovery || !result.merkleRoot || !result.authorAddress) return null;
-
-  const merkleRoot = asLiftJobHex(ethers.hexlify(result.merkleRoot));
-  const authorAddress = asLiftJobHex(result.authorAddress);
-  if (!merkleRoot || !authorAddress) return null;
+  const txHash = asLiftJobHex(receipt.txHash);
+  const blockHash = asLiftJobHex(receipt.blockHash);
+  const merkleRoot = asLiftJobHex(ethers.hexlify(receipt.merkleRoot));
+  const publisherAddress = asLiftJobHex(receipt.publisherAddress);
+  const authorAddress = receipt.authorAddress
+    ? asLiftJobHex(receipt.authorAddress)
+    : null;
+  if (
+    !txHash
+    || !blockHash
+    || !merkleRoot
+    || !publisherAddress
+    || !authorAddress
+    || !ethers.isHexString(blockHash, 32)
+    || !ethers.isHexString(merkleRoot, 32)
+    || !ethers.isAddress(publisherAddress)
+    || !ethers.isAddress(authorAddress)
+    || !Number.isSafeInteger(receipt.blockNumber)
+    || receipt.blockNumber < 0
+    || !Number.isSafeInteger(receipt.txIndex)
+    || receipt.txIndex < 0
+  ) return null;
   return {
-    ...recovery,
-    publishProof: { merkleRoot, authorAddress },
+    inclusion: {
+      txHash,
+      blockNumber: receipt.blockNumber,
+      blockHash,
+    },
+    finalization: {
+      mode: 'published',
+      txHash,
+      ual: buildKnowledgeAssetUal(chainId, knowledgeAssetsContract, receipt.kaId),
+      batchId: receipt.batchId.toString() as `${bigint}`,
+      startKAId: receipt.startKAId.toString() as `${bigint}`,
+      endKAId: receipt.endKAId.toString() as `${bigint}`,
+      publisherAddress,
+    },
+    publishProof: { merkleRoot, authorAddress, txIndex: receipt.txIndex },
   };
 }
 
@@ -848,12 +957,16 @@ function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
 export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
+  pageIndexStore?: SnapshotPageIndexStore,
 ): WorkspacePublicSnapshotStore | undefined {
   const snapshotConfig = config?.sharedMemoryPublicSnapshotStorage;
   if (snapshotConfig?.enabled === false) {
     return undefined;
   }
-  return new FileWorkspacePublicSnapshotStore(snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'));
+  return new FileWorkspacePublicSnapshotStore(
+    snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'),
+    pageIndexStore,
+  );
 }
 
 function isLocalOxigraphStoreConfig(storeConfig: { backend?: unknown }): boolean {

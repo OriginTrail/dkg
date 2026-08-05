@@ -15,15 +15,24 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { META_REFRESH_COOLDOWN_MS } from './dkg-agent-constants.js';
+import {
+  META_REFRESH_COOLDOWN_MS,
+  SYNC_TOTAL_TIMEOUT_MS,
+} from './dkg-agent-constants.js';
 import {
   hasAuthoritativePrivateMetaDefinition,
   type AuthoritativePrivateMetaMemberProof,
 } from './context-graph-private-meta-proof.js';
+import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
+import {
+  hasSyncAdmissionSource,
+  withSyncAdmissionSource,
+} from './sync/attempt-telemetry.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
 import type { SyncPageResult } from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
+import { stripLiteral } from './dkg-agent-utils.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -41,6 +50,11 @@ export interface CuratorMetaRefreshOptions {
 
 interface CuratorConnection {
   remotePeer: { toString(): string };
+}
+
+interface CuratorBoundSubscription {
+  onChainId?: string;
+  onChainHash?: string;
 }
 
 interface CuratorMetaRefreshAgent {
@@ -66,6 +80,7 @@ interface CuratorMetaRefreshAgent {
   readonly contextGraphMetaProjection: {
     markDirty(contextGraphId: string): void;
   };
+  readonly subscribedContextGraphs?: Map<string, CuratorBoundSubscription>;
   readonly log: {
     warn(ctx: OperationContext, message: string): void;
     info(ctx: OperationContext, message: string): void;
@@ -89,6 +104,13 @@ interface CuratorMetaRefreshAgent {
     recovery?: boolean,
     forceFreshSession?: boolean,
   ): Promise<SyncPageResult>;
+  bindSubscriptionOnChainId?(
+    localCgId: string,
+    sub: CuratorBoundSubscription,
+    newOnChainId: string,
+  ): void;
+  recordCgWireId?(localCgId: string, wireId: string | null): void;
+  persistContextGraphSubscription?(contextGraphId: string): void;
 }
 
 interface CuratorMetaRefreshState {
@@ -103,6 +125,67 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+}
+
+/**
+ * Apply the chain slot and wire-id carried by an authenticated curator
+ * snapshot to the late member's durable subscription row.
+ *
+ * These facts deliberately come from the already-validated private `_meta`
+ * snapshot.  Reading only the system ontology graph is insufficient for a
+ * late member: the registration announcement on that public topic is a
+ * one-shot event and may have happened before the member joined.
+ */
+function applyCuratorRegistrationBinding(
+  agent: CuratorMetaRefreshAgent,
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+): void {
+  const sub = agent.subscribedContextGraphs?.get(contextGraphId);
+  if (!sub) return;
+
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+  const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
+  let onChainId: string | undefined;
+  let onChainHash: string | undefined;
+
+  for (const quad of snapshot) {
+    if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
+    const value = stripLiteral(quad.object);
+    if (quad.predicate === onChainIdPredicate && /^\d+$/.test(value)) {
+      try {
+        if (BigInt(value) > 0n) onChainId = value;
+      } catch {
+        // Ignore malformed or out-of-domain curator metadata fail-closed.
+      }
+    } else if (
+      quad.predicate === onChainHashPredicate
+      && /^0x[0-9a-fA-F]{64}$/.test(value)
+    ) {
+      onChainHash = value.toLowerCase();
+    }
+  }
+
+  let changed = false;
+  if (onChainId && sub.onChainId !== onChainId) {
+    if (agent.bindSubscriptionOnChainId) {
+      agent.bindSubscriptionOnChainId(contextGraphId, sub, onChainId);
+    } else {
+      sub.onChainId = onChainId;
+    }
+    changed = true;
+  }
+  if (onChainHash && sub.onChainHash?.toLowerCase() !== onChainHash) {
+    if (agent.recordCgWireId) {
+      agent.recordCgWireId(contextGraphId, onChainHash);
+    } else {
+      sub.onChainHash = onChainHash;
+    }
+    changed = true;
+  }
+  if (changed) agent.persistContextGraphSubscription?.(contextGraphId);
 }
 
 const inFlightCuratorMetaRefreshesByAgent = new WeakMap<
@@ -243,20 +326,54 @@ async function fetchAuthoritativeMetaSnapshot(
     'meta',
   );
   agent.syncCheckpoints.delete(snapshotCheckpointKey);
-  const result = await agent.fetchSyncPages(
+  // W1 §5.5 — TRIGGER attribution with a base case.
+  //
+  // This is the only fetch in this file, and every route into it funnels here,
+  // so one guard covers all three enumerated callers:
+  //   1. `runImmediatePostApprovalSync` (dkg-agent-lifecycle.ts) — requester,
+  //      no enclosing operation (gossipsub handler)
+  //   2. `resolveCuratorPeerIdsForCg` (dkg-agent-lifecycle.ts) — requester,
+  //      reached from the changelog lane's `runResync`, so it DOES run inside
+  //      an admitted operation
+  //   3. `authorizeSyncRequest` (sync/auth/request-authorize.ts) — RESPONDER,
+  //      authorizing an inbound request; no requester operation exists
+  //
+  // `control-plane` therefore covers BOTH requester-side and responder-side
+  // control traffic. Anyone later reading it as "requester meta refresh" is
+  // wrong. A FOURTH caller must be checked against this list rather than
+  // assumed to fit — the guard will silently give it a plausible label.
+  //
+  // Guarded on scope PRESENCE, never on `=== 'unspecified'`: an admitted
+  // operation whose caller omitted `source` legitimately holds that sentinel,
+  // and relabelling it `control-plane` would launder "we do not know" into a
+  // confident answer. See `hasSyncAdmissionSource`'s doc comment.
+  //
+  // Case 2 keeps its ENCLOSING source on purpose. A refresh nested inside a
+  // catch-up happens *because* of that catch-up — skip the catch-up and the
+  // refresh does not happen — so those bytes are that lane's cost. Attributing
+  // them to `control-plane` would move them out of the eligible numerator and
+  // under-count the very lane §7.3 is evaluating.
+  const runFetch = () => agent.fetchSyncPages(
     ctx,
     curatorPeerId,
     contextGraphId,
     false,
     'meta',
     metaGraph,
-    Date.now() + 10_000,
+    // A curator projection shares the root `_meta` graph with KA lifecycle
+    // metadata, so even the small control-plane subset can sit behind many
+    // pages. Use the normal bounded sync budget instead of a special 10-second
+    // cap that made sufficiently populated private CGs impossible to join.
+    Date.now() + SYNC_TOTAL_TIMEOUT_MS,
     undefined,
     undefined,
     options.signal,
     undefined,
     true,
   );
+  const result = await (hasSyncAdmissionSource()
+    ? runFetch()
+    : withSyncAdmissionSource('control-plane', runFetch));
   throwIfCuratorMetaRefreshAborted(options.signal);
 
   // The shared N-Quads parser admits any graph under the CG prefix. This
@@ -272,16 +389,26 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  if (!hasAuthoritativePrivateMetaDefinition(
+  const hasAuthoritativePublicDefinition = hasAuthoritativePublicMetaDefinition(
+    contextGraphId,
+    controlMetaQuads,
+  );
+  // Supplying memberProof selects the fail-closed private post-approval
+  // contract. A public-only snapshot must not satisfy that request: public
+  // subscriptions reach this refresh without a member proof.
+  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
+    && hasAuthoritativePublicDefinition;
+  const hasAuthoritativePrivateDefinition = hasAuthoritativePrivateMetaDefinition(
     contextGraphId,
     controlMetaQuads,
     options.memberProof,
-  )) {
+  );
+  if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(
       ctx,
-      `Rejected curator metadata snapshot for "${contextGraphId}": missing the complete private definition or approved-member delegation proof`,
+      `Rejected curator metadata snapshot for "${contextGraphId}": missing an unambiguous public definition or the complete private definition and approved-member delegation proof`,
     );
     return undefined;
   }
@@ -415,6 +542,7 @@ async function executeCuratorMetaRefresh(
     );
     if (!snapshot) return false;
     await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot.quads, ctx);
+    applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,

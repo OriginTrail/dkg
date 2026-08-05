@@ -50,6 +50,52 @@ const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
   },
 };
 
+async function requestStatusWithAgent(
+  agentOverrides: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    await handleStatusRoutes({
+      req,
+      res,
+      publisherState: DISABLED_PUBLISHER_STATE,
+      path: url.pathname,
+      url,
+      network: null,
+      config: {
+        name: 'status-finalization-recovery-test',
+        nodeRole: 'edge',
+        chain: { type: 'mock' },
+      },
+      startedAt: Date.now(),
+      agent: {
+        peerId: 'peer-status-test',
+        multiaddrs: [],
+        node: {
+          libp2p: { getConnections: () => [] },
+          getRelayStats: () => null,
+        },
+        publisher: { getIdentityId: () => 0n },
+        ...agentOverrides,
+      },
+      nodeVersion: '0.0.0-test',
+      nodeCommit: '',
+      admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+    } as unknown as RequestContext);
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/status`);
+    return { status: response.status, body: await response.json() };
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+}
+
 describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
   let daemon: LiveDaemon;
 
@@ -129,6 +175,49 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     for (const probe of body.rpcs) {
       expect(probe).not.toHaveProperty('rpcUrl');
     }
+  });
+});
+
+describe('/api/status finalization recovery health', () => {
+  it('includes the exact operator-facing recovery health block', async () => {
+    const finalizationRecovery = {
+      available: true,
+      closed: false,
+      ready: false,
+      canonicalReceiptCapability: 'unsupported' as const,
+      degradedReason: 'canonical-finalization-receipt-unsupported',
+      stateCounts: { RECEIVED: 1 },
+      liveEntries: 1,
+      livePayloadBytes: 4,
+      dueEntries: 1,
+    };
+
+    const response = await requestStatusWithAgent({
+      getFinalizationRecoveryHealth: async () => finalizationRecovery,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.finalizationRecovery).toEqual(finalizationRecovery);
+  });
+
+  it('keeps status healthy and degrades recovery when the health read throws', async () => {
+    const response = await requestStatusWithAgent({
+      getFinalizationRecoveryHealth: async () => {
+        throw new Error('finalization inbox health read failed');
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.finalizationRecovery).toEqual({
+      available: false,
+      closed: false,
+      ready: false,
+      canonicalReceiptCapability: 'unknown',
+      degradedReason: 'finalization inbox health read failed',
+      stateCounts: {},
+      livePayloadBytes: 0,
+      dueEntries: 0,
+    });
   });
 });
 

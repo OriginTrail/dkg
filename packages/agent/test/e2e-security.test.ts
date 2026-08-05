@@ -465,6 +465,15 @@ describe('Access protocol round-trip', () => {
       predicate: 'http://dkg.io/ontology/accessPolicy',
     });
     await storeA.insert([
+      // Access metadata is accepted only from an authoritative root context-
+      // graph registry. This test constructs DKGPublisher directly (without
+      // DKGAgent.createContextGraph), so declare that control-plane fact here.
+      {
+        subject: `did:dkg:context-graph:${CONTEXT_GRAPH}`,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#ContextGraph',
+        graph: metaGraph,
+      },
       {
         subject: result.ual,
         predicate: 'http://dkg.io/ontology/accessPolicy',
@@ -486,6 +495,8 @@ describe('Access protocol round-trip', () => {
     expect(result.status).toBe('confirmed');
     const ka = result.kaManifest[0];
     expect(ka).toBeDefined();
+    // Preserve the legacy token-address compatibility route while graph-scoped
+    // V2 assets continue to use only their canonical bare UAL.
     const accessResult = await accessClient.requestAccess(nodeA.peerId, `${result.ual}/${ka!.tokenId}`);
 
     expect(accessResult.granted, accessResult.rejectionReason).toBe(true);

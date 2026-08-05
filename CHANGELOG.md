@@ -4,9 +4,230 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.12] - 2026-08-04
+
+A scheduler release: on a busy node the work an operator is waiting on now wins, and can be measured while it does. Three paths let maintenance or background traffic hold capacity a foreground request needed — an unbounded RS-heal sweep that ran *ahead* of the useful reconcile slice and turned a valid publish into `CONTEXT_GRAPH_VALIDATION_UNAVAILABLE`, an aging rule under which aged reconnect work displaced an explicit Context Graph catch-up indefinitely, and a durable finalization inbox whose rows replayed only if chain reconciliation happened to revisit them. All three are now bounded and self-draining. Two observability layers land alongside: node-wide backpressure diagnostics that separate the queued victim from the work holding the slots, and source-attributed sync instruments that make catch-up, reconnect and reconcile traffic comparable in one query. Two RFC-64 chain-read defects are fixed too. The dashboard database stays at 31 — no migration. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.11).
+
+### Upgrading from 10.0.11
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Write routes validate a **qualified** `contextGraphId` at the exact point instead of falling back to a full catalog scan | that `O(catalog)` fallback was the operation that timed out under store pressure. A qualified ID now resolves deterministically to accept, `404`, `400 CONTEXT_GRAPH_NOT_WRITABLE` or `503 CONTEXT_GRAPH_VALIDATION_UNAVAILABLE`; bare names still use the list leg. Affects every write route, including import, async-share and `/api/memory/*` | none for a synced Context Graph. A qualified ID for a graph this node has **not** synced now gets a fast `400` where 10.0.11 could still resolve it via the catalog — subscribe first, or pass the bare name |
+| Foreground catch-up walks peers progressively, stops on the curator's proof, and no longer settles on a stranger's silence | `GET /api/sync/catchup-status` gains `result.peersNotAttempted`, and `peersTried` is legitimately lower for the same graph. A subscribe 10.0.11 reported `done` on one stranger's empty answer can now report not-ready | none — the previous `done` was wrong, and the failure is retryable. `DKG_CATCHUP_STOP_ON_PROOF=0` restores the 10.0.11 full fan-out |
+| Foreground catch-up retries local scheduler refusals for up to **180 s** (was a fixed 850 ms) | a job stays `running` longer on a saturated node instead of returning `deferredBackpressure`; subscribe still returns immediately with a `jobId` | tolerate longer `running` windows. `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS=0` disables retries |
+| Subscribe can answer **503** during shutdown | `code: "CATCHUP_SHUTTING_DOWN"`, `retryable: true`, `Retry-After: 5`, reachable only between the start of graceful shutdown and process exit | treat it as retryable and honour `Retry-After` |
+| `DKGAgent.stop()` now **rejects** on a shutdown drain timeout | `VmReconcileShutdownTimeoutError` or `ContextGraphMembershipPersistShutdownTimeoutError`, both bounded at 5 s, where 10.0.11 warned and continued. The daemon handles both and now closes Oxigraph and the dashboard database even when the agent stop fails | none for operators; shutdown can take a few seconds longer. A builder embedding the agent must wrap `await agent.stop()` |
+| `sync-global` `operation` becomes `<work class>:<source>`, and `GET /api/diagnostics/backpressure` is new | `durable` becomes `durable:catchup-foreground`, `durable:on-connect`, `durable:reconcile`, … in the route and the `[backpressure]` logs; both halves are closed sets. The new route needs the **node-level** admin token — agent-scoped tokens get `403` — and is open when node auth is disabled, like every admin route | update dashboards grouping on `operation` for `sync-global`; an unrecognised source clamps to `unspecified`. See the [backpressure observability guide](use-dkg/backpressure-observability.md) |
+| `CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS` and `retryDelaysMs` are removed from `@origintrail-official/dkg-agent` | no node is affected — the CLI depends on the agent as `workspace:*`, so every package moves together. Only code outside this repository driving the catch-up retry policy breaks, at compile time and at runtime | use `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS`, or the injectable `retry` / `now` / `wait` / `random` seams on `runCatchupPlanesWithPolicy` |
+| New operator knobs, no changed defaults | `DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS` (180000), `DKG_CATCHUP_STOP_ON_PROOF` (on), `DKG_RS_HEAL_BATCH_SIZE` (8, capped 64), `DKG_RS_HEAL_CG_STATE_MAX_ENTRIES` (1000, capped 10000). No key renamed or removed, no default changed, no dashboard migration, no new path under `DKG_HOME`, `engines` unchanged | none |
+
+### Added
+
+- **Node-wide backpressure diagnostics for the store and sync schedulers** (#2003): queued and active work are tracked independently, so a queue-wait timeout reads as the victim it names rather than as the work holding the slots. Exposed as node-admin `GET /api/diagnostics/backpressure`, a state-only `/api/status` projection, and nine `dkg.backpressure.*` OpenTelemetry instruments.
+- **Sync cost is attributable to the trigger that caused it** (#2033): nine instruments across `dkg.sync.attempt.*`, `dkg.sync.operation.*`, `dkg.sync.singleflight.joins_total` and `dkg.context_graph.catchup.*` each carry a closed eight-value admission source, delivered through `AsyncLocalStorage` so it can never enter a coalescing key. Query and alert-rule artifacts ship under `tools/observability/w1/`.
+
+### Fixed
+
+- **A valid publish no longer fails validation because the node is under store pressure** (#2066, #2067): exact write validation could not complete, so the fallback enumerated the whole ONTOLOGY/AGENTS catalog and returned `exceeded listContextGraphs budget` before any payload work began. A canonical qualified Context Graph ID now takes one bounded point projection instead.
+- **RS heal can no longer starve the foreground** (#2066, #2067): 38 of 99 store queue-wait timeouts in one inspected mainnet hour came from RS-heal relocation, running on the *normal* lane and ahead of the useful VM reconcile slice. The VM slice now runs first; heal follows on the background lane over one bounded page, deferring when the scheduler is busy.
+- **An explicit catch-up is no longer displaced indefinitely by reconnect churn** (#2052, #2053): the `sync-global` aging rule let any entry past its 30 s threshold beat raw priority, so aged reconnect work kept winning — one two-hour testnet window spent 228 of 532 sync attempts on `agents` and a stale campaign graph. Aging now buys **one** bounded turn, and missing Verifiable Memory slots rotate across a bounded peer roster, backing off only after a complete clean-absence rotation.
+- **Shutdown no longer loses work or telemetry it had already done** (#2053, #2033): graph-scoped chain authentication, binding persistence and materialization could settle *after* `agent.stop()` returned, with Oxigraph and the dashboard database already closed; backing stores now stay live until that work retires. And `stopTelemetry()` ran first, so every later `getMetrics()` bound to a no-op meter — terminal catch-up records were exported while the attempts behind them were dropped. A bounded flush-only hook now precedes it.
+- **RFC-64 finalized chain reads work on shipped EVM networks, and are bounded per chain** (#2059, #2051): the finalized-read pool is primary plus backups — three URLs on testnet, mainnet-base and mainnet-gnosis — and the strict validator rejected more than two, so the finalized-VM precommit could not build a snapshot scope on any of them; selection now takes two slots, preferring distinct provider origins. The one-scan-per-chain permit was also per transport instance, so concurrent precommits each got their own; it now lives at module scope keyed on the canonical chain ID, and a refused read defers instead of failing.
+- **A durable finalization row no longer waits for a reconciliation coincidence** (#2002): a row that hit store pressure was replayed only if reconciliation revisited the same graph, UAL and Knowledge Asset — and a watermark past that ordinal returned `current` without doing so. Stale rows then held the per-graph capacity of 64 and the global 128, rejecting new finalizations as `capacity-exhausted`. A lifecycle-owned worker now replays due rows serially through the #1939 validation path, retires a row that exhausts a bounded seven-day budget, and reports due depth and age on `GET /api/status`.
+- **One foreground catch-up no longer pulls the whole graph from every peer, and a stranger's silence can no longer settle it as `done`** (#2006): the ranked peer list never became selection, so every sync-capable peer got a full durable and shared-memory pull — a 14-peer testnet fetched a 24,541-triple graph six times over (147,246 triples, ~278 MB). Peers are now walked in escalating waves that stop once the **resolved curator** has settled every requested plane, and the curator settles a plane by being *empty* only for durable data, which it owns. Because one stranger's clean empty response once settled a run that had failed five phases as `done` with 1 Knowledge Asset out of 40, emptiness is now a whole-round verdict, and content that arrived and failed verification voids it outright. With no resolvable curator the walk degrades to the previous full fan-out.
+- **Foreground catch-up survives local scheduler pressure instead of giving up in under a second** (#2006): the retry budget was a fixed `[100, 250, 500]` ms ladder — 850 ms — against measured `sync-global` queue waits of 87–109 s, so a refused admission always exhausted it first. It is now exponential backoff with jitter against an absolute per-plane deadline taken *before* the first attempt. A dead catch-up worker also no longer pins subscribe jobs at `running`: terminating it emits `'exit'`, never `'error'`, so the run promise never settled and every later subscribe hung too.
+
+### Changed
+
+- **`sync-global` diagnostics attribute queue pressure to a trigger** (#2006, #2033): the `operation` dimension moves from the work class alone (`durable`, which merely duplicated `lane`) to `<work class>:<source>`, so a saturated queue is attributable to explicit catch-up versus sync-on-connect versus reconcile.
+- **A Context Graph with legacy allowlist gates but no explicit policy literal resolves as `private` on write preflight** (#2067), matching the list and projection paths it replaced.
+- **RFC-64 M0 public-baseline acceptance harness** (#2010): the devnet baseline becomes a workspace package with a short-circuiting runner. It ships no runtime code and is not wired into CI — it is an operator-run gate.
+- **Release version set:** all workspace packages move together to 10.0.12.
+
+### Removed
+
+- **`CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS` and the `retryDelaysMs` option are gone from `@origintrail-official/dkg-agent`** (#2006): both described the fixed `[100, 250, 500]` ladder, which no longer exists. `retryDelaysMs` is retained on the options type as `never` so a caller that still sets it fails to compile, and it is rejected at runtime too — silently ignoring it would turn an intended 10 ms schedule into a wait of up to the full budget.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.11; nodes can upgrade through the normal npm release path.
+
+### Known issues
+
+- The Node runtime floor introduced in 10.0.10 is unchanged: `@origintrail-official/dkg` and `@origintrail-official/dkg-agent` require a runtime where `node:sqlite` is available unflagged (Node >= 22.13, or >= 23.4 on the 23.x line), and `engines` stays advisory. Check `node --version` before upgrading.
+- On `sync-global`, per-lane `state` in `GET /api/diagnostics/backpressure` does not reflect a full **global** queue: sync lanes publish no per-lane limits, so a saturated scheduler can report every lane `healthy` for up to 15 s until queue age or a rejection moves it. The scheduler-level `state` that `/api/status` publishes is correct, and the store scheduler is unaffected — attribute sync pressure from the scheduler rollup and lane queue depth, not from lane `state`.
+- #2053 relieves the measured reconnect pressure; the legacy replay of system and historical Context Graphs it also names is unchanged, and no Blackbox conductor run substantiating a full convergence claim has been recorded. Strict finalized reads are health-blind and configuration-ordered, so with three configured endpoints and two slots exactly one is never dialled by that path (#2059).
+
+## [10.0.11] - 2026-07-30
+
+A focused stability release on two paths a busy node exercises constantly. One external `/api/query` read could amplify into a planner-stalling query that starved every other subsystem: a caller that had already constrained `GRAPH ?g` to a handful of verified partitions was rewritten with a second `VALUES ?g` carrying the entire allow-list, expanding a 3 KB query to roughly 24 KB and occupying the store for minutes, cascading into queue-wait timeouts across promotion, gossip validation, SWM catch-up, and durable sync. External reads now run on the store scheduler's background lane, a disconnected caller's store work is cancelled instead of orphaned, and the redundant graph rewrite is elided. Separately, the `dkg integration` CLI is brought back into line with the registry's published JSON Schema, which its parser had drifted *stricter* than — so no `manual` entry was readable at all, in either the CLI or the node dashboard's integrations sidebar. The dashboard database stays at 31 — no migration. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.10).
+
+### Upgrading from 10.0.10
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| `POST /api/query` is admitted on the store scheduler's `background` lane | external reads no longer compete for the capacity normal node work depends on. Under stock tuning the background lane admits **one** concurrent store operation where the normal lane admitted two, and API reads now queue behind background node work, so concurrent callers can see higher latency | none for correctness. Set `DKG_API_QUERY_PRIORITY=normal` before starting the daemon to restore 10.0.10 admission. The daemon logs the effective lane once at boot; an invalid value warns and falls back to `background` |
+| A query shed before execution returns **503**, previously **500** | the body carries `code: "STORE_SCHEDULER_BUSY"`, `reason`, `priority` and `retryable: true`, with a `Retry-After: 1` header. Shedding is governed by `DKG_STORE_BACKGROUND_QUEUE_LIMIT` and `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS`. Read paths only; write routes are untouched | treat `503` on `/api/query` as retryable and honour `Retry-After`. Clients keying on exactly `500` for overload must be updated |
+| A disconnected `/api/query` caller now cancels its store work | the queued or in-flight SPARQL request is aborted instead of running to completion. The operation is recorded as `cancelled`, not `error` | none. A client that times out and retries no longer leaves orphan store work behind it |
+| Dashboard operation health excludes cancelled and in-progress rows | `successRate` is now `success / (success + error)` instead of `success / total`, in the summary, the time series and the per-operation breakdown. A new `cancelled` status appears in operation rows and in the Operations page filter | none. Historical rates shift upward where in-progress rows were previously counted as non-successes. No schema migration — the dashboard database stays at 31 |
+| `dkg integration` now parses every entry the published registry schema permits | entries the CLI wrongly reported as unreadable appear in `dkg integration list`/`info` and in the dashboard integrations sidebar. `dkg integration install <manual-entry>` prints the entry's `docsUrl` and exits **0**, where 10.0.10 exited 1 | none for the public registry; `list` output and its `--json` shape are unchanged. An operator pointing `DKG_REGISTRY_RAW_BASE` at a private or staging registry must bring entries into line with the published schema: `manual` carries `docsUrl` (not `steps`), and `docker`/`npmGlobal` payloads require `version` |
+
+### Added
+
+- **`dkg integration search` and `dkg integration installed`, plus automated `npm-global` service installs** (#1988): `search [keyword]` filters the registry case-insensitively over slug, name, description and category; `installed` reports what is present on this machine, derived from the real install targets (`npm ls -g`, and the MCP client configs `dkg mcp setup` writes) rather than from a ledger that could claim installs that never happened — an entry whose kind cannot be probed reports `unknown` with its own reason, never "not installed". `dkg integration install` now performs `service` entries with `runtime: npm-global` under the same npm provenance gate as `cli` entries; `docker` and `binary` runtimes still exit cleanly pointing at the integration's own instructions.
+
+### Fixed
+
+- **One scoped API query no longer stalls the store for every other subsystem** (#1991, #1994): a caller that had already constrained `GRAPH ?g` to a handful of verified Verifiable Memory partitions was rewritten with a second `VALUES ?g` carrying the entire allow-list, expanding the query roughly eightfold and occupying the store until the client deadline, cascading into queue-wait timeouts across promotion, gossip validation, SWM catch-up and durable sync. The redundant injection is now skipped when a simple top-level static `VALUES` names only graphs already inside the allow-list. Scoping stays fail-closed: tuple `VALUES`, variables, literals, `UNDEF`, nested groups, unresolvable prefixes, or any out-of-scope graph all keep the previous intersection rewrite, and result sets are unchanged because a subset intersected with the allow-list is that same subset.
+- **A disconnected caller no longer leaves orphan store work, and shutdown drains what is in flight** (#1991, #1994): cancellation, admission priority and a store-work label now travel from the daemon route through the agent and the query engine to the SPARQL adapter, so an HTTP timeout or client disconnect aborts the queued or in-flight request instead of letting it hold a scheduler slot. `SparqlHttpStore.close()` was a no-op — it now aborts and awaits its outstanding work, which is why slow-query completions could previously surface after the daemon had logged `Stopped.`
+- **Registry entries the CLI declared unreadable are readable again** (#1988): the integration validator was stricter than the registry's published JSON Schema in three places — `manual` required a `steps` array the schema forbids, `mcp` required the schema-optional `args`, and `service` rejected the schema's `binary` runtime — so no `manual` entry could ever parse. The same parser backs both `dkg integration` and the dashboard integrations sidebar, so both dropped them. Installing a `manual` entry is now the documented success path: print its `docsUrl`, one-liner and security declaration, and exit 0. `info` renders `manual` entries and the `service` `binary` runtime, which previously printed nothing. The invariant is now recorded in code — this validator must never be stricter than the published schema, only more lenient, so an older CLI can still read a newer registry.
+
+### Changed
+
+- **`POST /api/query` is admitted as background store work labelled `api.query`** (#1991, #1994): external reads are untrusted and potentially planner-heavy, so they no longer compete for the slots normal node work depends on. `DKG_API_QUERY_PRIORITY=normal` reverts the lane, and pre-dispatch shedding returns `503` with `Retry-After: 1` on the read paths only. Slow-query telemetry now classifies through the canonical SPARQL classifier, so a query behind a `PREFIX`/`BASE` prologue or a comment is attributed as `source=api.query operation=select` instead of `source=unknown operation=unknown`.
+- **A cancelled operation is its own dashboard state, not a failure** (#1991, #1994): a request the caller abandoned is recorded as `cancelled` on both the operation and its active phases, the Operations page gains a `cancelled` status filter and colour, and operation health becomes `success / (success + error)` so neither cancelled nor in-progress work counts against the success rate. Additive at the SQL level — the dashboard schema stays at 31, so no migration and no rollback risk.
+- **Release version set:** all workspace packages move together to 10.0.11.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.10; nodes can upgrade through the normal npm release path.
+
+### Known issues
+
+- The Node runtime floor introduced in 10.0.10 is unchanged and still applies: `@origintrail-official/dkg` and `@origintrail-official/dkg-agent` require a runtime where `node:sqlite` is available unflagged (Node >= 22.13, or >= 23.4 on the 23.x line), `engines` stays advisory under npm and pnpm, and blue-green auto-update does not prove the new slot boots. Check `node --version` before upgrading.
+
+## [10.0.10] - 2026-07-28
+
+This release lands OT-RFC-64, the public author catalog: a node-local subsystem that announces, discovers, fetches, and verifies another author's finalized Knowledge Assets over five new `/dkg/catalog/1/*` libp2p protocols. It is active by default on every node with a data directory, while authoring, auto-publish, and bootstrap targets stay opt-in. Because its persistence opens before networking, such a node now requires a Node runtime where `node:sqlite` is available unflagged — Node 22.13 or newer, or 23.4 or newer on the 23.x line. The rest is durability hardening on paths that could strand, mis-report, or lose verified work. Two changes are operator-visible: one encoded SWM share or promotion is capped at 4 MiB instead of 10 MB, and the dashboard database migrates 30 → 31. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.9).
+
+### Upgrading from 10.0.9
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| RFC-64 persistence requires unflagged `node:sqlite` | on a node with a data directory the RFC-64 inventory and the finalization inbox open before networking, so a runtime without `node:sqlite` fails the start with `requires Node runtime support for node:sqlite` | run **Node >= 22.13.0**, or **>= 23.4.0** on the 23.x line, or Node 24+. `node:sqlite` exists from 22.5.0 but stays behind `--experimental-sqlite` until 22.13.0/23.4.0, and the daemon never passes that flag — so 22.5–22.12 and 23.0–23.3 install cleanly and then fail to boot. `@origintrail-official/dkg` and `@origintrail-official/dkg-agent` both declare this range in `engines.node` — the agent package owns the `node:sqlite` code, so a builder embedding it directly gets the same contract. |
+| SWM payload ceiling 10 MB → 4 MiB | one encoded SWM share or promotion above 4 MiB is rejected, and a 10.0.9 peer emitting more is dropped inbound | reduce importer batch size (`dkg-importer` guidance moves 1000 → 400 records) |
+| `@origintrail-official/dkg-agent` declares `"exports"` | deep imports of internal paths fail with `ERR_PACKAGE_PATH_NOT_EXPORTED` | import from the package root |
+| RFC-64 catalog is active by default | first boot creates `DKG_HOME/rfc64-sync/` and serves five new inbound catalog protocols (three without chain configuration) | no action; authoring/auto-publish stays opt-in |
+| Dashboard database migrates 30 → 31 | one additive index table; rolling back to 10.0.9 is safe | no action |
+
+### Added
+
+- **Public author catalog (OT-RFC-64) runs on every node with a data directory** (#1930, #1882, #1929): first boot opens `DKG_HOME/rfc64-sync/` and registers the five catalog protocols, but a graph is answered for only after an operator accepts its current policy snapshot.
+- **Catalog access follows the Context Graph policy cell** (#1835, #1881, #1905): every catalog operation is authorized in both directions against an accepted current `ContextGraphPolicyV1`, and an invite-only graph requires both ends in a roster bound to that policy digest.
+- **Catalog chain state is read at one pinned finalized block** (#1821, #1909, #1911, #1913, #1914, #1915): policy, name binding, and finalized inventory resolve inside one EIP-1898 session, and rows are materialized before the applied-head pointer moves, so no node advertises a head it has not stored.
+- **Opt-in catalog automation: cold start, bootstrap, and auto-advance** (#1819, #1926, #1928, #1927): a node can cold-start a public scope from a named provider, `rfc64PublicCatalogBootstrap` retries pinned provider targets across restarts, and `rfc64PublicCatalogAutoPublish` bridges a confirmed fully-public VM publish into it.
+- **Clear a single terminal publish or share job by exact job ID** (#1883, #1910, #1899): new idempotent `clear-job` routes on the publisher and SWM share APIs remove one terminal record atomically; previously only a status-scoped bulk clear existed.
+
+### Fixed
+
+- **A transient store timeout no longer strands a verified Knowledge Asset outside Verifiable Memory** (#1939): finalization envelopes are now recorded in a durable SQLite inbox before any store work, so a crash or store failure between verification and materialization leaves the graph untouched and the evidence replayable instead of returning `verified-vm-metadata-pending` forever. Recovery surfaces as `finalizationRecovery` on `GET /api/status`.
+- **Durable recovery drains its backlog and reports a truthful verdict** (#1967, #1898, #1908, #1895, #1937, #1906): exact VM repair now spends one peer attempt per asset under a far larger transfer ceiling and rotates the peer order, so large assets no longer time out together. A catch-up leg carries an explicit state, so a run that reached no eligible peer fails instead of reporting success, foreground catch-up retries backpressure, and a named `peerId` is probed.
+- **The store no longer answers routine work with full scans** (#1877, #1959, #1873, #1917): a write racing an in-flight index probe demoted a scoped update to an `O(store)` rebuild that stalled publishes and starved sync; public exact-asset reads are now byte-bounded, and snapshot paging seeks to a persisted checkpoint.
+- **Durable metadata pages no longer split an author seal** (#1916, #1936): pages end on a `(graph, subject)` boundary, so a seal straddling a boundary arrives whole instead of an unverifiable prefix that left curated Context Graphs unable to VM-publish, and a peer can no longer inject a non-IRI `_meta` subject.
+- **Curator no longer silently publishes its own same-named Knowledge Asset** (#1969): author resolution returned the caller's own assertion before the ambiguity check, spending real TRAC and gas on the wrong asset; both VM publish routes now accept `selectedAuthorAgentAddress`, so a caller answered `409 AMBIGUOUS_ASSERTION_AUTHOR` can name one.
+- **Publisher job records survive a crash mid-transition** (#1919, #1935, #1945, #1902): every async publish and share transition is now a single-subject atomic replace instead of a delete-then-insert that could strand it empty and lose the queue row; publisher admin routes also answer a malformed body without a 500.
+- **Transport failures are classified by what they actually mean** (#1942, #1918, #1904): an aborted fetch now fails over instead of failing a publish whose mint is already on chain, an unambiguous pre-mempool reject terminates at once rather than entering recovery, and a failed chain read is no longer a negative authentication verdict.
+
+### Changed
+
+- **SWM gossip payload ceiling aligned with StorageACK** (#1932): one encoded SWM share or promotion is now capped at 4 MiB, matching the untrusted inline StorageACK staging ceiling. GossipSub retains 256 KiB of framing headroom, while the general direct-protocol frame/read limit remains 10 MiB.
+- **`@origintrail-official/dkg-agent` declares an explicit `"exports"` map** (#1835, #1930): it previously had none, so any subpath resolved; it now exposes only the root, `./package.json`, an allowlist of catalog subpaths, and `./dist/*`.
+- **Dashboard SQLite schema 30 → 31** (#1873): adds a `snapshot_page_indexes` table for public-snapshot page offsets; additive, so rolling back to 10.0.9 is safe.
+- **Node UI metric snapshots are collected once a day** (#1981): the collector's interval moves from 30 seconds to 24 hours, cutting dashboard database growth and periodic store-scan counters by roughly three orders of magnitude.
+- **Knowledge Asset metadata states how a confirmation was obtained** (#1920): `_meta` now carries `dkg:confirmationKind`, distinguishing an asset confirmed by its own publish transaction from one rebuilt by a finalized on-chain scan.
+- **Release version set:** all workspace packages move together to 10.0.10.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.9; nodes can upgrade through the normal npm release path.
+
+### Known issues
+
+- `engines.node` on `@origintrail-official/dkg` declares the supported runtime range, but npm and pnpm both treat `engines` as advisory unless `engine-strict` is set, so an unsupported runtime still installs with only an `EBADENGINE` warning. Neither the RFC-64 inventory nor the finalization inbox degrades gracefully, so such a node then fails at daemon start. Blue-green auto-update verifies build output exists before activating a slot but does not prove the new slot boots, so a node auto-updating on an unsupported runtime can activate and then restart-loop. Check `node --version` before upgrading.
+
+## [10.0.9] - 2026-07-21
+
+Public Context Graphs work fully: any agent can reliably sync both SWM and VM, including late joiners and Context Graphs whose operation history exceeds the previous snapshot ceiling. This release consolidates the testnet-canary line previously rolled out to nodes by branch ref, plus the fifa-class metadata ceiling fix, validated by a devnet hold-out proof (a node absent during publication reconstructs the full corpus with per-graph digest verification) and by the testnet fleet. **No smart-contract changes — no deployment required** (no Solidity source or ABI changes since 10.0.7).
+
+### Fixed
+
+- **SWM meta sync past the 64,000-row snapshot ceiling** (#1847, #1880): TTL-filtered meta is now served through a bounded session plan instead of a raw snapshot cut off at the store's 64,000-row window, with per-subject count and sha-256 digest verification binding every page. Context Graphs with long operation histories (e.g. `fifa-world-cup-2026`) sync completely instead of silently refusing.
+- **Exact-batch VM reconciliation** (#1871, #1876): chain-driven VM reconciliation fetches exactly the missing assets in bounded batches (wire-capped, with recovery damping) instead of full-graph passes, and three reconcile race/boundary conditions are closed.
+- **Public CG catch-up materializes verified snapshots** (#1842): late-joining subscribers materialize verified public snapshots into the store under the same per-KA write lock live gossip uses, with in-lock version ordering and digest-bound skip guards — content arrives, not just metadata.
+- **Plaintext SWM accepted on public agent-gated CGs** (#1843, #1852, #1853): sender and receiver now agree on the encryption requirement for public/curated Context Graphs (requires-encryption split from supports-encryption), and the on-chain public-access probe is evaluated lazily so ungated receives stay off the chain-RPC hot path.
+- **Curator can VM-publish a member-shared rootless KA** (#1780): author resolution from finalized-assertion seals, fail-closed on conflicting or mismatched seals.
+- **Markdown KA entities preserved across SWM sharing** (#1779).
+- **Public CG metadata projection and subscription catch-up** (#1848, #1866, #1885): member-proof required for private meta refresh, public meta projection corrected, CG-hash fallback fixed.
+- **Broadcast durability** (#1851): the pre-send broadcast record is fsynced before the transaction is sent, preventing crash-recovery double-submit.
+
+### Added
+
+- **Append-only admission & transaction journal** (#1829, #1875): every VM-publish lifecycle transition is journaled node-locally (seq-ordered, gap-detectable) and readable via `GET /api/publisher/journal` by job or by lifecycle facts. Recorded tx hashes are attempted submissions — reconcile against chain.
+- **Durable-admission recovery lookup** (#1828, #1849): `GET /api/publisher/job-by-intent` recovers an admitted async VM-publish job from client-retained facts after a lost 202 response.
+- **Public CG SWM+VM sync proof harness** (#1844): `devnet/public-cg-sync-proof/` — the end-to-end gate (exact content counts, arm's-length receivers, hold-out reconstruction) used to validate this release.
+- **Node UI local metrics collection toggle** (#1892).
+
+### Changed
+
+- **Outbox metadata cleanup** (#1646): metadata capability is explicit and payload-free at the store boundary; diagnostics no longer load payloads.
+
+### Known issues
+
+- Recovery/journal lookups for a curator-published member KA require an explicit `agentAddress=<member>` query parameter (the omitted-parameter default resolves to the caller); fix queued.
+- The chain-reconcile watermark counter can trail the chain head on provenance-fenced entries; cosmetic — durable sync delivers the content and the counter is not a health signal.
+
+## [10.0.8] - 2026-07-17
+
+Durable-sync materialization hardening for large private Context Graphs. This release makes durable catch-up survive transport drops, responder restarts, and multi-million-quad snapshots without discarding verified work, and fixes the relay and dial paths that stalled fan-out under load. Validated by a 500-Knowledge-Asset private-CG late-join scale test on Gnosis mainnet (5,337,721 unique quads, exact per-graph digest verification). **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.7).
+
+### Fixed
+
+- **Durable sync survives transport drops without losing verified work** (#1775): a requester now retains its verified prefix and accepted-session checkpoints when a stream drops mid-transfer, resuming the same responder row list instead of restarting the snapshot. Responder sessions are persisted with their checkpoints, expired sessions rotate immediately, and store-fallback session expiry slides while a transfer makes progress.
+- **Snapshots beyond one million rows no longer fail integrity verification** (#1775): the responder clamped any requested cursor to 1,000,000, which silently replayed the row slice at the clamp boundary while the requester kept advancing — producing duplicates and failing manifest verification on any snapshot larger than the cap. Valid non-negative cursors are now accepted in full; exact-graph paging still bounds the response by returning an empty page past the plan.
+- **Durable settlement is serialized per graph** (#1775): concurrent settlement for the same graph no longer interleaves, and a catch-up round that fails against every peer surfaces the failure instead of reporting a silent no-op success.
+- **Catch-up honors its durable time budget** (#1775), and durable-only recovery is supported as a safe path.
+- **Rootless chain identities reconcile during sync** (#1775).
+- **Relay fan-out no longer stalls behind stale direct dials** (#1775): pooled messages reuse a live relay connection, and the dial path falls back to a live relay after a stale direct dial rather than blocking.
+
+### Changed
+
+- **Publisher wallet jobs run concurrently** (#1775): each configured wallet owns an independent nonce stream, so a cycle now dispatches one job per wallet in parallel and waits for all to settle. Adding publisher wallets now actually increases throughput. Errors propagate only after every wallet in the cycle settles.
+- **Rootless durable batches skip legacy partitioning** (#1775).
+- **Dashboard SQLite schema 29 → 30** (#1775): `sync_checkpoints` gains nullable `responder_session_id` and `responder_session_expires_at` columns, added idempotently on upgrade. The migration is additive, so rolling back to 10.0.7 is safe — the older schema guard ignores a newer database and leaves the extra columns in place.
+- **Release version set:** all workspace packages move together to 10.0.8.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.7; nodes can upgrade through the normal npm release path.
+
+## [10.0.7] - 2026-07-16
+
+Rootless Knowledge Assets and production hardening for private Context Graphs. New Knowledge Assets are stored and synchronized by their canonical UAL-derived named graph without synthetic `rootEntity` triples; legacy V10 assets remain readable but are no longer rewritten through the legacy lifecycle. The release also completes private-CG auto-approval, late-join recovery, and scalable SWM/VM fan-out, including the fixes validated by the multi-network testnet harness. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or deployment-registry changes since 10.0.6).
+
+### Added
+
+- **Rootless, graph-scoped Knowledge Assets:** publish, update, finalize, query, Random Sampling, and recovery now use the canonical UAL-derived graph as the asset boundary. Blank-node input is canonicalized deterministically, lifecycle metadata is stored separately, and legacy assets retain read compatibility without remaining on the new write path.
+- **Private Context Graph enrollment controls:** owners can opt a private Context Graph into bounded automatic approval of authenticated join requests, while requester identity, membership, privacy, and curator-local control records remain fail-closed.
+- **Realistic private-CG recovery gates:** local and testnet harnesses cover live receivers, mid-run and cold late joiners, unauthorized negative nodes, SWM and VM payloads, exact manifest integrity, and resource sampling across independent network paths.
+
 ### Fixed
 
 - **PCA agents can register PCA-backed Context Graphs:** the agent, CLI/API, and MCP surfaces now match the deployed contract by allowing either the PCA owner or a wallet registered to that exact PCA to register a curated Context Graph. Eligible registrations consume a quota-backed deposit waiver instead of requiring a separate liquid-TRAC deposit; exact-account authorization and Context Graph NFT ownership alignment remain fail-closed.
+- **Private SWM and VM late-join recovery:** graph-scoped manifests, authenticated sync controls, exact-graph reads, lifecycle pointers, queued VM intent, and private access evidence survive restart and catch-up without leaking private data or accepting unverified control metadata.
+- **Bounded sync makes durable progress:** recovery retains verified prefixes across truncated responses, retries while progress advances, tolerates a bounded flat round, and only declares a snapshot complete after exact integrity verification.
+- **Large snapshots no longer crawl one tiny page at a time:** responder pages are constrained by both frame and byte budgets, requester page size adapts to the transport, and successive pages reuse a framed sync stream with a safe fallback to the prior single-request protocol.
+- **Relay fan-out capacity matches large KA transfer:** the default relayed-circuit byte allowance is raised from 16 MiB to 256 MiB, avoiding deterministic stream termination during realistic private-CG synchronization while preserving the circuit duration and concurrency bounds.
+- **Join and discovery startup races:** profile readiness gates enrollment, durable discovery metadata survives restart, false relay quarantine is avoided, and repeated connect/catch-up work remains bounded.
+- **Graph-scoped publish and update safety:** chain identity, ownership, access-control metadata, immutable snapshot integrity, crash recovery, and update authorization are checked before materialization or promotion.
+
+### Changed
+
+- **Sync work is graph-addressed and backend-agnostic:** scalable paths enumerate candidate UALs from bounded metadata and fetch individual named graphs with SPARQL 1.1-compatible queries, avoiding store-wide ordered/offset scans and preserving Oxigraph/Blazegraph portability.
+- **Release version set:** all workspace packages move together to 10.0.7, including `@origintrail-official/dkg-rdf-utils`.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry files changed since 10.0.6; nodes can upgrade through the normal npm release path.
 
 ## [10.0.6] - 2026-07-13
 

@@ -2,6 +2,7 @@ import type { QueryResult } from '@origintrail-official/dkg-storage';
 import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
+  isTerminalLiftJobState,
 } from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
@@ -24,10 +25,20 @@ export {
   DEFAULT_CONTROL_GRAPH_URI as DEFAULT_GRAPH_URI,
   CONTROL_PAYLOAD as PAYLOAD_PREDICATE,
   CONTROL_STATUS as STATUS_PREDICATE,
+  CONTROL_LIFECYCLE_KEY,
+  DEFAULT_JOURNAL_GRAPH_URI,
+  JOURNAL_SEQ,
+  JOURNAL_LIFECYCLE_KEY,
+  JOURNAL_JOB_ID,
+  knowledgeAssetVmPublishLifecycleKey,
+  serializeJournalEntry,
+  parseJournalEntry,
+  serializeVmPublishIntentIndex,
   createJobSlug,
   jobSubject,
   parseIntegerLiteral,
   serializeJob,
+  serializeJobRecord,
   serializeWalletLock,
   literal,
   parseLiteral,
@@ -61,6 +72,32 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
   return job.status === 'failed' && 'failure' in job;
 }
 
+/**
+ * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk) and
+ * `clearTerminalJob(jobId)` so they cannot drift. A job is clearable iff it is in a native
+ * terminal state (finalized|failed) AND is not a `retry_recovery`-failed job — those may
+ * still carry a pending on-chain tx that periodic recovery will finalize, so only explicit
+ * cancel removes them. A `retry_recovery`-failed job is therefore treated as
+ * NONTERMINAL-for-cleanup.
+ */
+export function isClearableTerminalLiftJob(job: LiftJob): boolean {
+  return isTerminalLiftJobState(job.status)
+    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
+ * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal
+ * state, or a failed job admission would still reaccept (retryable with retries
+ * remaining). Admission dedup (findActiveKnowledgeAssetVmPublishJob) and the
+ * intent-recovery lookup MUST both partition on this so they cannot drift — an
+ * occupying job is the live one to bind; everything else (finalized, exhausted
+ * or non-retryable failed) is superseded.
+ */
+export function isOccupyingLifecycleJob(job: LiftJob): boolean {
+  if (!isTerminalLiftJobState(job.status)) return true;
+  return isFailedJob(job) && job.failure.retryable && job.retries.retryCount < job.retries.maxRetries;
+}
+
 export function createKnowledgeAssetVmPublishSnapshotRequest(
   request: KnowledgeAssetVmPublishRequest,
 ): LiftPublishSnapshotRequest {
@@ -68,6 +105,31 @@ export function createKnowledgeAssetVmPublishSnapshotRequest(
     shareOperationId: request.shareOperationId,
     roots: request.roots,
     contextGraphId: request.contextGraphId,
+    ...(request.contentScopeVersion !== undefined
+      ? { contentScopeVersion: request.contentScopeVersion }
+      : {}),
+    ...(request.kaUal !== undefined ? { kaUal: request.kaUal } : {}),
+    ...(request.assertionVersion !== undefined
+      ? { assertionVersion: request.assertionVersion }
+      : {}),
+    ...(request.publicTripleCount !== undefined
+      ? { publicTripleCount: request.publicTripleCount }
+      : {}),
+    ...(request.privateMerkleRoot !== undefined
+      ? { privateMerkleRoot: request.privateMerkleRoot }
+      : {}),
+    ...(request.privateTripleCount !== undefined
+      ? { privateTripleCount: request.privateTripleCount }
+      : {}),
+    ...(request.accessPolicy !== undefined
+      ? { accessPolicy: request.accessPolicy }
+      : {}),
+    ...(request.allowedPeers !== undefined
+      ? { allowedPeers: [...request.allowedPeers] }
+      : {}),
+    ...(request.entityProofs !== undefined
+      ? { entityProofs: request.entityProofs }
+      : {}),
     ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
     ...(request.publisherNodeIdentityIdOverride !== undefined
@@ -193,6 +255,12 @@ function parseRawLiftRequest(value: unknown, path: string): RawLiftRequest {
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),
     contextGraphId: expectString(record, 'contextGraphId', path),
+    ...optionalNumberField(record, 'contentScopeVersion', path),
+    ...optionalStringField(record, 'kaUal', path),
+    ...optionalStringField(record, 'assertionVersion', path),
+    ...optionalNumberField(record, 'publicTripleCount', path),
+    ...optionalHexStringField(record, 'privateMerkleRoot', path),
+    ...optionalNumberField(record, 'privateTripleCount', path),
     namespace: expectString(record, 'namespace', path),
     scope: expectString(record, 'scope', path),
     transitionType: expectEnum(record, 'transitionType', LIFT_TRANSITION_TYPES, path),
@@ -214,9 +282,22 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     contextGraphId: expectString(record, 'contextGraphId', path),
     name: expectString(record, 'name', path),
     ...optionalStringField(record, 'agentAddress', path),
+    // GH#1778 — the enqueuing caller must survive the persisted-job round-trip so
+    // the async worker stamps the CG curator with the operator who requested the
+    // publish (consistent with the sync lane), not the resolved KA author.
+    ...optionalStringField(record, 'callerAgentAddress', path),
     ...optionalStringField(record, 'subGraphName', path),
     shareOperationId: expectString(record, 'shareOperationId', path),
     roots: expectStringArray(record, 'roots', path),
+    ...optionalNumberField(record, 'contentScopeVersion', path),
+    ...optionalStringField(record, 'kaUal', path),
+    ...optionalStringField(record, 'assertionVersion', path),
+    ...optionalNumberField(record, 'publicTripleCount', path),
+    ...optionalHexStringField(record, 'privateMerkleRoot', path),
+    ...optionalNumberField(record, 'privateTripleCount', path),
+    ...optionalAccessPolicyField(record, 'accessPolicy', path),
+    ...optionalStringArrayField(record, 'allowedPeers', path),
+    ...optionalBooleanField(record, 'entityProofs', path),
     seal: parseSeal(record.seal, `${path}.seal`),
     sealChainId: expectBigIntString(record, 'sealChainId', path),
     sealKav10Address: expectHexString(record, 'sealKav10Address', path),
@@ -378,6 +459,17 @@ function optionalBigIntStringField<T extends string>(
 ): Partial<Record<T, `${bigint}`>> {
   if (record[field] === undefined) return {};
   return { [field]: expectBigIntString(record, field, path) } as Partial<Record<T, `${bigint}`>>;
+}
+
+function optionalHexStringField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, `0x${string}`>> {
+  if (record[field] === undefined) return {};
+  return {
+    [field]: expectHexString(record, field, path),
+  } as Partial<Record<T, `0x${string}`>>;
 }
 
 function optionalAccessPolicyField(

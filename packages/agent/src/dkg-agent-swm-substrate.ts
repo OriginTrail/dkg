@@ -115,8 +115,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -221,7 +220,6 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
-import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -355,9 +353,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -455,9 +450,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
 
     const finalizationTopic = contextGraphFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
-    this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
+    this.gossip.onMessage(finalizationTopic, async (_topic, data, from) => {
       const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(data, contextGraphId);
+      await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
   }
 
@@ -484,6 +479,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
+
+    // A host-only Core may continue chain reconciliation after member
+    // unsubscribe, but peer-rotation evidence collected under the member
+    // lifecycle must not survive that ownership transition.
+    this.clearVmReconcileRotationStateForContextGraph(contextGraphId);
 
     // Drop from the active sync scope so background sweeps no longer treat
     // this as a subscribed CG to keep current.
@@ -904,6 +904,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           recordDiscoveredContextGraph: (id, next) => { this.recordDiscoveredContextGraph(id, next); },
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
           getCgMeta: (id) => this.getCgMeta(id),
+          getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
           markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
@@ -920,6 +921,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
         contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        // Same live on-chain predicate the SENDER uses to decide plaintext vs
+        // encrypted SWM (`resolveWorkspaceRecipientsGated`). Wiring it here
+        // keeps both sides of the wire on one authority. Without it the
+        // receiver judged from local allowedAgent/participantAgent triples and
+        // permanently dropped the plaintext writes the sender is supposed to
+        // send on a public CG — silently breaking member->curator SWM shares on
+        // every public/curated context graph.
+        publicAccessPolicyOnChainOracle: (cgId: string) =>
+          this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
         markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
@@ -940,8 +950,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         workspaceRecipientPrivateKeys: () => this.getLocalWorkspaceRecipientPrivateKeys(),
         workspaceSenderKeyDecryptor: (message: SwmSenderKeyMessageMsg, contextGraphId: string, ctx: OperationContext) =>
           this.decryptWorkspacePayloadWithSenderKey(message, contextGraphId, ctx),
-        assetUalForKaIdentity: ({ agentAddress, kaNumber }) =>
-          resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber }),
         lifecycleLogOptions: {
           localPeerId: () => this.peerId,
           localNodeIdentityId: () => this.identityId.toString(),
@@ -1643,16 +1651,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       this.finalizationHandler = new FinalizationHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
-        this.eventBus,
-        // Defensive: when a peer's finalization gossip omits
-        // `targetContextGraphId` (pre-cd68fa689 publisher in the mesh),
-        // resolve the on-chain id locally so per-cgId promotion still
-        // fires and the RS prover sees the KC.
-        (cgName: string) => this.getContextGraphOnChainId(cgName),
-        (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         {
-          localPeerId: this.peerId,
-          localNodeIdentityId: this.identityId.toString(),
+          eventBus: this.eventBus,
+          // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
+          resolveContextGraphOnChainId: (cgName: string) =>
+            this.getContextGraphOnChainId(cgName),
+          markContextGraphMetaDirtyFromQuads: (quads) => {
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
+          runtime: this.finalizationRuntime,
         },
       );
     }

@@ -563,6 +563,51 @@ describe('sync responder snapshot cache and budget', () => {
     expect(loads).toBe(1);
   });
 
+  it('keeps an active store-bounded fallback alive past its original rejection TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 10,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    let loads = 0;
+    const loadRows = async () => {
+      loads += 1;
+      return [0, 1].map((index) => ({
+        s: `urn:sliding-rejection:${index}`,
+        p: `${DKG_NS}label`,
+        o: `"sliding-rejection-${index}"`,
+        g: 'urn:sliding-rejection:graph',
+      }));
+    };
+
+    await expect(memo.get('long-session', loadRows)).rejects.toMatchObject({
+      name: 'SyncRowSnapshotBudgetError',
+      reason: 'snapshot_rows',
+    });
+
+    // A later store-bounded page touches the rejection just before its
+    // original expiry. The same immutable session must still take the typed
+    // fallback after that original boundary instead of becoming `null`.
+    vi.setSystemTime(9);
+    await expect(
+      memo.get('long-session', loadRows, { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+
+    vi.setSystemTime(18);
+    await expect(
+      memo.get('long-session', loadRows, { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    expect(loads).toBe(1);
+  });
+
   it('does not resume a superseded snapshot after a refresh exceeds the budget', async () => {
     const budget = createSyncResponderSnapshotBudget({
       maxRows: 4,
@@ -758,7 +803,7 @@ describe('sync responder snapshot cache and budget', () => {
     expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0, bytesEstimate: 0 });
   });
 
-  it('extracts a cached page without iterating or copying the complete snapshot', async () => {
+  it('extracts a cached page with only a bounded subject-boundary lookahead', async () => {
     const source = Array.from({ length: 2_000 }, (_, index) => ({
       s: `urn:row:${index}`,
       p: `${DKG_NS}label`,
@@ -768,23 +813,25 @@ describe('sync responder snapshot cache and budget', () => {
     const pageStart = 1_000;
     const pageEnd = 1_500; // offset 1000 + limit 500
     let wholeSnapshotIterations = 0;
-    let outOfPageIndexReads = 0;
+    // Durable meta is subject-atomic (#1788): the reader peeks the single row at
+    // the page boundary to detect whether a subject straddles it. That is a
+    // bounded one-subject-horizon lookahead, NOT a full-array copy. Reading any
+    // index BEFORE the page (an indexed clone / `rows.slice()` of the whole
+    // array) or iterating the whole snapshot remains a HARD failure, so a
+    // full-scan regression still fails this test.
+    let boundaryLookAheadReads = 0;
     const snapshot = new Proxy(source, {
       get(target, property, receiver) {
         if (property === Symbol.iterator) {
           wholeSnapshotIterations += 1;
           throw new Error('complete snapshot must not be iterated while extracting one page');
         }
-        // A correct slice(offset, offset+limit) reads only in-page element
-        // indices (plus non-index props like `length`). Reading any index
-        // outside the page is a full-array copy (e.g. `rows.slice()` then slice
-        // again, or an indexed clone), which the iterator guard alone misses.
         if (typeof property === 'string' && /^\d+$/.test(property)) {
           const index = Number(property);
-          if (index < pageStart || index >= pageEnd) {
-            outOfPageIndexReads += 1;
-            throw new Error(`page extraction must not read out-of-page index ${index}`);
+          if (index < pageStart) {
+            throw new Error(`page extraction must not read pre-page index ${index} (full-array copy)`);
           }
+          if (index >= pageEnd) boundaryLookAheadReads += 1;
         }
         return Reflect.get(target, property, receiver);
       },
@@ -804,9 +851,13 @@ describe('sync responder snapshot cache and budget', () => {
       rowListCacheKey: 'cached-page',
     });
 
+    // Every source subject is distinct, so the boundary subject does not
+    // straddle: the page stays exactly one limit wide and the reader peeks the
+    // boundary row exactly once, never extending.
     expect(page).toHaveLength(500);
     expect(page[0]?.s).toBe('urn:row:1000');
+    expect(page[499]?.s).toBe('urn:row:1499');
     expect(wholeSnapshotIterations).toBe(0);
-    expect(outOfPageIndexReads).toBe(0);
+    expect(boundaryLookAheadReads).toBe(1);
   });
 });

@@ -204,6 +204,12 @@ function canonBoolean(lex: string): string {
 }
 
 // ── xsd:decimal ────────────────────────────────────────────────────────────────
+function trimTrailingAsciiZeros(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 48 /* 0 */) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 function canonDecimal(lex: string): string {
   const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(lex);
   if (!m || (m[2] === '' && (m[3] === undefined || m[3] === ''))) throw new Error(`invalid xsd:decimal: ${lex}`);
@@ -328,12 +334,6 @@ function expandToPlainDecimal(s: string): string {
   if (pointPos <= 0) return stripTrailingZeros(`0.${'0'.repeat(-pointPos)}${digits}`);
   if (pointPos >= digits.length) return digits + '0'.repeat(pointPos - digits.length);
   return stripTrailingZeros(`${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`);
-}
-
-function trimTrailingAsciiZeros(s: string): string {
-  let end = s.length;
-  while (end > 0 && s.charCodeAt(end - 1) === 48 /* 0 */) end--;
-  return end === s.length ? s : s.slice(0, end);
 }
 
 function stripTrailingZeros(s: string): string {

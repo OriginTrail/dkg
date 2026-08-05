@@ -284,20 +284,27 @@ export function classifyChainRpcTransportStatus(
   const { code } = err;
   const msg = sanitizeRpcMessage(typeof err.message === "string" ? err.message : "");
   const txHash = typeof err.txHash === "string" && err.txHash ? err.txHash : "";
+  const transportBody = (error: string, responseCode: string): Record<string, unknown> => ({
+    error,
+    code: responseCode,
+    ...(txHash ? { txHash } : {}),
+  });
   // Exhaustive over ChainRpcTransportCode: a new code added to the boundary
   // without a case here is a COMPILE error (the `never` default), so the
   // classifier can never silently inherit timeout/504 semantics for a new code.
   switch (code) {
     case "RPC_ENDPOINTS_EXHAUSTED":
-      return { status: 503, body: { error: msg || "Configured chain RPC endpoints were exhausted.", code } };
+      return {
+        status: 503,
+        body: transportBody(msg || "Configured chain RPC endpoints were exhausted.", code),
+      };
     case "RPC_RECEIPT_LOOKUP_FAILED":
       return {
         status: 503,
-        body: {
-          error: msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
+        body: transportBody(
+          msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
           code,
-          ...(txHash ? { txHash } : {}),
-        },
+        ),
       };
     case "RPC_TIMEOUT":
       // Internal, chain-namespaced timeout code. Expose the public/legacy
@@ -305,7 +312,7 @@ export function classifyChainRpcTransportStatus(
       // wire contract stable while the boundary stays namespaced internally.
       return {
         status: 504,
-        body: { error: msg || "Chain transaction timed out.", code: "TIMEOUT", ...(txHash ? { txHash } : {}) },
+        body: transportBody(msg || "Chain transaction timed out.", "TIMEOUT"),
       };
     default: {
       const _exhaustive: never = code;
@@ -737,9 +744,21 @@ function exactProbeCanFastAccept(
   probe: ContextGraphWritePreflightProbe,
   requireLocalWritable: boolean,
   callerAgentAddress: string | null,
+  allowLocalExactFallback: boolean,
 ): boolean {
   if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
-  if (!callerAgentAddress) return probe.accessPolicy === "public";
+  if (!callerAgentAddress) {
+    // Node-admin / trusted-local routes already opt into the exact-local
+    // fallback below after listContextGraphs. When the exact probe has all of
+    // the same positive evidence up front, accept a known PRIVATE graph here
+    // instead of enumerating every context graph first. This does not broaden
+    // access: scoped agent callers never set allowLocalExactFallback, and an
+    // unavailable/unknown store cannot satisfy exactProbeIsLocallyWritable.
+    return (
+      probe.accessPolicy === "public" ||
+      (allowLocalExactFallback && probe.accessPolicy === "private")
+    );
+  }
   return probe.callerAuthorized === true;
 }
 
@@ -869,20 +888,22 @@ async function rescueWriteTargetWithoutStore(
  *   - `accept`        — fast-accept; the caller returns the candidate id.
  *   - `rejectUnknown` — a definitive, store-backed deny of a non-bare id; the
  *                       caller returns 404.
- *   - `deferReject`   — a definitive deny of a BARE id; continue to the list leg
- *                       and reject only if that leg ALSO misses (a name may
- *                       resolve differently there).
- *   - `unavailable`   — the probe threw or degraded (`storeUnavailable`); this
- *                       is the ONLY verdict that makes the both-legs-failed
- *                       store-free rescue eligible. `errorMessage` feeds the 503.
- *   - `continueToList`— no probe, or a definitive miss with nothing to carry.
+ *   - canonical outcomes are fully reduced to accept/reject/unavailable here;
+ *     the HTTP resolver never re-interprets raw probe fields.
+ *   - the three `list*` variants are mutually exclusive: ordinary list/name
+ *     resolution, an authoritative exact deny deferred for bare-name suffix
+ *     resolution, or an unavailable exact probe whose list failure may use
+ *     the store-free rescue.
  */
 type ExactPreflightDecision =
   | { kind: "accept" }
   | { kind: "rejectUnknown" }
-  | { kind: "deferReject" }
-  | { kind: "unavailable"; errorMessage: string }
-  | { kind: "continueToList" };
+  | { kind: "rejectNonWritable" }
+  | { kind: "validationUnavailable"; errorMessage: string }
+  | { kind: "unavailableWithRescue"; errorMessage: string }
+  | { kind: "listFallback" }
+  | { kind: "listDeferredReject" }
+  | { kind: "listUnavailable"; errorMessage: string };
 
 /**
  * Run the exact write-preflight probe and reduce it to one {@link
@@ -903,17 +924,33 @@ async function evaluateExactWritePreflight(
     callerAgentAddress: string | null;
     requireLocalWritable: boolean;
     isBareCandidateId: boolean;
+    allowLocalExactFallback: boolean;
   },
 ): Promise<ExactPreflightDecision> {
-  if (!agent.probeContextGraphWritePreflight) return { kind: "continueToList" };
-  const { callerAgentAddress, requireLocalWritable, isBareCandidateId } = opts;
+  const {
+    callerAgentAddress,
+    requireLocalWritable,
+    isBareCandidateId,
+    allowLocalExactFallback,
+  } = opts;
+  if (!agent.probeContextGraphWritePreflight) {
+    // Compatibility for narrow providers that do not expose the exact point
+    // capability. Production agents do expose it; their canonical path below
+    // never enumerates the catalog.
+    return { kind: "listFallback" };
+  }
   try {
     const probe = await agent.probeContextGraphWritePreflight(candidateId, {
       callerAgentAddress,
     });
     // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
     // store fields), so check it before any deny/unavailable interpretation.
-    if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
+    if (exactProbeCanFastAccept(
+      probe,
+      requireLocalWritable,
+      callerAgentAddress,
+      allowLocalExactFallback,
+    )) {
       return { kind: "accept" };
     }
     if (probe.storeUnavailable === true) {
@@ -921,10 +958,10 @@ async function evaluateExactWritePreflight(
       // fields to UNKNOWN. Deny-ish verdicts are NOT trustworthy from unknowns
       // (that would turn a store outage into a 400), so carry the store error
       // for the both-legs-failed 503 and leave the verdict to the list/rescue.
-      return {
-        kind: "unavailable",
-        errorMessage: probe.storeErrorMessage ?? "local store unavailable",
-      };
+      const errorMessage = probe.storeErrorMessage ?? "local store unavailable";
+      return isBareCandidateId
+        ? { kind: "listUnavailable", errorMessage }
+        : { kind: "unavailableWithRescue", errorMessage };
     }
     // Store answered definitively — a deny-ish verdict is authoritative. Bare
     // ids defer (the list leg may resolve the name); qualified ids reject now.
@@ -932,17 +969,35 @@ async function evaluateExactWritePreflight(
       exactProbeIsStaleSubscription(probe) ||
       exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)
     ) {
-      return isBareCandidateId ? { kind: "deferReject" } : { kind: "rejectUnknown" };
+      return isBareCandidateId
+        ? { kind: "listDeferredReject" }
+        : { kind: "rejectUnknown" };
     }
-    return { kind: "continueToList" };
+    if (!isBareCandidateId) {
+      if (probe.exists === false) return { kind: "rejectUnknown" };
+      if (probe.exists !== true) {
+        return {
+          kind: "validationUnavailable",
+          errorMessage: "exact context graph existence was incomplete",
+        };
+      }
+      if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) {
+        return { kind: "rejectNonWritable" };
+      }
+      return {
+        kind: "validationUnavailable",
+        errorMessage: "exact context graph metadata was incomplete",
+      };
+    }
+    return { kind: "listFallback" };
   } catch (err) {
     // The exact probe could not answer local existence at all (store down / read
     // broke). The ONLY degraded case that makes the both-legs-failed rescue
     // eligible: there is no authoritative local-miss verdict to override.
-    return {
-      kind: "unavailable",
-      errorMessage: err instanceof Error ? err.message : String(err),
-    };
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    return isBareCandidateId
+      ? { kind: "listUnavailable", errorMessage }
+      : { kind: "unavailableWithRescue", errorMessage };
   }
 }
 
@@ -977,6 +1032,12 @@ export async function resolveRequiredWriteContextGraphId(
   opts: {
     callerAgentAddress?: string | null;
     requireLocalWritable?: boolean;
+    /**
+     * Trusted local / node-admin routes may accept an exact, store-backed
+     * private graph without first enumerating all visible context graphs.
+     * Scoped agent routes must leave this false so their per-caller private
+     * authorization remains authoritative.
+     */
     allowLocalExactFallback?: boolean;
     /**
      * Test-only seam: override the store-outage rescue eth_call timeout so the
@@ -1010,20 +1071,52 @@ export async function resolveRequiredWriteContextGraphId(
     callerAgentAddress,
     requireLocalWritable,
     isBareCandidateId,
+    allowLocalExactFallback: opts.allowLocalExactFallback === true,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {
     return rejectUnknownContextGraph(res, raw);
+  }
+  if (exactDecision.kind === "rejectNonWritable") {
+    return rejectKnownNonWritableContextGraph(res, raw);
+  }
+  if (exactDecision.kind === "validationUnavailable") {
+    return contextGraphValidationUnavailable(res, exactDecision.errorMessage);
+  }
+  // Qualified ids are already canonical and unambiguous. Never turn their
+  // point-validation into a full ONTOLOGY/AGENTS catalog scan: under store
+  // pressure that O(catalog) fallback was the operation that timed out and
+  // blocked an otherwise unrelated publish (#2066). Bare names still need the
+  // list leg below for suffix resolution and ambiguity reporting.
+  if (exactDecision.kind === "unavailableWithRescue") {
+    const message = `exact preflight failed: ${exactDecision.errorMessage}`;
+    if (await rescueWriteTargetWithoutStore(
+      agent,
+      candidateId,
+      message,
+      opts.chainRescueTimeoutMs,
+    )) {
+      return candidateId;
+    }
+    return contextGraphValidationUnavailable(res, message);
+  }
+  if (
+    exactDecision.kind !== "listFallback" &&
+    exactDecision.kind !== "listDeferredReject" &&
+    exactDecision.kind !== "listUnavailable"
+  ) {
+    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive');
   }
   // Immutable carry-forward for the list leg. Track B (rescue gating): the
   // store-free on-chain rescue may run ONLY on an `unavailable` verdict — the
   // exact probe THREW or degraded (`storeUnavailable`) and so has no
   // authoritative local-miss to override. A definitive local miss (any other
   // kind) keeps the fail-closed 503 if the list leg then fails.
-  const deferredExactProbeReject = exactDecision.kind === "deferReject";
-  const exactProbeUnavailable = exactDecision.kind === "unavailable";
-  const exactProbeErrorMessage =
-    exactDecision.kind === "unavailable" ? exactDecision.errorMessage : null;
+  const deferredExactProbeReject = exactDecision.kind === "listDeferredReject";
+  const exactProbeUnavailable = exactDecision.kind === "listUnavailable";
+  const exactProbeErrorMessage = exactDecision.kind === "listUnavailable"
+    ? exactDecision.errorMessage
+    : null;
 
   let contextGraphs: ExistingContextGraphRow[];
   try {

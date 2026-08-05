@@ -60,3 +60,14 @@ export class VmReconcileQueueClosedError extends Error {
     this.name = 'VmReconcileQueueClosedError';
   }
 }
+
+export const VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE = 'VmReconcileShutdownTimeout';
+
+export class VmReconcileShutdownTimeoutError extends Error {
+  readonly code = VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE;
+
+  constructor(readonly timeoutMs: number) {
+    super(`Graph-scoped sync/reconciliation work did not retire within the ${timeoutMs}ms shutdown bound`);
+    this.name = 'VmReconcileShutdownTimeoutError';
+  }
+}

@@ -103,6 +103,47 @@ afterEach(() => {
 });
 
 describe('#1609 — write-gen-gated negative memo (chain-reconcile backstop)', () => {
+  it('single-flights concurrent equivalent finalization slice events', async () => {
+    const store = new OxigraphStore();
+    const fh = new FinalizationHandler(store, new MockChainAdapter());
+    const entity = 'urn:fact:finalization-singleflight';
+    const merkleRoot = await seedSwmSnapshot(store, entity, 'shared value');
+    let acceptFactories = 0;
+    const load = () => (fh as any).loadFinalizationSwmSlice(
+      LOCAL_CG,
+      [entity],
+      undefined,
+      undefined,
+      merkleRoot,
+      async () => {
+        acceptFactories += 1;
+        return (quads: unknown[]) => quads;
+      },
+    );
+
+    const [first, second] = await Promise.all([load(), load()]);
+    expect(first.quads).toEqual(second.quads);
+    expect(acceptFactories).toBe(1);
+  });
+
+  it('single-flights concurrent equivalent never-match scans', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter();
+    const fh = new FinalizationHandler(store, chain);
+    await seedSwmSnapshot(store, 'urn:fact:singleflight', 'local content');
+    const reads = readSeam(fh);
+    const absentRoot = rootFor('urn:fact:elsewhere', 'remote content');
+
+    const [first, second] = await Promise.all([
+      (fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, absentRoot),
+      (fh as any).findSwmSnapshotForMerkleRoot(LOCAL_CG, absentRoot),
+    ]);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+
   it('replays a warm never-match verdict with ZERO slice reads until a local write lands', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter();

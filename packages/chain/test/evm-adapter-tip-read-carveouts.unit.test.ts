@@ -154,6 +154,18 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     expect(backupGetBlock.calls).toHaveLength(1);
   });
 
+  it('primary aborts the receipt-block request → fails over to the backup timestamp', async () => {
+    const abort = new Error('This operation was aborted');
+    abort.name = 'AbortError';
+    const primaryGetBlock = recorder(async () => { throw abort; });
+    const backupGetBlock = recorder(async () => ({ timestamp: 42 }));
+    const a = makeTwoEndpointAdapter({ getBlock: primaryGetBlock }, { getBlock: backupGetBlock });
+
+    await expect(a.getBlockTimestamp(123n)).resolves.toBe(42);
+    expect(primaryGetBlock.calls).toHaveLength(1);
+    expect(backupGetBlock.calls).toHaveLength(1);
+  });
+
   it('all endpoints lack the block → best-effort 0 (callers tolerate it)', async () => {
     const a = makeTwoEndpointAdapter({ getBlock: recorder(async () => null) }, { getBlock: recorder(async () => null) });
     expect(await a.getBlockTimestamp(123n)).toBe(0);

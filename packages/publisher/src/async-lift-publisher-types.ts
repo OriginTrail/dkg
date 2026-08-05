@@ -1,4 +1,5 @@
 import type {
+  AdmissionJournalEntry,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   LiftJobBroadcast,
@@ -10,13 +11,13 @@ import type {
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
-  RawLiftRequest,
 } from './lift-job.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -30,8 +31,31 @@ export class AsyncLiftJobConflictError extends Error {
   }
 }
 
+/** #1828 — the immutable facts a client retains to recover a lost VM-publish admission. */
+export interface IntentLookupInput {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly agentAddress?: string;
+  /** Optional exactness qualifier; sets `exactIntentMatch` on the result. */
+  readonly intentKey?: string;
+}
+
+/**
+ * #1828 — deterministic result of an intent lookup. At most one ACTIVE job can
+ * exist per lifecycle subject (admission dedup invariant), so `active` is the
+ * live job to bind; `superseded` carries terminal jobs sharing the subject;
+ * `conflict` (>1 active) signals a broken invariant. `exactIntentMatch` (only
+ * when the caller passed `intentKey`) reports whether the returned job's stored
+ * intent equals it.
+ */
+export type IntentLookupResult =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'active'; readonly job: LiftJob; readonly superseded: LiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'superseded'; readonly jobs: LiftJob[]; readonly exactIntentMatch?: boolean }
+  | { readonly kind: 'conflict'; readonly jobs: LiftJob[] };
+
 export interface AsyncLiftPublisher {
-  lift(request: RawLiftRequest): Promise<string>;
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
@@ -50,6 +74,94 @@ export interface AsyncLiftPublisher {
   clear(status: 'finalized' | 'failed'): Promise<number>;
 }
 
+/**
+ * #1828 — a publisher that also exposes the read-only durable-admission intent
+ * recovery lookup. Kept OFF the base {@link AsyncLiftPublisher} runtime queue
+ * contract so runner/adapter implementations that never serve recovery are not
+ * forced to implement it (the exported contract stays minimal). The daemon's
+ * `createPublisherControlFromStore` returns this; the recovery route depends on
+ * it. PR3/PR4 add their own feature reads on their own extended interfaces —
+ * the base contract does not grow.
+ */
+export interface VmPublishIntentRecoveryPublisher extends AsyncLiftPublisher {
+  /** #1828 — read-only recovery lookup by lifecycle facts (+ optional intentKey). */
+  lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
+}
+
+/** #1829 — read query for the append-only journal (facts-pure, or by jobId). */
+export interface JournalReadInput {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly agentAddress?: string;
+  /** Optional per-version filter WITHIN the lineage; never the lineage key itself. */
+  readonly intentKey?: string;
+}
+
+/**
+ * #1829 — result of a journal read. `entries` are seq-ordered; `maxSeq` is -1 for an
+ * empty lineage. `complete` = `entries.length === maxSeq + 1` (no seq gap) — authoritative
+ * on oxigraph-worker; best-effort on external SPARQL backends (no fsync, so the
+ * highest-seq entry can be lost on a crash without a gap being visible). `txHashes` are
+ * ATTEMPTED submissions — a reconciler MUST verify each against chain; a hash here is
+ * never proof the tx was sent (a pre-flush 'broadcast' entry can survive a rolled-back
+ * attempt).
+ */
+export interface JournalReadResult {
+  readonly entries: readonly AdmissionJournalEntry[];
+  readonly maxSeq: number;
+  readonly complete: boolean;
+  readonly txHashes: readonly string[];
+}
+
+/**
+ * #1829 — read-only append-only journal reader. Segregated off the base contract (like
+ * the #1828 recovery lookup): only the daemon control instance serves it.
+ */
+export interface VmPublishAdmissionJournalReader {
+  /** Facts-pure lineage read (derives lineageKey from facts, never the ephemeral index). */
+  readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
+  /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
+  readJournalByJob(jobId: string): Promise<JournalReadResult>;
+}
+
+/**
+ * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the
+ * #1828/#1829 capabilities); a MUTATION/admin capability, not a query. Clears the exact
+ * job ONLY when it is in a native terminal state, rejects otherwise without mutation,
+ * and is idempotent for an absent job. Never broadens to other jobs. On the lift side
+ * this preserves the #1829 append-only journal by construction (subject-scoped delete
+ * in the control-plane graph only).
+ */
+export interface VmPublishTerminalJobClearer {
+  clearTerminalJob(jobId: string): Promise<TerminalJobClearOutcome>;
+}
+
+/**
+ * #1828 — one-shot storage maintenance: (re)build the ephemeral intent index for
+ * VM-publish jobs admitted before it existed. This is a boot-time repair, not a
+ * runtime publisher behaviour, so it lives on its OWN narrow interface — the
+ * daemon boot backfill depends only on this, never on the publisher contract.
+ */
+export interface VmPublishIntentIndexBackfiller {
+  /** Idempotent additive backfill; returns the number of jobs (re)indexed. */
+  ensureVmPublishIntentIndex(): Promise<number>;
+}
+
+/**
+ * #1889 — the composite VM-publisher control surface returned by the daemon factory
+ * (`createPublisherControlFromStore`) and held by `RequestContext.publisherControl`. Names
+ * the capability set the daemon depends on, so the factory return type and the context field
+ * are a single named contract instead of an ad-hoc intersection. The four base interfaces
+ * remain the narrow contracts for callers that need a smaller surface (e.g. the boot
+ * backfill depends only on `VmPublishIntentIndexBackfiller`).
+ */
+export interface VmPublisherControl
+  extends VmPublishIntentRecoveryPublisher,
+    VmPublishIntentIndexBackfiller,
+    VmPublishAdmissionJournalReader,
+    VmPublishTerminalJobClearer {}
+
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;
   finalization: LiftJobFinalizationMetadata;
@@ -58,9 +170,13 @@ export interface AsyncLiftPublisherRecoveryResult {
 /** Required immutable transaction evidence for named-KA lifecycle recovery. */
 export interface AsyncKnowledgeAssetVmPublishRecoveryEvidence
   extends AsyncLiftPublisherRecoveryResult {
+  readonly inclusion: LiftJobInclusionMetadata & {
+    readonly blockHash: LiftJobHex;
+  };
   readonly publishProof: {
     readonly merkleRoot: LiftJobHex;
     readonly authorAddress: LiftJobHex;
+    readonly txIndex: number;
   };
 }
 
@@ -151,4 +267,11 @@ export interface AsyncLiftPublisherConfig {
   ) => Promise<void>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * #1829 — enable append-only admission/transaction journal writes. DAEMON-ONLY:
+   * left OFF for the CLI inspector and standalone `dkg publisher run` so a second
+   * OS process on the same store never races the node-local per-lineageKey seq
+   * allocation. Reads never require this flag. Defaults to OFF.
+   */
+  journalWrites?: boolean;
 }

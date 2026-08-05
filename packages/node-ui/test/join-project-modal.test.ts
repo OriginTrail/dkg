@@ -4,6 +4,7 @@ import {
   validateInvite,
   formatJoinRequestError,
   joinRequestWasApproved,
+  resolveJoinIntent,
 } from '../src/ui/components/Modals/JoinProjectModal.js';
 import { HttpError } from '../src/ui/api.js';
 
@@ -33,20 +34,46 @@ describe('JoinProjectModal invite parsing', () => {
       expect(parsed.legacyMultiaddr).toBeNull();
     });
 
-    // PR #448 review: V10 `/request-join` requires a curator peer id, so
-    // a bare cgId now 400s on the daemon. validateInvite rejects it
-    // client-side instead, with actionable copy. The old subscribe-to-public
-    // paste flow has been removed; users who want a public CG that
-    // hasn't surfaced in the Oracle have to ask the curator for an invite.
-    it('rejects invite with only a cgId (no curator peer id)', () => {
+    it('uses the public subscribe path for a discovered public graph with no curator invite', () => {
       const parsed = parseInviteCode('open-project');
       expect(parsed.cgId).toBe('open-project');
       expect(parsed.curatorPeerId).toBeNull();
       expect(parsed.legacyMultiaddr).toBeNull();
       expect(parsed.hasUnparsedExtra).toBe(false);
-      const err = validateInvite(parsed);
-      expect(err).not.toBeNull();
-      expect(err).toContain('curator peer id');
+      const publicGraphs = [{
+        id: 'open-project',
+        name: 'Open Project',
+        accessPolicy: 'public',
+        subscribed: false,
+        synced: false,
+      }];
+      expect(resolveJoinIntent('open-project', publicGraphs)).toMatchObject({
+        kind: 'publicSubscribe',
+        validationError: null,
+        idleLabel: 'Subscribe',
+      });
+      expect(validateInvite(parsed, { allowBareContextGraphId: true })).toBeNull();
+    });
+
+    it('keeps an explicitly public graph on the subscribe path when an old curator invite is pasted', () => {
+      expect(resolveJoinIntent('open-project\n12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6', [{
+        id: 'open-project',
+        accessPolicy: 'public',
+      }]).kind).toBe('publicSubscribe');
+    });
+
+    it('still requires a curator invite for a private or unknown bare context graph id', () => {
+      const parsed = parseInviteCode('private-project');
+      expect(resolveJoinIntent('private-project', [{
+        id: 'private-project',
+        name: 'Private Project',
+        accessPolicy: 'private',
+      }])).toMatchObject({
+        kind: 'privateJoin',
+        validationError: expect.stringContaining('curator peer id'),
+      });
+      expect(resolveJoinIntent('private-project', []).kind).toBe('privateJoin');
+      expect(validateInvite(parsed)).toContain('curator peer id');
     });
 
     it('validates a peer-id invite as ok', () => {

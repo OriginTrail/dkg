@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { FileWorkspacePublicSnapshotStore, serializeWorkspacePublicSnapshotQuads, TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { withLegacyRawLiftTestSeeder } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/index.js';
@@ -58,8 +59,13 @@ describe('SWM snapshot catch-up sync', () => {
       expect(legacyPayloads.bindings).toHaveLength(0);
     }
 
-    const asyncPublisher = new TripleStoreAsyncLiftPublisher(nodeB.store, { publicSnapshotStore: targetSnapshots });
-    const jobId = await asyncPublisher.lift({
+    const asyncPublisher = withLegacyRawLiftTestSeeder(new TripleStoreAsyncLiftPublisher(nodeB.store, {
+      publicSnapshotStore: targetSnapshots,
+    }), nodeB.store, {
+      now: () => Date.now(),
+      idGenerator: () => 'swm-snapshot-legacy-job',
+    });
+    const jobId = await asyncPublisher.seedLegacyRawLift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: [ENTITY],
@@ -105,15 +111,24 @@ describe('SWM snapshot catch-up sync', () => {
     installSharedMemorySyncMock(nodeB, nodeA, sourceSnapshots, { omitSnapshots: true });
 
     const detailed = await (nodeB as unknown as {
-      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; failedPhases: number; insertedTriples: number }>;
+      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{
+        failedPeers: number;
+        failedPhases: number;
+        completedPhases: number;
+        insertedDataTriples: number;
+        insertedMetaTriples: number;
+        insertedTriples: number;
+      }>;
     }).syncSharedMemoryFromPeerDetailed(REMOTE_PEER, [CONTEXT_GRAPH]);
-    // The peer is reachable and responds; only its snapshot phase fails the
-    // digest/count check. That is a phase failure (failedPhases), not a peer
-    // reachability failure (failedPeers) — but it still suppresses the
-    // success-stamp/backoff via the lifecycle success-gate.
+    // The peer is reachable and its verified data phase can be retained, but
+    // the immutable snapshot is incomplete. Keep the snapshot phase failed so
+    // lifecycle readiness retries, while never making its metadata visible.
     expect(detailed.failedPeers).toBe(0);
     expect(detailed.failedPhases).toBe(1);
-    expect(detailed.insertedTriples).toBe(0);
+    expect(detailed.completedPhases).toBe(1);
+    expect(detailed.insertedDataTriples).toBe(1);
+    expect(detailed.insertedMetaTriples).toBe(0);
+    expect(detailed.insertedTriples).toBe(1);
 
     const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
     // RFC ka-metadata-trim Phase 2: the snapshot pointer is the digest row

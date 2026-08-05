@@ -85,6 +85,72 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraph !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraph',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    await this.inner.replaceGraph(graphUri, externalized, options);
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    const [externalizedGraph, externalizedMetadata] = await Promise.all([
+      Promise.all(graphQuads.map((quad) => this.externalizeInsertQuad(quad))),
+      Promise.all(metadataQuads.map((quad) => this.externalizeInsertQuad(quad))),
+    ]);
+    await this.inner.replaceGraphAndSubject(
+      graphUri,
+      externalizedGraph,
+      metaGraphUri,
+      metadataSubject,
+      externalizedMetadata,
+      options,
+    );
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (typeof this.inner.replaceSubject !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceSubject',
+        'SharedMemoryLiteralBlobStore',
+      );
+    }
+    // Externalize oversized literals before the replace, exactly like insert() /
+    // replaceGraph() — so a large job payload is stored as a blob ref rather than
+    // inline, keeping the atomic path byte-consistent with the fallback.
+    const externalized = await Promise.all(
+      quads.map((quad) => this.externalizeInsertQuad(quad)),
+    );
+    await this.inner.replaceSubject(graphUri, subject, externalized, options);
+  }
+
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new UnsupportedTripleStoreCapabilityError('update', 'SharedMemoryLiteralBlobStore');
@@ -306,7 +372,12 @@ function shouldExternalizeLiteral(quad: Quad, thresholdBytes: number): boolean {
 }
 
 function isSharedMemoryGraph(graph: string | undefined): boolean {
-  return Boolean(graph && graph.endsWith(SHARED_MEMORY_GRAPH_SUFFIX));
+  return Boolean(
+    graph && (
+      graph.endsWith(SHARED_MEMORY_GRAPH_SUFFIX) ||
+      graph.includes(`${SHARED_MEMORY_GRAPH_SUFFIX}/`)
+    ),
+  );
 }
 
 function serializedTermByteLength(term: string): number {

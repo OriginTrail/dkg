@@ -170,6 +170,43 @@ describe('ProtocolRouter', () => {
       expect(stream.aborted?.message).toMatch(/handler error/);
     });
 
+    it('does ZERO admission work for an outbound send whose signal is already aborted', async () => {
+      // The premise W1's changelog pre-send boundary rests on. That boundary
+      // skips recording an attempt and its request bytes for an already-aborted
+      // send, on the grounds that the router rejects it before anything
+      // physical happens. Asserted here against the REAL router rather than
+      // reasoned about, because every agent telemetry test replaces
+      // `agent.messenger` wholesale and so never exercises this preflight —
+      // which would leave "no work happened" a code-reading claim.
+      const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
+      const node = {
+        libp2p: { handle: () => undefined, unhandle: () => undefined },
+        stopSignal: AbortSignal.abort(new Error('node stopping')),
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: (peerId, protocolId, direction) => {
+          admittedCalls.push([peerId, protocolId, direction]);
+          return true;
+        },
+      });
+
+      // Capture rather than `rejects.toMatchObject`, so the admission assertion
+      // below is REACHED even when the shape assertion would fail. Ordered
+      // deliberately: with the preflight removed, admission runs (it is the very
+      // next statement) and only later does the fixture's peer id fail to parse
+      // — so `admittedCalls` is what discriminates, and asserting it second
+      // would leave it unreached behind an earlier failure.
+      const err = await router
+        .send(REMOTE_PEER, PROTOCOL, new Uint8Array([0x01]))
+        .then(() => null, (e: unknown) => e);
+
+      // Admission is the FIRST thing after the abort preflight, so zero calls
+      // proves the rejection happened upstream of it — and therefore upstream
+      // of every dial, stream and byte.
+      expect(admittedCalls).toEqual([]);
+      expect(err).toMatchObject({ name: 'AbortError' });
+    });
+
     it('quietly rejects inbound requests when the admission boundary returns a quiet retryable error', async () => {
       const originalError = console.error;
       const errorSpy = recorder((..._args: unknown[]) => undefined);
@@ -929,6 +966,92 @@ describe('ProtocolRouter', () => {
       expect(resolveCalls).toBe(3);
     });
 
+    it('uses one pooled attempt for a single-use payload without replaying it', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      let poolCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('The operation was aborted due to timeout');
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => {
+            poolCalls += 1;
+            return new Uint8Array([0xFF]);
+          },
+        },
+      });
+
+      await expect(router.send(
+        FAKE_PEER_ID,
+        protocolId,
+        new Uint8Array([1, 2, 3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      )).resolves.toEqual(new Uint8Array([0xFF]));
+
+      expect(poolCalls).toBe(1);
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
+    });
+
+    it('never replays a single-use payload after an ambiguous pooled failure', async () => {
+      let dialCalls = 0;
+      const protocolId = '/dkg/test/single-use/1.0.0';
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          return makeStubStream(new Uint8Array([0xFF])) as any;
+        },
+      });
+      (router as any).pooledByLogical.set(protocolId, {
+        logicalProtocolId: protocolId,
+        wireProtocolId: '/dkg/test/single-use-pooled/1.0.0',
+        pool: {
+          send: async () => { throw new Error('pooled stream reset after write'); },
+        },
+      });
+
+      await expect(router.send(
+        FAKE_PEER_ID,
+        protocolId,
+        new Uint8Array([1, 2, 3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      )).rejects.toThrow(/pooled stream reset/);
+      expect(dialCalls).toBe(0);
+    });
+
+    it('rejects multi-path fan-out for a single-use payload before any wire attempt', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          return makeStubStream(new Uint8Array([0xFF])) as any;
+        },
+      });
+
+      await expect(
+        router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/single-use/1.0.0',
+          new Uint8Array([1, 2, 3]),
+          { payloadReuse: 'single-use', parallelPaths: 2 },
+        ),
+      ).rejects.toThrow(/single-use payloads cannot use parallelPaths > 1/);
+
+      expect(dialCalls).toBe(0);
+      expect(resolveCalls).toBe(0);
+    });
+
     it('stops retrying once a resolver-re-prime followed by dial succeeds', async () => {
       let resolveCalls = 0;
       let dialCalls = 0;
@@ -1282,6 +1405,73 @@ describe('ProtocolRouter', () => {
       expect(out).toEqual(new Uint8Array([0x66]));
       expect(limitedNewStream).toBe(0);
       expect(dialCalls).toBe(1);
+    });
+
+    it('falls back to a live limited candidate after cached direct-address dialing fails', async () => {
+      let limitedNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x67])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({
+          addresses: [
+            { multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } },
+          ],
+        }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('All multiaddr dials failed');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x67]));
+      expect(dialCalls).toBe(1);
+      expect(limitedNewStream).toBe(1);
+    });
+
+    it('prefers an open direct candidate even when a limited candidate is listed first', async () => {
+      let limitedNewStream = 0;
+      let directNewStream = 0;
+      let dialCalls = 0;
+      const router = makeRouterWithFastPath({
+        connections: [
+          {
+            status: 'open',
+            limits: { bytes: 1024 * 1024 },
+            newStream: async () => {
+              limitedNewStream += 1;
+              return makeStubStream(new Uint8Array([0x68])) as any;
+            },
+          },
+          {
+            status: 'open',
+            newStream: async () => {
+              directNewStream += 1;
+              return makeStubStream(new Uint8Array([0x69])) as any;
+            },
+          },
+        ],
+        peerStoreGet: async () => ({ addresses: [] }),
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('dialProtocol must not be called when direct is open');
+        },
+      });
+
+      const out = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(out).toEqual(new Uint8Array([0x69]));
+      expect(directNewStream).toBe(1);
+      expect(limitedNewStream).toBe(0);
+      expect(dialCalls).toBe(0);
     });
 
     // The Window D shape this fast path is meant to heal: a single

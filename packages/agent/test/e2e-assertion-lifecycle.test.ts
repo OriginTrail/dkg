@@ -11,7 +11,7 @@
  * 8. Sub-graph assertions — assertion lifecycle within a sub-graph
  * 9. Two-node promote gossip — promoted data replicates via gossip
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -111,7 +111,7 @@ describe('Assertion lifecycle (single agent)', () => {
     expect(wmAfter.length).toBe(0);
   }, 15_000);
 
-  it('promote with entity selection only promotes specified entities', async () => {
+  it('rejects entity-subset promotion because a graph-scoped KA is atomic', async () => {
     const agent = await createAgent('SelectivePromote');
 
     await agent.assertion.create(CG_ID, 'selective');
@@ -120,22 +120,10 @@ describe('Assertion lifecycle (single agent)', () => {
       { subject: 'urn:entity:skip', predicate: 'http://schema.org/name', object: '"Skip Me"' },
     ]);
 
-    await agent.assertion.promote(CG_ID, 'selective', {
+    await expect(agent.assertion.promote(CG_ID, 'selective', {
       entities: ['urn:entity:keep'],
-    });
-
-    const kept = await agent.query(
-      'SELECT ?name WHERE { <urn:entity:keep> <http://schema.org/name> ?name }',
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-    const skipped = await agent.query(
-      'SELECT ?name WHERE { <urn:entity:skip> <http://schema.org/name> ?name }',
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-
-    expect(kept.bindings.length).toBe(1);
-    expect(kept.bindings[0]?.['name']).toBe('"Keep Me"');
-    expect(skipped.bindings.length).toBe(0);
+    })).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(await agent.assertion.query(CG_ID, 'selective')).toHaveLength(2);
   }, 15_000);
 
   it('multiple assertions are isolated from each other', async () => {
@@ -160,7 +148,7 @@ describe('Assertion lifecycle (single agent)', () => {
     expect(quadsB[0].subject).toBe('urn:b:1');
   }, 15_000);
 
-  it('discard is idempotent — second discard does not throw', async () => {
+  it('discard is terminal — a second mutation is rejected explicitly', async () => {
     const agent = await createAgent('IdempotentDiscard');
 
     await agent.assertion.create(CG_ID, 'ephemeral');
@@ -169,8 +157,8 @@ describe('Assertion lifecycle (single agent)', () => {
     ]);
 
     await agent.assertion.discard(CG_ID, 'ephemeral');
-    // Should not throw
-    await agent.assertion.discard(CG_ID, 'ephemeral');
+    await expect(agent.assertion.discard(CG_ID, 'ephemeral'))
+      .rejects.toMatchObject({ code: 'KA_WM_LIFECYCLE_REQUIRED' });
 
     const quads = await agent.assertion.query(CG_ID, 'ephemeral');
     expect(quads.length).toBe(0);
@@ -212,7 +200,7 @@ describe('Assertion lifecycle with sub-graphs', () => {
 });
 
 describe('Assertion promote gossip (2 nodes)', () => {
-  it('promoted data replicates to connected peer via gossip', async () => {
+  it('a rootless Markdown-shaped KA replicates to the connected peer with its entities intact', async () => {
     const nodeA = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PromoteGossipA',
@@ -237,21 +225,50 @@ describe('Assertion promote gossip (2 nodes)', () => {
     await sleep(500);
 
     await nodeA.createContextGraph({ id: CG_ID, name: 'Gossip Promote' });
+    // The context-graph ontology announcement is asynchronous. Wait until the
+    // peer can authorize this public CG before installing its SWM subscription.
+    const discoveryDeadline = Date.now() + 10_000;
+    while (!(await nodeB.contextGraphExists(CG_ID)) && Date.now() < discoveryDeadline) {
+      await sleep(100);
+    }
+    expect(await nodeB.contextGraphExists(CG_ID)).toBe(true);
     nodeB.subscribeToContextGraph(CG_ID);
     await sleep(500);
 
+    const markdownRoot = 'did:dkg:context-graph:assertion-e2e/assertion/0xauthor/readme.md';
+    // The Markdown extractor emits section blank nodes. Finalization owns the
+    // conversion into the protocol-reserved urn:dkg:ka-skolem namespace.
+    const markdownSection = '_:section-safety';
+    const markdownFile = 'urn:dkg:file:keccak256:abc';
     await nodeA.assertion.create(CG_ID, 'gossip-draft');
     await nodeA.assertion.write(CG_ID, 'gossip-draft', [
-      { subject: 'urn:gossip:item', predicate: 'http://schema.org/name', object: '"Gossiped via promote"' },
+      { subject: markdownRoot, predicate: 'http://schema.org/name', object: '"Construction notes"' },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/sourceContentType', object: '"text/markdown"' },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/sourceFile', object: markdownFile },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/markdownForm', object: markdownFile },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/rootEntity', object: markdownRoot },
+      { subject: markdownRoot, predicate: 'http://dkg.io/ontology/hasSection', object: markdownSection },
+      { subject: markdownSection, predicate: 'http://schema.org/name', object: '"Safety"' },
     ]);
 
-    await nodeA.assertion.promote(CG_ID, 'gossip-draft');
+    const publishWorkspaceGossip = vi.spyOn(nodeA, 'publishWorkspaceGossip');
+    const promoted = await nodeA.assertion.promote(CG_ID, 'gossip-draft');
+    expect(promoted.shareOperationId).toBeTruthy();
+    const publishCall = publishWorkspaceGossip.mock.calls[0];
+    expect(publishCall?.[0]).toBe(CG_ID);
+    expect(publishCall?.[1]).toBeInstanceOf(Uint8Array);
+    expect(publishCall?.[4]).toBe(promoted.shareOperationId);
 
     const deadline = Date.now() + 15_000;
     let bindings: any[] = [];
     while (Date.now() < deadline) {
       const result = await nodeB.query(
-        'SELECT ?name WHERE { <urn:gossip:item> <http://schema.org/name> ?name }',
+        `SELECT ?title ?contentType ?sectionName WHERE {
+          <${markdownRoot}> <http://schema.org/name> ?title ;
+            <http://dkg.io/ontology/sourceContentType> ?contentType ;
+            <http://dkg.io/ontology/hasSection> ?section .
+          ?section <http://schema.org/name> ?sectionName .
+        }`,
         { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
       );
       bindings = result.bindings;
@@ -259,6 +276,8 @@ describe('Assertion promote gossip (2 nodes)', () => {
       await sleep(500);
     }
     expect(bindings.length).toBe(1);
-    expect(bindings[0]?.['name']).toBe('"Gossiped via promote"');
+    expect(bindings[0]?.['title']).toBe('"Construction notes"');
+    expect(bindings[0]?.['contentType']).toBe('"text/markdown"');
+    expect(bindings[0]?.['sectionName']).toBe('"Safety"');
   }, 20_000);
 });

@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -8,11 +9,18 @@ import {
   StorePriorityScheduler,
   createTripleStore,
   registerTripleStoreAdapter,
+  type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
   type QueryOptions,
   type StoreWorkPriority,
 } from '../src/index.js';
-import { CountingStore, MutationHookStore, emptyBindings, q } from './graph-set-index-store-harness.js';
+import {
+  ControlledProbeStore,
+  CountingStore,
+  MutationHookStore,
+  emptyBindings,
+  q,
+} from './graph-set-index-store-harness.js';
 
 class FailingMaintenanceStore extends CountingStore {
   failHasGraph = false;
@@ -20,16 +28,6 @@ class FailingMaintenanceStore extends CountingStore {
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     if (this.failHasGraph) throw new Error('hasGraph failed');
     return super.hasGraph(graphUri, options);
-  }
-}
-
-class GatedMaintenanceStore extends CountingStore {
-  hasGraphGate: Promise<void> | null = null;
-
-  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const present = await super.hasGraph(graphUri, options);
-    if (this.hasGraphGate) await this.hasGraphGate;
-    return present;
   }
 }
 
@@ -61,6 +59,26 @@ class ScheduledGraphListStore extends CountingStore {
       options?.signal,
     );
   }
+}
+
+async function exhaustTouchedGraphProbeRetries(
+  store: GraphSetIndexStore,
+  controlled: ControlledProbeStore,
+  probed: string,
+): Promise<string[]> {
+  controlled.enableProbeGates();
+  const mutation = store.delete([q(probed)]);
+  const expectedGraphs: string[] = [];
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await controlled.waitForProbe();
+    const graph = `did:dkg:context-graph:churn-${attempt}`;
+    expectedGraphs.push(graph);
+    await store.insert([q(graph)]);
+    controlled.releaseProbe();
+  }
+  await mutation;
+  controlled.disableProbeGates();
+  return expectedGraphs;
 }
 
 describe('GraphSetIndexStore', () => {
@@ -129,30 +147,120 @@ describe('GraphSetIndexStore', () => {
     const graph = 'did:dkg:context-graph:stale-delete-probe';
     const inner = new OxigraphStore();
     await inner.insert([q(graph)]);
-    const gated = new GatedMaintenanceStore(inner);
+    const gated = new ControlledProbeStore(inner);
     const events: GraphSetMutationEvent[] = [];
-    let release!: () => void;
-    gated.hasGraphGate = new Promise<void>((resolve) => { release = resolve; });
+    gated.enableProbeGates();
     const store = new GraphSetIndexStore(gated, { onMutation: (event) => events.push(event) });
     await expect(store.listGraphs()).resolves.toEqual([graph]);
     expect(gated.listGraphsCalls).toBe(1);
 
     const staleDelete = store.delete([q(graph)]);
-    for (let i = 0; i < 10 && gated.hasGraphOptions.length === 0; i++) {
-      await Promise.resolve();
-    }
+    await gated.waitForProbe();
     expect(gated.hasGraphOptions).toHaveLength(1);
     await store.insert([q(graph, 'urn:after')]);
-    release();
+    gated.disableProbeGates();
+    gated.releaseProbe();
     await staleDelete;
 
+    // The stale probe observed the graph absent mid-race; that result is
+    // discarded and the maintenance re-probes, observing the concurrent
+    // insert's re-created graph — the index stays warm with no rebuild scan.
     await expect(store.listGraphs()).resolves.toEqual([graph]);
-    expect(gated.listGraphsCalls).toBe(2);
-    expect(events).toContainEqual({
-      type: 'graph-set-revalidated',
-      added: [],
-      removed: [],
+    expect(gated.listGraphsCalls).toBe(1);
+    expect(gated.hasGraphOptions).toHaveLength(2);
+    expect(events).not.toContainEqual({
+      type: 'graph-removed',
+      graph,
       source: 'delete',
+    });
+  });
+
+  it('concurrent mutation during an in-flight touched-graph probe re-probes instead of scheduling a full rebuild', async () => {
+    const probed = 'did:dkg:context-graph:probe-under-race';
+    const concurrent = 'did:dkg:context-graph:concurrent-writer';
+    const inner = new OxigraphStore();
+    await inner.insert([q(probed)]);
+    const gated = new ControlledProbeStore(inner);
+    const events: GraphSetMutationEvent[] = [];
+    gated.enableProbeGates();
+    const store = new GraphSetIndexStore(gated, { onMutation: (event) => events.push(event) });
+    await expect(store.listGraphs()).resolves.toEqual([probed]);
+    expect(gated.listGraphsCalls).toBe(1);
+
+    // A graph-scoped delete whose incremental maintenance probes
+    // hasGraph(probed) and parks on the gate mid-flight.
+    const racedDelete = store.delete([q(probed)]);
+    await gated.waitForProbe();
+    expect(gated.hasGraphOptions).toHaveLength(1);
+
+    // A DIFFERENT-graph write lands while that probe is in flight, bumping the
+    // mutation generation (insert maintains synchronously — no probe of its own).
+    await store.insert([q(concurrent)]);
+    gated.disableProbeGates();
+    gated.releaseProbe();
+    await racedDelete;
+
+    // The maintenance RE-PROBED (second hasGraph call) and applied the result
+    // incrementally. Pre-fix this race demoted to scheduleFullRefresh and the
+    // read below would re-scan (listGraphsCalls = 2).
+    expect(gated.hasGraphOptions).toHaveLength(2);
+    await expect(store.listGraphs()).resolves.toEqual([concurrent]);
+    expect(gated.listGraphsCalls).toBe(1);
+    expect(events).toContainEqual({ type: 'graph-removed', graph: probed, source: 'delete' });
+    expect(events).toContainEqual({ type: 'graph-added', graph: concurrent, source: 'insert' });
+  });
+
+  it('falls back to one background full rebuild when the generation stays unstable past the probe-retry cap', async () => {
+    const probed = 'did:dkg:context-graph:churn-victim';
+    const inner = new OxigraphStore();
+    await inner.insert([q(probed)]);
+    const stepped = new ControlledProbeStore(inner);
+    const diagnostics: unknown[] = [];
+    const store = new GraphSetIndexStore(stepped, {
+      onDiagnostic: (event) => diagnostics.push(event),
+    } as GraphSetIndexStoreOptions);
+    await expect(store.listGraphs()).resolves.toEqual([probed]);
+    expect(stepped.listGraphsCalls).toBe(1);
+
+    // MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4: bump the generation during every
+    // in-flight probe so each attempt observes drift and the retry cap exhausts.
+    const expectedGraphs = await exhaustTouchedGraphProbeRetries(store, stepped, probed);
+
+    // Exactly the capped number of probes ran, then the maintenance demoted to
+    // a deferred dirty rebuild realized by the next read — on the background lane.
+    expect(stepped.hasGraphOptions).toHaveLength(4);
+    const graphs = await store.listGraphs();
+    expect(graphs).not.toContain(probed);
+    expect(new Set(graphs)).toEqual(new Set(expectedGraphs));
+    expect(stepped.listGraphsCalls).toBe(2);
+    expect(stepped.listGraphsOptions.at(-1)).toMatchObject({
+      priority: 'background',
+      source: 'graph-set-index.rebuild',
+    });
+    expect(diagnostics).toEqual([
+      { type: 'probe-retry-exhausted', source: 'delete', probeCount: 4 },
+      { type: 'dirty-rebuild', source: 'delete', graphCount: 4 },
+    ]);
+  });
+
+  it('ignores an internal diagnostic observer failure and still schedules the fallback rebuild', async () => {
+    const probed = 'did:dkg:context-graph:throwing-diagnostic-victim';
+    const inner = new OxigraphStore();
+    await inner.insert([q(probed)]);
+    const controlled = new ControlledProbeStore(inner);
+    const store = new GraphSetIndexStore(controlled, {
+      onDiagnostic: () => { throw new Error('diagnostic observer failed'); },
+    } as GraphSetIndexStoreOptions);
+    await expect(store.listGraphs()).resolves.toEqual([probed]);
+
+    await expect(
+      exhaustTouchedGraphProbeRetries(store, controlled, probed),
+    ).resolves.toHaveLength(4);
+    await expect(store.listGraphs()).resolves.not.toContain(probed);
+    expect(controlled.listGraphsCalls).toBe(2);
+    expect(controlled.listGraphsOptions.at(-1)).toMatchObject({
+      priority: 'background',
+      source: 'graph-set-index.rebuild',
     });
   });
 
@@ -456,6 +564,166 @@ describe('GraphSetIndexStore', () => {
       releaseAck();
       releaseBackground();
       await Promise.allSettled([background, ...(ack ? [ack] : [])]);
+    }
+  });
+
+  it('lets a normal seed bypass an in-flight background seed through the reserved scheduler lane', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      // Pin the pre-health-lane 2-slot ordinary pool this scenario was designed
+      // around. Commit 4057c25df added DEFAULT_HEALTH_RESERVED_SLOTS=1, which would
+      // otherwise steal the 2nd of 2 slots and clamp normalReservedSlots to 0, so
+      // the normal read could not bypass the in-flight background seed. Production
+      // (DEFAULT_MAX_CONCURRENT=4) keeps a 2-slot ordinary pool, so the bypass
+      // invariant still holds there; only this contrived 2-slot config needs it.
+      healthReservedSlots: 0,
+      normalReservedSlots: 1,
+      backgroundReservedSlots: 0,
+    });
+    const inner = new OxigraphStore();
+    const staleGraph = 'did:dkg:context-graph:background-normal-promotion';
+    const freshGraph = 'did:dkg:context-graph:normal-promoted-snapshot';
+    const scheduled = new ScheduledGraphListStore(inner, scheduler);
+    scheduled.listGraphsResults.background = [staleGraph];
+    scheduled.listGraphsResults.normal = [freshGraph];
+    let releaseBackground!: () => void;
+    let releaseNormal!: () => void;
+    scheduled.listGraphsGates.background = new Promise<void>((resolve) => {
+      releaseBackground = resolve;
+    });
+    scheduled.listGraphsGates.normal = new Promise<void>((resolve) => {
+      releaseNormal = resolve;
+    });
+    const store = new GraphSetIndexStore(scheduled);
+    const background = store.listGraphs({
+      priority: 'background',
+      source: 'agent.finalization.sharedMemorySlice',
+    });
+    let normal: Promise<string[]> | undefined;
+
+    try {
+      await Promise.resolve();
+      expect(scheduled.listGraphsCalls).toBe(1);
+      expect(scheduler.snapshot).toMatchObject({
+        normalInflight: 0,
+        normalQueued: 0,
+        backgroundInflight: 1,
+      });
+
+      normal = store.listGraphs({
+        priority: 'normal',
+        source: 'agent.query.sharedMemorySlice',
+      });
+      await Promise.resolve();
+
+      expect(scheduled.listGraphsCalls).toBe(2);
+      expect(scheduled.listGraphsOptions).toEqual([
+        {
+          priority: 'background',
+          source: 'agent.finalization.sharedMemorySlice',
+        },
+        {
+          priority: 'normal',
+          source: 'agent.query.sharedMemorySlice',
+        },
+      ]);
+      expect(scheduler.snapshot).toMatchObject({
+        normalInflight: 1,
+        normalQueued: 0,
+        backgroundInflight: 1,
+      });
+
+      // Normal completes through its reserved lane while background remains
+      // blocked; graph-index coalescing must not capture it first.
+      releaseNormal();
+      await expect(normal).resolves.toEqual([freshGraph]);
+      expect(scheduler.snapshot).toMatchObject({
+        normalInflight: 0,
+        backgroundInflight: 1,
+      });
+
+      releaseBackground();
+      await expect(background).resolves.toEqual([freshGraph]);
+      await expect(store.listGraphs()).resolves.toEqual([freshGraph]);
+      expect(scheduled.listGraphsCalls).toBe(2);
+    } finally {
+      releaseNormal();
+      releaseBackground();
+      await Promise.allSettled([background, ...(normal ? [normal] : [])]);
+    }
+  });
+
+  it('ignores an older failed background revalidation after a promoted refresh publishes', async () => {
+    let now = 1_000;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      // Pin the pre-health-lane 2-slot ordinary pool this scenario was designed
+      // around. Commit 4057c25df added DEFAULT_HEALTH_RESERVED_SLOTS=1, which would
+      // otherwise steal the 2nd of 2 slots and clamp normalReservedSlots to 0, so
+      // the normal read could not bypass the in-flight background seed. Production
+      // (DEFAULT_MAX_CONCURRENT=4) keeps a 2-slot ordinary pool, so the bypass
+      // invariant still holds there; only this contrived 2-slot config needs it.
+      healthReservedSlots: 0,
+      normalReservedSlots: 1,
+      backgroundReservedSlots: 0,
+    });
+    const cachedGraph = 'did:dkg:context-graph:cached-before-promotion';
+    const freshGraph = 'did:dkg:context-graph:fresh-promoted-snapshot';
+    const nextGraph = 'did:dkg:context-graph:next-periodic-snapshot';
+    const scheduled = new ScheduledGraphListStore(new OxigraphStore(), scheduler);
+    scheduled.listGraphsResults.normal = [cachedGraph];
+    const store = new GraphSetIndexStore(scheduled, {
+      revalidateMs: 100,
+      revalidateFailureBackoffMs: 1_000,
+      now: () => now,
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([cachedGraph]);
+    expect(scheduled.listGraphsCalls).toBe(1);
+
+    now += 100;
+    let rejectBackground!: (error: Error) => void;
+    scheduled.listGraphsGates.background = new Promise<void>((_resolve, reject) => {
+      rejectBackground = reject;
+    });
+    const background = store.listGraphs({
+      priority: 'background',
+      source: 'agent.finalization.sharedMemorySlice',
+    });
+
+    try {
+      await Promise.resolve();
+      expect(scheduled.listGraphsCalls).toBe(2);
+      expect(scheduler.snapshot.backgroundInflight).toBe(1);
+
+      scheduled.listGraphsResults.normal = [freshGraph];
+      const normal = store.listGraphs({
+        priority: 'normal',
+        source: 'agent.query.sharedMemorySlice',
+      });
+      await expect(normal).resolves.toEqual([freshGraph]);
+      expect(scheduled.listGraphsCalls).toBe(3);
+      expect(scheduler.snapshot.backgroundInflight).toBe(1);
+
+      // The older failure is superseded by the normal publication: its waiter
+      // receives the fresh set instead of rejecting or applying failure backoff.
+      rejectBackground(new Error('older background revalidation failed'));
+      await expect(background).resolves.toEqual([freshGraph]);
+
+      // The promoted success scheduled the next normal revalidation for +100ms.
+      // If the older failure applied its 1s backoff, this read would not scan.
+      now += 100;
+      scheduled.listGraphsResults.normal = [freshGraph, nextGraph];
+      await expect(store.listGraphs({ priority: 'normal' })).resolves.toEqual([
+        freshGraph,
+        nextGraph,
+      ]);
+      expect(scheduled.listGraphsCalls).toBe(4);
+    } finally {
+      rejectBackground(new Error('test cleanup'));
+      await Promise.allSettled([background]);
     }
   });
 
@@ -936,6 +1204,42 @@ describe('GraphSetIndexStore', () => {
     });
     expect(typeof optedInStore.listGraphsByPrefix).toBe('function');
     await optedInStore.close();
+  });
+
+  it('preserves atomic graph replacement when a managed SPARQL store is index-wrapped', async () => {
+    let updateRequests = 0;
+    const server = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        if (body.trimStart().startsWith('ASK')) {
+          response.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+          response.end(JSON.stringify({ boolean: true }));
+          return;
+        }
+        updateRequests++;
+        response.writeHead(204);
+        response.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const endpoint = `http://127.0.0.1:${port}/sparql`;
+    const store = await createTripleStore({
+      backend: 'sparql-http',
+      options: { queryEndpoint: endpoint, updateEndpoint: endpoint, managedByDkg: true },
+    });
+    try {
+      const graph = 'did:dkg:context-graph:managed-atomic';
+      await expect(store.replaceGraph!(graph, [q(graph)])).resolves.toBeUndefined();
+      expect(updateRequests).toBe(1);
+    } finally {
+      await store.close();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
   });
 
   it('leaves custom backends uncached unless explicitly enabled', async () => {

@@ -17,11 +17,18 @@ import {
   encodeAccessRequest,
   decodeAccessRequest,
   decodeAccessResponse,
+  createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { AccessHandler } from '../src/access-handler.js';
+import { computePrivateRootV10 } from '../src/merkle.js';
+import {
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '../src/workspace-resolution.js';
 
 const CONTEXT_GRAPH = 'test-access-verify';
+const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 const PRIVATE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_private`;
 const DKG = 'http://dkg.io/ontology/';
@@ -48,9 +55,15 @@ async function setupStoreWithPolicy(
 
   // KA metadata in meta graph
   await store.insert([
+    mq(
+      CONTEXT_GRAPH_URI,
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      'https://dkg.network/ontology#ContextGraph',
+      META_GRAPH,
+    ),
     mq(KA_UAL, `${DKG}rootEntity`, ENTITY, META_GRAPH),
     mq(KA_UAL, `${DKG}partOf`, KC_UAL, META_GRAPH),
-    mq(KC_UAL, `${DKG}contextGraph`, `did:dkg:context-graph:${CONTEXT_GRAPH}`, META_GRAPH),
+    mq(KC_UAL, `${DKG}contextGraph`, CONTEXT_GRAPH_URI, META_GRAPH),
     mq(KC_UAL, `${DKG}accessPolicy`, lit(policy), META_GRAPH),
     mq(KC_UAL, `${DKG}status`, lit('confirmed'), META_GRAPH),
   ]);
@@ -337,6 +350,63 @@ describe('I-005: Access handler signature verification', () => {
 
     expect(res.granted).toBe(false);
     expect(res.rejectionReason).toContain('allow list missing or empty');
+  });
+});
+
+describe('graph-scoped private access', () => {
+  it('serves the exact assertion-version private graph through its durable head', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const privateStore = new PrivateContentStore(store, graphManager);
+    const ual = 'did:dkg:mock:31337/0x1111111111111111111111111111111111111111/9';
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const privateQuads: Quad[] = [{
+      subject: 'urn:rootless:private',
+      predicate: 'urn:p:secret',
+      object: '"exact-version-secret"',
+      graph: '',
+    }];
+    const privateMerkleRoot = computePrivateRootV10(privateQuads)!;
+    await privateStore.replaceKnowledgeAssetPrivateTriples(
+      CONTEXT_GRAPH,
+      scope,
+      privateQuads,
+    );
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'graph-access-share',
+      kaUal: ual,
+      assertionVersion: scope.assertionVersion,
+      quads: [],
+      privateMerkleRoot,
+      privateTripleCount: privateQuads.length,
+      publisherPeerId: 'owner-peer',
+      accessPolicy: 'public',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'graph-access-share',
+      kaUal: ual,
+      assertionVersion: scope.assertionVersion,
+    });
+
+    const request = encodeAccessRequest({
+      kaUal: ual,
+      requesterPeerId: 'reader-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+    const response = decodeAccessResponse(
+      await new AccessHandler(store, new TypedEventBus()).handler(request, 'reader-peer' as any),
+    );
+
+    expect(response.granted).toBe(true);
+    expect(new TextDecoder().decode(response.nquads)).toContain('exact-version-secret');
+    expect(toHex(response.privateMerkleRoot)).toBe(toHex(privateMerkleRoot));
   });
 });
 

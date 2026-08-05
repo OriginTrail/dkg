@@ -27,10 +27,32 @@ function baseStore(overrides: Partial<TripleStore> = {}): TripleStore {
     dropGraph: async () => {},
     listGraphs: async () => [],
     deleteBySubjectPrefix: async () => 0,
-    countQuads: async () => 0,
+    // Exact-graph responder paging inventories a listed graph before issuing
+    // its bounded row query. Tests that expose a graph therefore model one row
+    // by default so their query gates still exercise responder admission.
+    countQuads: async (graph) => graph ? 1 : 0,
     close: async () => {},
     ...overrides,
   };
+}
+
+function exactGraphRowResult(): QueryResult {
+  return {
+    type: 'bindings',
+    bindings: [{
+      s: '<urn:test:sync-protection>',
+      p: 'http://schema.org/name',
+      o: '"name"',
+    }],
+  };
+}
+
+function emptyBindingsResult(): QueryResult {
+  return { type: 'bindings', bindings: [] };
+}
+
+function isExactGraphRowQuery(sparql: string): boolean {
+  return sparql.includes('SELECT ?s ?p ?o WHERE');
 }
 
 function deferred<T>() {
@@ -128,7 +150,8 @@ describe('sync responder protection', () => {
     let authStarted = 0;
     const cap = captureHandler(baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<QueryResult>();
         queryGates.push(gate);
         return gate.promise;
@@ -147,11 +170,11 @@ describe('sync responder protection', () => {
     for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
     expect(authStarted).toBe(1);
 
-    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.shift()?.resolve(exactGraphRowResult());
     await first;
     while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
     while (queryGates.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
-    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.shift()?.resolve(exactGraphRowResult());
     await second;
   });
 
@@ -168,6 +191,7 @@ describe('sync responder protection', () => {
         'did:dkg:context-graph:high',
       ],
       query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const contextGraphId = ['block-a', 'block-b', 'block-c', 'low', 'high']
           .find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
         queryOrder.push(contextGraphId);
@@ -202,19 +226,19 @@ describe('sync responder protection', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(authOrder.slice(0, 3)).toEqual(['block-a', 'block-b', 'block-c']);
 
-    queryGates.shift()?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.shift()?.resolve(exactGraphRowResult());
     for (let i = 0; i < 100 && !queryOrder.includes('high'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(queryOrder).toContain('high');
     expect(queryOrder).not.toContain('low');
 
-    for (const gate of queryGates.splice(0)) gate.resolve({ type: 'bindings', bindings: [] });
+    for (const gate of queryGates.splice(0)) gate.resolve(exactGraphRowResult());
     for (let i = 0; i < 100 && !queryOrder.includes('low'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(queryOrder).toContain('low');
-    for (const gate of queryGates.splice(0)) gate.resolve({ type: 'bindings', bindings: [] });
+    for (const gate of queryGates.splice(0)) gate.resolve(exactGraphRowResult());
     await Promise.all([...blockers, low, high]);
   });
 
@@ -226,6 +250,7 @@ describe('sync responder protection', () => {
     const cap = captureHandler(baseStore({
       listGraphs: async () => graphIds.map((id) => `did:dkg:context-graph:${id}`),
       query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const contextGraphId = graphIds.find((id) => sparql.includes(`context-graph:${id}`)) ?? 'unknown';
         queryOrder.push(contextGraphId);
         const gate = deferred<QueryResult>();
@@ -259,7 +284,7 @@ describe('sync responder protection', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(authOrder).toEqual(['block-a', 'block-b', 'block-c']);
 
-    queryGates.get('block-a')?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.get('block-a')?.resolve(exactGraphRowResult());
     for (let i = 0; i < 100 && !queryOrder.includes('default'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -267,7 +292,7 @@ describe('sync responder protection', () => {
     expect(authOrder).not.toContain('elevated');
     expect(queryOrder).toContain('default');
 
-    queryGates.get('block-b')?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.get('block-b')?.resolve(exactGraphRowResult());
     for (let i = 0; i < 100 && !authOrder.includes('elevated'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -276,8 +301,8 @@ describe('sync responder protection', () => {
     expect(queryOrder).not.toContain('elevated');
     expect(new TextDecoder().decode(denied)).toBe('sync-denied');
 
-    queryGates.get('block-c')?.resolve({ type: 'bindings', bindings: [] });
-    queryGates.get('default')?.resolve({ type: 'bindings', bindings: [] });
+    queryGates.get('block-c')?.resolve(exactGraphRowResult());
+    queryGates.get('default')?.resolve(exactGraphRowResult());
     await Promise.all([...blockers, defaultRequest]);
   });
 
@@ -301,9 +326,10 @@ describe('sync responder protection', () => {
     let served = 0;
     const cap = captureHandler(baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         served += 1;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     }), {
       contextGraphPriorities: { 'sync-protection': 5 },
@@ -338,7 +364,8 @@ describe('sync responder protection', () => {
     let maxInFlight = 0;
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
         const gate = deferred<void>();
@@ -347,7 +374,7 @@ describe('sync responder protection', () => {
           gate.resolve();
         });
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -563,7 +590,8 @@ describe('sync responder protection', () => {
     let authStarted = 0;
     const cap = captureHandler(baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async (_sparql: string, options?: QueryOptions) => {
+      query: async (sparql: string, options?: QueryOptions) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         querySignal = options?.signal;
         queryCalls += 1;
         return rowGate.promise;
@@ -649,11 +677,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -677,11 +706,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -707,11 +737,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -742,11 +773,12 @@ describe('sync responder protection', () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (sparql: string) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
-        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+        return exactGraphRowResult();
       },
     });
     const cap = captureHandler(store);
@@ -773,7 +805,12 @@ describe('sync responder protection', () => {
     let querySignal: AbortSignal | undefined;
     const store = baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async (_sparql: string, options?: QueryOptions) => {
+      // Force the bounded page path. Small graphs are intentionally assembled
+      // by a signal-independent shared snapshot owner and raced by each waiter;
+      // only the store-bounded fallback carries the stream signal itself.
+      countQuads: async (graph) => graph ? 1_000_000_000 : 0,
+      query: async (sparql: string, options?: QueryOptions) => {
+        if (!isExactGraphRowQuery(sparql)) return emptyBindingsResult();
         querySignal = options?.signal;
         await new Promise((_resolve, reject) => {
           options?.signal?.addEventListener('abort', () => reject(new Error('aborted by test')), { once: true });

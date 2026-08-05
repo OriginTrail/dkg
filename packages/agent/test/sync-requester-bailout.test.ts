@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import {
+  runDurableSync,
+  type DurableSyncFetchRequest,
+} from '../src/sync/requester/durable-sync.js';
+import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { markSyncTransportFailure } from '../src/sync/error-tags.js';
@@ -74,13 +78,10 @@ function sharedMemoryProcessResult() {
 
 describe('sync requester bailout', () => {
   it('stops durable context-graph fanout after a backoff-worthy transport failure', async () => {
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => {
+    const fetchSyncPages = recorder(async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => {
       if (contextGraphId === 'pressured-cg') {
         throw transportError('Too many active durable data sync session snapshots');
       }
@@ -92,7 +93,7 @@ describe('sync requester bailout', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['pressured-cg', 'next-cg'],
       stopOnBackoffWorthyFailure: true,
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -106,18 +107,26 @@ describe('sync requester bailout', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(1);
     expect(fetchSyncPages.calls).toEqual([
-      [ctx, 'peer-a', 'pressured-cg', false, 'meta', expect.any(String), expect.any(Number)],
+      [
+        expect.objectContaining({
+          ctx,
+          remotePeerId: 'peer-a',
+          contextGraphId: 'pressured-cg',
+          phase: 'meta',
+          graphUri: expect.any(String),
+          fetchContext: expect.objectContaining({
+            deadline: expect.any(Number),
+          }),
+        }),
+      ],
     ]);
   });
 
   it('continues durable fanout after an ordinary sync denial', async () => {
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => {
+    const fetchSyncPages = recorder(async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => {
       if (contextGraphId === 'denied-cg') throw deniedError();
       return pageResult(contextGraphId, phase);
     });
@@ -127,7 +136,7 @@ describe('sync requester bailout', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['denied-cg', 'next-cg'],
       stopOnBackoffWorthyFailure: true,
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -142,27 +151,25 @@ describe('sync requester bailout', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.backoffWorthyFailures).toBe(0);
     expect(fetchSyncPages.calls).toContainEqual([
-      ctx,
-      'peer-a',
-      'next-cg',
-      false,
-      'data',
-      expect.any(String),
-      expect.any(Number),
-      undefined,
-      undefined,
+      expect.objectContaining({
+        ctx,
+        remotePeerId: 'peer-a',
+        contextGraphId: 'next-cg',
+        phase: 'data',
+        graphUri: expect.any(String),
+        fetchContext: expect.objectContaining({
+          deadline: expect.any(Number),
+        }),
+      }),
     ]);
   });
 
   it('stops durable fanout after a sync page timeout', async () => {
     const setCheckpoint = recorder((_key: string, _offset: number) => {});
-    const fetchSyncPages = recorder(async (
-      _ctx: OperationContext,
-      _peer: string,
-      contextGraphId: string,
-      _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
-    ) => phase === 'data'
+    const fetchSyncPages = recorder(async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => phase === 'data'
       ? pageResult(contextGraphId, phase, { completed: false, timedOut: true, nextOffset: 500 })
       : pageResult(contextGraphId, phase));
 
@@ -171,7 +178,7 @@ describe('sync requester bailout', () => {
       remotePeerId: 'peer-a',
       contextGraphIds: ['slow-cg', 'next-cg'],
       stopOnBackoffWorthyFailure: true,
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -185,7 +192,9 @@ describe('sync requester bailout', () => {
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(0);
     expect(setCheckpoint.calls).toContainEqual(['slow-cg:data', 500]);
-    expect(fetchSyncPages.calls.some((call) => call[2] === 'next-cg')).toBe(false);
+    expect(fetchSyncPages.calls.some(([request]) => (
+      request.contextGraphId === 'next-cg'
+    ))).toBe(false);
   });
 
   it('stops shared-memory context-graph fanout after a backoff-worthy transport failure', async () => {

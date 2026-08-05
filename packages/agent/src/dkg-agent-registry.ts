@@ -115,8 +115,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -356,9 +355,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -422,6 +418,29 @@ function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: bool
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
+  async ensureProfilePublished(this: DKGAgent): Promise<void> {
+    if (this.profileManager.profileKcId !== null) return;
+    if (this.ensureProfilePublishedInFlight) {
+      return this.ensureProfilePublishedInFlight;
+    }
+
+    let tracked: Promise<void>;
+    const publish = (async () => {
+      // Re-check inside the coalesced operation in case another serialized
+      // publisher completed between the fast-path check and this turn.
+      if (this.profileManager.profileKcId === null) {
+        await this.publishProfile();
+      }
+    })();
+    tracked = publish.finally(() => {
+      if (this.ensureProfilePublishedInFlight === tracked) {
+        this.ensureProfilePublishedInFlight = undefined;
+      }
+    });
+    this.ensureProfilePublishedInFlight = tracked;
+    return tracked;
+  }
+
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
     // `publishProfile()` to settle (success or failure) before
@@ -1468,8 +1487,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * Check whether any locally registered agent is the curator/creator
    * of the given context graph.
    */
-  async isCuratorOf(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const owner = await this.getContextGraphOwner(contextGraphId);
+  async isCuratorOf(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const owner = await this.getContextGraphOwner(contextGraphId, options);
     if (!owner) return false;
     // Mirror the comparison in PROTOCOL_JOIN_REQUEST. `normalizeAgentDid`
     // collapses EVM-address case drift but preserves peer-ID case.

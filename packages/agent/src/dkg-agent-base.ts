@@ -12,6 +12,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
+  openRfc64PersistenceV1,
+  type Rfc64PersistenceV1,
+} from './rfc64/persistence-v1.js';
+import {
+  openSqliteFinalizationRecoveryStore,
+} from './finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
+import { FinalizationRuntime } from './finalization-runtime.js';
+import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
+import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/public-catalog-native-receiver-v1.js';
+import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
+import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
+import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
@@ -114,11 +128,11 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
+  type PromoteTerminalJobClearer,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -349,6 +363,8 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type VmReconcileNegativeRecord,
+  type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -367,9 +383,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -409,10 +422,17 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
+function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
-  markProjectionDirty?: (quads?: readonly Quad[]) => void,
+  // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
+  // dirty the projection by graph rather than by inserted quads (covers deletes).
+  markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
 ): TripleStore {
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
@@ -475,6 +495,50 @@ export function createListContextGraphsCacheInvalidatingStore(
         () => markProjectionDirty?.(),
       );
     },
+    replaceGraph: innerStore.replaceGraph
+      ? (graphUri, quads, options) => invalidateAfterMutation(
+          () => innerStore.replaceGraph!(graphUri, quads, options),
+          () => true,
+          () => markProjectionDirty?.(),
+        )
+      : undefined,
+    // Rootless KA materialization replaces the assertion graph and its UAL
+    // metadata subject in one backend transaction. Preserve that optional
+    // capability through the agent decorator just like replaceGraph/update;
+    // omitting it makes every capable production backend appear unsupported.
+    replaceGraphAndSubject: innerStore.replaceGraphAndSubject
+      ? (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, options) =>
+          invalidateAfterMutation(
+            () => innerStore.replaceGraphAndSubject!(
+              graphUri,
+              graphQuads,
+              metaGraphUri,
+              metadataSubject,
+              metadataQuads,
+              options,
+            ),
+            () => true,
+            () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
+          )
+      : undefined,
+    // #1863 — the async-lift publisher persists a job transition via this atomic
+    // single-subject replace. Preserve the optional capability through the agent
+    // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it
+    // makes every capable production backend appear unsupported, so the publisher
+    // silently falls back to non-atomic delete-then-insert and the fix is a no-op.
+    replaceSubject: innerStore.replaceSubject
+      ? (graphUri, subject, quads, options) =>
+          invalidateAfterMutation(
+            () => innerStore.replaceSubject!(graphUri, subject, quads, options),
+            () => true,
+            // Dirty the projection by the TARGET GRAPH, not the inserted quads:
+            // a subject replace can DELETE projection-relevant metadata (or insert
+            // non-relevant/empty rows), which quad-keyed dirtying would miss. The
+            // target graph covers both delete and insert (#1863). No-op for a
+            // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
+            () => markProjectionDirty?.(undefined, graphUri),
+          )
+      : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },
@@ -538,7 +602,10 @@ export class DKGAgentBase {
    * getter so the worker (a daemon-side concern) and tests can drive
    * the queue directly without going through the assertion subsurface.
    */
-  protected _promoteQueue?: AsyncPromoteQueue;
+  // Typed with the terminal-clear capability at the ownership boundary (not cast at the
+  // getter): the only assigned value is `TripleStoreAsyncPromoteQueue`, which implements it,
+  // and any test/subclass substituting a queue must now satisfy the clearer at compile time.
+  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer;
   /**
    * Override for tests / future operator config. When set before
    * `promoteQueue` is first accessed, the queue is constructed with
@@ -835,18 +902,71 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_SWEEP_INTERVAL_MS =
     Number(process.env['DKG_VM_RECONCILE_INTERVAL_MS']) || 60_000;
+  // The periodic sweep is a missed-event safety net, not startup readiness.
+  // Spread its first run across the configured cadence so a rolling fleet
+  // restart does not immediately launch a full reconciliation scan on every
+  // node. Live chain nudges remain available from startup.
+  static readonly VM_RECONCILE_STARTUP_MAX_DELAY_MS =
+    resolveVmReconcileStartupMaxDelayMs(
+      process.env['DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS'],
+      DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS,
+    );
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
-  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
-    Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
-  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS = (() => {
+    const configured = Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']);
+    return Number.isFinite(configured) && configured > 0
+      ? configured
+      : 10 * 60_000;
+  })();
+  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
+    1_000,
+  );
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
-  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
+    1_000,
+  );
+  /** Maximum peers connected/probed/transported by one exact-recovery pass. */
+  static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
+  /** Bounded proof universe retained across passes; transport still uses the cap above. */
+  static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
+  /**
+   * Maximum chain ordinals one CG may process before yielding the single VM
+   * worker. Ten keeps exact missing-KA pulls useful while bounding cross-CG
+   * latency and the per-request UAL filter.
+   */
+  static readonly VM_RECONCILE_BATCH_SIZE =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
+  static readonly RS_HEAL_BATCH_MAX = 64;
+  /**
+   * Maximum stranded KCs one RS-heal pass may inspect before yielding. RS heal
+   * is periodic repair work, so bounding each pass keeps foreground publish,
+   * SWM and gossip operations from competing with an entire historical backlog.
+  */
+  static readonly RS_HEAL_BATCH_SIZE = Math.min(
+    DKGAgentBase.RS_HEAL_BATCH_MAX,
+    readPositiveSafeIntegerEnv('DKG_RS_HEAL_BATCH_SIZE', 8),
+  );
+  /** Bounded per-CG keyset cursor retention for the independent RS-heal pager. */
+  static readonly RS_HEAL_CG_STATE_MAX_ENTRIES = Math.min(
+    10_000,
+    readPositiveSafeIntegerEnv('DKG_RS_HEAL_CG_STATE_MAX_ENTRIES', 1_000),
+  );
+  /**
+   * Parallel ordinal work per CG. Combined with the default two-CG dispatcher
+   * concurrency this caps chain/store pressure at ten in-flight ordinals.
+   */
+  static readonly VM_RECONCILE_ORDINAL_CONCURRENCY =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_ORDINAL_CONCURRENCY']) || 5);
+  /** Keep a slow peer recovery for one CG from blocking every other CG. */
+  static readonly VM_RECONCILE_CONCURRENCY =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CONCURRENCY']) || 2);
   static readonly VM_RECONCILE_MAX_FOREGROUND_BURST =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_MAX_FOREGROUND_BURST']) || 8);
   static readonly VM_RECONCILE_SHUTDOWN_TIMEOUT_MS =
@@ -873,6 +993,16 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS']) || 5_000);
   static readonly LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS =
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS']) || 5_000);
+  /**
+   * Per-row list enrichment can issue several store queries. Keep the aggregate
+   * fan-out comfortably below the store scheduler's normal-queue limit even on
+   * nodes that have discovered hundreds of context graphs.
+   */
+  static readonly LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY =
+    Math.min(8, Math.max(
+      1,
+      Math.floor(Number(process.env['DKG_LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY']) || 4),
+    ));
 
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
@@ -881,8 +1011,23 @@ export class DKGAgentBase {
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */
   protected vmReconcileDispatcher?: VmReconcileDispatcher<ContextGraphReconcileResult>;
+  /** Closed dispatcher retained until every physically active worker settles. */
+  protected vmReconcileRetirement: Promise<void> | null = null;
+  /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
+  protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
+  protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
+  protected graphScopedStoreClosed = false;
+  /** True only after startup has installed every dependency the VM worker uses. */
+  protected vmReconcileRuntimeReady = false;
+  /** A timed-out physical retirement quarantines this instance until stop is retried. */
+  protected vmReconcileShutdownBlocked = false;
   /** Next eligible CG index for bounded periodic-sweep admission. */
   protected vmReconcileSweepCursor = 0;
+  /** Deterministically staggered cold-start prime, separate from the interval. */
+  protected vmReconcileStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Process-wide sweep single-flight; interval/startup callers join this promise. */
+  protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
@@ -898,17 +1043,32 @@ export class DKGAgentBase {
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<string, {
-    localCgId: string;
-    failures: number;
-    nextRetryAt: number;
-    swmGen: string;
-    candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-    peerTopologyKey: string;
-  }>();
+  protected readonly vmReconcileNegativeCache = new Map<string, Omit<VmReconcileNegativeRecord, 'cacheKey'>>();
+  /** Bounded access-ordered keys already consulted in the durable store. */
+  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
+  /** Bounded, process-local clean-absence rotations for production VM recovery. */
+  protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Next stable batch index to consider when the bounded rotation cache has waiters. */
+  protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
+  /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
+  protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /** Exclusive peer-id cursor used to walk oversized curator registries. */
+  protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
+  /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
+  protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
+  protected contextGraphMembershipPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
+  /** Late exact responses must not mutate rotation state after shutdown begins. */
+  protected vmReconcileRotationClosed = false;
+  /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
+  protected vmReconcileLifecycleGeneration = 0;
+  /** Abortable boundary paired with the generation guard for restart-safe async work. */
+  protected vmReconcileLifecycleController = new AbortController();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** Last stranded UAL visited by the bounded RS-heal sweep for each CG. */
+  protected readonly rsHealCursorByCg = new Map<string, string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
   protected readonly vmReconcileCatchupPeerOrder = new Map<string, {
@@ -949,7 +1109,30 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  /**
+   * One OT-RFC-64 persistence owner for the inventory lease and every resource
+   * protected by it. Agents without dataDir remain deliberately dormant.
+   */
+  protected rfc64PersistenceV1?: Rfc64PersistenceV1;
+  /** Explicit owner for finalization persistence and network identity lifetimes. */
+  protected readonly finalizationRuntime = new FinalizationRuntime();
+  /**
+   * RFC-64 Gate 1 public author-catalog service, wired onto the production
+   * router during `start()` when {@link rfc64PersistenceV1} is open. Undefined
+   * while dormant (no dataDir) or after `stop()`.
+   */
+  protected rfc64PublicCatalogServiceV1?: Rfc64PublicCatalogServiceV1;
+  /** Exact process-local post-verification evidence, keyed by applied head. */
+  protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
+    new Map<string, Rfc64PublicCatalogNativeSynchronizationEvidenceV1>();
+  /** Bounded process-local terminal receiver failures, keyed by announced head. */
+  protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
+    new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+  /** Serialize local author-head construction/CAS independently per exact scope. */
+  protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
+  protected readonly contextGraphBindingGenerations = new Map<string, number>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
@@ -1132,6 +1315,13 @@ export class DKGAgentBase {
    * the guard at every caller.
    */
   protected publishProfileTail: Promise<unknown> = Promise.resolve();
+  /**
+   * Coalesces startup and first-join profile readiness checks. The regular
+   * publish tail serializes writes, but without this promise two concurrent
+   * readiness callers could still queue duplicate profile KAs while neither
+   * has observed the first result yet.
+   */
+  protected ensureProfilePublishedInFlight?: Promise<void>;
   /**
    * OT-RFC-38 / LU-6 Phase B — sliding-window rate-limiter applied
    * to pre-registration (beacon-discovered) ciphertext writes.
@@ -1511,6 +1701,84 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
     this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
+  }
+
+  /**
+   * Acquire the RFC-64 inventory, finish bounded stale-candidate cleanup, and
+   * open the inherited-owner control-object tree before network consumers.
+   */
+  protected async prepareRfc64PersistenceV1(): Promise<void> {
+    if (!this.config.dataDir || this.rfc64PersistenceV1 !== undefined) return;
+    this.rfc64PersistenceV1 = await openRfc64PersistenceV1(this.config.dataDir, {
+      yieldAfterPurgeBatch: () => this.yieldRfc64InventoryV1StartupBatch(),
+    });
+  }
+
+  /** Open after RFC-64 ownership and before networking starts. */
+  protected async prepareFinalizationRecoveryStore(): Promise<void> {
+    if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
+    const store = await openSqliteFinalizationRecoveryStore(
+      this.config.dataDir,
+    );
+    this.finalizationRuntime.attachRecoveryStore(store);
+  }
+
+  /** Yield between fixed-size adapter batches so startup cannot monopolize the event loop. */
+  protected async yieldRfc64InventoryV1StartupBatch(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  /**
+   * Relinquish the control store and single inventory foundation. Clear local
+   * references before closing so fail-stop cleanup cannot be retried.
+   */
+  protected async closeRfc64PersistenceV1(): Promise<void> {
+    const persistence = this.rfc64PersistenceV1;
+    this.rfc64PersistenceV1 = undefined;
+    await persistence?.close();
+  }
+
+  /** Drain and checkpoint the inbox before releasing the broader persistence lifetime. */
+  protected async closeFinalizationRecoveryStore(): Promise<void> {
+    await this.finalizationHandler?.stopRecoveryWorker();
+    const store = this.finalizationRuntime.detachRecoveryStore();
+    await store?.close();
+  }
+
+  async getFinalizationRecoveryHealth(): Promise<FinalizationRecoveryHealth> {
+    const store = this.finalizationRuntime.getRecoveryStore();
+    if (!store) {
+      return {
+        available: false,
+        closed: false,
+        ready: false,
+        canonicalReceiptCapability: 'not-configured',
+        degradedReason: 'not-configured',
+        stateCounts: {},
+        livePayloadBytes: 0,
+        dueEntries: 0,
+      };
+    }
+    const health = await store.health();
+    const canonicalReceiptCapability = this.chain.chainId !== 'none'
+      && typeof this.chain.resolveCanonicalFinalizationReceipt === 'function'
+      ? 'supported'
+      : 'unsupported';
+    return {
+      ...health,
+      ready: (health.ready ?? health.available)
+        && canonicalReceiptCapability === 'supported',
+      canonicalReceiptCapability,
+      ...(
+        canonicalReceiptCapability === 'unsupported'
+          && health.available
+          && health.degradedReason === undefined
+          ? {
+              degradedReason: 'canonical-finalization-receipt-unsupported',
+            }
+          : {}
+      ),
+    };
   }
 
   /**

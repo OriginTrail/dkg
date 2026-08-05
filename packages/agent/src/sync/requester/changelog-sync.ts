@@ -23,20 +23,18 @@ export interface PageApplyPlan {
 /**
  * Pure, crash-safe planner for one decoded delta page (OT-RFC-59 requester, model R).
  *
- * A data graph is trusted ONLY when (a) the whole page verified cleanly, (b) its sibling
- * `/_meta` record — carrying a real `dkg:merkleRoot` — is in THIS page, and (c) every one
- * of its parsed quads survived `verifySyncedData`. Gates (a)+(b) close the default-accept
- * hole: `verifiedData` passes through quads whose subject is not a recognised root entity
- * and is permissive on empty/rootless meta, so "survived verification" ALONE would let
- * orphan or unbound data through — the clean-batch + merkle-root-present checks force an
- * actual merkle bind.
+ * A data graph is trusted ONLY when (a) the whole page verified cleanly, (b) metadata in
+ * THIS page binds it either as a legacy `/_meta` sibling with a real `dkg:merkleRoot` or
+ * as the exact `dkg:assertionGraph` of a verified V2 graph-scoped KA, and (c) every parsed
+ * quad in the graph survived `verifySyncedData`. These gates prevent orphan, partially
+ * verified, or unbound data from crossing the durable cursor.
  *
  * The cursor advances only along a CONTIGUOUS verified prefix (iteration stops at the FIRST
  * unresolved record), so the durable cursor never passes a change that was not applied.
- * An empty-content upsert is a resolved NO-OP — never a REPLACE — so it can never delete a
- * local graph (genuine deletions arrive only via `drop` records). Store writes commit
- * BEFORE the caller persists the cursor; upsert=REPLACE and drop are idempotent, so a crash
- * between commit and cursor-persist re-fetches and re-applies harmlessly.
+ * Empty upserts are resolved NO-OPs. Peer-supplied drops and non-empty shared metadata
+ * snapshots defer to authoritative resync: neither a changelog marker nor a received-row
+ * count proves deletion/completeness. Store writes finish before cursor persistence, so a
+ * crash re-fetches the same idempotent data replacement.
  */
 export function planPageApply(params: {
   records: ChangelogDeltaRecord[]; // ascending by seq (wire decoder guarantees)
@@ -47,8 +45,10 @@ export function planPageApply(params: {
   verifiedByGraph: Map<string, Quad[]>;
   /** graph → parsed record quad count (pre-verify) — to detect partial/whole rejection & empties. */
   recordQuadCountByGraph: Map<string, number>;
-  /** meta-graph URIs present in-page THAT carry a `dkg:merkleRoot` (a rootless meta cannot bind data). */
+  /** Legacy sibling meta-graph URIs present in-page that carry a `dkg:merkleRoot`. */
   metaGraphsWithRoot: Set<string>;
+  /** Exact V2 assertion graphs bound by verified graph-scoped metadata in THIS page. */
+  verifiedGraphScopedDataGraphs: Set<string>;
   /** processDurableBatch rejected nothing this page (rejectedKcs===0 && dataRejectedMissingMeta===0). */
   batchVerifiedCleanly: boolean;
 }): PageApplyPlan {
@@ -57,9 +57,62 @@ export function planPageApply(params: {
   let earliestUnresolvedSeq = Number.POSITIVE_INFINITY;
   let applied = 0;
 
+  // Per-graph parse/verification accounting is intentionally bounded to one
+  // record. A page containing the same in-scope graph more than once is
+  // ambiguous (and a later empty record could otherwise overwrite the parsed
+  // count for an earlier non-empty metadata snapshot). Defer the whole page
+  // before any write; the bounded-stall path will reconcile it by full sync.
+  const seenGraphs = new Set<string>();
+  const hasDuplicateGraph = params.records.some((record) => {
+    if (params.isForeignGraph(record.graph)) return false;
+    if (seenGraphs.has(record.graph)) return true;
+    seenGraphs.add(record.graph);
+    return false;
+  });
+  if (hasDuplicateGraph) {
+    const firstRecordSeq = params.records.reduce(
+      (earliest, record) => Math.min(earliest, record.seq),
+      Number.POSITIVE_INFINITY,
+    );
+    return {
+      ops: [],
+      advanceTo: Math.max(params.priorSeq, firstRecordSeq - 1),
+      deferred: true,
+      applied: 0,
+    };
+  }
+
+  // Changelog v1 carries a whole shared `/_meta` snapshot but no authenticated
+  // subject manifest. Even when every received row verifies, a peer can omit a
+  // different live KA and turn whole-graph replacement into a remote delete.
+  // Defer every non-empty metadata replacement to the authoritative full-sync
+  // lane, and do so before planning data so local data and metadata never split.
+  const unsafeMetadataReplacement = params.records.find((record) => {
+    if (
+      record.op !== 'upsert'
+      || params.isForeignGraph(record.graph)
+      || !record.graph.endsWith('/_meta')
+    ) return false;
+    return (params.recordQuadCountByGraph.get(record.graph) ?? 0) > 0;
+  });
+  if (unsafeMetadataReplacement) {
+    const firstRecordSeq = params.records.reduce(
+      (earliest, record) => Math.min(earliest, record.seq),
+      unsafeMetadataReplacement.seq,
+    );
+    return {
+      ops: [],
+      advanceTo: Math.max(params.priorSeq, firstRecordSeq - 1),
+      deferred: true,
+      applied: 0,
+    };
+  }
+
   const dataGraphTrusted = (dataGraph: string): boolean => {
     if (!params.batchVerifiedCleanly) return false; // any KC in the page failed merkle ⇒ trust nothing
-    if (!params.metaGraphsWithRoot.has(`${dataGraph}/_meta`)) return false; // no merkle-root-bearing sibling in-page
+    const legacySiblingBound = params.metaGraphsWithRoot.has(`${dataGraph}/_meta`);
+    const graphScopeBound = params.verifiedGraphScopedDataGraphs.has(dataGraph);
+    if (!legacySiblingBound && !graphScopeBound) return false;
     const parsedCount = params.recordQuadCountByGraph.get(dataGraph);
     if (parsedCount === undefined || parsedCount === 0) return false; // absent/empty ⇒ nothing merkle-checkable
     return (params.verifiedByGraph.get(dataGraph)?.length ?? 0) === parsedCount; // ALL of G's quads survived
@@ -72,9 +125,13 @@ export function planPageApply(params: {
       continue;
     }
     if (rec.op === 'drop') {
-      ops.push({ seq: rec.seq, graph: rec.graph, op: 'drop', quads: [] });
-      applied += 1;
-      continue;
+      // A remote changelog marker is not an authenticated deletion proof. Stop
+      // before it and let the driver's bounded stall fallback reconcile through
+      // the authoritative durable lane; never hand an arbitrary peer a direct
+      // dropGraph primitive.
+      deferred = true;
+      earliestUnresolvedSeq = Math.min(earliestUnresolvedSeq, rec.seq);
+      break;
     }
     // Empty-content upsert (parsed to zero quads) carries nothing to verify or apply — a
     // resolved NO-OP. It must NEVER become a REPLACE (drop): that would silently delete a
@@ -83,13 +140,12 @@ export function planPageApply(params: {
       continue;
     }
     if (rec.graph.endsWith('/_meta')) {
-      // META graphs are trusted ANCHORS, exactly like legacy sync: the served meta is
-      // applied as-is (rejected-KC rows already dropped from verifiedMeta), and DATA is
-      // what gets merkle-verified against it. This is what lets the top-level `_meta`
-      // graph (whose data sibling is often empty) converge instead of deferring forever.
-      ops.push({ seq: rec.seq, graph: rec.graph, op: 'upsert', quads: params.verifiedByGraph.get(rec.graph) ?? [] });
-      applied += 1;
-      continue;
+      // The preflight above handles every non-empty metadata record. Keep a
+      // defensive defer here so later control-flow edits cannot reintroduce a
+      // whole shared-graph replacement without a completeness proof.
+      deferred = true;
+      earliestUnresolvedSeq = Math.min(earliestUnresolvedSeq, rec.seq);
+      break;
     }
     // DATA graphs apply ONLY if they merkle-verify against their in-page meta.
     if (!dataGraphTrusted(rec.graph)) {
@@ -135,15 +191,21 @@ export interface ChangelogSyncDeps {
   applyPage(page: {
     era: string; headSeq: number; nextSeq: number; priorSeq: number; records: ChangelogDeltaRecord[];
   }): Promise<{ advanceTo: number; applied: number; deferred: boolean }>;
-  /** Bootstrap this CG via the legacy full/durable lane (resync fallback + stall backstop). */
-  runResync(): Promise<ResyncOutcome>;
+  /**
+   * Bootstrap this CG via the legacy full/durable lane (resync fallback + stall backstop).
+   * `dropCandidates` are exact in-scope graphs whose unauthenticated changelog markers
+   * caused the stall. The full snapshot must reconcile them before returning `complete`.
+   */
+  runResync(dropCandidates: readonly string[]): Promise<ResyncOutcome>;
   logWarn?(message: string): void;
+  /** Test/containment override; production uses the defensive 100,000-round bound. */
+  maxRounds?: number;
 }
 
-export interface ChangelogSyncOutcome {
-  kind: 'delta' | 'resync' | 'denied';
-  applied: number;
-}
+export type ChangelogSyncOutcome =
+  | { kind: 'delta' | 'denied'; applied: number }
+  | { kind: 'resync'; applied: number; complete: boolean }
+  | { kind: 'incomplete'; applied: number; reason: 'round-limit' };
 
 /** After this many consecutive no-forward-progress rounds, fall back to a full resync. */
 const RESYNC_AFTER_STALLED_ROUNDS = 3;
@@ -155,14 +217,16 @@ const RESYNC_AFTER_STALLED_ROUNDS = 3;
  * rollback / first-contact the responder returns `resync` and we bootstrap via the legacy
  * lane — advancing the cursor to headSeq ONLY when that resync completed fully (a partial
  * resync leaves the cursor so the next cycle retries, never leaving a gap below headSeq).
- * A page whose sibling meta straddled the byte budget defers; re-fetching from the
- * (unadvanced) cursor pulls the meta into the same window next round. If a record stays
- * unresolvable for {@link RESYNC_AFTER_STALLED_ROUNDS} rounds, a resync clears it.
+ * A page whose legacy sibling meta or V2 graph binding straddled the byte budget defers;
+ * re-fetching from the unadvanced cursor pulls the binding into the same window next
+ * round. If a record stays unresolvable for {@link RESYNC_AFTER_STALLED_ROUNDS} rounds,
+ * a resync clears it.
  */
 export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<ChangelogSyncOutcome> {
   let applied = 0;
   let stalledRounds = 0;
-  for (let round = 0; round < 100_000; round++) {
+  const maxRounds = deps.maxRounds ?? 100_000;
+  for (let round = 0; round < maxRounds; round++) {
     const cursor = deps.getCursor();
     const priorSeq = cursor?.seq ?? 0;
     const requestBytes = encodeChangelogRequest({
@@ -176,12 +240,12 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
     if (resp.kind === 'denied') return { kind: 'denied', applied };
 
     if (resp.kind === 'resync') {
-      const rr = await deps.runResync();
+      const rr = await deps.runResync([]);
       applied += rr.insertedTriples;
       // Only jump the cursor to headSeq if the resync verifiably fetched everything < headSeq;
       // otherwise leave it (still first-contact / behind) so the next cycle retries — no gap.
       if (rr.complete) deps.setCursor(resp.era, resp.headSeq);
-      return { kind: 'resync', applied };
+      return { kind: 'resync', applied, complete: rr.complete };
     }
 
     // delta — verified apply of the page (store writes commit inside applyPage).
@@ -198,15 +262,17 @@ export async function runChangelogSync(deps: ChangelogSyncDeps): Promise<Changel
       // genuinely-missing meta (or an in-lane-unverifiable graph) can't wedge the CG.
       if (++stalledRounds >= RESYNC_AFTER_STALLED_ROUNDS) {
         deps.logWarn?.(`changelog sync stalled ${stalledRounds} rounds at seq ${priorSeq}; resyncing`);
-        const rr = await deps.runResync();
+        const rr = await deps.runResync(
+          resp.records.filter((record) => record.op === 'drop').map((record) => record.graph),
+        );
         applied += rr.insertedTriples;
         if (rr.complete) deps.setCursor(resp.era, resp.headSeq);
-        return { kind: 'resync', applied };
+        return { kind: 'resync', applied, complete: rr.complete };
       }
     }
 
     if (!deferred && advanceTo >= resp.headSeq) return { kind: 'delta', applied };
   }
   deps.logWarn?.('changelog sync exceeded the round bound; stopping (misbehaving peer?)');
-  return { kind: 'delta', applied };
+  return { kind: 'incomplete', applied, reason: 'round-limit' };
 }

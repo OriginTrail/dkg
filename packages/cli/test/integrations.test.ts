@@ -1,8 +1,16 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { Command } from 'commander';
 import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// This package is `"type": "module"`. Vitest's transform happens to supply
+// `__dirname`, so the fixture tests below do run — but relying on that is a
+// latent trap for anyone executing this file outside vitest. Resolve it from
+// import.meta.url instead so the fixture paths do not depend on the runner.
+const testDir = dirname(fileURLToPath(import.meta.url));
 
 import {
   resolveRegistryConfig,
@@ -12,6 +20,7 @@ import {
   isGithubHost,
 } from '../src/integrations/registry-client.js';
 import { isIntegrationEntry } from '../src/integrations/schema.js';
+import { registerIntegrationCommands } from '../src/integrations/commands.js';
 import { installCli } from '../src/integrations/install-cli.js';
 import { installMcp } from '../src/integrations/install-mcp.js';
 import { normalizeRepoUrl } from '../src/integrations/verify-npm-provenance.js';
@@ -610,5 +619,481 @@ describe('installMcp', () => {
     expect(res.mcpJson).not.toContain('MARKER-SHOULD-NEVER-APPEAR');
     expect(logs.join('\n')).not.toContain('MARKER-SHOULD-NEVER-APPEAR');
     expect(res.token).toBeUndefined();
+  });
+});
+
+// ── Registry ↔ CLI contract ───────────────────────────────────────────────
+//
+// The CLI's validator is a hand-written re-implementation of the registry's
+// published JSON Schema. It drifted STRICTER than the schema in three places
+// and silently dropped every affected entry as "unreadable" — in `dkg
+// integration` and in the node dashboard sidebar, which share this parser.
+//
+// These tests own that seam. The per-kind cases are derived from the schema's
+// $defs (minimal shapes the registry can merge); the vendored cases are
+// verbatim copies of live entries. The first set is what catches drift.
+
+describe('registry ↔ CLI contract', () => {
+  const contractBase = {
+    schemaVersion: '0.1.0',
+    slug: 'contract-fixture',
+    name: 'Contract Fixture',
+    description: 'x'.repeat(25),
+    category: ['test'],
+    maintainer: { github: '@OriginTrail/core-developers' },
+    repo: 'https://github.com/OriginTrail/dkg',
+    commit: 'a'.repeat(40),
+    license: 'Apache-2.0',
+    memoryLayers: ['WM'],
+    v10PrimitivesUsed: ['UAL'],
+    publicInterfacesUsed: ['http-api'],
+    security: { networkEgress: [], writeAuthority: [] },
+    trustTier: 'community',
+  };
+
+  // One minimal, registry-VALID shape per $defs entry in the published schema.
+  // Every one of these must parse, or the registry can merge something the CLI
+  // cannot read.
+  const schemaValidInstalls: Array<[string, Record<string, unknown>]> = [
+    ['cli', { kind: 'cli', package: 'p', version: '1.0.0', binary: 'b' }],
+    ['mcp (args present)', { kind: 'mcp', command: 'npx', args: ['-y', 'p'], supportedClients: ['cursor'] }],
+    // args is OPTIONAL in the schema; installMcp normalises a missing value to [].
+    ['mcp (args absent)', { kind: 'mcp', command: 'npx', supportedClients: ['cursor'] }],
+    ['service (npm-global)', { kind: 'service', runtime: 'npm-global', npmGlobal: { package: 'p', version: '1.0.0', binary: 'b' } }],
+    // The schema requires ONLY kind + runtime for a service; every payload
+    // object is optional. These minimal rows are the ones that actually pin
+    // the compatibility boundary — a validator that started demanding
+    // `npmGlobal` or `docker` would still pass the populated rows above and
+    // reject entries the registry considers valid, which is precisely the
+    // stricter-than-schema drift this PR exists to remove.
+    ['service (npm-global, minimal)', { kind: 'service', runtime: 'npm-global' }],
+    ['service (docker, minimal)', { kind: 'service', runtime: 'docker' }],
+    ['service (docker)', { kind: 'service', runtime: 'docker', docker: { image: 'i', version: '1' } }],
+    // 'binary' is in the schema's runtime enum.
+    ['service (binary)', { kind: 'service', runtime: 'binary' }],
+    ['agent-plugin', { kind: 'agent-plugin', framework: 'openclaw', package: 'p', version: '1.0.0' }],
+    // manual requires docsUrl and FORBIDS anything but oneLiner beyond it.
+    ['manual (docsUrl only)', { kind: 'manual', docsUrl: 'https://example.com/README.md' }],
+    ['manual (+ oneLiner)', { kind: 'manual', docsUrl: 'https://example.com/README.md', oneLiner: 'run it' }],
+  ];
+
+  it.each(schemaValidInstalls)('accepts a schema-valid %s entry', (_label, install) => {
+    expect(isIntegrationEntry({ ...contractBase, install })).toBe(true);
+  });
+
+  it('still rejects shapes the schema would also reject', () => {
+    const invalid: Array<Record<string, unknown>> = [
+      { kind: 'manual' }, // docsUrl is required
+      { kind: 'mcp' }, // command is required
+      { kind: 'cli', package: 'p' }, // version + binary required
+      { kind: 'service' }, // runtime required
+      { kind: 'service', runtime: 'kubernetes' }, // not in the enum
+      { kind: 'not-a-kind' },
+      // Payload objects are optional, but the schema marks THEIR fields
+      // required when present — and these drive a global npm install, so a
+      // non-string package must not reach the installer as `[object Object]`.
+      {
+        kind: 'service',
+        runtime: 'npm-global',
+        npmGlobal: { package: { name: '@acme/svc' }, version: '1.0.0' },
+      },
+      { kind: 'service', runtime: 'npm-global', npmGlobal: { package: '@acme/svc' } },
+      { kind: 'service', runtime: 'npm-global', npmGlobal: 'not-an-object' },
+      { kind: 'service', runtime: 'docker', docker: { image: 'i' } }, // version required
+      { kind: 'service', runtime: 'binary', binary: {} }, // url required
+      { kind: 'service', runtime: 'npm-global', portsOpened: ['8080'] },
+    ];
+    for (const install of invalid) {
+      expect(isIntegrationEntry({ ...contractBase, install })).toBe(false);
+    }
+  });
+
+  it('parses every vendored live registry entry', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const dir = join(testDir, 'fixtures', 'registry');
+    const files = (await readdir(dir)).filter(
+      (f) => f.endsWith('.json') && f !== 'integration.schema.json',
+    );
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const entry = JSON.parse(await readFile(join(dir, f), 'utf8'));
+      expect(isIntegrationEntry(entry), `${f} must be readable by the CLI`).toBe(true);
+    }
+  });
+
+  it('covers every install kind the published schema defines', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const schema = JSON.parse(
+      await readFile(join(testDir, 'fixtures', 'registry', 'integration.schema.json'), 'utf8'),
+    );
+    const schemaKinds = Object.values(schema.$defs as Record<string, { properties: { kind: { const: string } } }>)
+      .map((d) => d.properties.kind.const)
+      .sort();
+    const covered = [...new Set(schemaValidInstalls.map(([, i]) => i.kind as string))].sort();
+    // If the registry adds an install kind, this fails until the CLI handles it.
+    expect(covered).toEqual(schemaKinds);
+  });
+});
+
+describe('installMcp with an args-less entry', () => {
+  // `args` is optional in the registry schema, and legitimately so: a server
+  // launched by a binary already on PATH needs none, while an npx-style
+  // launcher carries the package there. The installer must emit a well-formed
+  // block rather than dropping the key (JSON.stringify discards `undefined`)
+  // or refusing the entry — judging whether a given command needs args is the
+  // entry author's call, not the installer's.
+  const mcpNoArgs: IntegrationEntry = {
+    ...baseEntry,
+    slug: 'no-args',
+    install: { kind: 'mcp', command: 'my-mcp-server', supportedClients: ['cursor'] },
+  };
+
+  it('emits args: [] rather than omitting the key', async () => {
+    const res = await installMcp({
+      entry: mcpNoArgs,
+      apiUrl: 'http://127.0.0.1:9200',
+      logger: () => {},
+    });
+    const parsed = JSON.parse(res.mcpJson) as {
+      mcpServers: Record<string, { command: string; args: unknown }>;
+    };
+    const block = parsed.mcpServers['no-args']!;
+    expect(block.command).toBe('my-mcp-server');
+    expect(block.args).toEqual([]);
+    expect(res.mcpJson).toContain('"args"');
+  });
+
+  it('preserves declared args when present', async () => {
+    const withArgs: IntegrationEntry = {
+      ...mcpNoArgs,
+      slug: 'with-args',
+      install: { kind: 'mcp', command: 'npx', args: ['-y', 'pkg@1.0.0'] },
+    };
+    const res = await installMcp({
+      entry: withArgs,
+      apiUrl: 'http://127.0.0.1:9200',
+      logger: () => {},
+    });
+    const parsed = JSON.parse(res.mcpJson) as {
+      mcpServers: Record<string, { args: string[] }>;
+    };
+    expect(parsed.mcpServers['with-args']!.args).toEqual(['-y', 'pkg@1.0.0']);
+  });
+});
+
+// ── Commander layer: the public `dkg integration …` contracts ──────────────
+// Everything above tests helpers. The wiring between them — argument parsing,
+// tier defaults, which envelope key each verb prints — lives only in
+// commands.ts, so a regression there (a `search` that ignores its keyword, an
+// `installed` that prints `{ entries }`) would leave every helper test green.
+// These drive the real Commander tree against the real local registry server.
+describe('integration commands (Commander layer, real wire)', () => {
+  const manualEntry = (slug: string, name: string, tier: 'community' | 'verified'): IntegrationEntry =>
+    ({
+      ...baseEntry,
+      slug,
+      name,
+      description: `${name} integration for testing`,
+      install: { kind: 'manual', docsUrl: 'https://example.com/README.md' },
+      trustTier: tier,
+    }) as unknown as IntegrationEntry;
+
+  // `manual` entries keep detectInstalled off the network and off npm: with no
+  // cli/mcp/npm-global candidates it performs no I/O at all, so `installed`
+  // stays deterministic here and still exercises the real command path.
+  const alpha = manualEntry('alpha-chat', 'Alpha Chat', 'verified');
+  const beta = manualEntry('beta-graph', 'Beta Graph', 'verified');
+  const communityOnly = manualEntry('gamma-tool', 'Gamma Tool', 'community');
+
+  // npm-global service WITHOUT `npmGlobal.binary` — schema-valid, and the shape
+  // resolveBinary's package-name fallback exists for.
+  const svcEntry = {
+    ...baseEntry,
+    slug: 'svc-ok',
+    name: 'Service OK',
+    install: {
+      kind: 'service',
+      runtime: 'npm-global',
+      npmGlobal: { package: '@acme/svc', version: '2.0.0' },
+      // Declared so the DKG_API_URL guidance renders — that line is where an
+      // ignored --api-url becomes visible to an operator.
+      envRequired: ['DKG_API_URL'],
+    },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
+  // Schema-valid (only kind + runtime are required) but NOT automatable.
+  const svcNoMeta = {
+    ...baseEntry,
+    slug: 'svc-bare',
+    name: 'Service Bare',
+    install: { kind: 'service', runtime: 'npm-global' },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
+  // Registry-valid, but the package is whitespace. The dispatcher used to gate
+  // on truthiness while the installer trimmed, so this passed the gate, threw
+  // inside installService, and surfaced as a generic "Install failed".
+  const svcBlankPkg = {
+    ...baseEntry,
+    slug: 'svc-blank',
+    name: 'Service Blank',
+    install: {
+      kind: 'service',
+      runtime: 'npm-global',
+      npmGlobal: { package: '   ', version: '1.0.0' },
+    },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
+  // A runtime the CLI does not automate at all. Readable, and this branch is now
+  // its public install behaviour.
+  const svcBinary = {
+    ...baseEntry,
+    slug: 'svc-binary',
+    name: 'Service Binary',
+    install: {
+      kind: 'service',
+      runtime: 'binary',
+      binary: { url: 'https://example.com/svc' },
+    },
+    trustTier: 'verified',
+  } as unknown as IntegrationEntry;
+
+  let savedIndex: string | undefined;
+  let savedRaw: string | undefined;
+
+  beforeEach(() => {
+    savedIndex = process.env.DKG_REGISTRY_INDEX_URL;
+    savedRaw = process.env.DKG_REGISTRY_RAW_BASE;
+    // commands.ts calls resolveRegistryConfig() with no argument, so the
+    // redirect has to happen through the real environment.
+    process.env.DKG_REGISTRY_INDEX_URL = `${registryBase}/index`;
+    process.env.DKG_REGISTRY_RAW_BASE = `${registryBase}/raw`;
+
+    for (const e of [alpha, beta, communityOnly, svcEntry, svcNoMeta, svcBinary, svcBlankPkg]) {
+      registryRoutes.set(`/raw/${e.slug}.json`, { status: 200, body: JSON.stringify(e) });
+    }
+    // Only the manual entries are indexed: `installed` runs detectInstalled over
+    // everything the index returns, and keeping npm-backed kinds out of it means
+    // no test here ever shells out to npm. `install <slug>` fetches by slug, so
+    // the service entries are still reachable by the install tests below.
+    registryRoutes.set('/index', {
+      status: 200,
+      body: JSON.stringify([alpha, beta, communityOnly].map((e) => ({ name: `${e.slug}.json` }))),
+    });
+  });
+
+  afterEach(() => {
+    if (savedIndex === undefined) delete process.env.DKG_REGISTRY_INDEX_URL;
+    else process.env.DKG_REGISTRY_INDEX_URL = savedIndex;
+    if (savedRaw === undefined) delete process.env.DKG_REGISTRY_RAW_BASE;
+    else process.env.DKG_REGISTRY_RAW_BASE = savedRaw;
+  });
+
+  /** Runs the real command tree and returns whatever it printed to stdout. */
+  async function runCli(argv: string[]): Promise<string> {
+    const program = new Command();
+    program.exitOverride(); // never let a parse error kill the test runner
+    registerIntegrationCommands(program);
+    const out: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      out.push(args.map(String).join(' '));
+    });
+    try {
+      await program.parseAsync(['node', 'dkg', ...argv]);
+    } finally {
+      spy.mockRestore();
+    }
+    return out.join('\n');
+  }
+
+  it('`search <keyword> --json` filters by the keyword', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'search', 'alpha', '--json']));
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug)).toEqual(['alpha-chat']);
+  });
+
+  // The control for the test above: without it, a `search` that dropped its
+  // keyword and returned everything would still need the filtered case to fail,
+  // but a `search` that returned NOTHING would pass it vacuously.
+  it('`search --json` with no keyword returns every entry at the tier', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'search', '--json']));
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug).sort()).toEqual([
+      'alpha-chat',
+      'beta-graph',
+    ]);
+  });
+
+  it('`list --json` keeps its shipped { entries, failures } envelope', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'list', '--json']));
+    expect(Object.keys(parsed).sort()).toEqual(['entries', 'failures']);
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug).sort()).toEqual([
+      'alpha-chat',
+      'beta-graph',
+    ]);
+  });
+
+  // `installed` reports something different from `list`/`search`, so it prints a
+  // different key. Printing `{ entries }` here would silently look like a
+  // registry listing to any script consuming it.
+  it('`installed --json` prints { installed, failures }, never { entries }', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'installed', '--json']));
+    expect(Object.keys(parsed).sort()).toEqual(['failures', 'installed']);
+    expect(parsed.entries).toBeUndefined();
+    expect(Array.isArray(parsed.installed)).toBe(true);
+  });
+
+  // The two verbs deliberately default to different tiers: browsing surfaces
+  // vetted entries, while "what is on my machine" must not hide a
+  // community-tier install the user actually has.
+  it('defaults `search` to verified but `installed` to community', async () => {
+    const searched = JSON.parse(await runCli(['integration', 'search', '--json']));
+    expect(searched.entries.map((e: IntegrationEntry) => e.slug)).not.toContain('gamma-tool');
+
+    const inst = JSON.parse(await runCli(['integration', 'installed', '--json']));
+    expect(inst.installed.map((r: { slug: string }) => r.slug)).toContain('gamma-tool');
+  });
+
+  it('`search --tier community --json` widens to community entries', async () => {
+    const parsed = JSON.parse(await runCli(['integration', 'search', '--tier', 'community', '--json']));
+    expect(parsed.entries.map((e: IntegrationEntry) => e.slug).sort()).toEqual([
+      'alpha-chat',
+      'beta-graph',
+      'gamma-tool',
+    ]);
+  });
+
+  // ── install dispatch ────────────────────────────────────────────────────
+  // The branches below are reachable only through the command; the helpers
+  // cannot tell you whether the dispatcher picked the right one or forwarded
+  // its options. Exit codes are captured rather than allowed to run, or a
+  // process.exit would take the test runner with it.
+  async function runInstall(
+    argv: string[],
+  ): Promise<{ out: string; err: string; exit: number | null; exits: number[] }> {
+    const program = new Command();
+    program.exitOverride();
+    registerIntegrationCommands(program);
+    const out: string[] = [];
+    const err: string[] = [];
+    const exits: number[] = [];
+    let exit: number | null = null;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      out.push(a.map(String).join(' '));
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      err.push(a.map(String).join(' '));
+    });
+    // Records rather than throws. Throwing would be caught by the command's own
+    // try/catch, which then calls process.exit(1) — turning every asserted exit
+    // code into 1 and hiding which branch actually ran. Only the FIRST code is
+    // kept for the same reason: it is the one the real process would have used.
+    // The spy RECORDS rather than throws, because throwing is caught by the
+    // command's own try/catch and converted into exit(1) — which collapses
+    // every asserted exit code to 1 and hides which branch ran.
+    //
+    // The cost of not throwing is that execution CONTINUES past a simulated
+    // exit, so a missing `break` would let a branch fall through into the
+    // generic failure path while `exit` still reports the first code. Every
+    // code is therefore recorded: `exits` having more than one entry means the
+    // real process would already have terminated, and the test is observing
+    // code that could never run.
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      exits.push(code ?? 0);
+      if (exit === null) exit = code ?? 0;
+      return undefined;
+    }) as never);
+    try {
+      await program.parseAsync(['node', 'dkg', ...argv]);
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+    return { out: out.join('\n'), err: err.join('\n'), exit, exits };
+  }
+
+  it('`install <manual>` prints the docs link and does not exit non-zero', async () => {
+    const r = await runInstall(['integration', 'install', 'alpha-chat']);
+    expect(r.exit).toBeNull();
+    expect(r.out).toContain('https://example.com/README.md');
+  });
+
+  it('`install <npm-global service> --dry-run` reaches the service installer with the pin', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-ok', '--dry-run']);
+    expect(r.exit).toBeNull();
+    // Proves dispatch reached installService AND that --dry-run was forwarded.
+    expect(r.out).toContain('@acme/svc@2.0.0');
+    expect(r.out).toContain('Dry-run');
+  });
+
+  // A schema-valid npm-global service with no npmGlobal block cannot be
+  // automated. It must take the same graceful path docker/binary take, not
+  // throw out of installService into the generic "install failed".
+  it('`install` falls back gracefully for an npm-global service with no package metadata', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-bare']);
+    expect(r.err).toContain('no npmGlobal.package/version');
+    expect(r.err).not.toMatch(/undefined/);
+    // Exactly one exit. Asserting only the FIRST code would still pass if the
+    // branch lost its `break` and fell through into installService, printing
+    // the graceful message and then the generic failure — the regression this
+    // test exists to catch.
+    expect(r.exits).toEqual([2]);
+    expect(r.err).not.toContain('Install failed');
+  });
+
+  // Regression guard for a fix that was previously verified only BELOW this
+  // boundary. `installService` accepted and rendered `apiUrl` correctly, and its
+  // unit test passed — while the command never passed the flag through, so the
+  // real CLI still printed the default node. Only a test that drives the actual
+  // command can catch a missing property on the call.
+  it('`install --api-url` reaches the service post-install guidance', async () => {
+    const r = await runInstall([
+      'integration',
+      'install',
+      'svc-ok',
+      '--dry-run',
+      '--api-url',
+      'http://10.0.0.5:9200',
+    ]);
+    expect(r.exits).toEqual([]);
+    expect(r.out).toContain('http://10.0.0.5:9200');
+    expect(r.out).not.toContain('default http://127.0.0.1:9200');
+  });
+
+  // Control: without the flag the guidance still renders, showing the effective
+  // node — so the test above cannot pass by never printing the DKG_API_URL line.
+  // Commander gives --api-url a default, so opts.apiUrl is always populated and
+  // the command path always echoes the URL actually in effect; the literal
+  // "default …" wording only appears for direct installService callers that
+  // pass no apiUrl at all.
+  it('`install --dry-run` shows the effective node when no --api-url is given', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-ok', '--dry-run']);
+    expect(r.out).toContain('DKG_API_URL');
+    expect(r.out).toContain('http://127.0.0.1:9200');
+    expect(r.out).not.toContain('10.0.0.5');
+  });
+
+  // The gap between the two gates: registry-valid, whitespace package. It must
+  // take the same graceful path as missing metadata, not fall through to the
+  // generic failure because one layer checked truthiness and the other trimmed.
+  it('`install` treats a whitespace-only package as not automatable, not a hard failure', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-blank']);
+    expect(r.exits).toEqual([2]);
+    expect(r.err).toContain('no npmGlobal.package/version');
+    expect(r.err).not.toContain('Install failed');
+  });
+
+  // Making docker/binary services readable also made this branch their public
+  // install behaviour. A regression routing them into installService would
+  // surface a generic "Install failed" (exit 1) instead of the graceful
+  // runtime-not-automated message — and no helper test would notice.
+  it('`install` gives a non-automated runtime the graceful path, not a generic failure', async () => {
+    const r = await runInstall(['integration', 'install', 'svc-binary']);
+    expect(r.exits).toEqual([2]);
+    expect(r.err).toContain('binary');
+    expect(r.err).toContain('not yet');
+    // The generic catch-all path would say this instead.
+    expect(r.err).not.toContain('Install failed');
   });
 });

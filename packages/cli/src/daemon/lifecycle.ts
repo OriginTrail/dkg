@@ -70,7 +70,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -90,6 +90,7 @@ import {
   OtlpLogWorker,
   initTelemetry,
   shutdownTelemetry,
+  flushTelemetry,
   LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
@@ -145,10 +146,16 @@ import {
 } from '../config.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import {
+  formatMetricsCollectorStartupLog,
+  resolveMetricsCollectorConfig,
+} from '../metrics-collector-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
+import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
+import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   migrateLegacyContextGraphReadiness,
@@ -211,6 +218,13 @@ import {
   type CatchupTracker,
   toCatchupStatusResponse,
 } from './types.js';
+import { drainCatchupJobs } from './catchup-telemetry.js';
+import {
+  beginGracefulShutdown,
+  buildProducerQuiescentTeardownSteps,
+  closeDaemonBackingStoresAfterTeardown,
+  runProducerQuiescentTeardown,
+} from './teardown.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -401,6 +415,7 @@ import {
 } from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
+import { configureApiQueryPriority } from './api-query-priority.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import {
@@ -890,9 +905,19 @@ export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): Knowledge
       ) {
         throw firstErr;
       }
-      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
+      // GH#1778 — auto-register the CG under the ENQUEUING CALLER (the token
+      // holder / operator who requested the publish), stamped as the CG curator by
+      // `stampAddressCurator`. This matches the synchronous `vm/publish` lane
+      // (`knowledge-assets.ts` passes `callerAgentAddress: requestAgentAddress`), so
+      // the same CG gets the same curator regardless of which lane registers it.
+      // NOT `request.agentAddress` (the resolved KA author — a member the curator
+      // is publishing for). When the caller was not captured (tokenless enqueue /
+      // pre-#1778 job), `stampAddressCurator` falls back to the node's default
+      // identity — again exactly as the sync lane does when `requestAgentAddress`
+      // is undefined. Deduped jobs stamp under the first enqueuer's caller, which
+      // is the same first-writer-wins the sync lane already has.
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
-        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+        ...(request.callerAgentAddress ? { callerAgentAddress: request.callerAgentAddress } : {}),
       });
       return await agent.publishQueuedKnowledgeAssetVmPublish(
         request,
@@ -1126,6 +1151,9 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  // Resolve the local collector toggle before constructing daemon resources.
+  // This is independent from OTLP metrics export configuration.
+  const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
   const logFile = logPath();
   // Rotate before installing the in-process stdout/stderr tee so startup does
   // not race the truncation with fresh log appends. Existing logs survive
@@ -1155,6 +1183,14 @@ export async function runDaemonInner(
     if (foreground) origStdoutWrite(line + "\n");
     appendFile(logFile, line + "\n").catch(() => {});
   }
+  const backpressureMonitor = new BackpressureMonitor({
+    emit: (level, message) => log(`[${level}] ${message}`),
+  });
+
+  configureApiQueryPriority(process.env.DKG_API_QUERY_PRIORITY, {
+    info: log,
+    warn: log,
+  });
 
   if (startupLogRotation?.rotated) {
     log(
@@ -1593,6 +1629,12 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
+  const publicSnapshotStore = createPublicSnapshotStore(
+    dkgDir(),
+    { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
+    snapshotPageIndexStore,
+  );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
     : chainBase?.hubAddress
@@ -1730,6 +1772,7 @@ export async function runDaemonInner(
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
+    publicSnapshotStore,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
     syncOnConnectEnabled: config.syncOnConnectEnabled,
@@ -1741,6 +1784,9 @@ export async function runDaemonInner(
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
+    // #1836 — forward the operator retry budget to the agent so its own
+    // publishAsync enqueue (EPCIS / Kafka) stamps publisher.maxRetries too.
+    publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
@@ -1813,6 +1859,47 @@ export async function runDaemonInner(
       },
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);
+      },
+      loadVmReconcileNegative: async (cacheKey) => {
+        const row = dashDb.getVmReconcileNegative(cacheKey);
+        if (!row) return null;
+        try {
+          const candidateNamespaces = JSON.parse(row.candidate_namespaces) as Array<{
+            metaGraph: string;
+            dataGraph: string;
+          }>;
+          if (!Array.isArray(candidateNamespaces)) return null;
+          return {
+            cacheKey: row.cache_key,
+            localCgId: row.context_graph_id,
+            failures: row.failures,
+            nextRetryAt: row.next_retry_at,
+            swmGen: row.swm_gen,
+            candidateNamespaces,
+            peerTopologyKey: row.peer_topology_key,
+          };
+        } catch {
+          dashDb.deleteVmReconcileNegative(cacheKey);
+          return null;
+        }
+      },
+      saveVmReconcileNegative: async (record) => {
+        dashDb.upsertVmReconcileNegative({
+          cache_key: record.cacheKey,
+          context_graph_id: record.localCgId,
+          failures: record.failures,
+          next_retry_at: record.nextRetryAt,
+          swm_gen: record.swmGen,
+          candidate_namespaces: JSON.stringify(record.candidateNamespaces),
+          peer_topology_key: record.peerTopologyKey,
+          updated_at: Date.now(),
+        });
+      },
+      deleteVmReconcileNegative: async (cacheKey) => {
+        dashDb.deleteVmReconcileNegative(cacheKey);
+      },
+      deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
+        dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
     },
     contextGraphMembershipStore: {
@@ -1918,10 +2005,19 @@ export async function runDaemonInner(
   let promoteWorkerLifecycle: PromoteWorkerDaemonLifecycle | null = null;
   let shuttingDown = false;
 
-  const publisherControl = createPublisherControlFromStore(
-    agent.store,
-    createPublicSnapshotStore(dkgDir(), config),
-  );
+  const publisherControl = createPublisherControlFromStore(agent.store, {
+    publicSnapshotStore,
+    // #1836 — the daemon admission instance MUST carry the operator's retry
+    // budget; without it every API-admitted VM-publish job was stamped with the
+    // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
+    maxRetries: config.publisher?.maxRetries,
+  });
+  // #1828 — one-time idempotent backfill of the durable-admission intent index
+  // for VM-publish jobs admitted before it existed. Additive-only (RDF set
+  // semantics), so it is safe here — before the runner starts — and fail-open so
+  // a backfill hiccup never blocks boot. Contract unit-tested in
+  // vm-publish-intent-backfill.test.ts.
+  await backfillVmPublishIntentIndexOnBoot(publisherControl, log);
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network) {
     log(
@@ -2165,7 +2261,7 @@ export async function runDaemonInner(
   const publisherChainBase = runtimeEvmChainConfig;
   const startPostApiPublishing = () => {
     const profileTimer = setTimeout(() => {
-      void agent.publishProfile().catch((err: any) => {
+      void agent.ensureProfilePublished().catch((err: any) => {
         log(`Agent profile publish failed: ${err?.message ?? String(err)}`);
       });
     }, 0);
@@ -2200,6 +2296,7 @@ export async function runDaemonInner(
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
+          publicSnapshotStore,
           log,
         });
         publisherState = outcome;
@@ -2443,7 +2540,9 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => {
-      const graphUris = await agent.store.listGraphs();
+      const graphUris = await agent.store.listGraphs({
+        source: "daemon.metrics.graphInventory",
+      });
       const knownContextGraphIds = new Set<string>();
       const subscribedContextGraphs = agent.getSubscribedContextGraphs();
       const shadowContextGraphIds = new Set(
@@ -2462,7 +2561,9 @@ export async function runDaemonInner(
       }
       const declarationQuery = buildContextGraphDeclarationsSparql(graphUris, knownContextGraphIds);
       const declarationResult = declarationQuery
-        ? await agent.store.query(declarationQuery)
+        ? await agent.store.query(declarationQuery, {
+            source: "daemon.metrics.contextGraphDeclarations",
+          })
         : null;
       if (declarationResult?.type === "bindings") {
         for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
@@ -2485,7 +2586,9 @@ export async function runDaemonInner(
     // that are backed by local subscription/declaration state.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
-      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
+      const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL, {
+        source: "daemon.metrics.totalTriples",
+      });
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
@@ -2501,6 +2604,7 @@ export async function runDaemonInner(
     getTotalKCs: async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }",
+        { source: "daemon.metrics.totalKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
@@ -2513,18 +2617,21 @@ export async function runDaemonInner(
             ?ka <http://dkg.io/ontology/rootEntity> ?re .
             FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
         } }`,
+        { source: "daemon.metrics.totalKAs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getConfirmedKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
+        { source: "daemon.metrics.confirmedKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTentativeKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
+        { source: "daemon.metrics.tentativeKCs" },
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
@@ -2583,14 +2690,17 @@ export async function runDaemonInner(
     alwaysCollect: process.env.DKG_METRICS_ALWAYS_COLLECT === "1",
   });
 
-  const metricsCollector = new MetricsCollector(
-    dashDb,
-    metricsSource,
-    dkgDir(),
-    () => metricsPresence.hasRecentConsumer(),
-  );
-  metricsCollector.start();
-  log("Metrics collector started (30s interval)");
+  let metricsCollector: MetricsCollector | undefined;
+  if (metricsCollectorConfig.enabled) {
+    metricsCollector = new MetricsCollector(
+      dashDb,
+      metricsSource,
+      dkgDir(),
+      () => metricsPresence.hasRecentConsumer(),
+    );
+    metricsCollector.start();
+  }
+  log(formatMetricsCollectorStartupLog(metricsCollectorConfig));
 
   // --- Telemetry: syslog log streaming (opt-in) ---
   const networkKey = network?.networkName?.toLowerCase().includes("testnet")
@@ -2780,6 +2890,7 @@ export async function runDaemonInner(
       log(`Telemetry: log exporter not started — ${r.error} (traces/metrics unaffected)`);
     }
   }
+  backpressureMonitor.start();
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
@@ -3665,16 +3776,18 @@ export async function runDaemonInner(
   async function shutdown(exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
-    log("Shutting down...");
-    // Tell the supervisor's liveness watcher (PR #664) that this is a graceful
-    // shutdown before any slow cleanup runs. The watcher reads `api.port`'s
-    // absence as "worker is intentionally going down — don't SIGKILL me
-    // mid-teardown." Idempotent with the second `removeApiPort()` below in
-    // cleanupStateFiles; if shutdown crashes here we'd be in the same state as
-    // if the late removeApiPort had failed.
-    await removeApiPort().catch((err: any) =>
-      log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),
-    );
+    // Closes catch-up admission ahead of every await below, announces, and
+    // performs the early `api.port` removal that tells the supervisor's
+    // liveness watcher (PR #664) this is a graceful shutdown — so it reads the
+    // file's absence as "intentionally going down" rather than SIGKILLing us
+    // mid-teardown.
+    //
+    // The ORDER inside it is the contract and lives in `./teardown.ts`: the
+    // admission flag is the subscribe route's only view of shutdown, and it
+    // must land before the first suspension point. Extracted so a test can
+    // suspend inside `removeApiPort` and prove a subscribe crossing that
+    // window is already refused — which is not observable from here.
+    await beginGracefulShutdown({ state: daemonState, removeApiPort, log });
     const cleanupStateFiles = async () => {
       await removePid().catch((err: any) =>
         log(`PID cleanup error: ${err?.message ?? String(err)}`),
@@ -3690,44 +3803,79 @@ export async function runDaemonInner(
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
         logVolumePruner.stop();
+        backpressureMonitor.stop();
         // Clears the timer AND performs the final best-effort drain (BEFORE
         // telemetry stops), so a partial window still reaches Loki — keeps
         // log-derived request totals exact across process lifecycles.
         rpcUsageTelemetry.stop();
         rateLimiter.destroy();
-        metricsCollector.stop();
-        // Stops log exporters AND flushes + shuts down the OTel SDK.
-        await stopTelemetry();
+        metricsCollector?.stop();
         natStatusWatcherStop?.();
         resetNatStatus();
-        await publisherState.runtime
-          ?.stop()
-          .catch((err: any) =>
-            log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+
+        // ── Producer-quiescent teardown ────────────────────────────────────
+        // Both the ORDER and the WIRING live in `./teardown.ts` — the order in
+        // `runProducerQuiescentTeardown`, the slot assignment in
+        // `buildProducerQuiescentTeardownSteps` — so a test can execute each
+        // and fail on either a reorder or a mis-wiring. This call site only
+        // names the daemon's own resources.
+        //
+        // It never throws. A failing step is reported instead of being allowed
+        // to strand the steps after it — `agent.stop()` rejects BY DESIGN when
+        // its persistence close fails — which is also why the Oxigraph and
+        // dashboard-DB teardown below is now reached even on a failed agent
+        // shutdown, where previously it was skipped.
+        const teardown = await runProducerQuiescentTeardown(
+          buildProducerQuiescentTeardownSteps({
+            server,
+            drainCatchupJobs,
+            flushTelemetry,
+            stopPublisherRuntime: async () => {
+              await publisherState.runtime
+                ?.stop()
+                .catch((err: any) =>
+                  log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+                );
+            },
+            // We let in-flight promotes complete (or hit `shutdownTimeoutMs`);
+            // RFC §6.2 forbids marking `running → queued` here so the next
+            // boot's `recoverOnStartup()` decides.
+            stopPromoteWorker: async () => {
+              await promoteWorkerLifecycle?.stop(shuttingDown ? 'daemon shutting down' : null);
+            },
+            closeCatchupRunner: async () => {
+              await daemonState.catchupRunner
+                ?.close()
+                .catch((err: any) =>
+                  log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
+                );
+            },
+            stopAgent: () => agent.stop(),
+            // Stops log exporters AND flushes + shuts down the OTel SDK.
+            stopTelemetry,
+            log,
+          }),
+          log,
+        );
+        if (teardown.failures.length > 0) {
+          log(
+            `[shutdown] ${teardown.failures.length} teardown step(s) failed: ` +
+              `${teardown.failures.map((f) => f.step).join(', ')}. ` +
+              'Remaining cleanup still ran; see the per-step lines above.',
           );
-        // Drain the async-promote worker before closing the agent — once
-        // `agent.stop()` runs the queue's underlying triple store goes
-        // away. We let in-flight promotes complete (or hit
-        // `shutdownTimeoutMs`); RFC §6.2 forbids marking `running →
-        // queued` here so the next boot's `recoverOnStartup()` decides.
-        await promoteWorkerLifecycle?.stop(shuttingDown ? 'daemon shutting down' : null);
-        await daemonState.catchupRunner
-          ?.close()
-          .catch((err: any) =>
-            log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
-          );
-        server.close();
-        await agent.stop();
-        // Stop the managed Oxigraph child AFTER the agent has stopped
-        // issuing store queries, so an in-flight SPARQL request never
-        // races the killed server. No-op when not using oxigraph-server.
-        await managedOxigraph
-          ?.stop()
-          .catch((err: any) =>
-            log(`Managed Oxigraph stop error: ${err?.message ?? String(err)}`),
-          );
-        dashDb.close();
-        log("Stopped.");
+        }
+
+        // Stop backing stores only after physical agent work retired. A typed
+        // retirement timeout is a dependency quarantine, not an ordinary
+        // best-effort cleanup failure: killing Oxigraph/SQLite underneath the
+        // still-running writer would defeat the agent's fail-stop boundary.
+        const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
+          retryAgentStop: () => agent.stop(),
+          stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
+          closeDashboardDb: () => dashDb.close(),
+          log,
+        });
+        if (backingStoresClosed) log("Stopped.");
       } finally {
         await cleanupStateFiles();
       }

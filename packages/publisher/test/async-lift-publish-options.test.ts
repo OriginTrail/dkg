@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { mapLiftRequestToPublishOptions, prepareAsyncPublishPayload, isFailClosedInlineEncrypt, type LiftPublishMappingInput } from '../src/async-lift-publish-options.js';
 
 describe('mapLiftRequestToPublishOptions', () => {
@@ -482,6 +483,26 @@ describe('mapLiftRequestToPublishOptions', () => {
     });
 
     expect(options.entityProofs).toBe(true);
+  });
+
+  it('rejects entity proofs for persisted graph-scoped jobs at mapping time', () => {
+    expect(() => mapLiftRequestToPublishOptions({
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        roots: [],
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+        assertionVersion: '1',
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        entityProofs: true,
+      },
+      resolved: {
+        ...baseInput().resolved,
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    })).toThrow(/does not support entityProofs/);
   });
 
   it('forwards request.publishEpochs to PublishOptions', () => {

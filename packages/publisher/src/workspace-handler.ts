@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetAgentAddressesEqual, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
@@ -25,13 +25,18 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { validatePublishRequest } from './validation.js';
-import { withKeyedLocks } from './keyed-lock.js';
-import { generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
+import { generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
-import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
-import type { KAManifestEntry } from './publisher.js';
+import {
+  resolveKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -47,13 +52,6 @@ export type WorkspaceSenderKeyDecryptor = (
   contextGraphId: string,
   ctx: OperationContext,
 ) => Promise<Uint8Array>;
-
-export type WorkspaceAssetUalResolver = (
-  input: { agentAddress: string; kaNumber: string },
-) => string | undefined | Promise<string | undefined>;
-
-const WORKSPACE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
-const WORKSPACE_ASSET_UAL_TIMEOUT = Symbol('workspace-asset-ual-timeout');
 
 type SharedMemoryLifecycleValue = string | number | bigint | (() => string | number | bigint | undefined);
 
@@ -289,6 +287,27 @@ export class SharedMemoryHandler {
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
+  /**
+   * LIVE on-chain proof that a CG's access policy is public (`0`).
+   *
+   * The SWM encryption requirement must be decided from the SAME authority on
+   * both sides of the wire. The SENDER decides with this predicate
+   * (`resolveWorkspaceRecipientsGated` -> `isContextGraphPublicOnChain`) and
+   * sends PLAINTEXT for a public CG regardless of any agent gate, because on a
+   * public CG the allowlist governs PUBLISH AUTHORITY, not READ ACCESS — there
+   * is nothing to keep confidential. Without the same predicate here, the
+   * receiver decided from local `allowedAgent`/`participantAgent` triples alone
+   * and permanently dropped those plaintext writes, which silently broke every
+   * member->curator SWM share on a public/curated CG.
+   *
+   * Returns true ONLY on a live public proof. Absent oracle, `false`, or a
+   * throw all mean "not proven public" and keep the encryption requirement —
+   * the same fail-closed discipline the sender uses, so a stale mapping or an
+   * RPC flake can never become a plaintext-acceptance hole.
+   */
+  private readonly publicAccessPolicyOnChainOracle?: (
+    contextGraphId: string,
+  ) => Promise<boolean>;
   private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
@@ -341,7 +360,6 @@ export class SharedMemoryHandler {
     contextGraphId: string,
   ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
   private readonly workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
-  private readonly assetUalForKaIdentity?: WorkspaceAssetUalResolver;
   private readonly lifecycleLogOptions?: SharedMemoryLifecycleLogOptions;
   private readonly now: () => number;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
@@ -410,6 +428,16 @@ export class SharedMemoryHandler {
       contextGraphMetaOracle?: (
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
+      /**
+       * Live on-chain public-access proof, mirroring the sender's
+       * `isContextGraphPublicOnChain`. Optional; when omitted the receiver
+       * keeps the pre-existing (fail-closed) behaviour and requires
+       * encryption for every agent-gated CG.
+       * See {@link SharedMemoryHandler#publicAccessPolicyOnChainOracle}.
+       */
+      publicAccessPolicyOnChainOracle?: (
+        contextGraphId: string,
+      ) => Promise<boolean>;
       markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
@@ -433,7 +461,6 @@ export class SharedMemoryHandler {
         contextGraphId: string,
       ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
       workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
-      assetUalForKaIdentity?: WorkspaceAssetUalResolver;
       lifecycleLogOptions?: SharedMemoryLifecycleLogOptions;
       now?: () => number;
       publicSnapshotStore?: WorkspacePublicSnapshotStore;
@@ -469,12 +496,12 @@ export class SharedMemoryHandler {
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.publicAccessPolicyOnChainOracle = options?.publicAccessPolicyOnChainOracle;
     this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
     this.workspaceSenderKeyDecryptor = options?.workspaceSenderKeyDecryptor;
-    this.assetUalForKaIdentity = options?.assetUalForKaIdentity;
     this.lifecycleLogOptions = options?.lifecycleLogOptions;
     this.now = options?.now ?? (() => Date.now());
     this.publicSnapshotStore = options?.publicSnapshotStore;
@@ -935,6 +962,7 @@ export class SharedMemoryHandler {
     // can signal which branch fired; the post-closure code
     // maps `cas` → retryable and `validation` → permanent.
     let withWriteLocksRejection: 'validation' | 'cas' | undefined;
+    let validationRejectionReason: string | undefined;
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
       const { envelope, signedPayload } = decoded;
@@ -1023,7 +1051,22 @@ export class SharedMemoryHandler {
         }
       }
 
-      const requiresEncryptedPayload = hasPrivateAccessPolicy || agentGateAddresses !== null;
+      // Policy rationale lives in `workspace-encryption-policy.ts` (the
+      // must-vs-may split and its fail-closed discipline). Local sequencing
+      // note only: the probe is LAZY — evaluated solely when the CG is
+      // agent-gated, because the policy consumes provenPublicOnChain
+      // exclusively behind `isAgentGated` and awaiting the chain RPC
+      // unconditionally put ~30ms on the hot path of EVERY SWM gossip receive
+      // (measured devnet regression: receive-apply 3ms -> 33ms flipped the
+      // public-CG sync gate red). Keep this evaluation order.
+      const { requiresEncryptedPayload, supportsEncryptedPayload } =
+        resolveWorkspaceEncryptionRequirement({
+          hasPrivateAccessPolicy,
+          agentGateAddresses,
+          provenPublicOnChain: agentGateAddresses !== null
+            ? await this.isContextGraphProvenPublicOnChain(contextGraphId, ctx)
+            : false,
+        });
       if (requiresEncryptedPayload && !decoded.encryptedPayload && !decoded.senderKeyMessage) {
         const reason = `Sender Key encrypted workspace payload required for private or agent-gated context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
@@ -1031,7 +1074,7 @@ export class SharedMemoryHandler {
       }
 
       if (decoded.senderKeyMessage) {
-        if (!requiresEncryptedPayload) {
+        if (!supportsEncryptedPayload) {
           const reason = `Sender Key payload is only supported for private or agent-gated context graph "${contextGraphId}"`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
           return { applied: false, reason, retryable: false };
@@ -1064,7 +1107,10 @@ export class SharedMemoryHandler {
           return { applied: false, reason, retryable: false };
         }
       } else if (decoded.encryptedPayload) {
-        if (!requiresEncryptedPayload) {
+        // Same must-vs-may split as the Sender-Key branch above: acceptance is
+        // governed by whether the CG is gated at all, not by whether the local
+        // chain probe currently proves it public.
+        if (!supportsEncryptedPayload) {
           const reason = `encrypted workspace payload is only supported for private or agent-gated context graph "${contextGraphId}"`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
           return { applied: false, reason, retryable: false };
@@ -1097,7 +1143,24 @@ export class SharedMemoryHandler {
       if (request.operationId) {
         ctx = createOperationContext('share', request.operationId);
       }
-      const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
+      const {
+        nquads,
+        manifest,
+        publisherPeerId,
+        timestampMs,
+        casConditions,
+        subGraphName,
+        agentAddress: kaAuthorAddress,
+        kaNumber,
+        contentScopeVersion,
+        kaUal,
+        assertionVersion,
+        publicTripleCount,
+        privateMerkleRoot,
+        privateTripleCount,
+        accessPolicy: wireAccessPolicy,
+        allowedPeers: wireAllowedPeers,
+      } = request;
       const shareOperationId = request.shareOperationId?.trim();
       const requestLifecycleFields: SharedMemoryLifecycleFields = {
         contextGraphId,
@@ -1150,12 +1213,99 @@ export class SharedMemoryHandler {
         }
       }
 
-      const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
-      const verifiedFields = { ...requestLifecycleFields, assetUal };
+      const wireScopeVersion = contentScopeVersion ?? 0;
+      if (wireScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+        const reason = wireScopeVersion <= 1
+          ? (() => {
+              const error = new LegacyKnowledgeAssetReadOnlyError();
+              return `${error.code}: ${error.message}`;
+            })()
+          : `UNSUPPORTED_KA_CONTENT_SCOPE_VERSION: ${wireScopeVersion}`;
+        this.log.warn(ctx, `SWM write rejected: ${reason}`);
+        return rejectOutcome(reason, false);
+      }
+      if ((manifest?.length ?? 0) !== 0) {
+        const reason =
+          'MIXED_KA_CONTENT_SCOPE: graph-scoped v2 messages must leave the legacy root manifest empty';
+        this.log.warn(ctx, `SWM write rejected: ${reason}`);
+        return rejectOutcome(reason, false);
+      }
+
+      let contentScope;
+      let graphAccessPolicy: 'public' | 'ownerOnly' | 'allowList';
+      let graphAllowedPeers: string[];
+      try {
+        contentScope = createGraphKnowledgeAssetScope(
+          kaUal ?? '',
+          assertionVersion ?? '',
+        );
+        if ((kaUal ?? '').trim() !== contentScope.ual) {
+          throw new Error(`kaUal is not canonical: ${kaUal ?? ''}`);
+        }
+        if (
+          kaAuthorAddress &&
+          !knowledgeAssetAgentAddressesEqual(kaAuthorAddress, contentScope.agentAddress)
+        ) {
+          throw new Error(
+            `agentAddress "${kaAuthorAddress}" conflicts with kaUal author "${contentScope.agentAddress}"`,
+          );
+        }
+        if (kaNumber) {
+          let canonicalKaNumber: string;
+          try {
+            canonicalKaNumber = BigInt(kaNumber).toString();
+          } catch {
+            throw new Error(`invalid kaNumber "${kaNumber}"`);
+          }
+          if (canonicalKaNumber !== contentScope.kaNumber) {
+            throw new Error(
+              `kaNumber "${kaNumber}" conflicts with kaUal number "${contentScope.kaNumber}"`,
+            );
+          }
+        }
+        const privateCount = privateTripleCount ?? 0;
+        if (!Number.isSafeInteger(privateCount) || privateCount < 0) {
+          throw new Error(`invalid privateTripleCount ${privateCount}`);
+        }
+        const privateRootLength = privateMerkleRoot?.length ?? 0;
+        if (privateCount > 0 && privateRootLength !== 32) {
+          throw new Error(
+            'privateTripleCount requires exactly one 32-byte privateMerkleRoot',
+          );
+        }
+        if (privateCount === 0 && privateRootLength !== 0) {
+          throw new Error(
+            'privateMerkleRoot requires a positive privateTripleCount',
+          );
+        }
+        const normalizedWirePolicy = String(wireAccessPolicy ?? '').trim();
+        graphAccessPolicy = normalizedWirePolicy === ''
+          ? (privateCount > 0 ? 'ownerOnly' : 'public')
+          : normalizedWirePolicy === 'public'
+            || normalizedWirePolicy === 'ownerOnly'
+            || normalizedWirePolicy === 'allowList'
+            ? normalizedWirePolicy
+            : (() => { throw new Error(`invalid accessPolicy "${normalizedWirePolicy}"`); })();
+        graphAllowedPeers = [...new Set(
+          (wireAllowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+        )].sort();
+        if (graphAccessPolicy === 'allowList' && graphAllowedPeers.length === 0) {
+          throw new Error('allowList accessPolicy requires allowedPeers');
+        }
+        if (graphAccessPolicy !== 'allowList' && graphAllowedPeers.length > 0) {
+          throw new Error('allowedPeers requires allowList accessPolicy');
+        }
+      } catch (error) {
+        const reason = `INVALID_KA_CONTENT_SCOPE: ${error instanceof Error ? error.message : String(error)}`;
+        this.log.warn(ctx, `SWM write rejected: ${reason}`);
+        return rejectOutcome(reason, false);
+      }
+
+      const verifiedFields = { ...requestLifecycleFields, assetUal: contentScope.ual };
       verifiedLifecycleFields = verifiedFields;
       this.logSwmLifecycleEvent(ctx, 'swm_update_received', {
         ...verifiedFields,
-        rootEntityCount: manifest?.length ?? 0,
+        rootEntityCount: 0,
         outcome: 'received',
       });
 
@@ -1187,73 +1337,119 @@ export class SharedMemoryHandler {
       }
 
       const nquadsStr = new TextDecoder().decode(nquads);
-      const quads = parseSimpleNQuads(nquadsStr);
-      assertNoUserAuthoredTrustLevelQuads(quads);
+      let quads: Quad[];
+      try {
+        quads = parseSimpleNQuads(nquadsStr);
+        assertNoUserAuthoredTrustLevelQuads(quads);
+      } catch (error) {
+        const reason = `INVALID_KA_RDF: ${error instanceof Error ? error.message : String(error)}`;
+        this.log.warn(ctx, `SWM write rejected: ${reason}`);
+        return rejectOutcome(reason, false);
+      }
       onPhase?.('decode', 'end');
 
-      const manifestForValidation: KAManifestEntry[] = (manifest ?? []).map((m) => ({
-        tokenId: 0n,
-        rootEntity: m.rootEntity,
-        privateMerkleRoot: m.privateMerkleRoot,
-        privateTripleCount: m.privateTripleCount ?? 0,
-      }));
-
-      // Uniform layout: write the gossiped KA into its per-KA SWM graph
-      // …/_shared_memory/{author}/{number} (carried on the wire); else legacy bucket.
-      const swmGraph = (kaAuthorAddress && kaNumber)
-        ? contextGraphLayerUri(
-            contextGraphId,
-            MemoryLayer.SharedWorkingMemory,
-            kaAuthorAddress,
-            BigInt(kaNumber),
-            subGraphName,
-          )
-        : this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-
-      const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-      const condSubjects = (casConditions ?? []).map(c => c.subject);
-      const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
-      const lockKeys = subjects.map(s => `${swmOwnershipKey}\0${s}`);
+      const expectedWireGraph = this.graphManager.dataGraphUri(contextGraphId);
+      const swmGraph = knowledgeAssetLayerGraphUri(
+        contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        contentScope,
+        subGraphName,
+      );
+      // All assertion versions currently replace the same exact per-KA layer
+      // graph. Lock by UAL, not subject and not version, so concurrent version
+      // deliveries cannot interleave a DROP/INSERT pair. The key is derived by
+      // the SHARED helper so the public catch-up materializer serializes on the
+      // identical string — see swmKaWriteLockKey for why drift here is silent.
+      const lockKeys = [swmKaWriteLockKey(contextGraphId, subGraphName, contentScope.ual)];
 
       onPhase?.('store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
-        const swmOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey) ?? new Map<string, string>();
-        const existing = new Set<string>([...swmOwned.keys()]);
-
-        const upsertable = new Set<string>();
-        for (const [entity, creator] of swmOwned) {
-          if (creator === publisherPeerId) {
-            upsertable.add(entity);
-          }
-        }
-
         onPhase?.('validate', 'start');
-        const validation = validatePublishRequest(
-          quads, manifestForValidation, contextGraphId, existing,
-          { allowUpsert: true, upsertableEntities: upsertable },
+        const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
+          quads,
+          expectedWireGraph,
+          publicTripleCount ?? 0,
         );
         if (!validation.valid) {
           const reason = validation.errors.join('; ');
           this.log.warn(ctx, `SWM validation rejected: ${reason}`);
           this.logSwmLifecycleEvent(ctx, 'swm_validation_failed', {
             ...verifiedFields,
-            rootEntityCount: manifestForValidation.length,
+            rootEntityCount: 0,
             outcome: 'rejected',
             retryable: false,
             reason,
             validationErrorCount: validation.errors.length,
           }, 'warn');
           withWriteLocksRejection = 'validation';
+          validationRejectionReason = reason;
           return false;
         }
         this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
           ...verifiedFields,
-          rootEntityCount: manifestForValidation.length,
+          rootEntityCount: 0,
           statementCount: quads.length,
           outcome: 'accepted',
         });
         onPhase?.('validate', 'end');
+
+        const normalized = quads.map((q) => ({ ...q, graph: swmGraph }));
+        const publicDigest = workspacePublicQuadsDigest(
+          normalized.map((quad) => ({ ...quad, graph: '' })),
+        );
+        const incomingPrivateRootHex = privateMerkleRoot?.length
+          ? ethers.hexlify(privateMerkleRoot).toLowerCase()
+          : undefined;
+        const currentHead = await resolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: contentScope.ual,
+          subGraphName,
+        });
+        if (currentHead) {
+          const incomingVersion = BigInt(contentScope.assertionVersion);
+          const currentVersion = BigInt(currentHead.assertionVersion);
+          if (incomingVersion < currentVersion) {
+            validationRejectionReason =
+              `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`;
+            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
+            withWriteLocksRejection = 'validation';
+            return false;
+          }
+          if (incomingVersion === currentVersion) {
+            const sameAssertion =
+              currentHead.shareOperationId === shareOperationId &&
+              currentHead.publisherPeerId === publisherPeerId &&
+              currentHead.publicQuadsDigest === publicDigest &&
+              currentHead.publicTripleCount === (publicTripleCount ?? 0) &&
+              currentHead.privateTripleCount === (privateTripleCount ?? 0) &&
+              currentHead.privateMerkleRoot?.toLowerCase() === incomingPrivateRootHex &&
+              currentHead.assertionGraph === swmGraph &&
+              (currentHead.accessPolicy
+                ?? (currentHead.privateTripleCount > 0 ? 'ownerOnly' : 'public')) === graphAccessPolicy &&
+              currentHead.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
+            if (sameAssertion) {
+              // Exact replay: acknowledge idempotently without churning the
+              // graph or immutable operation snapshot.
+              return true;
+            }
+            validationRejectionReason =
+              `CONFLICTING_KA_ASSERTION_VERSION: ${contentScope.ual} version ${incomingVersion} ` +
+              'is already bound to a different operation or content digest';
+            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
+            withWriteLocksRejection = 'validation';
+            return false;
+          }
+          if (currentHead.publisherPeerId !== publisherPeerId) {
+            validationRejectionReason =
+              `KA_PUBLISHER_MISMATCH: ${contentScope.ual} is owned in SWM by ` +
+              `${currentHead.publisherPeerId}, not ${publisherPeerId}`;
+            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
+            withWriteLocksRejection = 'validation';
+            return false;
+          }
+        }
 
         if (casConditions && casConditions.length > 0) {
           const passed = await this.enforceCASConditions(casConditions, swmGraph, ctx);
@@ -1269,35 +1465,25 @@ export class SharedMemoryHandler {
           }
         }
 
-        for (const m of manifestForValidation) {
-          if (swmOwned.has(m.rootEntity)) {
-            await this.store.deleteByPattern({ graph: swmGraph, subject: m.rootEntity });
-            await this.store.deleteBySubjectPrefix(swmGraph, m.rootEntity + '/.well-known/genid/');
-            await this.deleteMetaForRoot(swmMetaGraph, m.rootEntity);
-          }
-        }
-
-        const normalized = quads.map((q) => ({ ...q, graph: swmGraph }));
-        await this.store.insert(normalized);
-
-        const rootEntities = manifestForValidation.map((m) => m.rootEntity);
         const operationTimestamp = new Date(Number(timestampMs));
-        const metaQuads: Quad[] = [];
-
-        for (const m of manifestForValidation) {
-          if (m.privateMerkleRoot && m.privateMerkleRoot.length > 0) {
-            const hex = '0x' + Array.from(m.privateMerkleRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-            metaQuads.push({
-              subject: m.rootEntity,
-              predicate: 'http://dkg.io/ontology/privateMerkleRoot',
-              object: `"${hex}"`,
-              graph: swmMetaGraph,
-            });
-          }
+        if (Number.isNaN(operationTimestamp.getTime())) {
+          validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
+          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
+          withWriteLocksRejection = 'validation';
+          return false;
         }
 
-        if (metaQuads.length > 0) {
-          await this.store.insert(metaQuads);
+        const replacedAtomically = await tryReplaceGraphAtomically(
+          this.store,
+          swmGraph,
+          normalized,
+          { source: 'publisher.swm.graphScopedReplace' },
+        );
+        if (!replacedAtomically) {
+          throw Object.assign(
+            new Error('Graph-scoped SWM writes require atomic TripleStore.update() support'),
+            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
+          );
         }
         // The gossip envelope carries the verified author address
         // (`verifyAgentEnvelope` above already cryptographically bound
@@ -1313,43 +1499,33 @@ export class SharedMemoryHandler {
             senderAgentAddress = undefined;
           }
         }
-        await storeWorkspaceOperationPublicQuads({
+        await storeKnowledgeAssetOperationPublicQuads({
           store: this.store,
           graphManager: this.graphManager,
           contextGraphId,
           shareOperationId,
-          rootEntities,
+          kaUal: contentScope.ual,
+          assertionVersion: contentScope.assertionVersion,
           quads: normalized,
+          privateMerkleRoot,
+          privateTripleCount: privateTripleCount ?? 0,
           publisherPeerId,
-          agentAddress: senderAgentAddress,
+          accessPolicy: graphAccessPolicy,
+          allowedPeers: graphAllowedPeers,
+          agentAddress: senderAgentAddress ?? contentScope.agentAddress,
           subGraphName,
           timestamp: operationTimestamp,
           publicSnapshotStore: this.publicSnapshotStore,
         });
-
-        if (!this.sharedMemoryOwnedEntities.has(swmOwnershipKey)) {
-          this.sharedMemoryOwnedEntities.set(swmOwnershipKey, new Map());
-        }
-        const liveOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey)!;
-        const newOwnershipEntries: Array<{ rootEntity: string; creatorPeerId: string }> = [];
-        for (const r of rootEntities) {
-          if (!liveOwned.has(r)) {
-            newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
-          }
-        }
-        if (newOwnershipEntries.length > 0) {
-          for (const entry of newOwnershipEntries) {
-            await this.store.deleteByPattern({
-              graph: swmMetaGraph,
-              subject: entry.rootEntity,
-              predicate: 'http://dkg.io/ontology/workspaceOwner',
-            });
-          }
-          await this.store.insert(generateOwnershipQuads(newOwnershipEntries, swmMetaGraph));
-          for (const entry of newOwnershipEntries) {
-            liveOwned.set(entry.rootEntity, entry.creatorPeerId);
-          }
-        }
+        await storeKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: contentScope.ual,
+          assertionVersion: contentScope.assertionVersion,
+          shareOperationId,
+          subGraphName,
+        });
 
         return true;
       });
@@ -1364,7 +1540,7 @@ export class SharedMemoryHandler {
         this.recordSeenShareOp(contextGraphId, shareOperationId, ctx);
         this.logSwmLifecycleEvent(ctx, 'swm_state_changed', {
           ...verifiedFields,
-          rootEntityCount: manifestForValidation.length,
+          rootEntityCount: 0,
           statementCount: quads.length,
           insertedCount: quads.length,
           outcome: 'applied',
@@ -1398,7 +1574,7 @@ export class SharedMemoryHandler {
       }
       return rejectedSharedMemoryOutcome(
         verifiedFields,
-        'validation rejected payload (permanent: triple structure or manifest does not pass validatePublishRequest)',
+        validationRejectionReason ?? 'validation rejected graph-scoped KA payload (permanent)',
         false,
         true,
       );
@@ -1416,53 +1592,6 @@ export class SharedMemoryHandler {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.error(ctx, `SWM handle failed: ${reason}`);
       return failedSharedMemoryOutcome(verifiedLifecycleFields, reason);
-    }
-  }
-
-  private async resolveAssetUalForKaIdentity(
-    agentAddress: string | undefined,
-    kaNumber: string | undefined,
-    ctx: OperationContext,
-  ): Promise<string | undefined> {
-    if (!agentAddress || !kaNumber || !this.assetUalForKaIdentity) return undefined;
-    let normalizedAgentAddress: string;
-    try {
-      normalizedAgentAddress = ethers.getAddress(agentAddress.toLowerCase());
-    } catch {
-      return undefined;
-    }
-    let normalizedKaNumber: bigint;
-    try {
-      normalizedKaNumber = BigInt(kaNumber);
-    } catch {
-      return undefined;
-    }
-    if (normalizedKaNumber < 0n) return undefined;
-    try {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<typeof WORKSPACE_ASSET_UAL_TIMEOUT>((resolve) => {
-        timer = setTimeout(() => resolve(WORKSPACE_ASSET_UAL_TIMEOUT), WORKSPACE_ASSET_UAL_RESOLVE_TIMEOUT_MS);
-        timer.unref?.();
-      });
-      const assetUal = await Promise.race([
-        Promise.resolve(this.assetUalForKaIdentity({
-          agentAddress: normalizedAgentAddress,
-          kaNumber: normalizedKaNumber.toString(),
-        })).finally(() => { if (timer) clearTimeout(timer); }),
-        timeout,
-      ]);
-      if (assetUal === WORKSPACE_ASSET_UAL_TIMEOUT) {
-        this.log.warn(
-          ctx,
-          `SWM assetUal derivation exceeded ${WORKSPACE_ASSET_UAL_RESOLVE_TIMEOUT_MS}ms; continuing without lifecycle assetUal`,
-        );
-        return undefined;
-      }
-      return assetUal;
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      this.log.warn(ctx, `SWM assetUal derivation failed: ${reason}`);
-      return undefined;
     }
   }
 
@@ -1987,6 +2116,35 @@ export class SharedMemoryHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * True only on a LIVE on-chain proof that this CG's access policy is public.
+   *
+   * Fail-closed by construction: no oracle, a `false` answer, or a throw all
+   * yield `false` ("not proven public"), which keeps the encryption
+   * requirement. This mirrors the sender's `isContextGraphPublicOnChain` so the
+   * two sides of the wire cannot disagree about whether plaintext SWM is
+   * acceptable. A throw is logged rather than swallowed silently — a
+   * persistently failing probe means agent-gated public CGs keep rejecting
+   * plaintext, which is safe but worth diagnosing.
+   */
+  private async isContextGraphProvenPublicOnChain(
+    contextGraphId: string,
+    ctx: OperationContext,
+  ): Promise<boolean> {
+    if (!this.publicAccessPolicyOnChainOracle) return false;
+    try {
+      return await this.publicAccessPolicyOnChainOracle(contextGraphId);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `public-access on-chain probe failed for "${contextGraphId}" — treating as NOT public `
+        + `(fail-closed: agent-gated SWM keeps requiring encryption): `
+        + `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   }
 
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {

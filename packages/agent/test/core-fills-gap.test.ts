@@ -43,15 +43,52 @@ import {
   contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
-import type { ReplicationEvent, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import type {
+  ReplicationEvent,
+  ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
+  VmReconcileNegativeRecord,
+} from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
-import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import {
+  VmReconcileDispatcher,
+  type PendingOrdinalRecoveryResult,
+} from '../src/chain-reconciler.js';
+import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
   registerContextGraph(id: string, opts?: { callerAgentAddress?: string }): Promise<{ onChainId: string; txHash?: string }>;
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
-  reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
+  reconcileChainOrdinal(
+    localCgId: string,
+    onChainCgId: bigint,
+    ordinal: number,
+    headBlock: number | undefined,
+    options?: {
+      acquireActiveFetchPermit?: () => boolean;
+      maxPeerAttempts?: number;
+      isTargetCurrent?: () => boolean;
+      deferActiveFetch?: boolean;
+    },
+  ): Promise<{ status: string }>;
+  recoverVmReconcileBatch(
+    localCgId: string,
+    onChainCgId: bigint,
+    targets: readonly Array<{
+      localCgId: string;
+      onChainCgId: string;
+      ordinal: number;
+      ual: string;
+      merkleRoot: string;
+      kaId: string;
+      reason: 'no-swm' | 'verified-vm-metadata-pending';
+    }>,
+    headBlock: number | undefined,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<PendingOrdinalRecoveryResult>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
   runVmReconcileForCg(localCgId: string, source?: 'live' | 'periodic' | 'manual'): Promise<{
     status: string;
@@ -125,6 +162,22 @@ function emptyCatchupStats() {
         failedPeers: 0,
       },
     },
+  };
+}
+
+function vmRecoveryTarget(
+  localCgId: string,
+  ordinal: number,
+  kaId = String(ordinal),
+) {
+  return {
+    localCgId,
+    onChainCgId: '1',
+    ordinal,
+    ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${kaId}`,
+    merkleRoot: `root-${kaId}`,
+    kaId,
+    reason: 'no-swm' as const,
   };
 }
 
@@ -411,13 +464,22 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => new Promise<number>(() => undefined);
     (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const recording = internals.recordCoreHostedPublicCg('44')
+        .finally(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(2_499);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await recording;
 
-    const startedAt = Date.now();
-    await internals.recordCoreHostedPublicCg('44');
-
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(internals.subscribedContextGraphs.get('44')).toBeUndefined();
-    expect(saved.find((r) => r.id === '44')).toBeUndefined();
+      expect(settled).toBe(true);
+      expect(internals.subscribedContextGraphs.get('44')).toBeUndefined();
+      expect(saved.find((r) => r.id === '44')).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stops accepting and drains core-host recordings deterministically', async () => {
@@ -599,6 +661,39 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(recentKey)).toBe(false);
   });
 
+  it('reclaims binding generations when subscription records are deleted', async () => {
+    const internals = await boot();
+    const generations = (internals as any).contextGraphBindingGenerations as Map<string, number>;
+
+    for (let index = 0; index < 32; index += 1) {
+      const localCgId = `deleted-binding-${index}`;
+      const subscription = { subscribed: true };
+      internals.subscribedContextGraphs.set(localCgId, subscription);
+      (internals as any).bindSubscriptionOnChainId(localCgId, subscription, String(index + 1));
+      expect((internals as any).deleteContextGraphSubscription(localCgId)).toBe(true);
+    }
+
+    expect(generations.size).toBe(0);
+
+    const reusedCgId = 'deleted-binding-reused';
+    const oldSubscription = { subscribed: true };
+    internals.subscribedContextGraphs.set(reusedCgId, oldSubscription);
+    (internals as any).bindSubscriptionOnChainId(reusedCgId, oldSubscription, '100');
+    const oldGeneration = (internals as any).captureContextGraphBindingGeneration(reusedCgId);
+    (internals as any).deleteContextGraphSubscription(reusedCgId);
+    const replacement = { subscribed: true };
+    internals.subscribedContextGraphs.set(reusedCgId, replacement);
+    (internals as any).bindSubscriptionOnChainId(reusedCgId, replacement, '101');
+
+    expect(
+      internals.subscribedContextGraphs.get(reusedCgId) === oldSubscription
+      && (internals as any).isContextGraphBindingGenerationCurrent(
+        reusedCgId,
+        oldGeneration,
+      ),
+    ).toBe(false);
+  });
+
   it('clears VM reconcile state when stale inactive on-chain ids are re-registered', async () => {
     const internals = await boot();
     const localCgId = 'stale-register';
@@ -712,9 +807,13 @@ describe('Phase D - VM reconcile damping', () => {
     }
   });
 
-  async function boot(): Promise<AgentInternals> {
+  async function boot(contextGraphSubscriptionStore?: ContextGraphSubscriptionStore): Promise<AgentInternals> {
     const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'VmReconcileDamping', chainAdapter: chain });
+    agent = await DKGAgent.create({
+      name: 'VmReconcileDamping',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore,
+    });
     stubNode(agent);
     return agent as unknown as AgentInternals;
   }
@@ -732,6 +831,122 @@ describe('Phase D - VM reconcile damping', () => {
       chunks: [],
     });
   }
+
+  it('reconciles packed rootless ids through their canonical author/number UAL', async () => {
+    const internals = await boot();
+    const onChainCgId = 66n;
+    const authorAddress = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
+    const kaNumber = 408n;
+    const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: authorAddress, kaNumber });
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal('66', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect(reconcile.calls).toHaveLength(1);
+    expect(reconcile.calls[0]?.[0]).toMatchObject({
+      kaId,
+      ual: buildKnowledgeAssetUal(internals.chain.chainId, authorAddress, kaNumber),
+    });
+  });
+
+  it('keeps legacy sequential ids on the read-only contract/id UAL', async () => {
+    const internals = await boot();
+    const onChainCgId = 67n;
+    const kaId = 9067n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+
+    const reconcile = recorder(async () => 'already-confirmed' as const);
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: reconcile,
+    }));
+
+    await expect(internals.reconcileChainOrdinal('67', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    const storageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    expect(reconcile.calls).toHaveLength(1);
+    expect(reconcile.calls[0]?.[0]).toMatchObject({
+      kaId,
+      ual: buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId),
+    });
+  });
+
+  it('clears exact-recovery rotation state on the direct recent-cache terminal path', async () => {
+    const internals = await boot();
+    const localCgId = '68';
+    const onChainCgId = 68n;
+    const kaId = 9068n;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+    const storageAddress = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddress, kaId);
+    const merkleRoot = await internals.chain.getLatestMerkleRoot(kaId);
+    const target = {
+      localCgId,
+      onChainCgId: onChainCgId.toString(),
+      ordinal: 0,
+      ual,
+      merkleRoot: bytesToHex(merkleRoot),
+      kaId: kaId.toString(),
+      reason: 'no-swm' as const,
+    };
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    (internals as any).prepareVmReconcileRotationTarget(
+      target, ['12D3KooWDirectTerminalRecent'], 100,
+    );
+    ((internals as any).recentReconciledUals as { add(key: string): void }).add(
+      (internals as any).vmReconcileCacheKey(localCgId, ual, merkleRoot),
+    );
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+  });
+
+  it.each([
+    ['promoted', 'reconciled'],
+    ['already-confirmed', 'already'],
+    ['stale-target', 'already'],
+  ] as const)(
+    'clears exact-recovery rotation state on direct %s finalization',
+    async (finalizationOutcome, expectedStatus) => {
+      const internals = await boot();
+      const ordinalByOutcome = {
+        promoted: 69,
+        'already-confirmed': 70,
+        'stale-target': 71,
+      } as const;
+      const graphOrdinal = ordinalByOutcome[finalizationOutcome];
+      const localCgId = String(graphOrdinal);
+      const onChainCgId = BigInt(graphOrdinal);
+      const kaId = BigInt(9_000 + graphOrdinal);
+      registerUnmatchedKC(internals.chain, kaId, onChainCgId);
+      const target = {
+        ...vmRecoveryTarget(localCgId, 0, kaId.toString()),
+        onChainCgId: onChainCgId.toString(),
+      };
+      const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+      (internals as any).prepareVmReconcileRotationTarget(
+        target, [`12D3KooWDirectTerminal${graphOrdinal}`], 100,
+      );
+      (internals as any).getOrCreateFinalizationHandler = () => ({
+        handleChainReconciledKC: async () => finalizationOutcome,
+      });
+      expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
+
+      await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+        .resolves.toMatchObject({ status: expectedStatus });
+
+      expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+    },
+  );
 
   it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {
     const internals = await boot();
@@ -755,6 +970,118 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBe(0);
+  });
+
+  it('rehydrates a generation-gated miss after restart without repeating the scan', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
+      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const onChainCgId = 52n;
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
+    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
+    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
+    expect(durable.size).toBe(1);
+
+    await agent!.stop();
+    agent = null;
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, 9052n, onChainCgId);
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined);
+    expect(expensiveScans).toBe(0);
+    expect(fetch.calls).toHaveLength(0);
+  });
+
+  it('rescans after restart when an incomplete operation payload appears only in a per-KA child graph', async () => {
+    const durable = new Map<string, VmReconcileNegativeRecord>();
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (key) => durable.get(key) ?? null,
+      saveVmReconcileNegative: async (record) => { durable.set(record.cacheKey, record); },
+      deleteVmReconcileNegative: async (key) => { durable.delete(key); },
+      deleteVmReconcileNegativesForContextGraph: async (cg) => {
+        for (const [key, record] of durable) if (record.localCgId === cg) durable.delete(key);
+      },
+    };
+    const localCgId = '65';
+    const onChainCgId = 65n;
+    const kaId = 9065n;
+    const entity = 'urn:fact:child-after-restart';
+    const value = 'Payload persisted in a per-KA SWM graph';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    const publishedAt = '2035-01-01T00:00:00.000Z';
+
+    let internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
+    (internals.store as TripleStore & { getWriteGen?: (prefix: string) => number }).getWriteGen = () => 0;
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri(localCgId),
+      'child-after-restart',
+      entity,
+      publishedAt,
+    );
+    (internals as any).syncContextGraphFromConnectedPeers = recorder(async () => emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'pending' });
+    expect(durable.size).toBe(0);
+
+    await agent!.stop();
+    agent = null;
+    internals = await boot(subscriptionStore);
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(root));
+    (internals.store as TripleStore & { getWriteGen?: (prefix: string) => number }).getWriteGen = () => 0;
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri(localCgId),
+      'child-after-restart',
+      entity,
+      publishedAt,
+    );
+    await internals.store.insert([{
+      subject: entity,
+      predicate: 'http://schema.org/name',
+      object: `"${value}"`,
+      graph: `${contextGraphWorkspaceGraphUri(localCgId)}/0x0000000000000000000000000000000000000000/${kaId}`,
+    }]);
+
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    (internals.store as any).query = recorder(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await expect(internals.reconcileChainOrdinal(localCgId, onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(expensiveScans).toBeGreaterThan(0);
+    expect(fetch.calls).toHaveLength(0);
   });
 
   it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
@@ -958,7 +1285,7 @@ describe('Phase D - VM reconcile damping', () => {
     );
 
     await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceDataTriple(internals.store, '48', entity, value);
 
@@ -1001,6 +1328,33 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
+  it('actively fetches provenance metadata when exact VM content is metadata-pending', async () => {
+    const internals = await boot();
+    const onChainCgId = 62n;
+    const root = new Uint8Array(32);
+    root[31] = 62;
+    registerUnmatchedKC(internals.chain, 9062n, onChainCgId, bytesToHex(root));
+
+    let finalizationAttempt = 0;
+    const handleChainReconciledKC = recorder(async () => {
+      finalizationAttempt += 1;
+      return finalizationAttempt === 1
+        ? 'verified-vm-metadata-pending'
+        : 'already-confirmed';
+    });
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC,
+    }));
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
+
+    await expect(internals.reconcileChainOrdinal('62', onChainCgId, 0, undefined))
+      .resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect(fetch.calls).toHaveLength(1);
+    expect(handleChainReconciledKC.calls).toHaveLength(2);
+  });
+
   it('retries an incomplete SWM operation when data changes without triple-count changes', async () => {
     const internals = await boot();
     const onChainCgId = 52n;
@@ -1025,7 +1379,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '52', entity, staleValue);
 
     await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
 
@@ -1059,7 +1413,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '49', entity, value);
 
     await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
 
@@ -1295,7 +1649,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
-  it('does not negative-cache misses once candidate SWM operation metadata exists', async () => {
+  it('negative-caches unchanged incomplete SWM operations and invalidates on namespace/content changes', async () => {
     const internals = await boot();
     const onChainCgId = 43n;
     registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
@@ -1319,7 +1673,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch.calls).toHaveLength(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -1379,15 +1733,22 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('47', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
     expect(fetch.calls).toHaveLength(2);
+    // W1 §5.5 — `sourceOverride` is attribution only: it changes no peer
+    // selection, no rotation and no admission priority, which is why this
+    // options object is otherwise unchanged. Pinned as an EXACT literal
+    // because "not catchup-background" would also be satisfied by dropping
+    // the override entirely and landing on some other excluded source.
     expect(fetch.calls[0]).toEqual(['47', {
       includeSharedMemory: true,
       maxPeers: 1,
       peerRotationKey: '47',
+      sourceOverride: 'vm-recovery',
     }]);
     expect(fetch.calls[1]).toEqual(['47', {
       includeSharedMemory: true,
       maxPeers: 1,
       peerRotationKey: '47',
+      sourceOverride: 'vm-recovery',
     }]);
   });
 
@@ -1543,6 +1904,37 @@ describe('Phase D - VM reconcile damping', () => {
     expect(negativeCache.get(cacheKey)?.nextRetryAt).toBeGreaterThan(now);
   });
 
+  it('bounds durable negative-cache hydration guards and safely reloads evicted keys', async () => {
+    const loads: string[] = [];
+    const internals = await boot({
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+      loadVmReconcileNegative: async (cacheKey) => {
+        loads.push(cacheKey);
+        return undefined;
+      },
+    });
+    const hydrated = (internals as any).vmReconcileNegativeCacheHydrated as Map<string, string>;
+    const cap = DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES;
+
+    for (let index = 0; index < cap + 2; index += 1) {
+      (internals as any).markVmReconcileNegativeCacheHydrated(
+        `hydrated-cg\0ual-${index}#root`,
+        'hydrated-cg',
+      );
+    }
+
+    expect(hydrated.size).toBe(cap);
+    expect(hydrated.has('hydrated-cg\0ual-0#root')).toBe(false);
+    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(
+      'hydrated-cg\0ual-0#root',
+      'hydrated-cg',
+    )).resolves.toBe(false);
+    expect(loads).toEqual(['hydrated-cg\0ual-0#root']);
+    expect(hydrated.size).toBe(cap);
+  });
+
   it('prunes oversized VM reconcile state and clears non-hosted CG state on unsubscribe', async () => {
     const internals = await boot();
     const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
@@ -1555,6 +1947,8 @@ describe('Phase D - VM reconcile damping', () => {
     const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
+    const rotationState = (internals as any).vmReconcileRotationState as Map<string, unknown>;
+    const hydrated = (internals as any).vmReconcileNegativeCacheHydrated as Map<string, string>;
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
     const now = Date.now();
 
@@ -1593,15 +1987,22 @@ describe('Phase D - VM reconcile damping', () => {
       peerTopologyKey: '',
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
+    (internals as any).markVmReconcileNegativeCacheHydrated('cleanup-hydrated', 'cleanup-cg');
     fetchCooldown.set('cleanup-cg', now);
     peerCursor.set('cleanup-cg', 7);
     peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
+    const cleanupRotationKey = (internals as any).vmReconcileRotationSlotKey(
+      vmRecoveryTarget('cleanup-cg', 0),
+    );
+    rotationState.set(cleanupRotationKey, {});
     recent.add('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01');
     (agent as any).unsubscribeFromContextGraph('cleanup-cg');
     expect(negativeCache.has('cleanup-cache')).toBe(false);
+    expect(hydrated.has('cleanup-hydrated')).toBe(false);
     expect(fetchCooldown.has('cleanup-cg')).toBe(false);
     expect(peerCursor.has('cleanup-cg')).toBe(false);
     expect(peerOrder.has('cleanup-cg')).toBe(false);
+    expect(rotationState.has(cleanupRotationKey)).toBe(false);
     expect(recent.has('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01')).toBe(false);
 
     internals.subscribedContextGraphs.set('hosted-cg', { subscribed: true, coreHosted: true });
@@ -1614,15 +2015,22 @@ describe('Phase D - VM reconcile damping', () => {
       peerTopologyKey: '',
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
+    (internals as any).markVmReconcileNegativeCacheHydrated('hosted-hydrated', 'hosted-cg');
     fetchCooldown.set('hosted-cg', now);
     peerCursor.set('hosted-cg', 3);
     peerOrder.set('hosted-cg', { orderedPeers: ['peer-b'], nextPeerId: 'peer-b' });
+    const hostedRotationKey = (internals as any).vmReconcileRotationSlotKey(
+      vmRecoveryTarget('hosted-cg', 0),
+    );
+    rotationState.set(hostedRotationKey, {});
     recent.add('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02');
     (agent as any).unsubscribeFromContextGraph('hosted-cg');
     expect(negativeCache.has('hosted-cache')).toBe(true);
+    expect(hydrated.has('hosted-hydrated')).toBe(true);
     expect(fetchCooldown.has('hosted-cg')).toBe(true);
     expect(peerCursor.has('hosted-cg')).toBe(true);
     expect(peerOrder.has('hosted-cg')).toBe(true);
+    expect(rotationState.has(hostedRotationKey)).toBe(false);
     expect(recent.has('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02')).toBe(true);
   });
 });
@@ -1655,6 +2063,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       tryTriggerPeriodic: (cg: string) => {
         periodicTriggered.push(cg);
         return true;
+      },
+      dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
+        if (source === 'periodic') periodicTriggered.push(cg);
+        else if (source === 'live') liveTriggered.push(cg);
+        return {};
       },
     };
 
@@ -1725,6 +2138,2845 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       watermarkAfter: 2,
     });
     expect(reconcileOrdinal.calls).toEqual([]);
+  });
+
+  it('defers payload fetch during the parallel scan and recovers only missing ordinals as one batch', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillBatchFetchBudget', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'batch-fetch-budget';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '324',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 3n;
+
+    const scannedOrdinals: number[] = [];
+    const deferredFetches: boolean[] = [];
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string,
+      _ocg: bigint,
+      ordinal: number,
+      _headBlock: number | undefined,
+      options: {
+        isTargetCurrent?: () => boolean;
+        deferActiveFetch?: boolean;
+      },
+    ) => {
+      scannedOrdinals.push(ordinal);
+      deferredFetches.push(options.deferActiveFetch ?? false);
+      expect(options.isTargetCurrent?.()).toBe(true);
+      if (ordinal === 0) return { status: 'already', blockNumber: 0 };
+      return {
+        status: 'pending',
+        recovery: {
+          ordinal,
+          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+          kaId: String(ordinal),
+          reason: 'no-swm',
+        },
+      };
+    };
+    const recoveryBatches: number[][] = [];
+    (internals as any).recoverVmReconcileBatch = async (
+      _lcg: string,
+      _ocg: bigint,
+      targets: readonly Array<{ ordinal: number }>,
+    ) => {
+      recoveryBatches.push(targets.map((target) => target.ordinal));
+      return {
+        outcomes: new Map(targets.map((target) => [
+          target.ordinal,
+          { status: 'reconciled', blockNumber: 0 } as const,
+        ])),
+        attemptedOrdinals: targets.map((target) => target.ordinal),
+        continuationOrdinal: undefined,
+      };
+    };
+
+    const result = await internals.runVmReconcileForCg(localCgId, 'manual');
+
+    expect(result.watermarkAfter).toBe(3);
+    expect(scannedOrdinals).toEqual([0, 1, 2]);
+    expect(deferredFetches).toEqual([true, true, true]);
+    expect(recoveryBatches).toEqual([[1, 2]]);
+  });
+
+  it('targets the authenticated curator without running the global connection-prime walk', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCuratorTarget', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const approvedPeer = '12D3KooWApprovedCuratorPeer';
+    const registryPeer = '12D3KooWRegistryCuratorPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-target';
+    const connected = [approvedPeer, registryPeer].map((peerId) => ({
+      toString: () => peerId,
+    }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactVmLocalPeer',
+      libp2p: {
+        getConnections: () => connected.map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, approvedPeer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [registryPeer],
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+    });
+    (internals as any).primeCatchupConnections = async () => {
+      throw new Error('exact recovery must not walk every discovered agent');
+    };
+    const connectionAttempts: string[] = [];
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectionAttempts.push(peerId);
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    const protocolPeers: Array<{ toString(): string }> = [];
+    (internals as any).waitForSyncProtocol = async (peer: { toString(): string }) => {
+      protocolPeers.push(peer);
+      return true;
+    };
+    const fetches: Array<{ peerId: string; uals: string[] }> = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cg: string,
+      uals: string[],
+    ) => {
+      fetches.push({ peerId, uals });
+      return {
+        result: {
+          fetchedDataTriples: 1,
+          fetchedMetaTriples: 8,
+          insertedTriples: 9,
+          failedPeers: 0,
+          failedPhases: 0,
+          deferredBackpressure: 0,
+        },
+        disposition: 'found',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled',
+      blockNumber: 100,
+    });
+    const ual = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId,
+      1n,
+      [{ ...vmRecoveryTarget(localCgId, 0, '7'), ual }],
+      100,
+      () => true,
+    );
+
+    expect(connectionAttempts).toEqual([]);
+    expect(protocolPeers[0]?.toString()).toBe(registryPeer);
+    expect(fetches).toEqual([{ peerId: registryPeer, uals: [ual] }]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.attemptedOrdinals).toEqual([0]);
+  });
+
+  it('canonicalizes authoritative curators before the cap and ahead of a stale hint', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCanonicalCurators', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/canonical-curators';
+    const staleHint = '12D3KooWCanonicalCuratorHint';
+    const curators = [1, 2, 3, 4].map((n) => `12D3KooWCanonicalCurator${n}`);
+    const connectedById = new Map(
+      [staleHint, ...curators].map((peerId) => [peerId, { toString: () => peerId }]),
+    );
+    (internals as any).node = {
+      peerId: '12D3KooWCanonicalCuratorLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()].map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, staleHint);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [curators[3], curators[1], curators[2], curators[0]],
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+    });
+    const connectionAttempts: string[] = [];
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectionAttempts.push(peerId);
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'found',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, '85')], 100, () => true,
+    );
+
+    expect(connectionAttempts).toEqual([]);
+    expect(fetches).toEqual([curators[0]]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId))
+      .toEqual([...curators, staleHint]);
+  });
+
+  it('retains four curators and eventually recovers an asset held only by curator four', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmFourthCurator', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/fourth-curator';
+    const curators = [1, 2, 3, 4].map((n) => `12D3KooWFourthCurator${n}`);
+    const connected = curators.map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWFourthCuratorLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [...curators].reverse(), curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const attempts: string[] = [];
+    let lastPeerId: string | undefined;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      attempts.push(peerId);
+      lastPeerId = peerId;
+      const found = peerId === curators[3];
+      return {
+        result: {
+          fetchedDataTriples: found ? 1 : 0,
+          fetchedMetaTriples: found ? 8 : 0,
+          insertedTriples: found ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: found ? 'found' : 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'fourth-holder');
+    (internals as any).reconcileChainOrdinal = async () => (
+      lastPeerId === curators[3]
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: target }
+    );
+
+    for (let pass = 0; pass < 3; pass += 1) {
+      const result = await internals.recoverVmReconcileBatch(
+        localCgId, 1n, [target], 100, () => true,
+      );
+      expect(result.outcomes.get(0)).toMatchObject({ status: 'pending' });
+      expect((internals as any).vmReconcileRotationState.get(
+        (internals as any).vmReconcileRotationSlotKey(target),
+      )).toMatchObject({ phase: 'collecting' });
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    }
+    const recovered = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(attempts).toEqual(curators);
+    expect(recovered.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId)).toEqual(curators);
+  });
+
+  it('rotates a bounded oversized-roster transport window without treating it as absence proof', async () => {
+    const rosterDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_EXACT_ROSTER_MAX',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_EXACT_ROSTER_MAX', {
+      ...rosterDescriptor,
+      value: 4,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmRosterOverflow', chainAdapter: chain });
+      const internals = agent as unknown as AgentInternals;
+      const localCgId = '0x0000000000000000000000000000000000000001/roster-overflow';
+      const overflowPeers = Array.from({ length: 5 }, (_, i) => `12D3KooWRosterOverflow${i}`);
+      const connectedById = new Map<string, { toString(): string }>();
+      (internals as any).node = {
+        peerId: '12D3KooWRosterOverflowLocal',
+        libp2p: {
+          getConnections: () => [...connectedById.values()].map((remotePeer) => ({ remotePeer })),
+        },
+      };
+      let resolutions = 0;
+      (internals as any).resolveCuratorPeerIdsForCg = async (
+        _cgId: string,
+        options: { afterPeerId?: string },
+      ) => {
+        resolutions += 1;
+        const previousIndex = options.afterPeerId
+          ? overflowPeers.indexOf(options.afterPeerId)
+          : -1;
+        const peerId = overflowPeers[(previousIndex + 1) % overflowPeers.length]!;
+        return {
+          peerIds: [peerId],
+          curatorIsLocal: false,
+          legacyTripleResolved: false,
+          overflowed: true,
+          nextPageAfterPeerId: peerId,
+        };
+      };
+      (internals as any).ensurePeerConnected = async (peerId: string) => {
+        connectedById.set(peerId, { toString: () => peerId });
+      };
+      (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+      (internals as any).waitForSyncProtocol = async () => true;
+      (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+      const fetches: string[] = [];
+      const target = vmRecoveryTarget(localCgId, 0, 'roster-overflow');
+      const holderPeerId = overflowPeers[4]!;
+      let lastPeerId: string | undefined;
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+        fetches.push(peerId);
+        lastPeerId = peerId;
+        const found = peerId === holderPeerId;
+        return {
+          result: {
+            fetchedDataTriples: found ? 1 : 0,
+            fetchedMetaTriples: found ? 8 : 0,
+            insertedTriples: found ? 9 : 0,
+            failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+          },
+          disposition: found ? 'found' as const : 'clean-absent' as const,
+        };
+      };
+      (internals as any).reconcileChainOrdinal = async () => (
+        lastPeerId === holderPeerId
+          ? { status: 'reconciled', blockNumber: 100 }
+          : { status: 'pending', recovery: target }
+      );
+
+      // Simulate a formerly authoritative prefix cached before the registry
+      // grew beyond the proof cap. The current oversized result must replace it
+      // with rotating transport windows instead of querying that prefix forever.
+      (internals as any).vmReconcileCuratorPeersByCg.set(
+        localCgId,
+        overflowPeers.slice(0, 4),
+      );
+
+      let result;
+      for (let pass = 0; pass < 5; pass += 1) {
+        result = await internals.recoverVmReconcileBatch(
+          localCgId, 1n, [target], 100, () => true,
+        );
+        if (pass < 4) {
+          const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+          expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+            phase: 'collecting', curatorRosterConfirmed: false,
+          });
+          (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+        }
+      }
+
+      expect(resolutions).toBe(5);
+      expect(fetches).toEqual(overflowPeers);
+      expect(result?.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_EXACT_ROSTER_MAX',
+        rosterDescriptor,
+      );
+    }
+  });
+
+  it('keeps a successful-empty metadata fallback ahead of the ordinary roster cap', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmFallbackCurator', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/fallback-curator';
+    const fallbackPeer = '12D3KooWFallbackCuratorHolder';
+    const ordinaryPeers = [1, 2, 3].map((n) => `12D3KooWFallbackOrdinary${n}`);
+    const connectedById = new Map(
+      ordinaryPeers.map((peerId) => [peerId, { toString: () => peerId }]),
+    );
+    (internals as any).node = {
+      peerId: '12D3KooWFallbackCuratorLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()].map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: false,
+    });
+    (internals as any).resolvePreferredSyncPeerId = async () => fallbackPeer;
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectedById.set(peerId, { toString: () => peerId });
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: peerId === fallbackPeer ? 1 : 0,
+          fetchedMetaTriples: peerId === fallbackPeer ? 8 : 0,
+          insertedTriples: peerId === fallbackPeer ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: peerId === fallbackPeer ? 'found' : 'clean-absent',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'fallback')], 100, () => true,
+    );
+
+    expect(fetches).toEqual([fallbackPeer]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId))
+      .toEqual([fallbackPeer]);
+  });
+
+  it('clears cached authoritative curators after a successful empty resolution', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmClearCuratorCache', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/clear-curators';
+    const stalePeer = '12D3KooWClearCuratorStale';
+    const connectedPeer = { toString: () => stalePeer };
+    (internals as any).node = {
+      peerId: '12D3KooWClearCuratorLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).vmReconcileCuratorPeersByCg.set(localCgId, [stalePeer]);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: false,
+    });
+    (internals as any).resolvePreferredSyncPeerId = async () => undefined;
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => ({
+      result: {
+        fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+        failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+      },
+      disposition: 'found',
+    });
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, '86')], 100, () => true,
+    );
+
+    expect((internals as any).vmReconcileCuratorPeersByCg.has(localCgId)).toBe(false);
+  });
+
+  it('retains cached authoritative curators when curator discovery fails', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRetainCuratorCache', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/retain-curators';
+    const cachedPeer = '12D3KooWRetainCuratorCached';
+    const connectedPeer = { toString: () => cachedPeer };
+    (internals as any).node = {
+      peerId: '12D3KooWRetainCuratorLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).vmReconcileCuratorPeersByCg.set(localCgId, [cachedPeer]);
+    (internals as any).discovery.findAgents = async () => {
+      throw new Error('agent registry unavailable');
+    };
+    (internals as any).refreshMetaFromCurator = async () => false;
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'found',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, '87')], 100, () => true,
+    );
+
+    expect(fetches).toEqual([cachedPeer]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId))
+      .toEqual([cachedPeer]);
+  });
+
+  it('fetches one large recovery KA per peer attempt and defers the rest', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmBatchCap', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWExactCapPeerA';
+    const peerB = '12D3KooWExactCapPeerB';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-cap';
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactCapLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerA, peerB],
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    const fetches: Array<{ peerId: string; uals: string[] }> = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cg: string,
+      uals: string[],
+    ) => {
+      fetches.push({ peerId, uals });
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    };
+    const revalidated: number[] = [];
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string, _ocg: bigint, ordinal: number,
+    ) => {
+      revalidated.push(ordinal);
+      if (ordinal === 0) {
+        return {
+          status: 'pending',
+          recovery: targets[0],
+        };
+      }
+      return { status: 'reconciled', blockNumber: 100 };
+    };
+    const targets = Array.from({ length: 4 }, (_, ordinal) =>
+      vmRecoveryTarget(localCgId, ordinal));
+
+    const result = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
+
+    // Every peer attempt gives one potentially frame-sized KA the full
+    // foreground budget. A pending target rotates behind untouched work, so
+    // the second peer reaches ordinal 1 and the untouched tail leads the next
+    // eligible sweep.
+    expect(fetches).toHaveLength(2);
+    expect(fetches[0]!.uals).toEqual([targets[0]!.ual]);
+    expect(fetches[1]!.uals).toEqual([targets[1]!.ual]);
+    // Revalidation runs only for requested targets, in request order.
+    expect(revalidated).toEqual([targets[0]!.ordinal, targets[1]!.ordinal]);
+    expect(result.outcomes.size).toBe(2);
+    expect(result.attemptedOrdinals).toEqual([0, 1]);
+    expect(result.continuationOrdinal).toBe(2);
+  });
+
+  it('spreads unavailable-peer probes across targets within the global peer budget', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmUnavailableFairness', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peers = [1, 2, 3, 4].map((n) => `12D3KooWUnavailableFairness${n}`);
+    const localCgId = '0x0000000000000000000000000000000000000001/unavailable-fairness';
+    (internals as any).node = {
+      peerId: '12D3KooWUnavailableFairnessLocal',
+      libp2p: { getConnections: () => [] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: peers, curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    const connectionAttempts: string[] = [];
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectionAttempts.push(peerId);
+    };
+    (internals as any).selectCatchupPeers = (candidates: Array<{ toString(): string }>) => candidates;
+    const protocolWaits: string[] = [];
+    (internals as any).waitForSyncProtocol = async (peerId: string) => {
+      protocolWaits.push(peerId);
+      return false;
+    };
+    const fetch = vi.fn();
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    const targets = Array.from({ length: 4 }, (_, ordinal) =>
+      vmRecoveryTarget(localCgId, ordinal, `unavailable-${ordinal}`));
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+
+    expect(connectionAttempts).toEqual(peers.slice(0, 3));
+    // The dial stub deliberately leaves each peer disconnected, so protocol
+    // probing is skipped after each failed connection boundary.
+    expect(protocolWaits).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result.attemptedOrdinals).toEqual([0, 1, 2]);
+    expect(result.continuationOrdinal).toBe(3);
+  });
+
+  it('tries each pending target once per eligible pass and damps immediate retries', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmBatchCooldown', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWExactCooldownPeerA';
+    const peerB = '12D3KooWExactCooldownPeerB';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-cooldown';
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactCooldownLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerA, peerB], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    const fetchedUals: string[][] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      _cgId: string,
+      uals: string[],
+    ) => {
+      fetchedUals.push(uals);
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 1, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '7');
+    const deferredTarget = vmRecoveryTarget(localCgId, 1, '8');
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string,
+      _ocg: bigint,
+      ordinal: number,
+    ) => ({
+      status: 'pending',
+      recovery: ordinal === target.ordinal ? target : deferredTarget,
+    });
+
+    const targets = [target, deferredTarget];
+    const first = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
+    expect(fetchedUals).toEqual([[target.ual], [deferredTarget.ual]]);
+    expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
+    expect(first.outcomes.get(1)).toMatchObject({ status: 'pending' });
+    expect(first.attemptedOrdinals).toEqual([0, 1]);
+    expect(first.continuationOrdinal).toBeUndefined();
+
+    // Nothing recovered: the cooldown stamped on entry stands, so an immediate
+    // next pass performs no network fetch for this CG.
+    const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
+    expect(fetchedUals).toEqual([[target.ual], [deferredTarget.ual]]);
+    expect(second.outcomes.size).toBe(0);
+    expect(second.attemptedOrdinals).toEqual([]);
+    expect(second.continuationOrdinal).toBe(0);
+    expect(second.cooldownOnly).toBe(true);
+  });
+
+  it('suppresses completed incomplete cycles after every pending target receives an attempt', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmBatchWrap', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+    const peer = '12D3KooWExactWrapPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-wrap';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWExactWrapLocalPeer',
+      libp2p: {
+        getConnections: () => [{ remotePeer: connectedPeer }],
+      },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    const networkAttempts: number[] = [];
+    const targets = [0, 1].map((ordinal) => vmRecoveryTarget(localCgId, ordinal));
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      _cgId: string,
+      uals: string[],
+    ) => {
+      networkAttempts.push(Number(uals[0]!.split('/').at(-1)));
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 1, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string,
+      _ocg: bigint,
+      ordinal: number,
+    ) => ({
+      status: 'pending',
+      recovery: targets[ordinal],
+    });
+
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+    expect(first.attemptedOrdinals).toEqual([0]);
+    expect(first.continuationOrdinal).toBe(1);
+
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const second = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [targets[1]!], 100, () => true,
+    );
+    expect(second.attemptedOrdinals).toEqual([1]);
+    expect(second.continuationOrdinal).toBeUndefined();
+
+    const rotationState = (internals as any).vmReconcileRotationState as Map<string, unknown>;
+    expect(rotationState.size).toBe(2);
+    for (const target of targets) {
+      expect(rotationState.get(
+        (internals as any).vmReconcileRotationSlotKey(target),
+      )).toMatchObject({ phase: 'backoff', backoffKind: 'incomplete-cycle' });
+    }
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const wrapped = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+    expect(wrapped.attemptedOrdinals).toEqual([]);
+    expect(networkAttempts).toEqual([0, 1]);
+  });
+
+  it('rotates one pending recovery target across eligible peers between windows', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmPeerRotation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWExactRotationPeerA';
+    const peerB = '12D3KooWExactRotationPeerB';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-peer-rotation';
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactRotationLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerA],
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (
+      peers: Array<{ toString(): string }>,
+    ) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const networkAttempts: string[] = [];
+    let lastPeerId: string | undefined;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      networkAttempts.push(peerId);
+      lastPeerId = peerId;
+      return {
+        result: {
+          fetchedDataTriples: peerId === peerB ? 1 : 0,
+          fetchedMetaTriples: peerId === peerB ? 8 : 0,
+          insertedTriples: peerId === peerB ? 9 : 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deferredBackpressure: 0,
+        },
+        disposition: peerId === peerB ? 'found' : 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '7');
+    (internals as any).reconcileChainOrdinal = async () => (
+      lastPeerId === peerB
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: target }
+    );
+
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
+
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const second = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(networkAttempts).toEqual([peerA, peerB]);
+    expect(second.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+  });
+
+  it('rotates incomplete, thrown, and still-pending found attempts without absence credit', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmIncompleteRotation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+    const peerA = '12D3KooWIncompleteRotationPeerA';
+    const peerB = '12D3KooWIncompleteRotationPeerB';
+    const localCgId = '0x0000000000000000000000000000000000000001/incomplete-rotation';
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWIncompleteRotationLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const attemptsByUal = new Map<string, string[]>();
+    let lastDisposition: 'found' | 'incomplete' = 'incomplete';
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cgId: string,
+      requestedUals: string[],
+    ) => {
+      const ual = requestedUals[0]!;
+      const attempts = attemptsByUal.get(ual) ?? [];
+      attempts.push(peerId);
+      attemptsByUal.set(ual, attempts);
+      if (ual.endsWith('/77') && peerId === peerB) {
+        lastDisposition = 'incomplete';
+        throw new Error('transport failed');
+      }
+      lastDisposition = (ual.endsWith('/76') && peerId === peerB)
+        || (ual.endsWith('/77') && peerId === peerA)
+        ? 'found'
+        : 'incomplete';
+      return {
+        result: {
+          fetchedDataTriples: lastDisposition === 'found' ? 1 : 0,
+          fetchedMetaTriples: lastDisposition === 'found' ? 8 : 0,
+          insertedTriples: lastDisposition === 'found' ? 9 : 0,
+          failedPeers: 0, failedPhases: lastDisposition === 'incomplete' ? 1 : 0,
+          deferredBackpressure: 0,
+        },
+        disposition: lastDisposition,
+      };
+    };
+    let activeTarget = vmRecoveryTarget(localCgId, 0, '76');
+    (internals as any).reconcileChainOrdinal = async () => (
+      activeTarget.ual.endsWith('/76') && lastDisposition === 'found'
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: activeTarget }
+    );
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const recovered = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [activeTarget], 100, () => true,
+    );
+    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB]);
+    expect(recovered.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+
+    activeTarget = vmRecoveryTarget(localCgId, 1, '77');
+    lastDisposition = 'incomplete';
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
+    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB]);
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(activeTarget);
+    const incompleteBackoff = (internals as any).vmReconcileRotationState.get(slotKey);
+    expect(incompleteBackoff).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+    });
+    expect([...incompleteBackoff.cleanAbsentPeerIds]).toEqual([]);
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+
+    now = incompleteBackoff.nextRetryAt + 1;
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const retried = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [activeTarget], 100, () => true,
+    );
+    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB, peerA]);
+    expect(retried.outcomes.get(1)).toMatchObject({ status: 'pending' });
+    expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+      phase: 'collecting', failures: 1,
+    });
+
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
+    expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB, peerA, peerB]);
+    expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 2,
+    });
+  });
+
+  it('backs off only after a complete clean-absence rotation and requires a fresh next cycle', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCleanAbsenceBackoff', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWCleanAbsentPeerA';
+    const peerB = '12D3KooWCleanAbsentPeerB';
+    const localCgId = '0x0000000000000000000000000000000000000001/clean-absence';
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWCleanAbsentLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    let curatorResolutions = 0;
+    (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      curatorResolutions += 1;
+      return { peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false };
+    };
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+    const networkAttempts: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      networkAttempts.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '71');
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending',
+      recovery: target,
+    });
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    const firstBackoff = (internals as any).vmReconcileRotationState.get(slotKey);
+    expect(networkAttempts).toEqual([peerA, peerB]);
+    expect(firstBackoff).toMatchObject({ phase: 'backoff', failures: 1 });
+
+    const suppressed = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(suppressed.attemptedOrdinals).toEqual([]);
+    expect(curatorResolutions).toBe(2);
+
+    now = firstBackoff.nextRetryAt + 1;
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const freshPartial = (internals as any).vmReconcileRotationState.get(slotKey);
+    expect(networkAttempts).toEqual([peerA, peerB, peerA]);
+    expect(freshPartial).toMatchObject({ phase: 'collecting', failures: 1 });
+    expect([...freshPartial.cleanAbsentPeerIds]).toEqual([peerA]);
+
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(networkAttempts).toEqual([peerA, peerB, peerA, peerB]);
+    expect((internals as any).vmReconcileRotationState.get(slotKey))
+      .toMatchObject({ phase: 'backoff', failures: 2 });
+  });
+
+  it('backs off a scheduling-exhausted cycle when one peer is rejected and one is incomplete', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmSchedulingExhaustion', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const rejectedPeer = '12D3KooWSchedulingRejected';
+    const incompletePeer = '12D3KooWSchedulingIncomplete';
+    const localCgId = '0x0000000000000000000000000000000000000001/scheduling-exhaustion';
+    const connected = [rejectedPeer, incompletePeer]
+      .map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWSchedulingLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, rejectedPeer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [rejectedPeer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async (peerId: string) =>
+      peerId !== rejectedPeer;
+    const networkAttempts: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      networkAttempts.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: 50_000, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'scheduling');
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending', recovery: target,
+    });
+
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.attemptedOrdinals).toEqual([0]);
+    expect(networkAttempts).toEqual([]);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    expect(networkAttempts).toEqual([incompletePeer]);
+    expect(result.attemptedOrdinals).toEqual([0]);
+    const incompleteBackoff = (internals as any).vmReconcileRotationState.get(slotKey);
+    expect(incompleteBackoff).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+    });
+    expect([...incompleteBackoff.attemptedPeerIds])
+      .toEqual([rejectedPeer, incompletePeer]);
+    expect([...incompleteBackoff.cleanAbsentPeerIds]).toEqual([]);
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+
+    const damped = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(damped.cooldownOnly).toBe(false);
+    expect(networkAttempts).toEqual([incompletePeer]);
+  });
+
+  it('retains max-batch proof progress while each slot continues making progress', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRollingCollectionDeadline', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const peers = ['12D3KooWRollingA', '12D3KooWRollingB', '12D3KooWRollingC'];
+    const targets = Array.from({ length: DKGAgent.VM_RECONCILE_BATCH_SIZE }, (_, ordinal) =>
+      vmRecoveryTarget('rolling-collection-deadline', ordinal, `rolling-${ordinal}`));
+    let now = 0;
+    (internals as any).vmReconcileRotationNow = () => now;
+
+    for (const peerId of peers) {
+      for (const target of targets) {
+        now += 25_000;
+        const prepared = (internals as any).prepareVmReconcileRotationTarget(
+          target, peers, now,
+        );
+        expect(prepared.suppressed).toBe(false);
+        expect(prepared.record).toBeDefined();
+        (internals as any).settleVmReconcileRotationAttempt(
+          target, peerId, 'clean-absent', peers, prepared.record,
+        );
+      }
+    }
+
+    expect(now).toBeGreaterThan(DKGAgent.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS);
+    for (const target of targets) {
+      expect((internals as any).vmReconcileRotationState.get(
+        (internals as any).vmReconcileRotationSlotKey(target),
+      )).toMatchObject({ phase: 'backoff', failures: 1 });
+    }
+  });
+
+  it('keeps the pre-suppression roster stable across connection reorder and curator discovery', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCanonicalRoster', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWCanonicalRosterA';
+    const peerB = '12D3KooWCanonicalRosterB';
+    const peerC = '12D3KooWCanonicalRosterC';
+    const peerD = '12D3KooWCanonicalRosterD';
+    const localCgId = '0x0000000000000000000000000000000000000001/canonical-roster';
+    const peerById = new Map(
+      [peerA, peerB, peerC, peerD].map((peerId) => [peerId, { toString: () => peerId }]),
+    );
+    let connectionRead = 0;
+    (internals as any).node = {
+      peerId: '12D3KooWCanonicalRosterLocal',
+      libp2p: {
+        getConnections: () => {
+          connectionRead += 1;
+          const ids = connectionRead % 2 === 0
+            ? [peerD, peerC, peerB, peerA]
+            : [peerB, peerD, peerA, peerC];
+          return ids.map((peerId) => ({ remotePeer: peerById.get(peerId)! }));
+        },
+      },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    let curatorResolutions = 0;
+    (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      curatorResolutions += 1;
+      return {
+        // The secondary curator would displace C if this list were prepended to
+        // the post-discovery roster instead of using the canonicalizer.
+        peerIds: [peerA, peerD],
+        curatorIsLocal: false,
+        legacyTripleResolved: false,
+      };
+    };
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const networkAttempts: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      networkAttempts.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '75');
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending', recovery: target,
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    }
+    expect(networkAttempts).toEqual([peerA, peerD, peerB]);
+    expect(curatorResolutions).toBe(3);
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(networkAttempts).toEqual([peerA, peerD, peerB, peerC]);
+    expect(curatorResolutions).toBe(4);
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+      phase: 'backoff', backoffKind: 'clean-absence', failures: 1,
+    });
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(networkAttempts).toEqual([peerA, peerD, peerB, peerC]);
+    expect(curatorResolutions).toBe(4);
+  });
+
+  it('ranks a resolved structural curator ahead of an ordinary capped roster', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmResolvedCuratorRoster', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peers = [
+      '12D3KooWResolvedCuratorA',
+      '12D3KooWResolvedCuratorB',
+      '12D3KooWResolvedCuratorC',
+      '12D3KooWResolvedCuratorD',
+    ];
+    const curatorPeerId = peers[3]!;
+    const localCgId = '0x0000000000000000000000000000000000000001/resolved-curator';
+    const connected = peers.map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWResolvedCuratorLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [curatorPeerId], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (ordered: Array<{ toString(): string }>) => ordered;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const attempts: string[] = [];
+    let lastPeerId: string | undefined;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      attempts.push(peerId);
+      lastPeerId = peerId;
+      return {
+        result: {
+          fetchedDataTriples: peerId === curatorPeerId ? 1 : 0,
+          fetchedMetaTriples: peerId === curatorPeerId ? 8 : 0,
+          insertedTriples: peerId === curatorPeerId ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: peerId === curatorPeerId ? 'found' : 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '80');
+    (internals as any).reconcileChainOrdinal = async () => (
+      lastPeerId === curatorPeerId
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: target }
+    );
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(attempts).toEqual([curatorPeerId]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+  });
+
+  it('completion-anchors the per-CG retry damper after a legacy incomplete rotation', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmPartialCycleExpiry', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWPartialCyclePeerA';
+    const peerB = '12D3KooWPartialCyclePeerB';
+    const localCgId = '0x0000000000000000000000000000000000000001/partial-cycle';
+    const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWPartialCycleLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peerA);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+    const networkAttempts: string[] = [];
+    let peerAFetches = 0;
+    let lastDisposition: 'found' | 'clean-absent' | 'incomplete' = 'incomplete';
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      networkAttempts.push(peerId);
+      if (peerId === peerA) peerAFetches += 1;
+      lastDisposition = peerId === peerA && peerAFetches > 1
+        ? 'found'
+        : peerId === peerA
+          ? 'clean-absent'
+          : 'incomplete';
+      return {
+        result: {
+          fetchedDataTriples: lastDisposition === 'found'
+            ? 1
+            : lastDisposition === 'incomplete'
+              ? 50_000
+              : 0,
+          fetchedMetaTriples: lastDisposition === 'found' ? 8 : 0,
+          insertedTriples: lastDisposition === 'found' ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: lastDisposition,
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '74');
+    (internals as any).reconcileChainOrdinal = async () => (
+      lastDisposition === 'found'
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: target }
+    );
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    expect(networkAttempts).toEqual([peerA, peerB]);
+    const incompleteBackoff = (internals as any).vmReconcileRotationState.get(slotKey);
+    expect(incompleteBackoff).toMatchObject({
+      phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+    });
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+
+    const damped = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(networkAttempts).toEqual([peerA, peerB]);
+    expect(damped.cooldownOnly).toBe(false);
+
+    now = incompleteBackoff.nextRetryAt + 1;
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const recovered = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(networkAttempts).toEqual([peerA, peerB, peerA]);
+    expect(recovered.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+  });
+
+  it('defers cap overflow until an expired slot can be replaced without retry churn', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 1,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmStableRotationCapacity', chainAdapter: chain });
+      const internals = agent as unknown as AgentInternals;
+      const peerA = '12D3KooWStableCapacityPeerA';
+      const peerB = '12D3KooWStableCapacityPeerB';
+      const localCgId = '0x0000000000000000000000000000000000000001/stable-capacity';
+      const connected = [peerA, peerB].map((peerId) => ({ toString: () => peerId }));
+      (internals as any).node = {
+        peerId: '12D3KooWStableCapacityLocal',
+        libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+      };
+      (internals as any).preferredSyncPeers.set(localCgId, peerA);
+      let curatorResolutions = 0;
+      (internals as any).resolveCuratorPeerIdsForCg = async () => {
+        curatorResolutions += 1;
+        return { peerIds: [peerA], curatorIsLocal: false, legacyTripleResolved: false };
+      };
+      (internals as any).ensurePeerConnected = async () => undefined;
+      (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+      (internals as any).waitForSyncProtocol = async () => true;
+      (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+      const attemptsByUal = new Map<string, string[]>();
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+        peerId: string,
+        _cgId: string,
+        requestedUals: string[],
+      ) => {
+        const ual = requestedUals[0]!;
+        const attempts = attemptsByUal.get(ual) ?? [];
+        attempts.push(peerId);
+        attemptsByUal.set(ual, attempts);
+        return {
+          result: {
+            fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+            failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+          },
+          disposition: 'clean-absent',
+        };
+      };
+      const first = vmRecoveryTarget(localCgId, 0, '78');
+      const overflow = vmRecoveryTarget(localCgId, 1, '79');
+      const secondOverflow = vmRecoveryTarget(localCgId, 2, '80');
+      const targets = [first, overflow, secondOverflow];
+      const byOrdinal = new Map(targets.map((target) => [target.ordinal, target]));
+      (internals as any).reconcileChainOrdinal = async (
+        _lcg: string,
+        _ocg: bigint,
+        ordinal: number,
+      ) => ({ status: 'pending', recovery: byOrdinal.get(ordinal)! });
+      const rotationState = (internals as any).vmReconcileRotationState as Map<
+        string,
+        { phase: string; cleanAbsentPeerIds: Set<string> }
+      >;
+      const firstKey = (internals as any).vmReconcileRotationSlotKey(first);
+      const overflowKey = (internals as any).vmReconcileRotationSlotKey(overflow);
+      const secondOverflowKey = (internals as any).vmReconcileRotationSlotKey(secondOverflow);
+
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      expect(rotationState.size).toBe(1);
+      expect(rotationState.get(firstKey)).toMatchObject({ phase: 'collecting' });
+      expect([...rotationState.get(firstKey)!.cleanAbsentPeerIds]).toEqual([peerA]);
+      expect(attemptsByUal.get(first.ual)).toEqual([peerA]);
+      expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
+      expect(attemptsByUal.get(secondOverflow.ual)).toBeUndefined();
+
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      expect(rotationState.size).toBe(1);
+      expect(rotationState.get(firstKey)).toMatchObject({ phase: 'backoff' });
+      expect(attemptsByUal.get(first.ual)).toEqual([peerA, peerB]);
+      expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
+
+      // A batch containing only an unowned target can be rejected from the
+      // live capacity state without paying curator discovery or transport.
+      const resolutionsBeforeCapacityDeferral = curatorResolutions;
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, [overflow], 100, () => true,
+      );
+      expect(curatorResolutions).toBe(resolutionsBeforeCapacityDeferral);
+      expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
+
+      // An unexpired backoff remains installed and the overflow target performs
+      // no evidence-free exact request.
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      expect(rotationState.size).toBe(1);
+      expect(rotationState.get(firstKey)).toMatchObject({ phase: 'backoff' });
+      expect(rotationState.has(overflowKey)).toBe(false);
+      expect(attemptsByUal.get(first.ual)).toEqual([peerA, peerB]);
+      expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
+
+      const firstBackoff = rotationState.get(firstKey) as any;
+      (internals as any).vmReconcileRotationNow = () => firstBackoff.nextRetryAt + 1;
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      expect(rotationState.size).toBe(1);
+      expect(rotationState.has(firstKey)).toBe(false);
+      expect(rotationState.get(overflowKey)).toMatchObject({ phase: 'collecting' });
+      expect(attemptsByUal.get(overflow.ual)).toEqual([peerA]);
+
+      // Complete B's roster, expire it, and prove the third stable-order waiter
+      // receives the next slot instead of A/B alternating forever.
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      const overflowBackoff = rotationState.get(overflowKey) as any;
+      expect(overflowBackoff).toMatchObject({ phase: 'backoff' });
+      expect(attemptsByUal.get(overflow.ual)).toEqual([peerA, peerB]);
+
+      (internals as any).vmReconcileRotationNow = () => overflowBackoff.nextRetryAt + 1;
+      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      await internals.recoverVmReconcileBatch(
+        localCgId, 1n, targets, 100, () => true,
+      );
+      expect(rotationState.size).toBe(1);
+      expect(rotationState.has(overflowKey)).toBe(false);
+      expect(rotationState.get(secondOverflowKey)).toMatchObject({ phase: 'collecting' });
+      expect(attemptsByUal.get(secondOverflow.ual)).toEqual([peerA]);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('reserves a live rotation slot for an unrelated CG at the node-wide cache cap', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 3,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmCrossCgCapacity', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWCrossCgCapacityPeer';
+      const dominantCg = '0x0000000000000000000000000000000000000001/dominant-capacity';
+      const waitingCg = '0x0000000000000000000000000000000000000002/waiting-capacity';
+      const dominantTargets = [0, 1, 2]
+        .map((ordinal) => vmRecoveryTarget(dominantCg, ordinal, `dominant-${ordinal}`));
+      for (const target of dominantTargets) {
+        expect((internals as any).prepareVmReconcileRotationTarget(
+          target,
+          [peer],
+          100,
+        ).suppressed).toBe(false);
+      }
+      const state = (internals as any).vmReconcileRotationState as Map<
+        string,
+        { localCgId: string }
+      >;
+      expect(state.size).toBe(3);
+      expect([...state.values()].filter((record) => record.localCgId === dominantCg)).toHaveLength(3);
+
+      const waiting = vmRecoveryTarget(waitingCg, 0, 'waiting');
+      const admitted = (internals as any).prepareVmReconcileRotationTarget(
+        waiting,
+        [peer],
+        100,
+      );
+
+      expect(admitted.suppressed).toBe(false);
+      expect(admitted.record?.localCgId).toBe(waitingCg);
+      expect(state.size).toBe(3);
+      expect([...state.values()].filter((record) => record.localCgId === dominantCg)).toHaveLength(2);
+      expect([...state.values()].filter((record) => record.localCgId === waitingCg)).toHaveLength(1);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('does not evict a cross-CG donor when recovery exits before requester installation', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 3,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmDonationRollback', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWDonationRollbackPeer';
+      const dominantCg = '0x0000000000000000000000000000000000000001/donation-owner';
+      const waitingCg = '0x0000000000000000000000000000000000000002/donation-waiter';
+      (internals as any).vmReconcileRotationNow = () => 100;
+      for (let ordinal = 0; ordinal < 3; ordinal += 1) {
+        const target = vmRecoveryTarget(dominantCg, ordinal, `donor-${ordinal}`);
+        expect((internals as any).prepareVmReconcileRotationTarget(
+          target,
+          [peer],
+          100,
+        ).record).toBeDefined();
+      }
+      const state = (internals as any).vmReconcileRotationState as Map<string, unknown>;
+      const before = [...state.entries()];
+      (internals as any).vmReconcileCuratorPeersByCg.set(waitingCg, [peer]);
+      let current = true;
+      (internals as any).resolveCuratorPeerIdsForCg = async () => {
+        current = false;
+        return {
+          peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+        };
+      };
+      const waiting = vmRecoveryTarget(waitingCg, 0, 'waiting');
+
+      await internals.recoverVmReconcileBatch(
+        waitingCg,
+        1n,
+        [waiting],
+        100,
+        () => current,
+      );
+
+      expect([...state.entries()]).toEqual(before);
+      expect(state.has((internals as any).vmReconcileRotationSlotKey(waiting))).toBe(false);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('retains an incomplete-cycle backoff until expiry, then releases its state slot', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 1,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmNoProgressCapacity', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWNoProgressCapacityPeer';
+      const first = vmRecoveryTarget('no-progress-capacity', 0, 'first');
+      const second = vmRecoveryTarget('no-progress-capacity', 1, 'second');
+      const firstKey = (internals as any).vmReconcileRotationSlotKey(first);
+      const secondKey = (internals as any).vmReconcileRotationSlotKey(second);
+      let now = 100;
+      (internals as any).vmReconcileRotationNow = () => now;
+      const firstRecord = (internals as any).prepareVmReconcileRotationTarget(
+        first, [peer], now,
+      ).record;
+
+      (internals as any).settleVmReconcileRotationAttempt(
+        first, peer, 'incomplete', [peer], firstRecord,
+      );
+      expect((internals as any).vmReconcileRotationState.get(firstKey)).toMatchObject({
+        phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
+      });
+
+      const secondRecord = (internals as any).prepareVmReconcileRotationTarget(
+        second, [peer], now + 1,
+      ).record;
+      expect(secondRecord).toBeUndefined();
+      expect((internals as any).vmReconcileRotationState.has(firstKey)).toBe(true);
+      expect((internals as any).vmReconcileRotationState.has(secondKey)).toBe(false);
+
+      now = (internals as any).vmReconcileRotationState.get(firstKey).nextRetryAt + 1;
+      const admittedAfterExpiry = (internals as any).prepareVmReconcileRotationTarget(
+        second, [peer], now,
+      ).record;
+      expect(admittedAfterExpiry).toBeDefined();
+      expect((internals as any).vmReconcileRotationState.has(firstKey)).toBe(false);
+      expect((internals as any).vmReconcileRotationState.get(secondKey))
+        .toBe(admittedAfterExpiry);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('evicts an expired collecting rotation when the next slot reaches the state cap', async () => {
+    const capDescriptor = Object.getOwnPropertyDescriptor(
+      DKGAgentBase,
+      'VM_RECONCILE_CACHE_MAX_ENTRIES',
+    )!;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', {
+      ...capDescriptor,
+      value: 1,
+    });
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmExpiredCapacity', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const peer = '12D3KooWExpiredCapacityPeer';
+      const first = vmRecoveryTarget('expired-capacity', 0, 'first');
+      const second = vmRecoveryTarget('expired-capacity', 1, 'second');
+      let now = 100;
+      (internals as any).vmReconcileRotationNow = () => now;
+      const firstKey = (internals as any).vmReconcileRotationSlotKey(first);
+      const secondKey = (internals as any).vmReconcileRotationSlotKey(second);
+      expect((internals as any).prepareVmReconcileRotationTarget(
+        first, [peer], now,
+      ).record).toBeDefined();
+
+      now += DKGAgent.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS + 1;
+      const secondRecord = (internals as any).prepareVmReconcileRotationTarget(
+        second, [peer], now,
+      ).record;
+      expect(secondRecord).toBeDefined();
+      expect((internals as any).vmReconcileRotationState.has(firstKey)).toBe(false);
+      expect((internals as any).vmReconcileRotationState.get(secondKey)).toBe(secondRecord);
+    } finally {
+      Object.defineProperty(
+        DKGAgentBase,
+        'VM_RECONCILE_CACHE_MAX_ENTRIES',
+        capDescriptor,
+      );
+    }
+  });
+
+  it('preserves retained proof across candidate growth and ignores evicted records', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRotationIdentity', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const target = vmRecoveryTarget('rotation-identity', 0, '72');
+    const peerA = '12D3KooWRotationIdentityA';
+    const peerB = '12D3KooWRotationIdentityB';
+    const peerC = '12D3KooWRotationIdentityC';
+
+    const initial = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerB], 0,
+    );
+    (internals as any).creditVmReconcileCleanAbsence(
+      target, peerA, [peerA, peerB], initial.record,
+    );
+    expect([...initial.record.cleanAbsentPeerIds]).toEqual([peerA]);
+
+    const grown = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerB, peerC], 1,
+    );
+    expect(grown.record).toBe(initial.record);
+    expect(grown.record.phase).toBe('collecting');
+    expect([...grown.record.cleanAbsentPeerIds]).toEqual([peerA]);
+    expect([...grown.record.attemptedPeerIds]).toEqual([peerA]);
+
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    (internals as any).vmReconcileRotationState.delete(slotKey);
+    (internals as any).creditVmReconcileCleanAbsence(
+      target, peerA, [peerA, peerB, peerC], grown.record,
+    );
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+
+    const rootB = { ...target, merkleRoot: 'root-b' };
+    const replacement = (internals as any).prepareVmReconcileRotationTarget(
+      rootB, [peerA], 2,
+    ).record;
+    expect(replacement).not.toBe(grown.record);
+    const rootAAgain = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA], 2,
+    ).record;
+    expect(rootAAgain).not.toBe(initial.record);
+    expect(rootAAgain).not.toBe(replacement);
+    (internals as any).forceClearVmReconcileStateForContextGraph(target.localCgId);
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+    (internals as any).creditVmReconcileCleanAbsence(
+      target, peerA, [peerA], rootAAgain,
+    );
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+
+    const shutdownRecord = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA], 3,
+    ).record;
+    (internals as any).closeVmReconcileRotationState();
+    (internals as any).creditVmReconcileCleanAbsence(
+      target, peerA, [peerA], shutdownRecord,
+    );
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('closes exact-recovery rotation state through the public stop path', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRotationPublicStop', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const target = vmRecoveryTarget('rotation-public-stop', 0, 'stop');
+    const peer = '12D3KooWRotationPublicStop';
+    (internals as any).started = true;
+    (internals as any).node = {
+      peerId: '12D3KooWRotationPublicStopLocal',
+      libp2p: { getPeers: () => [] },
+      stop: vi.fn(async () => undefined),
+    };
+    (internals as any).messenger = { stopOutboxDrain: vi.fn(async () => undefined) };
+    const record = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peer], 100,
+    ).record;
+    expect((internals as any).vmReconcileRotationState.size).toBe(1);
+
+    await agent.stop();
+
+    expect((internals as any).vmReconcileRotationClosed).toBe(true);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, peer, 'clean-absent', [peer], record,
+    );
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    agent = null;
+  });
+
+  it('clears the complete proof cycle across capped-roster replacement and rejoin', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRotationReplacement', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const target = vmRecoveryTarget('rotation-replacement', 0, '81');
+    const peerA = '12D3KooWRotationReplacementA';
+    const peerB = '12D3KooWRotationReplacementB';
+    const peerC = '12D3KooWRotationReplacementC';
+    const peerD = '12D3KooWRotationReplacementD';
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+
+    const initial = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerB, peerC], now,
+    ).record;
+    for (const peerId of [peerA, peerB, peerC]) {
+      (internals as any).settleVmReconcileRotationAttempt(
+        target, peerId, 'clean-absent', [peerA, peerB, peerC], initial,
+      );
+    }
+    expect(initial).toMatchObject({ phase: 'backoff', failures: 1 });
+
+    now += 1;
+    const replaced = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerC, peerD], now,
+    ).record;
+    expect(replaced).toBe(initial);
+    expect(replaced).toMatchObject({ phase: 'collecting', failures: 1, nextRetryAt: 0 });
+    expect([...replaced.attemptedPeerIds]).toEqual([]);
+    expect([...replaced.cleanAbsentPeerIds]).toEqual([]);
+    expect((internals as any).vmReconcileUncreditedCandidateOrder(replaced))
+      .toEqual([peerA, peerC, peerD]);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, peerA, 'clean-absent', [peerA, peerC, peerD], replaced,
+    );
+    expect([...replaced.cleanAbsentPeerIds]).toEqual([peerA]);
+
+    now += 1;
+    const rejoined = (internals as any).prepareVmReconcileRotationTarget(
+      target, [peerA, peerB, peerC], now,
+    ).record;
+    expect(rejoined).toBe(initial);
+    expect(rejoined).toMatchObject({ phase: 'collecting', failures: 1, nextRetryAt: 0 });
+    expect([...rejoined.attemptedPeerIds]).toEqual([]);
+    expect([...rejoined.cleanAbsentPeerIds]).toEqual([]);
+    expect((internals as any).vmReconcileUncreditedCandidateOrder(rejoined))
+      .toEqual([peerA, peerB, peerC]);
+  });
+
+  it('clears partial and active-backoff evidence on roster shrink', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRotationShrink', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const peerA = '12D3KooWRotationShrinkA';
+    const peerB = '12D3KooWRotationShrinkB';
+
+    const partialTarget = vmRecoveryTarget('rotation-shrink', 0, '87');
+    const partial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [peerA, peerB], 100,
+    ).record;
+    (internals as any).settleVmReconcileRotationAttempt(
+      partialTarget, peerA, 'incomplete', [peerA, peerB], partial,
+    );
+    expect([...partial.attemptedPeerIds]).toEqual([peerA]);
+
+    const shrunkPartial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [peerA], 101,
+    );
+    expect(shrunkPartial.suppressed).toBe(false);
+    expect(shrunkPartial.record).toMatchObject({ phase: 'collecting', failures: 0 });
+    expect([...shrunkPartial.record.attemptedPeerIds]).toEqual([]);
+    expect([...shrunkPartial.record.cleanAbsentPeerIds]).toEqual([]);
+    // A response captured against the old roster is inert after shrink.
+    (internals as any).settleVmReconcileRotationAttempt(
+      partialTarget, peerB, 'clean-absent', [peerA, peerB], partial,
+    );
+    expect([...shrunkPartial.record.cleanAbsentPeerIds]).toEqual([]);
+
+    const backoffTarget = vmRecoveryTarget('rotation-shrink', 1, '88');
+    const backoff = (internals as any).prepareVmReconcileRotationTarget(
+      backoffTarget, [peerA, peerB], 200,
+    ).record;
+    for (const peerId of [peerA, peerB]) {
+      (internals as any).settleVmReconcileRotationAttempt(
+        backoffTarget, peerId, 'clean-absent', [peerA, peerB], backoff,
+      );
+    }
+    expect(backoff.phase).toBe('backoff');
+    const shrunkBackoff = (internals as any).prepareVmReconcileRotationTarget(
+      backoffTarget, [peerA], 201,
+    );
+    expect(shrunkBackoff.suppressed).toBe(false);
+    expect(shrunkBackoff.record).toMatchObject({ phase: 'collecting', failures: 1 });
+    expect([...shrunkBackoff.record.attemptedPeerIds]).toEqual([]);
+    expect([...shrunkBackoff.record.cleanAbsentPeerIds]).toEqual([]);
+  });
+
+  it('preserves active backoff across an empty socket view but drops partial evidence', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmEmptyRoster', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peer = '12D3KooWEmptyRosterPeer';
+    const otherPeer = '12D3KooWEmptyRosterOther';
+    const localCgId = '0x0000000000000000000000000000000000000001/empty-roster';
+    (internals as any).node = {
+      peerId: '12D3KooWEmptyRosterLocal',
+      libp2p: { getConnections: () => [] },
+    };
+    let now = 100;
+    (internals as any).vmReconcileRotationNow = () => now;
+
+    const partialTarget = vmRecoveryTarget(localCgId, 0, 'partial-empty');
+    const partial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [peer, otherPeer], now,
+    ).record;
+    (internals as any).settleVmReconcileRotationAttempt(
+      partialTarget, peer, 'incomplete', [peer, otherPeer], partial,
+    );
+    expect([...partial.attemptedPeerIds]).toEqual([peer]);
+    const partialKey = (internals as any).vmReconcileRotationSlotKey(partialTarget);
+    const emptyPartial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [], now + 1,
+    );
+    expect(emptyPartial.suppressed).toBe(false);
+    expect((internals as any).vmReconcileRotationState.has(partialKey)).toBe(false);
+    const rejoinedPartial = (internals as any).prepareVmReconcileRotationTarget(
+      partialTarget, [peer], now + 2,
+    ).record;
+    expect([...rejoinedPartial.attemptedPeerIds]).toEqual([]);
+    expect([...rejoinedPartial.cleanAbsentPeerIds]).toEqual([]);
+
+    const backoffTarget = vmRecoveryTarget(localCgId, 1, 'backoff-empty');
+    const backoff = (internals as any).prepareVmReconcileRotationTarget(
+      backoffTarget, [peer], now,
+    ).record;
+    (internals as any).settleVmReconcileRotationAttempt(
+      backoffTarget, peer, 'clean-absent', [peer], backoff,
+    );
+    expect(backoff.phase).toBe('backoff');
+    now += 1;
+
+    const resolveCurators = vi.fn();
+    (internals as any).resolveCuratorPeerIdsForCg = resolveCurators;
+    const fetch = vi.fn();
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [backoffTarget], 100, () => true,
+    );
+    expect(result.attemptedOrdinals).toEqual([]);
+    expect(resolveCurators).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect((internals as any).vmReconcileRotationState.get(
+      (internals as any).vmReconcileRotationSlotKey(backoffTarget),
+    )).toBe(backoff);
+  });
+
+  it('does not let an unconfirmed curator roster suppress the next discovery attempt', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmUnconfirmedCuratorBackoff', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/unconfirmed-curator';
+    const ordinaryPeer = '12D3KooWUnconfirmedOrdinary';
+    const target = vmRecoveryTarget(localCgId, 0, 'unconfirmed');
+    const first = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 100, false,
+    );
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], first.record,
+    );
+    expect(first.record).toMatchObject({
+      phase: 'collecting',
+      curatorRosterConfirmed: false,
+    });
+
+    const retry = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 101, false,
+    );
+    expect(retry.suppressed).toBe(false);
+    expect(retry.record).toBe(first.record);
+    expect(retry.record).toMatchObject({
+      phase: 'collecting',
+      curatorRosterConfirmed: false,
+    });
+
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], retry.record,
+    );
+    const confirmed = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 102, true,
+    );
+    expect(confirmed.suppressed).toBe(false);
+    expect(confirmed.record).toBe(retry.record);
+    expect(confirmed.record.curatorRosterConfirmed).toBe(true);
+    expect([...confirmed.record.attemptedPeerIds]).toEqual([]);
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], confirmed.record,
+    );
+    expect((internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 103, true,
+    ).suppressed).toBe(true);
+  });
+
+  it('reprobes retained peers when curator proof arrives with roster growth', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCuratorProofGrowth', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/proof-growth';
+    const ordinaryPeer = '12D3KooWProofGrowthOrdinary';
+    const curatorPeer = '12D3KooWProofGrowthCurator';
+    const target = vmRecoveryTarget(localCgId, 0, 'proof-growth');
+    const unconfirmed = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer], 100, false,
+    );
+    (internals as any).settleVmReconcileRotationAttempt(
+      target, ordinaryPeer, 'clean-absent', [ordinaryPeer], unconfirmed.record,
+    );
+    expect([...unconfirmed.record.cleanAbsentPeerIds]).toEqual([ordinaryPeer]);
+
+    const confirmed = (internals as any).prepareVmReconcileRotationTarget(
+      target, [ordinaryPeer, curatorPeer], 101, true,
+    );
+    expect(confirmed.suppressed).toBe(false);
+    expect(confirmed.record).toBe(unconfirmed.record);
+    expect(confirmed.record.curatorRosterConfirmed).toBe(true);
+    expect([...confirmed.record.candidatePeerIds]).toEqual([ordinaryPeer, curatorPeer]);
+    expect([...confirmed.record.attemptedPeerIds]).toEqual([]);
+    expect([...confirmed.record.cleanAbsentPeerIds]).toEqual([]);
+  });
+
+  it('does not persist incomplete-cycle suppression when curator discovery is unconfirmed', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmUnconfirmedIncompleteBackoff', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/unconfirmed-incomplete';
+    const peer = '12D3KooWUnconfirmedIncomplete';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWUnconfirmedIncompleteLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peer);
+    let curatorResolutions = 0;
+    (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      curatorResolutions += 1;
+      return {
+        peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: true,
+      };
+    };
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let fetches = 0;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      fetches += 1;
+      return {
+        result: {
+          fetchedDataTriples: 50_000, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'unconfirmed-incomplete');
+    (internals as any).reconcileChainOrdinal = async () => ({ status: 'pending', recovery: target });
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
+      phase: 'collecting', curatorRosterConfirmed: false,
+    });
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const suppressed = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(suppressed.attemptedOrdinals).toEqual([]);
+    expect(curatorResolutions).toBe(2);
+    expect(fetches).toBe(1);
+  });
+
+  it('retries curator discovery after an unconfirmed clean-absence cycle', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmCuratorDiscoveryRetry', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/curator-retry';
+    const ordinaryPeer = '12D3KooWCuratorRetryOrdinary';
+    const curatorPeer = '12D3KooWCuratorRetryAuthoritative';
+    const connectedById = new Map([
+      [ordinaryPeer, { toString: () => ordinaryPeer }],
+    ]);
+    (internals as any).node = {
+      peerId: '12D3KooWCuratorRetryLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()]
+          .map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    const resolveCurators = vi.fn()
+      .mockResolvedValueOnce({
+        peerIds: [], curatorIsLocal: false, legacyTripleResolved: false, lookupFailed: true,
+      })
+      .mockResolvedValueOnce({
+        peerIds: [curatorPeer], curatorIsLocal: false,
+        legacyTripleResolved: false, lookupFailed: false,
+      });
+    (internals as any).resolveCuratorPeerIdsForCg = resolveCurators;
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectedById.set(peerId, { toString: () => peerId });
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      const found = peerId === curatorPeer;
+      return {
+        result: {
+          fetchedDataTriples: found ? 1 : 0,
+          fetchedMetaTriples: found ? 8 : 0,
+          insertedTriples: found ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: found ? 'found' : 'clean-absent',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = vi.fn()
+      .mockResolvedValueOnce({ status: 'pending' })
+      .mockResolvedValue({ status: 'reconciled', blockNumber: 100 });
+    const target = vmRecoveryTarget(localCgId, 0, 'curator-retry');
+
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.outcomes.get(0)).toEqual({ status: 'pending' });
+    expect(fetches).toEqual([ordinaryPeer]);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+
+    const second = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(resolveCurators).toHaveBeenCalledTimes(2);
+    expect(fetches).toEqual([ordinaryPeer, curatorPeer]);
+    expect(second.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+  });
+
+  it('ignores stale exact-recovery targets before creating state or fetching', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmStaleTarget', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const fetch = vi.fn();
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    const staleLocal = vmRecoveryTarget('other-context-graph', 0, '82');
+    const staleOnChain = {
+      ...vmRecoveryTarget('current-context-graph', 1, '83'),
+      onChainCgId: '2',
+    };
+
+    const result = await internals.recoverVmReconcileBatch(
+      'current-context-graph', 1n, [staleLocal, staleOnChain], 100, () => true,
+    );
+
+    expect(result.attemptedOrdinals).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it.each(['unsubscribe', 'rebind'])('does not recreate state after %s during curator resolution', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmResolutionInvalidation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/resolution-invalidation';
+    const peer = '12D3KooWResolutionInvalidationPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWResolutionInvalidationLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    let releaseResolution!: () => void;
+    let markResolutionStarted!: () => void;
+    const resolutionStarted = new Promise<void>((resolve) => { markResolutionStarted = resolve; });
+    const resolutionRelease = new Promise<void>((resolve) => { releaseResolution = resolve; });
+    (internals as any).resolveCuratorPeerIdsForCg = async () => {
+      markResolutionStarted();
+      await resolutionRelease;
+      return { peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false };
+    };
+    const connect = recorder(async () => undefined);
+    const fetch = recorder(async () => undefined);
+    (internals as any).ensurePeerConnected = connect;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    let current = true;
+    const target = vmRecoveryTarget(localCgId, 0, 'resolution-invalidation');
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => current,
+    );
+    await resolutionStarted;
+    current = false;
+    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+    releaseResolution();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(connect.calls).toEqual([]);
+    expect(fetch.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('does not recreate state after shutdown during fallback resolution', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmFallbackShutdown', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/fallback-shutdown';
+    const peer = '12D3KooWFallbackShutdownPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWFallbackShutdownLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    let releaseFallback!: () => void;
+    let markFallbackStarted!: () => void;
+    const fallbackStarted = new Promise<void>((resolve) => { markFallbackStarted = resolve; });
+    const fallbackRelease = new Promise<void>((resolve) => { releaseFallback = resolve; });
+    (internals as any).resolvePreferredSyncPeerId = async () => {
+      markFallbackStarted();
+      await fallbackRelease;
+      return peer;
+    };
+    const connect = recorder(async () => undefined);
+    (internals as any).ensurePeerConnected = connect;
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'fallback-shutdown')], 100, () => true,
+    );
+    await fallbackStarted;
+    (internals as any).closeVmReconcileRotationState();
+    releaseFallback();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(connect.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.size).toBe(0);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('keeps a pre-stop exact recovery stale after rotation state reopens', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRestartGeneration', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/restart-generation';
+    const peer = '12D3KooWRestartGenerationPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWRestartGenerationLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    let releaseFallback!: () => void;
+    let markFallbackStarted!: () => void;
+    const fallbackStarted = new Promise<void>((resolve) => { markFallbackStarted = resolve; });
+    const fallbackRelease = new Promise<void>((resolve) => { releaseFallback = resolve; });
+    (internals as any).resolvePreferredSyncPeerId = async () => {
+      markFallbackStarted();
+      await fallbackRelease;
+      return peer;
+    };
+    const connect = recorder(async () => undefined);
+    const fetch = recorder(async () => undefined);
+    (internals as any).ensurePeerConnected = connect;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'restart-generation')], 100, () => true,
+    );
+    await fallbackStarted;
+    const priorGeneration = (internals as any).vmReconcileLifecycleGeneration;
+    (internals as any).closeVmReconcileRotationState();
+    (internals as any).openVmReconcileRotationState();
+    expect((internals as any).vmReconcileRotationClosed).toBe(false);
+    expect((internals as any).vmReconcileLifecycleGeneration).toBe(priorGeneration + 1);
+    releaseFallback();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(connect.calls).toEqual([]);
+    expect(fetch.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.size).toBe(0);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('does not recreate state after a rebind while dialing the curator', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmDialInvalidation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/dial-invalidation';
+    const peer = '12D3KooWDialInvalidationPeer';
+    (internals as any).node = {
+      peerId: '12D3KooWDialInvalidationLocal',
+      libp2p: { getConnections: () => [] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    let releaseDial!: () => void;
+    let markDialStarted!: () => void;
+    const dialStarted = new Promise<void>((resolve) => { markDialStarted = resolve; });
+    const dialRelease = new Promise<void>((resolve) => { releaseDial = resolve; });
+    (internals as any).ensurePeerConnected = async () => {
+      markDialStarted();
+      await dialRelease;
+    };
+    const fetch = recorder(async () => undefined);
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+    let current = true;
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'dial-invalidation')], 100, () => current,
+    );
+    await dialStarted;
+    current = false;
+    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+    releaseDial();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(fetch.calls).toEqual([]);
+    expect((internals as any).vmReconcileCuratorPeersByCg.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it.each(['protocol', 'admission'] as const)(
+    'does not start stale transport after invalidation during the %s wait',
+    async (stage) => {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'ExactVmBoundaryInvalidation', chainAdapter: chain });
+      const internals = agent as unknown as AgentInternals;
+      const localCgId = `0x0000000000000000000000000000000000000001/${stage}-invalidation`;
+      const peer = `12D3KooW${stage}InvalidationPeer`;
+      const connectedPeer = { toString: () => peer };
+      (internals as any).node = {
+        peerId: '12D3KooWBoundaryInvalidationLocal',
+        libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+      };
+      (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+        peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+      });
+      (internals as any).ensurePeerConnected = async () => undefined;
+      (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+      let releaseBoundary!: () => void;
+      let markBoundaryStarted!: () => void;
+      const boundaryStarted = new Promise<void>((resolve) => { markBoundaryStarted = resolve; });
+      const boundaryRelease = new Promise<void>((resolve) => { releaseBoundary = resolve; });
+      (internals as any).waitForSyncProtocol = async () => {
+        if (stage === 'protocol') {
+          markBoundaryStarted();
+          await boundaryRelease;
+        }
+        return true;
+      };
+      (internals as any).ensurePeerAdmittedForRecovery = async () => {
+        if (stage === 'admission') {
+          markBoundaryStarted();
+          await boundaryRelease;
+        }
+        return true;
+      };
+      const fetch = vi.fn();
+      (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = fetch;
+      let current = true;
+      const target = vmRecoveryTarget(localCgId, 0, `${stage}-invalidation`);
+      const recovery = internals.recoverVmReconcileBatch(
+        localCgId, 1n, [target], 100, () => current,
+      );
+      await boundaryStarted;
+      current = false;
+      (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+      releaseBoundary();
+
+      await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+      expect(fetch).not.toHaveBeenCalled();
+      expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
+      expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    },
+  );
+
+  it('does not restore cooldown after invalidation during exact transport', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmTransportInvalidation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/transport-invalidation';
+    const peer = '12D3KooWTransportInvalidationPeer';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWTransportInvalidationLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let releaseFetch!: () => void;
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
+    const fetchRelease = new Promise<void>((resolve) => { releaseFetch = resolve; });
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      markFetchStarted();
+      await fetchRelease;
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'clean-absent',
+      };
+    };
+    const reconcile = vi.fn();
+    (internals as any).reconcileChainOrdinal = reconcile;
+    let current = true;
+    const target = vmRecoveryTarget(localCgId, 0, 'transport-invalidation');
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => current,
+    );
+    await fetchStarted;
+    current = false;
+    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
+    releaseFetch();
+
+    await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
+    expect(reconcile).not.toHaveBeenCalled();
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+  });
+
+  it('does not resurrect a rotation record evicted while the exact request is pending', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLateEviction', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peer = '12D3KooWLateEvictionPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/late-eviction';
+    const connectedPeer = { toString: () => peer };
+    (internals as any).node = {
+      peerId: '12D3KooWLateEvictionLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let releaseFetch!: () => void;
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => { markFetchStarted = resolve; });
+    const fetchRelease = new Promise<void>((resolve) => { releaseFetch = resolve; });
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      markFetchStarted();
+      await fetchRelease;
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 0, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, '73');
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending', recovery: target,
+    });
+
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    await fetchStarted;
+    const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(true);
+    (internals as any).vmReconcileRotationState.delete(slotKey);
+    releaseFetch();
+    await recovery;
+
+    expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+  });
+
+  it('clears the fetch cooldown after a productive exact batch so the next slice proceeds', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmBatchProductive', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peer = '12D3KooWExactProductivePeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-productive';
+    const connected = [{ toString: () => peer }];
+    (internals as any).node = {
+      peerId: '12D3KooWExactProductiveLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).preferredSyncPeers.set(localCgId, peer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    let fetchCount = 0;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      fetchCount += 1;
+      return {
+        result: {
+          fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'found',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled',
+      blockNumber: 100,
+    });
+    const target = vmRecoveryTarget(localCgId, 0, '7');
+
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(fetchCount).toBe(1);
+
+    // Progress cleared the cooldown: the trailing hasMore slice fetches now.
+    await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
+    expect(fetchCount).toBe(2);
+  });
+
+  it('never sends an exact request to a peer the network-admission boundary rejects', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmAdmissionGate', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const rejectedPeer = '12D3KooWExactRejectedPeer';
+    const admittedPeer = '12D3KooWExactAdmittedPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-admission';
+    const connected = [rejectedPeer, admittedPeer].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactAdmissionLocalPeer',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    // The curator hint points at the peer the admission boundary rejects — a
+    // hint must never bypass the identity gate.
+    (internals as any).preferredSyncPeers.set(localCgId, rejectedPeer);
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [rejectedPeer], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).networkAdmissionCoordinator = {
+      isAcceptedPeer: (peerId: string) => peerId === admittedPeer,
+      isRejectedPeer: (peerId: string) => peerId === rejectedPeer,
+      ensureAdmitted: async () => false,
+    };
+    const fetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      fetches.push(peerId);
+      return {
+        result: {
+          fetchedDataTriples: 1, fetchedMetaTriples: 8, insertedTriples: 9,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'found',
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled',
+      blockNumber: 100,
+    });
+    const target = vmRecoveryTarget(localCgId, 0, '7');
+
+    const first = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+    expect(first.attemptedOrdinals).toEqual([0]);
+    expect(fetches).toEqual([]);
+    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true,
+    );
+
+    expect(fetches).toEqual([admittedPeer]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.attemptedOrdinals).toEqual([0]);
+  });
+
+  it('propagates lifecycle cancellation into an in-flight exact recovery', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLifecycleAbort', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerId = '12D3KooWExactLifecycleAbortPeer';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-abort';
+    const remotePeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWExactLifecycleAbortLocal',
+      libp2p: { getConnections: () => [{ remotePeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerId], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    let receivedSignal: AbortSignal | undefined;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      _cgId: string,
+      _uals: string[],
+      options: { signal?: AbortSignal },
+    ) => {
+      receivedSignal = options.signal;
+      markEntered();
+      await new Promise<void>((_resolve, reject) => {
+        const onAbort = () => reject(new DOMException('aborted', 'AbortError'));
+        if (options.signal?.aborted) onAbort();
+        else options.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+      throw new Error('unreachable');
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'exact-abort');
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'pending', recovery: target,
+    });
+    const controller = new AbortController();
+
+    const recovery = internals.recoverVmReconcileBatch(
+      localCgId, 1n, [target], 100, () => true, controller.signal,
+    );
+    await entered;
+    controller.abort();
+
+    await expect(recovery).resolves.toMatchObject({ outcomes: new Map() });
+    expect(receivedSignal).toBe(controller.signal);
+  });
+
+  it('keeps the main VM slice ahead of repair and abandons a rebind during repair', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillHealBindingFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'heal-binding-fence';
+    const sub = {
+      subscribed: true,
+      onChainId: '321',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, sub);
+    let releaseHeal!: () => void;
+    let markHealStarted!: () => void;
+    const healStarted = new Promise<void>((resolve) => { markHealStarted = resolve; });
+    const healRelease = new Promise<void>((resolve) => { releaseHeal = resolve; });
+    (internals as any).healStrandedScopedKCs = async () => {
+      markHealStarted();
+      await healRelease;
+    };
+    const getCount = vi.fn(async () => 0n);
+    chain.getContextGraphKCCount = getCount;
+
+    const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await healStarted;
+    sub.onChainId = '322';
+    releaseHeal();
+
+    await expect(reconcile).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+    // The primary reconcile must complete its useful bounded slice before the
+    // best-effort repair begins; the post-repair binding fence still rejects a
+    // stale continuation after the same subscription object is rebound.
+    expect(getCount).toHaveBeenCalledOnce();
+    expect(getCount).toHaveBeenCalledWith(321n);
+    expect(sub.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('retires an aborted reconcile even when stranded-KC repair ignores cancellation', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillHealAbortRace', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'heal-abort-race';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      onChainId: '323',
+      lastReconciledOrdinal: 0,
+    });
+    let markHealStarted!: () => void;
+    const healStarted = new Promise<void>((resolve) => { markHealStarted = resolve; });
+    let healCalls = 0;
+    (internals as any).healStrandedScopedKCs = async () => {
+      healCalls += 1;
+      if (healCalls === 1) {
+        markHealStarted();
+        await new Promise<void>(() => undefined);
+      }
+    };
+    chain.getContextGraphKCCount = async () => 0n;
+
+    const abandoned = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await healStarted;
+    (internals as any).closeVmReconcileRotationState();
+    await expect(abandoned).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+
+    (internals as any).openVmReconcileRotationState();
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .resolves.toMatchObject({ status: 'current' });
+    expect(healCalls).toBe(2);
+  });
+
+  it('keeps watermark persistence inside the tracked physical reconcile', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkDrain', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-drain';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      onChainId: '324',
+      lastReconciledOrdinal: 0,
+    });
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    let markPersistStarted!: () => void;
+    const persistStarted = new Promise<void>((resolve) => { markPersistStarted = resolve; });
+    let releasePersist!: () => void;
+    const persistGate = new Promise<void>((resolve) => { releasePersist = resolve; });
+    (internals as any).persistVmReconcileWatermark = async () => {
+      markPersistStarted();
+      await persistGate;
+    };
+
+    const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await persistStarted;
+    expect((internals as any).vmReconcilePhysicalRuns.size).toBe(1);
+    let settled = false;
+    void reconcile.finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    releasePersist();
+    await expect(reconcile).resolves.toMatchObject({ watermarkAfter: 1 });
+    expect((internals as any).vmReconcilePhysicalRuns.size).toBe(0);
+  });
+
+  it('does not expose an advanced watermark when its durable save fails', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkSaveFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-save-failure';
+    const subscription = {
+      subscribed: true,
+      onChainId: '325',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    (internals as any).persistVmReconcileWatermark = async () => {
+      throw new Error('subscription store unavailable');
+    };
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .rejects.toThrow('subscription store unavailable');
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(0);
+  });
+
+  it('flushes reconcile materialization before strictly saving its watermark', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkFlushOrder', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-flush-order';
+    const subscription = {
+      subscribed: true,
+      onChainId: '326',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    const durabilityOrder: string[] = [];
+    internals.store.flush = async () => { durabilityOrder.push('flush'); };
+    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+      durabilityOrder.push('save');
+    };
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .resolves.toMatchObject({ watermarkAfter: 1 });
+    expect(durabilityOrder).toEqual(['flush', 'save']);
+    expect(subscription.lastReconciledOrdinal).toBe(1);
+  });
+
+  it('flushes reconcile materialization while confirmation depth holds the watermark', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillHeldWatermarkFlush', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'held-watermark-flush';
+    const subscription = {
+      subscribed: true,
+      onChainId: '330',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    chain.getBlockNumber = async () => 100;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    const flush = vi.fn(async () => undefined);
+    internals.store.flush = flush;
+    const persistStrict = vi.fn(async () => undefined);
+    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .resolves.toMatchObject({ watermarkAfter: 0, reconciledOrdinals: 1 });
+    expect(flush).toHaveBeenCalledOnce();
+    expect(persistStrict).not.toHaveBeenCalled();
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('does not save or expose a watermark when reconcile materialization flush fails', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkFlushFailure', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-flush-failure';
+    const subscription = {
+      subscribed: true,
+      onChainId: '327',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    internals.store.flush = async () => { throw new Error('triple-store flush failed'); };
+    const persistStrict = vi.fn(async () => undefined);
+    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+
+    await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
+      .rejects.toThrow('triple-store flush failed');
+    expect(persistStrict).not.toHaveBeenCalled();
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(0);
+  });
+
+  it('fences a watermark save continuation across a same-object binding ABA', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillWatermarkBindingAba', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'watermark-binding-aba';
+    const subscription = {
+      subscribed: true,
+      onChainId: '328',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    chain.getContextGraphKCCount = async () => 1n;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+    internals.store.flush = async () => undefined;
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+      markSaveStarted();
+      await saveGate;
+    };
+
+    const reconcile = (internals as any).executeVmReconcileForCg(localCgId, 'manual');
+    await saveStarted;
+    const originalCursor = (internals as any).reconcileCursors.get(localCgId);
+    (internals as any).bindSubscriptionOnChainId(localCgId, subscription, '329');
+    (internals as any).bindSubscriptionOnChainId(localCgId, subscription, '328');
+    (internals as any).reconcileCursors.set(localCgId, originalCursor);
+    releaseSave();
+
+    await expect(reconcile).rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+    expect(subscription.onChainId).toBe('328');
+    expect(subscription.lastReconciledOrdinal).toBe(0);
+    expect(originalCursor.watermark).toBe(0);
   });
 
   it('reports a durable watermark ahead of the chain head without ordinal work', async () => {

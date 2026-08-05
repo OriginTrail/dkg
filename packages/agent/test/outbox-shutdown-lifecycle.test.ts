@@ -2,9 +2,61 @@ import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { VmReconcileDispatcher } from '../src/chain-reconciler.js';
-import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
+import { FinalizationRuntime } from '../src/finalization-runtime.js';
+import {
+  ContextGraphMembershipPersistScheduler,
+  ContextGraphMembershipPersistShutdownTimeoutError,
+} from '../src/context-graph-membership-persist-scheduler.js';
+import {
+  VmReconcileQueueClosedError,
+  VmReconcileShutdownTimeoutError,
+} from '../src/vm-reconcile-service.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
+  it('closes and drains membership persistence before network and store teardown', async () => {
+    const membershipPersistence = new ContextGraphMembershipPersistScheduler();
+    let releaseWrite!: () => void;
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const write = membershipPersistence.enqueue('cg\0node\0peer', async () => {
+      markWriteStarted();
+      await writeGate;
+    });
+    await writeStarted;
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      contextGraphMembershipPersistence: membershipPersistence,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await Promise.resolve();
+    expect(stopNode).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    releaseWrite();
+    await Promise.all([write, stopping]);
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
   it('closes reconcile admission and cancels queued jobs before store teardown', async () => {
     let releaseActive!: () => void;
     let queuedStarted = false;
@@ -22,7 +74,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const agent = Object.create(DKGAgent.prototype) as any;
     Object.assign(agent, {
       started: true,
-      chainPoller: null,
+      chainPoller: {
+        stop: vi.fn(async () => {
+          expect(agent.vmReconcileRotationClosed).toBe(true);
+        }),
+      },
       vmReconcileDispatcher: dispatcher,
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
@@ -34,6 +90,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
       node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
     });
@@ -53,15 +110,17 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     expect(closeStore).toHaveBeenCalledOnce();
   });
 
-  it('continues shutdown after the bounded reconcile drain timeout', async () => {
+  it('quarantines the instance after the bounded reconcile drain timeout', async () => {
     const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
     Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
       configurable: true,
       value: 1,
     });
     try {
+      let release!: () => void;
+      const activeGate = new Promise<void>((resolve) => { release = resolve; });
       const dispatcher = new VmReconcileDispatcher(
-        async () => new Promise<void>(() => undefined),
+        async () => activeGate,
         () => undefined,
       );
       void dispatcher.triggerManual('stuck');
@@ -85,19 +144,232 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         inFlightSubstrateFanOutCount: () => 0,
         router: { closePooling: vi.fn(async () => {}) },
         node: { stop: stopNode },
+        chain: { chainId: 'none' },
+        finalizationRuntime: new FinalizationRuntime(),
         store: { close: closeStore },
         log: { warn },
       });
 
-      await expect(agent.stop()).resolves.toBeUndefined();
+      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
 
-      expect(stopNode).toHaveBeenCalledOnce();
-      expect(closeStore).toHaveBeenCalledOnce();
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
       expect(warn).toHaveBeenCalledWith(
         expect.anything(),
-        expect.stringContaining('1 VM reconcile job(s) still active after 1ms drain bound'),
+        expect.stringContaining('store/network teardown is blocked until stop() is retried'),
       );
+
+      // Even after physical retirement, start remains blocked until a second
+      // stop finishes the deliberately incomplete teardown.
+      await expect(agent.start()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+
+      release();
+      await agent.vmReconcileRetirement;
+      await expect(agent.start()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      await expect(agent.stop()).resolves.toBeUndefined();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+      expect(agent.started).toBe(false);
     } finally {
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('quarantines start and backing-store teardown after membership persistence times out', async () => {
+    const originalTimeout = DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const membershipPersistence = new ContextGraphMembershipPersistScheduler();
+    void membershipPersistence.enqueue('stuck', async () => gate);
+    await Promise.resolve();
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      contextGraphMembershipPersistence: membershipPersistence,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      chain: { chainId: 'none' },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      await expect(agent.stop()).rejects.toBeInstanceOf(
+        ContextGraphMembershipPersistShutdownTimeoutError,
+      );
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+      await expect(agent.start()).rejects.toBeInstanceOf(
+        ContextGraphMembershipPersistShutdownTimeoutError,
+      );
+
+      release();
+      await membershipPersistence.closeAndDrain();
+      await expect(agent.start()).rejects.toBeInstanceOf(
+        ContextGraphMembershipPersistShutdownTimeoutError,
+      );
+      await expect(agent.stop()).resolves.toBeUndefined();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+      expect(agent.started).toBe(false);
+    } finally {
+      release();
+      Object.defineProperty(DKGAgentBase, 'CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('drains physically active VM reconciliation before closing the store', async () => {
+    const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    let release!: () => void;
+    const physical = new Promise<void>((resolve) => { release = resolve; });
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      vmReconcilePhysicalRuns: new Set([physical]),
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+
+      release();
+      await agent.vmReconcileRetirement;
+      await agent.stop();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+    } finally {
+      release();
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+    }
+  });
+
+  it('drains an entered ordinary graph-scoped commit before closing the store', async () => {
+    let release!: () => void;
+    const physicalCommit = new Promise<void>((resolve) => { release = resolve; });
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      graphScopedStorePhysicalRuns: new Set([physicalCommit]),
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await Promise.resolve();
+    expect(stopNode).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    release();
+    await stopping;
+    expect(stopNode).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('bounds chain-poller retirement before network and store teardown', async () => {
+    const originalTimeout = DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
+      configurable: true,
+      value: 1,
+    });
+    let release!: () => void;
+    const pollerDrain = new Promise<void>((resolve) => { release = resolve; });
+    const chainPoller = { stop: vi.fn(() => pollerDrain) };
+    const closeStore = vi.fn(async () => {});
+    const stopNode = vi.fn(async () => {});
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: { close: closeStore },
+      log: { warn: vi.fn() },
+    });
+
+    try {
+      await expect(agent.stop()).rejects.toBeInstanceOf(VmReconcileShutdownTimeoutError);
+      expect(chainPoller.stop).toHaveBeenCalledOnce();
+      expect(agent.chainPoller).toBe(chainPoller);
+      expect(stopNode).not.toHaveBeenCalled();
+      expect(closeStore).not.toHaveBeenCalled();
+
+      release();
+      await agent.vmReconcileRetirement;
+      expect(agent.chainPoller).toBeNull();
+      await agent.stop();
+      expect(stopNode).toHaveBeenCalledOnce();
+      expect(closeStore).toHaveBeenCalledOnce();
+    } finally {
+      release();
       Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_SHUTDOWN_TIMEOUT_MS', {
         configurable: true,
         value: originalTimeout,
@@ -124,6 +396,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
       node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
       store: { close: vi.fn(async () => {}) },
       log: { warn: vi.fn() },
     });
@@ -157,6 +430,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
       node: { stop: stopNode },
+      finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn },
     });

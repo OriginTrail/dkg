@@ -88,6 +88,15 @@ export interface V10ACKProviderBaseParams {
   merkleLeafCount: number;
   /** Canonical KA UAL used by receiver-side lifecycle logs. */
   assetUal?: string;
+  /** Complete rootless-KA content envelope; omitted together for legacy ACKs. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
 }
 
 export type V10ACKProviderParams =
@@ -177,6 +186,13 @@ export type V10UpdateACKProvider = (params: {
   /** Source SWM graph id (defaults to contextGraphId). */
   swmGraphId?: string;
   subGraphName?: string;
+  /** Complete rootless-KA envelope; omitted together for legacy updates. */
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
 }) => Promise<V10CoreNodeACK[]>;
 
 /**
@@ -191,6 +207,22 @@ export interface PublishOptions {
   contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
+  /**
+   * Content-scope discriminator for the rootless KA model. Supplying any of
+   * the graph-scope fields requires version 2; legacy root-scoped KAs are
+   * deliberately read-only and cannot enter publish/update mutation paths.
+   */
+  contentScopeVersion?: number;
+  /** Canonical deterministic `did:dkg:<chain>/<author>/<number>` identity. */
+  kaUal?: string;
+  /** One-based assertion/Merkle-root version for this exact KA graph. */
+  assertionVersion?: string | number | bigint;
+  /** Exact public triple count committed by the graph-scoped envelope. */
+  publicTripleCount?: number;
+  /** Optional expected single KA-level private commitment. */
+  privateMerkleRoot?: Uint8Array;
+  /** Exact private triple count committed by `privateMerkleRoot`. */
+  privateTripleCount?: number;
   /** Publisher peer ID used for KC ownership/access metadata. */
   publisherPeerId?: string;
   /** KC-level private access policy metadata. */
@@ -245,9 +277,11 @@ export interface PublishOptions {
    */
   onChainContextGraphId?: string | bigint;
   /**
-   * Internal/private-CG catalog path: exact generated catalog triples that ride
-   * in the KC Merkle root but are not user KA manifest roots. Public callers
-   * should not set this for arbitrary metadata.
+   * Internal/private-CG catalog capability: the exact deterministic floor keys.
+   * Legacy publishes use them to recognize combined-model catalog rows. V2
+   * graph-scoped publishes use them to derive a detached catalog commitment;
+   * the generated floor is never appended to the atomic KA graph or KC root.
+   * Public callers must not set this for arbitrary metadata.
    */
   trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
   /**
@@ -434,6 +468,15 @@ export interface PublishResult {
   v10Origin?: boolean;
   /** Sub-graph the data was published into (for gossip propagation). */
   subGraphName?: string;
+  /** Complete rootless-KA content envelope; omitted together for legacy results. */
+  contentScopeVersion?: number;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateMerkleRoot?: Uint8Array;
+  privateTripleCount?: number;
+  /** Effective access envelope persisted for graph-scoped KAs. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
 }
 
 export interface Publisher {

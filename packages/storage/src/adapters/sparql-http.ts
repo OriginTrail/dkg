@@ -41,44 +41,26 @@ import {
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
-import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import {
+  buildAtomicGraphAndSubjectReplaceUpdate,
+  buildAtomicGraphReplaceUpdate,
+  buildAtomicSubjectReplaceUpdate,
+  isAtomicGraphReplaceStagingGraph,
+} from '../atomic-graph-replace.js';
+import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
+import { readResponseTextBounded } from '../http-response-limit.js';
+import {
+  assertQuadLiteralsMutf8Safe,
+  classifySparqlOperation,
+  getMetrics,
+  JAVA_WRITE_UTF_MAX_BYTES,
+} from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-
-function composeAbortSignals(
-  primary: AbortSignal | undefined,
-  secondary: AbortSignal | undefined,
-): AbortSignal | undefined {
-  if (!primary) return secondary;
-  if (!secondary) return primary;
-  const AnyImpl = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  if (AnyImpl) return AnyImpl([primary, secondary]);
-  const combined = new AbortController();
-  let settled = false;
-  const cleanup = () => {
-    primary.removeEventListener('abort', forwardPrimary);
-    secondary.removeEventListener('abort', forwardSecondary);
-  };
-  const forwardPrimary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    combined.abort(primary.reason);
-  };
-  const forwardSecondary = () => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    combined.abort(secondary.reason);
-  };
-  if (primary.aborted) combined.abort(primary.reason);
-  else if (secondary.aborted) combined.abort(secondary.reason);
-  else {
-    primary.addEventListener('abort', forwardPrimary, { once: true });
-    secondary.addEventListener('abort', forwardSecondary, { once: true });
-  }
-  return combined.signal;
-}
+import {
+  AbortableStoreWorkLifecycle,
+  composeAbortSignals,
+} from '../abortable-store-work-lifecycle.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -142,6 +124,15 @@ export interface SparqlHttpStoreOptions {
    * index/revalidation owner.
    */
   managedByDkg?: boolean;
+  /**
+   * Declare that the endpoint executes a whole multi-operation SPARQL Update
+   * request as one transaction (SPARQL 1.1 only RECOMMENDS this). Required for
+   * `replaceGraph`: without it the staged DROP/INSERT/MOVE could be applied
+   * partially, violating the old-graph-or-new-graph contract, so the
+   * capability fails closed. Daemon-owned endpoints (`managedByDkg`) are
+   * oxigraph-server, which is known transactional, and imply this flag.
+   */
+  atomicUpdates?: boolean;
   /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
   slowQueryThresholdMs?: number;
   /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
@@ -163,11 +154,13 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
+  private readonly atomicUpdates: boolean;
 
   private readonly now: () => number;
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
+  private readonly workLifecycle = new AbortableStoreWorkLifecycle();
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -185,6 +178,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
     this.managedByDkg = options.managedByDkg === true;
+    this.atomicUpdates = options.atomicUpdates === true || this.managedByDkg;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -207,13 +201,16 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWork<T>(
     operation: string,
     options: QueryOptions | undefined,
-    work: () => Promise<T>,
+    work: (signal: AbortSignal | undefined) => Promise<T>,
   ): Promise<T> {
-    return externalStorePriorityScheduler.run(
-      options?.priority,
-      options?.source ?? `sparql-http.${operation}`,
-      work,
+    return this.workLifecycle.run(
       options?.signal,
+      (signal) => externalStorePriorityScheduler.run(
+        options?.priority,
+        options?.source ?? `sparql-http.${operation}`,
+        () => work(signal),
+        signal,
+      ),
     );
   }
 
@@ -226,7 +223,12 @@ export class SparqlHttpStore implements TripleStore {
     return this.writeGen.getWriteGen(graphPrefix);
   }
 
-  private async postQuery(sparql: string, accept: string, options?: SparqlHttpQueryOptions): Promise<Response> {
+  private async postQuery<T>(
+    sparql: string,
+    accept: string,
+    options: SparqlHttpQueryOptions | undefined,
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -239,36 +241,71 @@ export class SparqlHttpStore implements TripleStore {
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
-    const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
-    const res = await fetch(this.queryEndpoint, {
-      method: 'POST',
-      headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
-      body: sparql,
-      signal,
-    });
-    return res;
+    const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
+    const signal = signalScope.signal ?? timeoutSignal;
+    try {
+      const response = await fetch(this.queryEndpoint, {
+        method: 'POST',
+        headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
+        body: sparql,
+        signal,
+      });
+      // Keep the composed caller/deadline signal linked until the response body
+      // has settled. A fetch promise may resolve as soon as headers arrive,
+      // while JSON/N-Quads parsing is still holding the scheduler admission.
+      return await consume(response);
+    } catch (error) {
+      if (signal.aborted) {
+        getMetrics().storeCancellationCompletedTotal.add(1, {
+          operation: 'query',
+          source: options?.source ?? 'sparql-http.query',
+        });
+      }
+      throw error;
+    } finally {
+      signalScope.dispose();
+    }
   }
 
   private async postUpdate(
     update: string,
     options?: QueryOptions,
     operation = 'update',
-  ): Promise<Response> {
+  ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
-    return this.runStoreWork(operation, options, async () => {
+    return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
-      const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
+      const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
+      const signal = signalScope.signal ?? timeoutSignal;
       // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
-      return fetch(this.updateEndpoint, {
-        method: 'POST',
-        headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
-        body: update,
-        signal,
-      });
+      try {
+        const res = await fetch(this.updateEndpoint, {
+          method: 'POST',
+          headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
+          body: update,
+          signal,
+        });
+        if (!res.ok) {
+          // Keep scheduler admission until the response body has settled too;
+          // otherwise retries can dispatch while an error body is unwinding.
+          const text = await res.text().catch(() => '');
+          throw new Error(`SPARQL HTTP ${operation} failed (${res.status}): ${text.slice(0, 300)}`);
+        }
+      } catch (error) {
+        if (signal.aborted) {
+          getMetrics().storeCancellationCompletedTotal.add(1, {
+            operation,
+            source: options?.source ?? `sparql-http.${operation}`,
+          });
+        }
+        throw error;
+      } finally {
+        signalScope.dispose();
+      }
     });
   }
 
@@ -294,14 +331,10 @@ export class SparqlHttpStore implements TripleStore {
       }
     }
     const update = `INSERT DATA {\n  ${parts.join('\n  ')}\n}`;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.insert',
     }, 'insert');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP insert failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites(byGraph.keys());
   }
@@ -317,14 +350,10 @@ export class SparqlHttpStore implements TripleStore {
     // structure over the SPARQL protocol. See the helper for details.
     const update = buildBlankNodeSafeDelete(quads);
     if (!update) return;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.delete',
     }, 'delete');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP delete failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
   }
@@ -347,14 +376,10 @@ export class SparqlHttpStore implements TripleStore {
       // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
       update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
     }
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern',
     }, 'deleteByPattern');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP deleteByPattern failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     if (graphUri) this.writeGen.recordGraphWrites([graphUri]);
     else this.writeGen.recordUnscopedWrite();
@@ -372,14 +397,10 @@ export class SparqlHttpStore implements TripleStore {
     });
     const escapedPrefix = escapeString(prefix);
     const update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapedPrefix}")) } }`;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
     }, 'deleteBySubjectPrefix');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP deleteBySubjectPrefix failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
     const after = await this.countQuads(graphUri, {
@@ -395,54 +416,176 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    const res = await this.postUpdate(sparql, {
+    await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
     }, 'update');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP update failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     // `touchedGraphs` hints only membership changes, not every graph whose
     // CONTENT a raw UPDATE mutates — an unscoped bump is the only sound scope.
     this.writeGen.recordUnscopedWrite();
   }
 
+  async replaceGraph(
+    graphUri: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      // A generic SPARQL endpoint may apply the staged DROP/INSERT/MOVE
+      // operations non-transactionally, which can strand the target graph in a
+      // partial state — the one outcome replaceGraph must never produce. Fail
+      // closed (before any request) so callers take their non-atomic fallback.
+      throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'SparqlHttpStore');
+    }
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceGraph',
+    });
+    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    const execute = async (update: string, source: string): Promise<void> => {
+      await this.postUpdate(update, { ...options, source }, 'replaceGraph');
+    };
+    try {
+      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraph');
+    } catch (error) {
+      if (plan.cleanup) {
+        await execute(plan.cleanup, 'sparql-http.replaceGraph.cleanup').catch(() => undefined);
+      }
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: DKGQuad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      throw new UnsupportedTripleStoreCapabilityError(
+        'replaceGraphAndSubject',
+        'SparqlHttpStore',
+      );
+    }
+    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceGraphAndSubject',
+    });
+    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
+    const execute = async (update: string, source: string): Promise<void> => {
+      await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
+    };
+    try {
+      await execute(plan.update, options?.source ?? 'sparql-http.replaceGraphAndSubject');
+    } catch (error) {
+      await execute(plan.cleanup, 'sparql-http.replaceGraphAndSubject.cleanup').catch(() => undefined);
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri, metaGraphUri]);
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    if (!this.atomicUpdates) {
+      // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
+      // operations, re-exposing the transient-empty subject. Fail closed before
+      // any request so callers take their non-atomic delete-then-insert fallback.
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
+    }
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'SparqlHttpStore.replaceSubject',
+    });
+    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    try {
+      await this.postUpdate(
+        update,
+        { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
+        'replaceSubject',
+      );
+    } catch (error) {
+      // Indeterminate remote failure: a timeout / lost response can occur AFTER
+      // the endpoint committed the DELETE/INSERT (which may have added the graph's
+      // first row or removed its last). Invalidate the graph-list cache before
+      // rethrowing so a direct managed caller never serves stale membership —
+      // mirrors replaceGraph / replaceGraphAndSubject.
+      this.invalidateListGraphsCache();
+      throw error;
+    }
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites([graphUri]);
+  }
+
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    return this.runStoreWork('query', options, async () => {
+    return this.runStoreWork('query', options, async (lifecycleSignal) => {
+      const effectiveOptions: SparqlHttpQueryOptions = {
+        ...options,
+        signal: lifecycleSignal,
+      };
       const startedAt = this.now();
-      throwIfAborted(options?.signal);
+      throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
       const isAsk = upper.startsWith('ASK');
       const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
-      const operation = inferQueryOperation(trimmed);
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, options);
+          return await this.queryConstruct(trimmed, effectiveOptions);
         }
 
-        const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
-        if (!res.ok) {
-          const text = await res.text().catch(() => '');
-          throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
-        }
+        return await this.postQuery(
+          trimmed,
+          'application/sparql-results+json',
+          effectiveOptions,
+          async (res) => {
+            if (!res.ok) {
+              const text = await (effectiveOptions.maxResponseBytes === undefined
+                ? res.text()
+                : readResponseTextBounded(res, effectiveOptions.maxResponseBytes)
+              ).catch(() => '');
+              throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
+            }
 
-        const json = (await res.json()) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
+            const json = effectiveOptions.maxResponseBytes === undefined
+              ? await res.json() as AdapterSparqlJsonSelectResponse | W3CAskResponse
+              : JSON.parse(
+                  await readResponseTextBounded(res, effectiveOptions.maxResponseBytes),
+                ) as AdapterSparqlJsonSelectResponse | W3CAskResponse;
 
-        if (isAsk || 'boolean' in json) {
-          return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
-        }
+            if (isAsk || 'boolean' in json) {
+              return {
+                type: 'boolean',
+                value: (json as W3CAskResponse).boolean,
+              } satisfies AskResult;
+            }
 
-        const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
-        return { type: 'bindings', bindings } satisfies SelectResult;
+            const bindings = formatSparqlJsonBindings(json as AdapterSparqlJsonSelectResponse);
+            return { type: 'bindings', bindings } satisfies SelectResult;
+          },
+        );
       } finally {
         this.maybeEmitSlowQuery({
           sparql: trimmed,
           source: options?.source,
-          operation,
           startedAt,
         });
       }
@@ -450,14 +593,25 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
-    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', options);
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-    const text = await res.text();
-    const quads = parseNQuadsText(text);
-    return { type: 'quads', quads };
+    return this.postQuery(
+      sparql,
+      'application/n-quads, text/n-quads',
+      options,
+      async (res) => {
+        if (!res.ok) {
+          const text = await (options?.maxResponseBytes === undefined
+            ? res.text()
+            : readResponseTextBounded(res, options.maxResponseBytes)
+          ).catch(() => '');
+          throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
+        }
+        const text = options?.maxResponseBytes === undefined
+          ? await res.text()
+          : await readResponseTextBounded(res, options.maxResponseBytes);
+        const quads = parseNQuadsText(text);
+        return { type: 'quads', quads };
+      },
+    );
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -474,14 +628,10 @@ export class SparqlHttpStore implements TripleStore {
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     const update = `DROP SILENT GRAPH <${escapeUri(graphUri)}>`;
-    const res = await this.postUpdate(update, {
+    await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.dropGraph',
     }, 'dropGraph');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP dropGraph failed (${res.status}): ${text.slice(0, 300)}`);
-    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
   }
@@ -513,7 +663,11 @@ export class SparqlHttpStore implements TripleStore {
       NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
       { ...options, source: options?.source ?? 'sparql-http.listGraphs' },
     );
-    return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
+    return r.type === 'bindings'
+      ? r.bindings
+          .map((b) => b.g)
+          .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph))
+      : [];
   }
 
   private refreshListGraphsCache(options?: QueryOptions): Promise<string[]> {
@@ -561,7 +715,6 @@ export class SparqlHttpStore implements TripleStore {
   private maybeEmitSlowQuery(input: {
     sparql: string;
     source?: string;
-    operation: SparqlHttpSlowQueryEvent['operation'];
     startedAt: number;
   }): void {
     if (this.slowQueryThresholdMs <= 0 || this.slowQuerySampleRate <= 0) return;
@@ -571,7 +724,9 @@ export class SparqlHttpStore implements TripleStore {
 
     const event: SparqlHttpSlowQueryEvent = {
       source: normalizeQuerySource(input.source),
-      operation: input.operation,
+      // Classification scans the complete query. Keep it behind the same
+      // threshold/sample gates as hashing so normal reads pay no telemetry cost.
+      operation: inferQueryOperation(input.sparql),
       elapsedMs,
       thresholdMs: this.slowQueryThresholdMs,
       endpoint: sanitizeEndpointForTelemetry(this.queryEndpoint),
@@ -596,7 +751,11 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    // Remote service — nothing to close.
+    // A managed endpoint is stopped immediately after store.close(). The
+    // lifecycle owns one complete generation, aborting and draining every
+    // operation admitted before close while rejecting work attempted during
+    // close. A fresh generation is installed only after the drain completes.
+    await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
 }
 
@@ -618,12 +777,14 @@ function normalizeQuerySource(source: string | undefined): string {
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
-  const upper = sparql.trimStart().toUpperCase();
-  if (upper.startsWith('SELECT')) return 'select';
-  if (upper.startsWith('ASK')) return 'ask';
-  if (upper.startsWith('CONSTRUCT')) return 'construct';
-  if (upper.startsWith('DESCRIBE')) return 'describe';
-  return 'unknown';
+  const operation = classifySparqlOperation(sparql);
+  if (operation.kind !== 'read') return 'unknown';
+  switch (operation.form) {
+    case 'SELECT': return 'select';
+    case 'ASK': return 'ask';
+    case 'CONSTRUCT': return 'construct';
+    case 'DESCRIBE': return 'describe';
+  }
 }
 
 function hashQuery(sparql: string): string {

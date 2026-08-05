@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
   buildAuthoritativePrivateMetaAskQuery,
   hasAuthoritativePrivateMetaDefinition,
@@ -337,6 +338,119 @@ describe('refreshMetaFromCurator', () => {
     expect(dialSignals).toEqual([controller.signal, controller.signal]);
   });
 
+  it('accepts an authoritative public snapshot without a private member proof', async () => {
+    const contextGraphId = 'public/authoritative-curator-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    let staged: Quad[] = [];
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'public-authoritative-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async (quads: Quad[]) => { staged = quads; },
+        update: async () => undefined,
+        dropGraph: async () => undefined,
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+    );
+
+    expect(refreshed).toBe(true);
+    expect(staged).toHaveLength(2);
+  });
+
+  it('rejects a public-only snapshot when private member proof was required', async () => {
+    const contextGraphId = 'private/member-proof-cannot-use-public-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    let targetMutated = false;
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'member-proof-public-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async () => { targetMutated = true; },
+        update: async () => { targetMutated = true; },
+        dropGraph: async () => { targetMutated = true; },
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      {
+        trustedCuratorPeerId: CURATOR_PEER_ID,
+        force: true,
+        memberProof: {
+          approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
+          expectedDelegateePeerId: 'local-peer',
+        },
+      },
+    );
+
+    expect(refreshed).toBe(false);
+    expect(targetMutated).toBe(false);
+  });
+
   it('uses a trusted join-approved curator directly and bypasses the auth-probe cooldown', async () => {
     const contextGraphId = 'private/trusted-curator-bootstrap';
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -371,6 +485,7 @@ describe('refreshMetaFromCurator', () => {
     }];
     let resolved = false;
     let fetchPeer: string | undefined;
+    let fetchDeadline: number | undefined;
     let forceFreshSession: boolean | undefined;
     let staged: Quad[] = [];
     let replacementUpdate = '';
@@ -391,6 +506,7 @@ describe('refreshMetaFromCurator', () => {
       fetchSyncPages: async (...args: unknown[]) => {
         const peerId = args[1] as string;
         fetchPeer = peerId;
+        fetchDeadline = args[6] as number;
         forceFreshSession = args[11] as boolean | undefined;
         return {
           quads: inserted,
@@ -414,6 +530,7 @@ describe('refreshMetaFromCurator', () => {
       },
     };
 
+    const refreshStartedAt = Date.now();
     const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
       agent as never,
       contextGraphId,
@@ -423,6 +540,9 @@ describe('refreshMetaFromCurator', () => {
     expect(refreshed).toBe(true);
     expect(resolved).toBe(false);
     expect(fetchPeer).toBe(CURATOR_PEER_ID);
+    expect(fetchDeadline).toBeGreaterThanOrEqual(
+      refreshStartedAt + SYNC_TOTAL_TIMEOUT_MS - 100,
+    );
     expect(forceFreshSession).toBe(true);
     expect(staged).toHaveLength(4);
     expect(staged[0]).toMatchObject({
@@ -708,6 +828,8 @@ describe('refreshMetaFromCurator', () => {
     const freshDelegation = `did:dkg:agent-delegation:${contextGraphId}:${freshAgent}`;
     const pendingJoinRequest = `did:dkg:join-request:${contextGraphId}:${freshAgent}`;
     const localDraftLifecycle = `urn:dkg:lifecycle:draft:${contextGraphId}:42`;
+    const freshOnChainId = '105';
+    const freshOnChainHash = `0x${'A'.repeat(64)}`;
     const store = new OxigraphStore();
     try {
       await store.insert([
@@ -724,10 +846,16 @@ describe('refreshMetaFromCurator', () => {
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${CURATOR_PEER_ID}`, graph: metaGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: freshCurator, graph: metaGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${freshAgent}"`, graph: metaGraph },
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${freshOnChainId}"`, graph: metaGraph },
+        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${freshOnChainHash}"`, graph: metaGraph },
         { subject: freshDelegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"fresh-peer"', graph: metaGraph },
       ];
       let invalidations = 0;
       let projectionInvalidations = 0;
+      let persistedBindings = 0;
+      const subscription: { onChainId?: string; onChainHash?: string } = {
+        onChainId: '104',
+      };
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
         peerId: 'local-peer',
@@ -747,6 +875,17 @@ describe('refreshMetaFromCurator', () => {
         oversizeTombstoneLog: { record: noop },
         invalidateListContextGraphsCache: () => { invalidations += 1; },
         contextGraphMetaProjection: { markDirty: () => { projectionInvalidations += 1; } },
+        subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
+        bindSubscriptionOnChainId: (
+          _localCgId: string,
+          sub: { onChainId?: string },
+          onChainId: string,
+        ) => { sub.onChainId = onChainId; },
+        recordCgWireId: (
+          _localCgId: string,
+          onChainHash: string | null,
+        ) => { subscription.onChainHash = onChainHash ?? undefined; },
+        persistContextGraphSubscription: () => { persistedBindings += 1; },
         syncCheckpoints: new Map<string, number>(),
         log: { warn: noop, info: noop },
       };
@@ -787,6 +926,11 @@ describe('refreshMetaFromCurator', () => {
       });
       expect(invalidations).toBe(2);
       expect(projectionInvalidations).toBe(2);
+      expect(subscription).toEqual({
+        onChainId: freshOnChainId,
+        onChainHash: freshOnChainHash.toLowerCase(),
+      });
+      expect(persistedBindings).toBe(1);
     } finally {
       await store.close();
     }
@@ -1087,14 +1231,22 @@ describe('refreshMetaFromCurator', () => {
     const bootstrapPeer = 'peer-from-join-approval';
     const authoritativePeer = 'peer-from-authoritative-meta';
     const preferredSyncPeers = new Map([[contextGraphId, bootstrapPeer]]);
+    const declaredFacts = {
+      // A complete canonical definition, in the shape the projection produces:
+      // each declared fact appears as the scalar AND in its array.
+      declared: true,
+      accessPolicy: 'private',
+      curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
+      curators: ['did:dkg:agent:0x0000000000000000000000000000000000000abc'],
+      creator: `did:dkg:agent:${authoritativePeer}`,
+      creators: [`did:dkg:agent:${authoritativePeer}`],
+    };
     const agent = {
       preferredSyncPeers,
-      getCgMeta: async () => ({
-        curator: 'did:dkg:agent:0x0000000000000000000000000000000000000abc',
-        curators: [],
-        creator: `did:dkg:agent:${authoritativePeer}`,
-        creators: [],
-      }),
+      getCgMeta: async () => declaredFacts,
+      // The Context Graph declares this curator→peer binding in its OWN `_meta`,
+      // which is what makes it authoritative rather than merely rankable (#2006).
+      getOwnCgMetaFacts: async () => declaredFacts,
       discovery: {
         findAgents: async () => {
           throw new Error('creator metadata should resolve the curator peer');
@@ -1109,10 +1261,18 @@ describe('refreshMetaFromCurator', () => {
     expect(resolved).toBe(authoritativePeer);
     expect(preferredSyncPeers.has(contextGraphId)).toBe(false);
 
-    const lifecycleResolved = await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId.call({
+    // The same resolution through the lifecycle entry points, against the real
+    // metadata rather than a stubbed curator: the join-approved peer ranks only
+    // until `_meta` names someone. The declared answer then wins the RANKING —
+    // but it confers no authority, because `_meta` identifies the graph that
+    // holds the rows, not the writer that supplied them.
+    const lifecycleAgent = {
+      ...agent,
       preferredSyncPeers: new Map([[contextGraphId, bootstrapPeer]]),
-      resolveCuratorPeerId: async () => authoritativePeer,
-    } as never, contextGraphId);
-    expect(lifecycleResolved).toBe(authoritativePeer);
+    };
+    expect(await LifecycleSyncMethods.prototype.resolvePreferredSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBe(authoritativePeer);
+    expect(await LifecycleSyncMethods.prototype.resolveAuthoritativeSyncPeerId
+      .call(lifecycleAgent as never, contextGraphId)).toBeUndefined();
   });
 });

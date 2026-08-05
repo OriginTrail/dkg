@@ -1150,7 +1150,13 @@ export class DKGNode {
           // 2h) so operators tuning relay behaviour see the value
           // here instead of having to grep upstream.
           reservationTtl: RELAY_RESERVATION_TTL_MS,
-          defaultDataLimit: BigInt(1 << 24),
+          // Durable graph syncs regularly exceed the previous 16 MiB
+          // per-circuit ceiling. Hitting that ceiling resets an otherwise
+          // healthy relayed connection mid-page and forces the requester to
+          // retry from its last safe graph checkpoint. Raising the forwarding
+          // allowance does not pre-allocate memory; it only permits a circuit
+          // to carry a realistic multi-KA catch-up before its 30-minute limit.
+          defaultDataLimit: BigInt(256 * 1024 * 1024),
         },
       });
       // Route the ulimit log emission to the appropriate console sink
@@ -1792,6 +1798,10 @@ export class DKGNode {
             relayPeerId: relayPath.relayPeerId,
             remotePeerId: pid,
             durationMs,
+            // libp2p's connection:close event carries no reliable failure
+            // reason. A one-shot DKG request/response relay circuit normally
+            // closes in <1s, so duration alone must never poison the route.
+            confirmedFailure: false,
           });
           if (result.enteredQuarantine) {
             console.warn(

@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 28;
+const SCHEMA_VERSION = 31;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -299,11 +299,29 @@ export class DashboardDB {
           );
       `);
     };
+    const ensureSyncCheckpointResponderSessionColumns = () => {
+      const table = this.db.prepare(`
+        SELECT 1 AS found FROM sqlite_master
+        WHERE type = 'table' AND name = 'sync_checkpoints'
+      `).get() as { found: number } | undefined;
+      if (!table) return;
+      const columns = new Set(
+        (this.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has('responder_session_id')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_id TEXT;`);
+      }
+      if (!columns.has('responder_session_expires_at')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_expires_at INTEGER;`);
+      }
+    };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
       // but lost an idempotent schema adjunct.
       ensureJoinApprovalRepairMarker();
+      ensureSyncCheckpointResponderSessionColumns();
       ensureJoinPolicyAuditCapTrigger();
       return;
     }
@@ -1151,6 +1169,48 @@ export class DashboardDB {
     // idempotent and keeps the audit bound fail-closed on every open.
     ensureJoinPolicyAuditCapTrigger();
 
+    if (version < 29) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS vm_reconcile_negative_cache (
+          cache_key TEXT PRIMARY KEY,
+          context_graph_id TEXT NOT NULL,
+          failures INTEGER NOT NULL,
+          next_retry_at INTEGER NOT NULL,
+          swm_gen TEXT NOT NULL,
+          candidate_namespaces TEXT NOT NULL,
+          peer_topology_key TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_cg
+          ON vm_reconcile_negative_cache(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_vm_reconcile_negative_retry
+          ON vm_reconcile_negative_cache(next_retry_at);
+      `);
+    }
+    if (version < 30) {
+      // OFFSET pagination is scoped to an immutable responder row list. Keep
+      // the opaque responder token beside the verified offset so a requester
+      // restart can resume that same list instead of discarding durable work.
+      ensureSyncCheckpointResponderSessionColumns();
+    }
+    if (version < 31) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS snapshot_page_indexes (
+          snapshot_digest TEXT PRIMARY KEY,
+          format_version INTEGER NOT NULL CHECK (format_version > 0),
+          stride INTEGER NOT NULL CHECK (stride > 0),
+          snapshot_file_size INTEGER NOT NULL CHECK (snapshot_file_size >= 0),
+          modification_fingerprint TEXT NOT NULL,
+          offset_count INTEGER NOT NULL CHECK (offset_count > 0),
+          offsets BLOB NOT NULL,
+          checksum TEXT NOT NULL,
+          CHECK (length(snapshot_digest) > 0),
+          CHECK (length(modification_fingerprint) > 0),
+          CHECK (length(offsets) = offset_count * 8),
+          CHECK (length(checksum) > 0)
+        );
+      `);
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -1198,6 +1258,10 @@ export class DashboardDB {
         AND (committed_at IS NULL OR committed_at < ?)
     `).run(cutoff, cutoff);
     this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
+    // Reconcile negatives are accelerators, never historical records. Once the
+    // retry window elapses they must not survive indefinitely or accumulate one
+    // row per previously-seen KA across restarts.
+    this.db.prepare(`DELETE FROM vm_reconcile_negative_cache WHERE next_retry_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
     // a day. The protocol_outbox table is intentionally not pruned
@@ -1842,6 +1906,47 @@ export class DashboardDB {
     return `contextGraphJoinPolicy:${contextGraphId}`;
   }
 
+  upsertVmReconcileNegative(record: VmReconcileNegativeRow): void {
+    this.stmt('upsertVmReconcileNegative', `
+      INSERT INTO vm_reconcile_negative_cache (
+        cache_key, context_graph_id, failures, next_retry_at, swm_gen,
+        candidate_namespaces, peer_topology_key, updated_at
+      ) VALUES (
+        @cache_key, @context_graph_id, @failures, @next_retry_at, @swm_gen,
+        @candidate_namespaces, @peer_topology_key, @updated_at
+      )
+      ON CONFLICT(cache_key) DO UPDATE SET
+        context_graph_id = excluded.context_graph_id,
+        failures = excluded.failures,
+        next_retry_at = excluded.next_retry_at,
+        swm_gen = excluded.swm_gen,
+        candidate_namespaces = excluded.candidate_namespaces,
+        peer_topology_key = excluded.peer_topology_key,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getVmReconcileNegative(cacheKey: string): VmReconcileNegativeRow | undefined {
+    return this.stmt(
+      'getVmReconcileNegative',
+      'SELECT * FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).get(cacheKey) as VmReconcileNegativeRow | undefined;
+  }
+
+  deleteVmReconcileNegative(cacheKey: string): void {
+    this.stmt(
+      'deleteVmReconcileNegative',
+      'DELETE FROM vm_reconcile_negative_cache WHERE cache_key = ?',
+    ).run(cacheKey);
+  }
+
+  deleteVmReconcileNegativesForContextGraph(contextGraphId: string): void {
+    this.stmt(
+      'deleteVmReconcileNegativesForContextGraph',
+      'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
+    ).run(contextGraphId);
+  }
+
   // --- Phase F: chain-driven VM reconciliation telemetry ---
 
   /**
@@ -2173,8 +2278,25 @@ export class DashboardDB {
     duration_ms: number;
     error_message: string;
   }): void {
-    this.stmt('failOp', `
-      UPDATE operations SET status = 'error', duration_ms = @duration_ms,
+    this.finishOperation({ ...op, status: 'error' });
+  }
+
+  cancelOperation(op: {
+    operation_id: string;
+    duration_ms: number;
+    error_message: string;
+  }): void {
+    this.finishOperation({ ...op, status: 'cancelled' });
+  }
+
+  finishOperation(op: {
+    operation_id: string;
+    duration_ms: number;
+    error_message: string;
+    status: 'error' | 'cancelled';
+  }): void {
+    this.stmt('finishOperation', `
+      UPDATE operations SET status = @status, duration_ms = @duration_ms,
         error_message = @error_message
       WHERE operation_id = @operation_id AND status = 'in_progress'
     `).run(op);
@@ -2350,8 +2472,22 @@ export class DashboardDB {
   }
 
   failPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
-    this.stmt('failPhase', `
-      UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
+    this.finishPhase({ ...op, status: 'error' });
+  }
+
+  cancelPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
+    this.finishPhase({ ...op, status: 'cancelled' });
+  }
+
+  finishPhase(op: {
+    operation_id: string;
+    phase: string;
+    duration_ms: number;
+    error_message: string;
+    status: 'error' | 'cancelled';
+  }): void {
+    this.stmt('finishPhase', `
+      UPDATE operation_phases SET status = @status, duration_ms = @duration_ms,
         details = @error_message
       WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
     `).run(op);
@@ -2413,6 +2549,7 @@ export class DashboardDB {
         COUNT(*) as totalCount,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
         SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
         AVG(gas_cost_eth) as avgGasCostEth,
         SUM(gas_cost_eth) as totalGasCostEth,
@@ -2425,7 +2562,9 @@ export class DashboardDB {
       totalCount: summaryRow.totalCount ?? 0,
       successCount: summaryRow.successCount ?? 0,
       errorCount: summaryRow.errorCount ?? 0,
-      successRate: summaryRow.totalCount > 0 ? (summaryRow.successCount ?? 0) / summaryRow.totalCount : 0,
+      successRate: summaryRow.healthCount > 0
+        ? (summaryRow.successCount ?? 0) / summaryRow.healthCount
+        : 0,
       avgDurationMs: summaryRow.avgDurationMs ?? 0,
       avgGasCostEth: summaryRow.avgGasCostEth ?? 0,
       totalGasCostEth: summaryRow.totalGasCostEth ?? 0,
@@ -2442,6 +2581,7 @@ export class DashboardDB {
         (CAST(started_at / ? AS INTEGER) * ?) as bucket,
         COUNT(*) as count,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgDurationMs,
         AVG(gas_cost_eth) as avgGasCostEth,
         SUM(gas_cost_eth) as totalGasCostEth
@@ -2455,7 +2595,7 @@ export class DashboardDB {
       timeSeries: timeSeries.map((r: any) => ({
         bucket: r.bucket,
         count: r.count,
-        successRate: r.count > 0 ? r.successCount / r.count : 0,
+        successRate: r.healthCount > 0 ? r.successCount / r.healthCount : 0,
         avgDurationMs: r.avgDurationMs ?? 0,
         avgGasCostEth: r.avgGasCostEth ?? 0,
         totalGasCostEth: r.totalGasCostEth ?? 0,
@@ -2478,6 +2618,7 @@ export class DashboardDB {
         COUNT(*) as count,
         AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgMs,
         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(CASE WHEN status IN ('success', 'error') THEN 1 ELSE 0 END) as healthCount,
         SUM(gas_cost_eth) as gasCostEth
       FROM operations WHERE started_at >= ?
       GROUP BY bucket, operation_name ORDER BY bucket
@@ -2500,7 +2641,7 @@ export class DashboardDB {
         return {
           count: r?.count ?? 0,
           avgMs: r?.avgMs ?? 0,
-          successRate: r ? (r.count > 0 ? r.successCount / r.count : 0) : 0,
+          successRate: r ? (r.healthCount > 0 ? r.successCount / r.healthCount : 0) : 0,
           gasCostEth: r?.gasCostEth ?? 0,
         };
       });
@@ -2524,7 +2665,7 @@ export class DashboardDB {
       GROUP BY operation_name ORDER BY total DESC
     `).all(cutoff) as any[]).map(r => ({
       ...r,
-      rate: r.total > 0 ? r.success / r.total : 0,
+      rate: r.success + r.error > 0 ? r.success / (r.success + r.error) : 0,
       avgMs: r.avgMs ?? 0,
     }));
   }
@@ -3161,20 +3302,46 @@ export class SqliteSyncCheckpointStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
   }
 
-  get(key: string): { offset: number; updatedAtMs: number; expiresAtMs: number } | undefined {
+  get(key: string): {
+    offset: number;
+    updatedAtMs: number;
+    expiresAtMs: number;
+    responderSessionId?: string;
+    responderSessionExpiresAtMs?: number;
+  } | undefined {
     const now = this.clock();
     const row = this.db.prepare(
-      `SELECT offset, updated_at, expires_at FROM sync_checkpoints WHERE key = ?`,
-    ).get(key) as { offset: number; updated_at: number; expires_at: number } | undefined;
+      `SELECT offset, updated_at, expires_at,
+              responder_session_id, responder_session_expires_at
+         FROM sync_checkpoints WHERE key = ?`,
+    ).get(key) as {
+      offset: number;
+      updated_at: number;
+      expires_at: number;
+      responder_session_id: string | null;
+      responder_session_expires_at: number | null;
+    } | undefined;
     if (!row) return undefined;
     if (row.expires_at < now) {
       this.delete(key);
       return undefined;
     }
+    const hasFreshResponderSession = Boolean(row.responder_session_id)
+      && Number.isSafeInteger(row.responder_session_expires_at)
+      && (row.responder_session_expires_at ?? 0) > now;
+    if (row.responder_session_id && !hasFreshResponderSession) {
+      this.clearResponderSession(key);
+    }
     return {
       offset: row.offset,
       updatedAtMs: row.updated_at,
       expiresAtMs: row.expires_at,
+      ...(hasFreshResponderSession
+        ? {
+            responderSessionId: row.responder_session_id!,
+            responderSessionExpiresAtMs: row.responder_session_expires_at!,
+          }
+        : {}),
     };
   }
 
@@ -3190,6 +3357,39 @@ export class SqliteSyncCheckpointStore {
         updated_at = excluded.updated_at,
         expires_at = excluded.expires_at
     `).run(key, value, nowMs, nowMs + this.ttlMs);
+  }
+
+  setResponderSession(
+    key: string,
+    sessionId: string,
+    expiresAtMs: number,
+    nowMs = this.clock(),
+  ): void {
+    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
+      throw new Error(`Invalid sync responder session for ${key}`);
+    }
+    if (expiresAtMs <= nowMs) {
+      this.clearResponderSession(key);
+      return;
+    }
+    this.db.prepare(`
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at
+      ) VALUES (?, 0, ?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        responder_session_id = excluded.responder_session_id,
+        responder_session_expires_at = excluded.responder_session_expires_at
+    `).run(key, nowMs, nowMs + this.ttlMs, sessionId, expiresAtMs);
+  }
+
+  clearResponderSession(key: string): void {
+    this.db.prepare(`
+      UPDATE sync_checkpoints
+         SET responder_session_id = NULL,
+             responder_session_expires_at = NULL
+       WHERE key = ?
+    `).run(key);
   }
 
   delete(key: string): void {
@@ -3981,6 +4181,17 @@ export interface ContextGraphReadinessProvenance {
   durableVerified: boolean;
   sharedMemoryVerified: boolean;
   updatedAt: number;
+}
+
+export interface VmReconcileNegativeRow {
+  cache_key: string;
+  context_graph_id: string;
+  failures: number;
+  next_retry_at: number;
+  swm_gen: string;
+  candidate_namespaces: string;
+  peer_topology_key: string;
+  updated_at: number;
 }
 
 // --- Phase F: chain-driven VM reconciliation telemetry rows ---

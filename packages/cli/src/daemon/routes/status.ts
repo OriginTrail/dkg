@@ -59,7 +59,7 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -403,13 +403,14 @@ function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.Json
   );
 }
 
-// Quad-count cache for external SPARQL backends. Every /api/status hit
-// otherwise issues a `SELECT (COUNT(*))` against the remote endpoint —
-// expensive on a large namespace, and the route is polled by the
-// dashboard, telemetry, and `dkg status` operators. 30 s TTL is short
-// enough that a fresh wipe / bulk publish shows up quickly without
-// flooding Blazegraph. Cold/stale callers get the current snapshot while
-// one refresh runs in the background, so status never waits on the count.
+// Quad-count cache for external SPARQL backends. A full-store COUNT is not a
+// liveness check: on a multi-million-row namespace it can occupy the store for
+// seconds and compete directly with sync. Normal /api/status polling therefore
+// never starts it. Operators may request a background refresh explicitly with
+// `?includeStoreQuads=true`; subsequent ordinary status calls can reuse the
+// cached value without touching the store. Cold/stale explicit callers get the
+// current snapshot while one refresh runs in the background, so status never
+// waits on the count.
 // Local backends bypass this entirely (file-bytes metric stays on the
 // metrics collector tick).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
@@ -448,6 +449,7 @@ function getCachedExternalStoreQuads(
       try {
         const r = await agent.store.query(
           'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+          { priority: 'health', source: 'daemon.status.storeQuads' },
         );
         let value: number | null = null;
         if (r.type === 'bindings' && r.bindings.length > 0) {
@@ -474,6 +476,11 @@ function getCachedExternalStoreQuads(
     });
   }
   return currentSnapshot;
+}
+
+function peekCachedExternalStoreQuads(): StoreQuadsSnapshot | null {
+  if (!storeQuadsCache) return null;
+  return { value: storeQuadsCache.value, status: storeQuadsCache.status };
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -668,15 +675,42 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
+    const includeStoreQuads = url.searchParams.get('includeStoreQuads') === 'true'
+      || url.searchParams.get('includeStoreQuads') === '1';
     const storeQuadsSnapshot = reportsExternalStoreQuads
-      ? getCachedExternalStoreQuads(agent, Date.now())
+      ? includeStoreQuads
+        ? getCachedExternalStoreQuads(agent, Date.now())
+        : peekCachedExternalStoreQuads()
       : null;
+    const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
     // the {commit: "uncommitted", distTag: "monorepo", ...}
     // sentinels when build-info.json is absent (monorepo / dev),
     // so consumers can branch reliably.
     const buildInfo = loadBuildInfo();
+    const unavailableFinalizationRecovery = (reason: string) => ({
+      available: false,
+      closed: false,
+      ready: false,
+      canonicalReceiptCapability: 'unknown' as const,
+      degradedReason: reason,
+      stateCounts: {},
+      livePayloadBytes: 0,
+      dueEntries: 0,
+    });
+    let finalizationRecovery: Awaited<
+      ReturnType<DKGAgent['getFinalizationRecoveryHealth']>
+    > = unavailableFinalizationRecovery('not-configured');
+    if (typeof agent.getFinalizationRecoveryHealth === 'function') {
+      try {
+        finalizationRecovery = await agent.getFinalizationRecoveryHealth();
+      } catch (error) {
+        finalizationRecovery = unavailableFinalizationRecovery(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -731,6 +765,16 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
       },
+      // Public status carries state only. Detailed lane timings and operation
+      // summaries stay behind the node-admin diagnostics route.
+      backpressure: {
+        state: backpressure.state,
+        schedulers: backpressure.schedulers.map((scheduler) => ({
+          scheduler: scheduler.scheduler,
+          state: scheduler.state,
+        })),
+        diagnosticsAvailable: '/api/diagnostics/backpressure',
+      },
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,
@@ -744,6 +788,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
       asyncPublisher: publisherState.availability,
+      finalizationRecovery,
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),

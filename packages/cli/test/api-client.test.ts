@@ -370,6 +370,46 @@ describe('ApiClient', () => {
       expect(url).toContain('contextType=review');
       expect(url).toContain('includeBody=true');
     });
+
+    // #1828 (otReviewAgent): the recovery-lookup client wrapper is the public
+    // surface callers use — assert endpoint spelling, param encoding, optional
+    // forwarding, and response passthrough at the client boundary.
+    it('publisherJobByIntent() GETs /api/publisher/job-by-intent with all facts encoded', async () => {
+      const body = { result: 'active', job: { jobId: 'job-1' }, superseded: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const result = await client.publisherJobByIntent({
+        contextGraphId: 'music social',
+        name: 'albums/2026',
+        subGraphName: 'research',
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      });
+
+      expect(result).toEqual(body);
+      expect(calls).toHaveLength(1);
+      const url = calls[0].url;
+      expect(url.startsWith(`http://127.0.0.1:${PORT}/api/publisher/job-by-intent?`)).toBe(true);
+      expect(url).toContain('contextGraphId=music+social');
+      expect(url).toContain('name=albums%2F2026');
+      expect(url).toContain('subGraphName=research');
+      expect(url).toContain('agentAddress=0x1111111111111111111111111111111111111111');
+      expect(url).toContain(`intentKey=sha256%3A${'ab'.repeat(32)}`);
+    });
+
+    it('publisherJobByIntent() omits optional facts when not provided', async () => {
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { result: 'none' } });
+      globalThis.fetch = fetch;
+      await client.publisherJobByIntent({ contextGraphId: 'cg', name: 'albums' });
+
+      const url = calls[0].url;
+      expect(url).toContain('contextGraphId=cg');
+      expect(url).toContain('name=albums');
+      expect(url).not.toContain('subGraphName=');
+      expect(url).not.toContain('agentAddress=');
+      expect(url).not.toContain('intentKey=');
+    });
   });
 
   describe('PUT endpoints', () => {
@@ -977,17 +1017,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     let calls = track({ swmShared: true, promotedCount: 2 });
     await client.knowledgeAssetShare('cg', 'f', {
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
       awaitCuratorAck: true,
-      skipSeal: true,
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
       awaitCuratorAck: true,
-      skipSeal: true,
     });
 
     calls = track({ kaId: '7', status: 'confirmed' });
@@ -1031,28 +1067,119 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(publishAsyncBody.options).not.toHaveProperty('subGraphName');
   });
 
-  it('knowledgeAssetFinalize can target WM or SWM layer', async () => {
-    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
-    await client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' });
-    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/wm/finalize`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
-      contextGraphId: 'cg',
-      layer: 'swm',
-      subGraphName: 'notes',
+  // GH#1786 — the selector must be serialized TOP-LEVEL and must never end up inside
+  // `options`: `parseHttpFinalizedPublishOptions` ignores unknown nested keys, so a
+  // nested selector would be silently dropped and publish a different author.
+  it('serializes selectedAuthorAgentAddress top-level on both publish lanes', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+
+    let calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      publishEpochs: 12,
     });
+    let body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      publishEpochs: 12,
+    });
+    body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  // GH#1786 — the OLDER public wrapper over the same endpoint must expose the selector too:
+  // a typed SDK caller holding only `publishFromFinalizedAssertion` would otherwise have to
+  // cast to `any` to send the very field the AMBIGUOUS_ASSERTION_AUTHOR 409 tells it to
+  // retry with. Be precise about what this test can and cannot prove: no tsconfig in this
+  // repo includes `test/` (every package is `include: ["src"]`), so nothing HERE guards the
+  // TYPE. That is structural instead — all three public entry points take their selector
+  // from the one `KnowledgeAssetPublishAuthorSelection` contract, so it cannot go missing
+  // from one of them, and deleting it outright fails the package typecheck at the
+  // destructures. What this DOES pin is the forwarding: the wrapper currently passes
+  // `options` straight through, but the sibling `publishAssertion` builds its downstream
+  // options from an explicit key-by-key spread, and a refactor of this wrapper into that
+  // shape would silently drop the selector and publish a different author with a 200.
+  it('publishFromFinalizedAssertion forwards the selector top-level, like knowledgeAssetPublish', async () => {
+    const selected = '0x00000000000000000000000000000000000000b7';
+    const calls = track({ kaId: '7', status: 'confirmed' });
+
+    await client.publishFromFinalizedAssertion('cg', 'f', {
+      selectedAuthorAgentAddress: selected,
+      subGraphName: 'notes',
+      publishEpochs: 12,
+    });
+
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
+    const body = JSON.parse(calls[0].opts.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      selectedAuthorAgentAddress: selected,
+      options: { publishEpochs: 12 },
+    });
+    // Same nesting hazard as the direct lane: a selector inside `options` is silently
+    // ignored by parseHttpFinalizedPublishOptions and would publish a different author.
+    expect(body.options).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  it('forwards an explicitly empty selector so the daemon can reject it, and omits it when absent', async () => {
+    // Presence, not truthiness: silently dropping a malformed selector client-side
+    // would let normal author resolution publish a DIFFERENT author with 200 instead
+    // of the daemon's 400.
+    let calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', { selectedAuthorAgentAddress: '' });
+    expect(JSON.parse(calls[0].opts.body as string)).toHaveProperty('selectedAuthorAgentAddress', '');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', { selectedAuthorAgentAddress: '' });
+    expect(JSON.parse(calls[0].opts.body as string)).toHaveProperty('selectedAuthorAgentAddress', '');
+
+    calls = track({ kaId: '7', status: 'confirmed' });
+    await client.knowledgeAssetPublish('cg', 'f', {});
+    expect(JSON.parse(calls[0].opts.body as string)).not.toHaveProperty('selectedAuthorAgentAddress');
+  });
+
+  it('knowledgeAssetShare rejects root selection and unsealed sharing before HTTP serialization', async () => {
+    const calls = track({ swmShared: true, promotedCount: 1 });
+    await expect(client.knowledgeAssetShare('cg', 'f', {
+      entities: ['urn:entity:1'],
+    })).rejects.toThrow('Knowledge Assets are shared atomically');
+    await expect(client.knowledgeAssetShare('cg', 'f', {
+      skipSeal: true,
+    })).rejects.toThrow('always seal-before-share');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetFinalize rejects the legacy SWM write bridge before HTTP serialization', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await expect(
+      client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
     let calls = track({ jobId: 'share-job-1', state: 'queued' });
     await client.knowledgeAssetShareAsync('cg', 'f', {
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share-async`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
-      entities: ['urn:entity:1'],
     });
 
     calls = track({ jobs: [] });
@@ -1078,11 +1205,30 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls[0].opts.method).toBe('POST');
   });
 
+  it('#1837 clear-job helpers POST the terminal-clear routes with correct encoding and body', async () => {
+    // SWM share-job clear: jobId is percent-encoded in the path, empty JSON body.
+    let calls = track({ outcome: 'cleared', jobId: 'share/job 1' });
+    await client.knowledgeAssetClearShareJob('share/job 1');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs/share%2Fjob%201/clear`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({});
+
+    // Publisher clear-job: jobId travels in the body, not the path.
+    calls = track({ outcome: 'already_absent', jobId: 'lift job 7' });
+    await client.publisherClearJob('lift job 7');
+    expect(calls[0].url).toBe(`${base}/api/publisher/clear-job`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
+  });
+
   it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       skipSeal: true,
-    } as any)).rejects.toThrow('skipSeal is not supported for async share');
+    } as any)).rejects.toThrow('skipSeal is not supported');
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      entities: ['urn:entity:1'],
+    })).rejects.toThrow('Knowledge Assets are shared atomically');
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       awaitCuratorAck: true,
     } as any)).rejects.toThrow('awaitCuratorAck is not supported for async share');

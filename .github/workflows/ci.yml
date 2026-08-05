@@ -11,9 +11,9 @@ name: CI
 #     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
   pull_request:
-    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # When merge queue is enabled, this is the pre-merge full-CI safety net.
   # It validates the exact candidate that will land, without introducing a
@@ -42,8 +42,10 @@ jobs:
   # ------------------------------------------------------------------
   # Produce one fail-closed test plan for every workflow in this repository.
   # PRs run the affected package lane plus declared downstream consumers.
-  # Protected pushes, merge queue candidates, manual runs, global/unknown
-  # changes, package manifests, large changes, and `ci:full` run everything.
+  # Protected pushes, manual runs, and merge queue candidates select every
+  # lane. Global/unknown changes, package manifests, large changes, and
+  # `ci:full` run every Node/EVM lane; Solidity retains its independent PR
+  # path gate.
   # ------------------------------------------------------------------
   changes:
     name: Plan CI delta
@@ -229,7 +231,7 @@ jobs:
           key: turbo-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
             turbo-${{ runner.os }}-${{ github.ref }}-
-            turbo-${{ runner.os }}-refs/heads/v10-rc-
+            turbo-${{ runner.os }}-refs/heads/main-
             turbo-${{ runner.os }}-
 
       - name: Build all Node packages (evm-module hardhat compile short-circuits)
@@ -270,6 +272,33 @@ jobs:
 
       - name: Test repository scripts
         run: pnpm run test:scripts
+
+      # W1 §8.3 packet reachability. This job is the right home because it is
+      # the one lane that installs the full workspace without sharding, and the
+      # gate asks the REAL Vitest resolver (`vitest list --filesOnly`) which
+      # files each pinned config would run.
+      #
+      # It exists because a packet file can be present on disk, tracked, and
+      # still contribute nothing: Vitest treats positionals as FILTERS against
+      # `include`, never as additions, so a suite missing from the include array
+      # is silently skipped and the command still exits 0. Leaving the gate
+      # uninvoked would have reproduced that exact failure one level up — a
+      # check that cannot fire is not a check.
+      - name: Verify the W1 §8.3 test packet is reachable
+        run: pnpm run verify:w1-packet
+
+      # A18's benchmark was previously only syntax-checked, which proves nothing
+      # about the thing it exists to measure: it loads the REAL record helpers
+      # out of `packages/agent/dist`, so a missing build output, a renamed
+      # export or a changed OTel constructor shape would leave A18 with no
+      # usable benchmark and `node --check` would still pass.
+      #
+      # `--ci` records the verdict WITHOUT gating on it, deliberately: a shared
+      # runner's timing variance must never fail a build. What is gated here is
+      # the mechanism — real seam loads, both arms run, JSON report is produced.
+      # Tiny page/round counts keep it a smoke test, not a measurement.
+      - name: Smoke the W1 A18 benchmark (real seam, non-gating budget)
+        run: pnpm run bench:w1-sync-telemetry:smoke
 
       - name: Package build outputs
         run: |
@@ -939,16 +968,18 @@ jobs:
   #
   # This job catches the only way that contract can break: a contributor
   # changes a `.sol` file and forgets to commit the regenerated ABIs.
-  # Runs only when `changes.outputs.contracts == 'true'` so PRs that
-  # don't touch contracts pay zero cost. On failure prints an explicit
-  # remediation command so the fix is one copy-paste away.
+  # The controller changes in this PR are not trusted until they land on the
+  # protected default branch. During that first rollout phase, run this cheap
+  # gate unconditionally instead of pinning workflows to candidate history.
+  # A follow-up may rotate the immutable controller and restore path selection.
+  # On failure prints an explicit remediation command so the fix is one
+  # copy-paste away.
   # ------------------------------------------------------------------
   abi-freshness:
     name: "Tornado: ABI freshness (committed abi/ vs hardhat compile)"
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.changes.outputs.contracts == 'true'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -1016,9 +1047,9 @@ jobs:
   #   - PR + contract changes    : 4-way sharded hardhat test, no
   #                                coverage (~5-6 min per shard in
   #                                parallel; previously ~20 min single).
-  #   - merge queue candidate    : same sharded full test suite as a PR,
-  #                                keeping the pre-merge critical path short.
-  #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
+  #   - merge queue candidate    : same sharded suite against the exact
+  #                                combined commit that is about to land.
+  #   - push (trigger branches)  : full coverage + ratchet safety net,
   #                                single job (coverage reports don't
   #                                compose across shards, so we keep
   #                                the safety-net job unsharded).
@@ -1028,8 +1059,8 @@ jobs:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Candidate lane only — sharded 4 ways. Protected pushes and manual runs
-    # use the separate coverage+ratchet job below.
+    # Candidate lane — sharded 4 ways. Protected pushes and manual runs use the
+    # separate coverage+ratchet job below.
     if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'
     strategy:
       fail-fast: false
@@ -1199,7 +1230,7 @@ jobs:
   #   * pull_request : runs only when the `changes` filter detects
   #                    contract-touching paths (mirrors the existing
   #                    Tornado: Solidity lane).
-  #   * push (main / v10-rc / …) : ALWAYS runs so the Security tab
+  #   * push (trigger branches) : ALWAYS runs so the Security tab
   #                    baseline refreshes after every merge. Without
   #                    this, post-merge findings would never bubble
   #                    up to Code Scanning even though they apply to
@@ -1292,7 +1323,7 @@ jobs:
           && hashFiles('slither.sarif') != ''
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         continue-on-error: true
         with:
           sarif_file: ${{ steps.slither.outputs.sarif }}
@@ -1333,7 +1364,7 @@ jobs:
           && hashFiles('packages/evm-module/aderyn.sarif') != ''
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         continue-on-error: true
         with:
           sarif_file: packages/evm-module/aderyn.sarif
@@ -1353,7 +1384,7 @@ jobs:
           && hashFiles('packages/evm-module/solhint.sarif') != ''
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         continue-on-error: true
         with:
           sarif_file: packages/evm-module/solhint.sarif

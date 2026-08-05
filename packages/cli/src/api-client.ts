@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
+import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -89,6 +90,8 @@ export interface KnowledgeAssetCreateResponse {
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
+  /** Core peers whose StorageACKs backed a confirmed VM publish. */
+  storageAckPeerIds?: string[];
   errors?: KnowledgeAssetLifecycleError[];
   [key: string]: unknown;
 }
@@ -108,11 +111,13 @@ export interface KnowledgeAssetShareResponse {
 
 export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
+  /** @deprecated New Knowledge Assets are atomic. Only `"all"` is accepted. */
   entities?: string[] | 'all';
 }
 
 export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
   awaitCuratorAck?: boolean;
+  /** @deprecated `true` is rejected; graph-scoped KAs are always seal-before-share. */
   skipSeal?: boolean;
 }
 
@@ -123,6 +128,8 @@ export interface KnowledgeAssetPublishResponse {
   ual?: string;
   txHash?: string;
   status?: string;
+  /** Core peers whose StorageACKs backed a confirmed VM publish. */
+  storageAckPeerIds?: string[];
   error?: string;
   errors?: KnowledgeAssetLifecycleError[];
   contextGraphError?: unknown;
@@ -143,9 +150,19 @@ export interface KnowledgeAssetPublishAsyncResponse {
   name: string;
   subGraphName?: string;
   shareOperationId?: string;
-  rootsCount?: number;
+  contentScopeVersion?: number;
+  kaUal?: string;
+  assertionVersion?: string;
+  publicTripleCount?: number;
+  privateTripleCount?: number;
   sealMerkleRoot?: string;
   intentKey?: string;
+  /**
+   * GH#1786 — the RESOLVED author this job will publish. Lets a caller verify which
+   * author was selected before the job runs, and detect a daemon that ignored a
+   * supplied `selectedAuthorAgentAddress` (older daemons omit it).
+   */
+  agentAddress?: string;
 }
 
 export type KnowledgeAssetShareJobState =
@@ -213,11 +230,20 @@ function hasOwnKey<K extends PropertyKey>(value: unknown, key: K): value is Reco
 }
 
 function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptions | undefined): void {
+  assertAtomicKnowledgeAssetShare(options);
   if (hasOwnKey(options, 'skipSeal') && options.skipSeal !== undefined) {
-    throw new Error('skipSeal is not supported for async share; use knowledgeAssetShare() for unsealed synchronous shares');
+    throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
   }
   if (hasOwnKey(options, 'awaitCuratorAck') && options.awaitCuratorAck !== undefined) {
     throw new Error('awaitCuratorAck is not supported for async share; use knowledgeAssetShare() when curator acknowledgement must block');
+  }
+}
+
+function assertAtomicKnowledgeAssetShare(options: KnowledgeAssetShareTargetOptions | undefined): void {
+  if (Array.isArray(options?.entities)) {
+    throw new Error(
+      'entities selection is not supported; graph-scoped Knowledge Assets are shared atomically',
+    );
   }
 }
 
@@ -400,6 +426,24 @@ function requireDaemonStatusResponse(value: unknown, expectedName?: string): Dae
     );
   }
   return value;
+}
+
+/**
+ * GH#1786 — the author-selection coordinate shared by every public publish entry point.
+ * Declared ONCE and reused, so `selectedAuthorAgentAddress` cannot drift between the two
+ * lanes and the older `publishFromFinalizedAssertion` wrapper: the invariant is structural
+ * rather than asserted after the fact.
+ */
+export interface KnowledgeAssetPublishAuthorSelection {
+  subGraphName?: string;
+  /**
+   * The resident author to publish, for retrying an `AMBIGUOUS_ASSERTION_AUTHOR` 409.
+   * Serialized at the TOP level of the body (never inside `options`, where
+   * `parseHttpFinalizedPublishOptions` would silently ignore it and publish a different
+   * author). Sent on PRESENCE, not truthiness, so a malformed value reaches the daemon's
+   * 400 instead of being dropped client-side.
+   */
+  selectedAuthorAgentAddress?: string;
 }
 
 export class ApiClient {
@@ -692,6 +736,7 @@ export class ApiClient {
     name: string,
     options?: {
       subGraphName?: string;
+      /** @deprecated Only WM finalization is supported. `swm` fails read-only. */
       layer?: 'wm' | 'swm';
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
@@ -702,7 +747,15 @@ export class ApiClient {
     // self-sign vs external-signer conflict client-side instead of relying on
     // the daemon, so every SDK surface enforces the same contract.
     assertExclusiveAuthorFields(options ?? {});
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...(options ?? {}) });
+    if (options?.layer === 'swm') {
+      throw Object.assign(
+        new Error('Legacy root-scoped Knowledge Assets are read-only'),
+        { code: 'LEGACY_KA_READ_ONLY' },
+      );
+    }
+    const wireOptions = { ...(options ?? {}) };
+    delete wireOptions.layer;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`, { contextGraphId, ...wireOptions });
   }
 
   /** Discard the WM draft. */
@@ -726,6 +779,10 @@ export class ApiClient {
     name: string,
     options?: KnowledgeAssetShareOptions,
   ): Promise<KnowledgeAssetShareResponse> {
+    assertAtomicKnowledgeAssetShare(options);
+    if (options?.skipSeal === true) {
+      throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
   }
 
@@ -765,17 +822,33 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/recover`, {});
   }
 
+  // #1837 — atomic by-exact-jobId TERMINAL record removal (idempotent). Distinct from
+  // knowledgeAssetCancelShareJob (DELETE = queued cancellation that retains the row).
+  // cleared / already_absent resolve normally (200); rejected throws via post().
+  async knowledgeAssetClearShareJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/clear`, {});
+  }
+
   /** Publish to VM (mint or update on chain; git push origin main). */
   async knowledgeAssetPublish(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: KnowledgeAssetPublishAuthorSelection
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    // GH#1786 — `selectedAuthorAgentAddress` is destructured out alongside
+    // `subGraphName` for two reasons: the daemon reads it at the TOP level of the
+    // body, and `finalizedPublishOptionsPayload` throws on any key outside its
+    // allowlist, so leaving it in would break every publish that supplies it.
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -783,13 +856,18 @@ export class ApiClient {
   async knowledgeAssetPublishAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+    options?: KnowledgeAssetPublishAuthorSelection
+      & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const { subGraphName, selectedAuthorAgentAddress, ...finalizedOptions } = options ?? {};
     const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
       ...(subGraphName ? { subGraphName } : {}),
+      // Presence, NOT truthiness: an explicitly empty/malformed selector must reach
+      // the daemon so it is rejected 400, rather than being silently omitted here and
+      // letting normal author resolution publish a different author.
+      ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -895,8 +973,10 @@ export class ApiClient {
   async publishFromFinalizedAssertion(
     contextGraphId: string,
     assertionName: string,
-    options?: {
-      subGraphName?: string;
+    // The selector comes from the SHARED contract — a typed SDK caller holding only this
+    // older wrapper must be able to pass the field the 409 tells it to retry with. The
+    // finalized-option subset stays deliberately narrower than the standalone lanes'.
+    options?: KnowledgeAssetPublishAuthorSelection & {
       clearAfter?: boolean;
       publishEpochs?: number;
       publisherNodeIdentityIdOverride?: bigint;
@@ -910,6 +990,7 @@ export class ApiClient {
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
+    storageAckPeerIds?: string[];
     contextGraphError?: string;
   }> {
     return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
@@ -921,6 +1002,7 @@ export class ApiClient {
       kas: Array<{ tokenId: string; rootEntity: string }>;
       txHash?: string;
       blockNumber?: number;
+      storageAckPeerIds?: string[];
       contextGraphError?: string;
     }>;
   }
@@ -1185,6 +1267,49 @@ export class ApiClient {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 
+  // #1828 — durable-admission recovery: look a VM-publish job up by the lifecycle
+  // facts the client retains (contextGraphId + name required). Read-only.
+  async publisherJobByIntent(facts: {
+    contextGraphId: string;
+    name: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<{
+    result: 'none' | 'active' | 'superseded' | 'conflict';
+    job?: any;
+    superseded?: any[];
+    jobs?: any[];
+    exactIntentMatch?: boolean;
+  }> {
+    const qs = new URLSearchParams({ contextGraphId: facts.contextGraphId, name: facts.name });
+    if (facts.subGraphName !== undefined) qs.set('subGraphName', facts.subGraphName);
+    if (facts.agentAddress !== undefined) qs.set('agentAddress', facts.agentAddress);
+    if (facts.intentKey !== undefined) qs.set('intentKey', facts.intentKey);
+    return this.get(`/api/publisher/job-by-intent?${qs.toString()}`);
+  }
+
+  // #1829 — read-only append-only journal. By jobId, or facts-pure by lifecycle
+  // identity. txHashes are ATTEMPTED submissions — verify against chain, never treat
+  // as sent.
+  async publisherJournal(query: {
+    jobId?: string;
+    contextGraphId?: string;
+    name?: string;
+    subGraphName?: string;
+    agentAddress?: string;
+    intentKey?: string;
+  }): Promise<JournalReadResult> {
+    const qs = new URLSearchParams();
+    if (query.jobId !== undefined) qs.set('jobId', query.jobId);
+    if (query.contextGraphId !== undefined) qs.set('contextGraphId', query.contextGraphId);
+    if (query.name !== undefined) qs.set('name', query.name);
+    if (query.subGraphName !== undefined) qs.set('subGraphName', query.subGraphName);
+    if (query.agentAddress !== undefined) qs.set('agentAddress', query.agentAddress);
+    if (query.intentKey !== undefined) qs.set('intentKey', query.intentKey);
+    return this.get(`/api/publisher/journal?${qs.toString()}`);
+  }
+
   async publisherStats(): Promise<Record<string, number>> {
     return this.get('/api/publisher/stats');
   }
@@ -1199,6 +1324,14 @@ export class ApiClient {
 
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
     return this.post('/api/publisher/clear', { status });
+  }
+
+  // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
+  // status-scoped publisherClear). cleared / already_absent resolve normally (200);
+  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // carrying { outcome:'rejected', reason } in the response body.
+  async publisherClearJob(jobId: string): Promise<{ outcome: 'cleared' | 'already_absent'; jobId: string }> {
+    return this.post('/api/publisher/clear-job', { jobId });
   }
 
   // ------------------------- EPCIS -------------------------------------
@@ -1367,6 +1500,8 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+        peersNotAttempted?: number;
         deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
@@ -1386,6 +1521,7 @@ export class ApiClient {
             checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
+            verifiedPrivateOnlyResponses?: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
@@ -1439,6 +1575,8 @@ export class ApiClient {
         peersTried: number;
         peersResponded: number;
         peersSucceeded: number;
+        /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+        peersNotAttempted?: number;
         deferredBackpressure: number;
         dataSynced: number;
         sharedMemorySynced: number;
@@ -1458,6 +1596,7 @@ export class ApiClient {
             checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
+            verifiedPrivateOnlyResponses?: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
@@ -1507,6 +1646,8 @@ export class ApiClient {
       peersTried: number;
       peersResponded: number;
       peersSucceeded: number;
+      /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
+      peersNotAttempted?: number;
       deferredBackpressure: number;
       dataSynced: number;
       sharedMemorySynced: number;
@@ -1526,6 +1667,7 @@ export class ApiClient {
           checkpointAdvances: number;
           emptyResponses: number;
           metaOnlyResponses: number;
+          verifiedPrivateOnlyResponses?: number;
           dataRejectedMissingMeta: number;
           rejectedKcs: number;
           failedPeers: number;

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import { DKGEvent } from '@origintrail-official/dkg-core';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -164,8 +165,22 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
 
         expect(peerStoreReads).toBe(3);
-        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
-        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
+        // Background catch-up carries no admission priority override, but it
+        // does tag its origin so node-wide scheduler diagnostics can attribute
+        // queue pressure to a trigger (issue #2006).
+        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([
+          remotePeer.toString(),
+          ['runtime-contextGraph'],
+          undefined,
+          undefined,
+          undefined,
+          { source: 'catchup-background' },
+        ]);
+        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([
+          remotePeer.toString(),
+          ['runtime-contextGraph'],
+          { source: 'catchup-background' },
+        ]);
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(1);
         expect(result.peersTried).toBe(1);
@@ -652,6 +667,67 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.diagnostics.durable.insertedMetaTriples).toBe(1);
         expect(result.diagnostics.sharedMemory.insertedMetaTriples).toBe(1);
         expect(result.diagnostics.durable.metaOnlyResponses).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('counts a verified private-only inline catchup as clean durable readiness', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupVerifiedPrivateOnly',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        allowAllNetworkAdmission(agent);
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = { toString: () => 'peer-private-only-clean' };
+        (agent.node.libp2p as any).getConnections = recorder(() => [
+          { remotePeer } as any,
+        ]);
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
+          protocols: [PROTOCOL_SYNC],
+        } as any));
+        const syncedEvents: unknown[] = [];
+        agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (event) => syncedEvents.push(event));
+        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 1,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 2,
+          checkpointAdvances: 2,
+          emptyResponses: 0,
+          metaOnlyResponses: 0,
+          verifiedPrivateOnlyResponses: 1,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deniedPhases: 0,
+        }));
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.peersResponded).toBe(1);
+        expect(result.peersSucceeded).toBe(1);
+        expect(result.dataSynced).toBe(0);
+        expect(result.diagnostics.durable.verifiedPrivateOnlyResponses).toBe(1);
+        expect(syncedEvents).toContainEqual(expect.objectContaining({
+          contextGraphId: 'runtime-contextGraph',
+          dataSynced: 0,
+          verifiedPrivateOnlyResponses: 1,
+        }));
+        expect(agent.getSubscribedContextGraphs().get('runtime-contextGraph')).toMatchObject({
+          synced: true,
+        });
       } finally {
         await agent.stop().catch(() => {});
       }

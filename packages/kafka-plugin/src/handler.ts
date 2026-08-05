@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { jsonResponse, readBody } from '@origintrail-official/dkg/daemon/plugin-api';
 import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
@@ -9,6 +10,7 @@ import {
   buildListQuery,
   buildCountQuery,
   buildSingleByUalQuery,
+  buildPageContentQuery,
   bindingsToKa,
 } from './discovery.js';
 
@@ -144,6 +146,8 @@ async function handlePostRegister(
   const parsedData = result.data as Record<string, unknown>;
   const coreFields = pickCoreFields(parsedData);
   const baseKa = buildKa(coreFields);
+  const streamId = `urn:dkg:kafka-stream:${randomUUID()}`;
+  baseKa['@id'] = streamId;
   let ka: Record<string, unknown> = baseKa as unknown as Record<string, unknown>;
   if (opts.extension) {
     const extensionFields = pickExtensionFields(parsedData);
@@ -161,7 +165,17 @@ async function handlePostRegister(
       unknown
     >;
   }
-  const publishContent = { private: ka } as unknown as Record<string, unknown>;
+  // Keep connection details private while exposing one application-level
+  // discovery/challenge triple on the same subject. V2 metadata points to the
+  // exact public and private graphs, so no rootEntity rows are required.
+  const publishContent = {
+    public: {
+      '@context': { dkg: 'http://dkg.io/ontology/' },
+      '@id': streamId,
+      'dkg:privateDataAnchor': 'true',
+    },
+    private: ka,
+  } as unknown as Record<string, unknown>;
   let publishResult: { captureID: string };
   try {
     publishResult = await ctx.agent.publishAsync(cgId, publishContent, opts.publishOptions);
@@ -283,16 +297,30 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
   const queryOptions = discoveryQueryOptions(ctx, cgId, subGraphName);
   let countBindings: Array<Record<string, unknown>>;
   let pageBindings: Array<Record<string, unknown>>;
+  let contentBindings: Array<Record<string, unknown>> = [];
   try {
-    countBindings = (await ctx.agent.query(countQuery, queryOptions)).bindings;
-    pageBindings = (await ctx.agent.query(listQuery, queryOptions)).bindings;
+    const fetchBindings = async (sparql: string): Promise<Array<Record<string, unknown>>> =>
+      (await ctx.agent.query(sparql, queryOptions)).bindings;
+    [countBindings, pageBindings] = await Promise.all([
+      fetchBindings(countQuery),
+      fetchBindings(listQuery),
+    ]);
+    const targets = pageBindings.flatMap((row) => {
+      const ual = unwrapBindingValue(row.ual);
+      const root = unwrapBindingValue(row.root);
+      const contentGraph = unwrapBindingValue(row.contentGraph);
+      return ual && root && contentGraph ? [{ ual, root, contentGraph }] : [];
+    });
+    if (targets.length > 0) {
+      contentBindings = await fetchBindings(buildPageContentQuery(targets));
+    }
   } catch (err) {
     return queryFailedResponse(ctx.res, err);
   }
   const total = extractCount(countBindings);
 
   const grouped = new Map<string, Array<Record<string, unknown>>>();
-  for (const row of pageBindings) {
+  for (const row of contentBindings) {
     const subject = unwrapBindingValue(row.ual);
     if (!subject) continue;
     const arr = grouped.get(subject) ?? [];
@@ -300,7 +328,11 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
     grouped.set(subject, arr);
   }
   const items: Array<Record<string, unknown>> = [];
-  for (const subjectBindings of grouped.values()) {
+  const orderedUals = [...new Set(
+    pageBindings.map((row) => unwrapBindingValue(row.ual)).filter((ual): ual is string => Boolean(ual)),
+  )];
+  for (const ual of orderedUals) {
+    const subjectBindings = grouped.get(ual) ?? [];
     const ka = bindingsToKa(subjectBindings);
     if (ka) items.push(ka as Record<string, unknown>);
   }

@@ -18,6 +18,7 @@ import {
 import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
+  classifyContextOracleEntry,
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
@@ -59,6 +60,56 @@ function ProjectTreeItem({
           className="v10-tree-hide-btn"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface OracleCatalogueItemProps {
+  cg: ContextGraph;
+  isBrowsing: boolean;
+  onBrowse: () => void;
+  onSubscribe: () => void;
+  onHide: () => void;
+}
+
+function OracleCatalogueItem({
+  cg,
+  isBrowsing,
+  onBrowse,
+  onSubscribe,
+  onHide,
+}: OracleCatalogueItemProps) {
+  const label = cg.name || cg.id.slice(0, 16);
+  return (
+    <div className="v10-tree-section">
+      <div className={`v10-tree-section-header catalogue ${isBrowsing ? 'active' : ''}`}>
+        <span className="v10-tree-project-dot" />
+        <span className="v10-tree-section-label">{label}</span>
+        <button
+          type="button"
+          className="v10-tree-catalogue-btn"
+          aria-label={`Browse ${label}`}
+          onClick={onBrowse}
+        >
+          Browse
+        </button>
+        <button
+          type="button"
+          className="v10-tree-catalogue-btn primary"
+          aria-label={`Subscribe to ${label}`}
+          onClick={onSubscribe}
+        >
+          Subscribe
+        </button>
+        <button
+          type="button"
+          className="v10-tree-hide-btn"
+          title="Hide this context graph from the sidebar (reversible)"
+          onClick={onHide}
         >
           ×
         </button>
@@ -176,6 +227,17 @@ export function PanelLeft() {
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
+  const [joinContextGraphId, setJoinContextGraphId] = useState<string | undefined>();
+
+  const openJoinModal = useCallback((contextGraphId?: string) => {
+    setJoinContextGraphId(contextGraphId);
+    setShowJoinModal(true);
+  }, []);
+
+  const closeJoinModal = useCallback(() => {
+    setShowJoinModal(false);
+    setJoinContextGraphId(undefined);
+  }, []);
 
   const loadCGs = useCallback(() => {
     setLoading(true);
@@ -202,7 +264,7 @@ export function PanelLeft() {
     <div className="v10-panel-left">
       <div style={{ display: 'flex', gap: 4, padding: '8px 8px 4px' }}>
         <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
-        <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Context Graph</button>
+        <button className="v10-new-project-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
       </div>
 
       <div className="v10-tree-header">
@@ -354,26 +416,48 @@ export function PanelLeft() {
           {contextOracleProjects.length > 0 && (
             <>
               <div className="v10-tree-group-label">Context Oracle</div>
-              {contextOracleProjects.map((cg) => (
-                <ProjectTreeItem
-                  key={cg.id}
-                  cg={cg}
-                  isActive={activeProjectId === cg.id}
-                  onSelect={() => {
-                    setActiveProject(cg.id);
-                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                  }}
-                  onHide={() => {
-                    hideProject(cg.id);
-                    if (activeProjectId === cg.id) setActiveProject(null);
-                  }}
-                />
-              ))}
+              {contextOracleProjects.map((cg) => {
+                const onHide = () => {
+                  hideProject(cg.id);
+                  if (activeProjectId === cg.id) setActiveProject(null);
+                };
+                if (classifyContextOracleEntry(cg) === 'catalogue') {
+                  return (
+                    <OracleCatalogueItem
+                      key={cg.id}
+                      cg={cg}
+                      isBrowsing={activeTabId === `project:${cg.id}`}
+                      onBrowse={() => {
+                        setActiveProject(null);
+                        openTab({
+                          id: `project:${cg.id}`,
+                          label: cg.name || cg.id.slice(0, 16),
+                          closable: true,
+                        });
+                      }}
+                      onSubscribe={() => openJoinModal(cg.id)}
+                      onHide={onHide}
+                    />
+                  );
+                }
+                return (
+                  <ProjectTreeItem
+                    key={cg.id}
+                    cg={cg}
+                    isActive={activeProjectId === cg.id}
+                    onSelect={() => {
+                      setActiveProject(cg.id);
+                      openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                    }}
+                    onHide={onHide}
+                  />
+                );
+              })}
             </>
           )}
           {contextOracleProjects.length === 0 && (
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
-              No public catalogue entries yet. Context graphs you sync or curate appear under <strong>Context Graphs</strong>; non-private graphs you discover but haven&apos;t joined list here — use <strong>Join Context Graph</strong> to subscribe.
+              No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
             </p>
           )}
           {hiddenCount > 0 && (
@@ -390,7 +474,11 @@ export function PanelLeft() {
       )}
 
       <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
-      <JoinProjectModal open={showJoinModal} onClose={() => setShowJoinModal(false)} />
+      <JoinProjectModal
+        open={showJoinModal}
+        onClose={closeJoinModal}
+        initialContextGraphId={joinContextGraphId}
+      />
     </div>
   );
 }

@@ -2,7 +2,11 @@
  * Optional TripleStore operations that a decorator may expose even when its
  * wrapped backend cannot perform them.
  */
-export type TripleStoreCapability = 'update';
+export type TripleStoreCapability =
+  | 'update'
+  | 'replaceGraph'
+  | 'replaceGraphAndSubject'
+  | 'replaceSubject';
 
 /**
  * Typed signal that an optional store capability is unavailable.
@@ -23,4 +27,31 @@ export class UnsupportedTripleStoreCapabilityError extends Error {
     this.capability = capability;
     this.storeName = storeName;
   }
+}
+
+/**
+ * A capability refusal is a clean preflight outcome — the contract requires it
+ * to be raised before the operation starts — so decorators that treat a failed
+ * `replaceGraph` as an indeterminate (possibly committed) mutation must exempt
+ * it from cache-dirtying and reconcile flagging.
+ */
+export function isReplaceGraphCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError &&
+    error.capability === 'replaceGraph'
+  );
+}
+
+export function isReplaceGraphAndSubjectCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError &&
+    error.capability === 'replaceGraphAndSubject'
+  );
+}
+
+export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
+  return (
+    error instanceof UnsupportedTripleStoreCapabilityError &&
+    error.capability === 'replaceSubject'
+  );
 }

@@ -17,6 +17,7 @@ import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
+  ChainReadOptions,
   V10PublishParams,
   OnChainPublishResult,
 } from './chain-adapter.js';
@@ -186,6 +187,14 @@ const RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED = new Set<string>([
 export const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
+
+// V10 publish/update execution cost can increase between eth_estimateGas and
+// mining when concurrent writes land first and advance shared contract state.
+// Base Sepolia Jenkins evidence showed three status=0 receipts consuming their
+// gas limits exactly while four nodes published into the same block. Keep this
+// headroom local to the shared V10 write path; unrelated contract writes retain
+// their existing gas policy.
+const V10_WRITE_GAS_LIMIT_BUFFER_BPS = 2_500;
 
 type IdentityIdCacheEntry = {
   identityId: bigint;
@@ -1347,6 +1356,21 @@ export class EVMChainAdapterBase {
     return this.rpcFailover.getReceipt(txHash, options);
   }
 
+  /** Nullable transaction lookup used to distinguish pending from unknown. */
+  protected getTransactionWithFailover(
+    txHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<ethers.TransactionResponse | null> {
+    return this.readProvider(
+      'transaction lookup',
+      (provider) => provider.getTransaction(txHash),
+      {
+        signal: options.signal,
+        isEmptyResult: (value) => value === null,
+      },
+    );
+  }
+
   /**
    * Common point-view CONTRACT read — the chain-concept surface the domain mixins
    * call: a `contract`, a `label`, a string `method` name, and its args, run with
@@ -1360,8 +1384,24 @@ export class EVMChainAdapterBase {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
+    return this.readContractWithOptions(contract, label, method, args);
+  }
+
+  /**
+   * Canonical simple contract view with request options. This keeps ordinary
+   * method-name reads on the same path as {@link readContract} while allowing
+   * cancellation and other read policy to be supplied without a custom lambda.
+   */
+  protected readContractWithOptions<T = any>(
+    contract: Contract,
+    label: string,
+    method: string,
+    args: readonly unknown[],
+    opts?: ReadOpts,
+  ): Promise<T> {
     return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
-      rpcUsageConsumer: label,
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
     });
   }
 
@@ -1513,6 +1553,7 @@ export class EVMChainAdapterBase {
           [methodParams],
           signer,
           `V10 ${method}`,
+          { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
         );
       } catch (err) {
         enrichEvmError(err);
@@ -2709,7 +2750,10 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected async getBlockTimestamp(blockNumber: number): Promise<number> {
+  protected async getBlockTimestamp(
+    blockNumber: number,
+    options: ChainReadOptions = {},
+  ): Promise<number> {
     // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
     // endpoint stickiness (the endpoint that produced the receipt is the one most
     // likely to already have the block). It is NOT a `skipPreferred` tip read:
@@ -2729,6 +2773,7 @@ export class EVMChainAdapterBase {
       {
         rpcUsageConsumer: 'getBlock',
         endpointSetRetry: 'all-throttled',
+        signal: options.signal,
       },
     );
     return block?.timestamp != null ? Number(block.timestamp) : 0;
@@ -2751,6 +2796,21 @@ export class EVMChainAdapterBase {
       throw new Error('DKGKnowledgeAssets / DKGKnowledgeAssets not deployed on this chain.');
     }
     return this.contracts.knowledgeAssetStorage.target as string;
+  }
+
+  async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
+    await this.init();
+    const storage = this.contracts.knowledgeAssetStorage;
+    if (!storage) {
+      throw new Error('DKGKnowledgeAssets not deployed on this chain.');
+    }
+    const owner = await this.readContract<string>(
+      storage,
+      'DKGKnowledgeAssets.ownerOf',
+      'ownerOf',
+      kaId,
+    );
+    return ethers.getAddress(owner);
   }
 
   /**
@@ -3342,6 +3402,30 @@ export class EVMChainAdapterBase {
     try {
       const code = await this.readProvider('hasContractCode getCode', (p) => p.getCode(address));
       return code !== undefined && code !== null && code !== '0x' && code.length > 2;
+    } catch {
+      return false;
+    }
+  }
+
+  async verifyContractSignature(
+    address: string,
+    digest: string,
+    signature: string,
+  ): Promise<boolean> {
+    const wallet = new Contract(
+      ethers.getAddress(address),
+      ['function isValidSignature(bytes32,bytes) view returns (bytes4)'],
+      this.signer,
+    );
+    try {
+      const magic = await this.readContract<string>(
+        wallet,
+        'IERC1271.isValidSignature',
+        'isValidSignature',
+        digest,
+        signature,
+      );
+      return magic.toLowerCase() === '0x1626ba7e';
     } catch {
       return false;
     }

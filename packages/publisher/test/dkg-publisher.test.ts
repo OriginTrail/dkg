@@ -15,6 +15,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildSeal, buildUpdateSeal, wrapPublisherForTest } from './_helpers/seal.js';
 import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
+import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 import type { V10ACKProvider } from '../src/publisher.js';
 
 let CONTEXT_GRAPH: string;
@@ -445,6 +446,11 @@ describe('DKGPublisher', () => {
     });
 
     it('allows a user-authored assertionWrite with a non-reserved subject', async () => {
+      await publisher.assertionCreate(
+        CONTEXT_GRAPH,
+        'user-allowed',
+        TEST_PUBLISHER_ADDRESS,
+      );
       await expect(
         publisher.assertionWrite(CONTEXT_GRAPH, 'user-allowed', TEST_PUBLISHER_ADDRESS, [
           { subject: 'urn:note:my-doc', predicate: 'http://schema.org/name', object: '"allowed"' },
@@ -645,7 +651,11 @@ describe('DKGPublisher', () => {
       // functionally-equivalent but differently-shaped check
       // (e.g., a Set lookup or a regex), this test still passes
       // as long as the behaviour is correct.
-      const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/assertion/${TEST_PUBLISHER_ADDRESS}/bug35-ssot`;
+      const dataGraph = await publisher.assertionCreate(
+        CONTEXT_GRAPH,
+        'bug35-ssot',
+        TEST_PUBLISHER_ADDRESS,
+      );
       const reservedQuads: Quad[] = RESERVED_SUBJECT_PREFIXES.map((prefix, i) => ({
         subject: `${prefix}synthetic-${i}`,
         predicate: 'http://schema.org/name',
@@ -680,6 +690,13 @@ describe('DKGPublisher', () => {
           throw err;
         }
       }
+      const finalized = await finalizeRootlessAssertionForTest({
+        publisher,
+        store,
+        contextGraphId: CONTEXT_GRAPH,
+        name: 'bug35-ssot',
+        agentAddress: TEST_PUBLISHER_ADDRESS,
+      });
       const result = await publisher.assertionPromote(
         CONTEXT_GRAPH,
         'bug35-ssot',
@@ -689,7 +706,7 @@ describe('DKGPublisher', () => {
       // directly, but we can query the SWM graph post-promote and
       // assert that none of the reserved subjects landed there.
       expect(result.promotedCount).toBeGreaterThan(0);
-      const swmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+      const swmGraph = finalized.graphUri.replace('/_working_memory/', '/_shared_memory/');
       const swmCheck = await store.query(
         `ASK { GRAPH <${swmGraph}> { ?s ?p ?o . FILTER(${RESERVED_SUBJECT_PREFIXES.map(p => `STRSTARTS(STR(?s), "${p}")`).join(' || ')}) } }`,
       );
@@ -781,7 +798,11 @@ describe('DKGPublisher', () => {
         // the daemon's import-file handler does). Then promote and
         // verify the uppercase variants are filtered out along with
         // the lowercase canonical form.
-        const dataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/assertion/${TEST_PUBLISHER_ADDRESS}/bug41-promote`;
+        const dataGraph = await publisher.assertionCreate(
+          CONTEXT_GRAPH,
+          'bug41-promote',
+          TEST_PUBLISHER_ADDRESS,
+        );
         const mixedCaseReserved: Quad[] = [
           { subject: 'URN:dkg:file:keccak256:upper', predicate: 'http://schema.org/name', object: '"upper-reserved"', graph: dataGraph },
           { subject: 'urn:DKG:extraction:caseNID', predicate: 'http://schema.org/name', object: '"nid-reserved"', graph: dataGraph },
@@ -802,6 +823,14 @@ describe('DKGPublisher', () => {
           }
         }
 
+        const finalized = await finalizeRootlessAssertionForTest({
+          publisher,
+          store,
+          contextGraphId: CONTEXT_GRAPH,
+          name: 'bug41-promote',
+          agentAddress: TEST_PUBLISHER_ADDRESS,
+        });
+
         const result = await publisher.assertionPromote(
           CONTEXT_GRAPH,
           'bug41-promote',
@@ -809,7 +838,7 @@ describe('DKGPublisher', () => {
         );
         expect(result.promotedCount).toBeGreaterThan(0);
 
-        const swmGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
+        const swmGraph = finalized.graphUri.replace('/_working_memory/', '/_shared_memory/');
         // Use a SPARQL ASK that matches ANY case of the reserved
         // prefixes (LCASE both sides of the comparison).
         const swmCheck = await store.query(

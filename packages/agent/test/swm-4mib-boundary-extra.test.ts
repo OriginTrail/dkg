@@ -1,0 +1,162 @@
+/**
+ * SHARE / SWM 4 MiB gossip-size boundary, exercised from the agent layer.
+ *
+ * Audit findings covered:
+ *   A-2 (CRITICAL) — `DKGPublisher#_shareImpl` rejects encoded SWM messages
+ *        larger than the DKG gossip payload cap. The agent's
+ *        `DKGAgent#share` is the only user-facing entry point. We pin:
+ *          1. Positive: a payload whose encoded size is safely below the
+ *             limit succeeds and produces a shareOperationId + SWM quads
+ *             observable via `query({view: 'shared-working-memory'})`.
+ *          2. Negative: a payload well above the limit throws the exact
+ *             "SWM message too large" error, with the guidance pointing at
+ *             split-into-smaller-share() batches.
+ *          3. Boundary: callers that hit the limit see a *clear* error, not
+ *             a silent libp2p-level drop. Error message contains both the
+ *             observed KB and the 4 MiB limit so operators can react.
+ *
+ * No mocks — real `DKGAgent` + real libp2p + real chain (only used to boot
+ * the agent; share() never submits a tx).
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
+import { ethers } from 'ethers';
+import { DKGAgent } from '../src/index.js';
+import { DKG_GOSSIP_MAX_MESSAGE_BYTES } from '@origintrail-official/dkg-core';
+import {
+  HARDHAT_KEYS,
+  createEVMAdapter,
+  createProvider,
+  getSharedContext,
+  revertSnapshot,
+  takeSnapshot,
+} from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+
+let _fileSnapshot: string;
+let nodeA: DKGAgent | undefined;
+
+function freshCgId(prefix: string): string {
+  return `${prefix}-${ethers.hexlify(ethers.randomBytes(4)).slice(2)}`;
+}
+
+function buildChunkedDescriptionQuads(prefix: string, bytes: number, fill: string) {
+  const chunkBytes = 16 * 1024;
+  const quads = [];
+  let remaining = bytes;
+  let index = 0;
+  while (remaining > 0) {
+    const size = Math.min(chunkBytes, remaining);
+    quads.push({
+      subject: `urn:swm:${prefix}:e${index}`,
+      predicate: 'http://schema.org/description',
+      object: `"${fill.repeat(size)}"`,
+      graph: '',
+    });
+    remaining -= size;
+    index += 1;
+  }
+  return quads;
+}
+
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(
+    provider,
+    hubAddress,
+    HARDHAT_KEYS.DEPLOYER,
+    coreOp.address,
+    ethers.parseEther('1000000'),
+  );
+  nodeA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+    name: 'SwmBoundaryA',
+    listenPort: 0,
+    skills: [],
+    chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    nodeRole: 'core',
+  });
+  await nodeA.start();
+});
+
+afterAll(async () => {
+  try { await nodeA?.stop(); } catch { /* best-effort */ }
+  await revertSnapshot(_fileSnapshot);
+});
+
+describe('A-2: SHARE 4 MiB gossip-size boundary', () => {
+  it('share() with a payload well below 4 MiB succeeds and lands in SWM', async () => {
+    const cgId = freshCgId('bnd-lo');
+    await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Lo', description: '' });
+
+    // Target ~100 KB of literal payload — well under the 4 MiB cap.
+    // Split across multiple literals to mimic realistic agent output.
+    const chunkCount = 10;
+    const chunkLen = 10 * 1024; // 10 KB per chunk
+    const chunk = 'x'.repeat(chunkLen);
+    const quads = Array.from({ length: chunkCount }, (_, i) => ({
+      subject: `urn:swm:lo:e${i}`,
+      predicate: 'http://schema.org/description',
+      object: `"${chunk}"`,
+      graph: '',
+    }));
+
+    const result = await nodeA!.share(cgId, quads);
+    expect(result.shareOperationId).toMatch(/.+/);
+
+    // Data landed in SWM — can be queried via view:'shared-working-memory'.
+    const qr = await nodeA!.query(
+      `SELECT ?s WHERE { ?s <http://schema.org/description> ?o }`,
+      { contextGraphId: cgId, view: 'shared-working-memory' },
+    );
+    const subs = new Set(qr.bindings.map((b) => b['s']));
+    for (let i = 0; i < chunkCount; i++) {
+      expect(subs.has(`urn:swm:lo:e${i}`)).toBe(true);
+    }
+  });
+
+  it('share() with a payload well above 4 MiB is rejected with the expected error message', async () => {
+    const cgId = freshCgId('bnd-hi');
+    await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Hi', description: '' });
+
+    // Many individually-safe literals exercise the aggregate gossip-message
+    // boundary without tripping the stricter per-literal Blazegraph guard.
+    const quads = buildChunkedDescriptionQuads('hi', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024, 'y');
+
+    let caught: Error | null = null;
+    try {
+      await nodeA!.share(cgId, quads);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught, 'share() should reject an oversized payload with a size-limit error').not.toBeNull();
+    // Spec text from dkg-publisher.ts: "SWM message too large (<KB> KB, limit 4 MB)."
+    expect(caught!.message).toMatch(/SWM message too large/);
+    expect(caught!.message).toMatch(/limit\s+4\s*MB/);
+    // Operator-actionable guidance: split into multiple share() calls.
+    expect(caught!.message.toLowerCase()).toMatch(/split|multiple share/);
+  });
+
+  it('share() is atomic on rejection — no SWM quads from the oversized attempt persist', async () => {
+    const cgId = freshCgId('bnd-atomic');
+    await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Atomic', description: '' });
+
+    const quads = buildChunkedDescriptionQuads('atomic', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024, 'z');
+
+    await expect(nodeA!.share(cgId, quads)).rejects.toThrow(/SWM message too large/);
+
+    // SWM view for this CG must be empty for the attempted subject: the
+    // oversized share must not have half-written into the store.
+    const qr = await nodeA!.query(
+      `SELECT ?o WHERE { <urn:swm:atomic:e0> <http://schema.org/description> ?o }`,
+      { contextGraphId: cgId, view: 'shared-working-memory' },
+    );
+    expect(
+      qr.bindings.length,
+      'oversized share must not persist ANY triples; store leak would let large payloads bypass the limit',
+    ).toBe(0);
+  });
+});

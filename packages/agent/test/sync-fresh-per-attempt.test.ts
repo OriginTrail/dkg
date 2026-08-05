@@ -185,6 +185,55 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(didSyncPeerRespond(transportError)).toBe(false);
   });
 
+  it('backs a preferred 256-row page down to the 64-row frame-safe floor across retries', async () => {
+    const limits: number[] = [];
+    let attempts = 0;
+    const promise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 3,
+      syncPageSize: 256,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async (
+        _contextGraphId,
+        _offset,
+        limit,
+      ) => {
+        limits.push(limit);
+        return new TextEncoder().encode(`request-${limit}`);
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        attempts += 1;
+        if (attempts < 3) throw new Error('stream reset');
+        return new Uint8Array();
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(runFetchWithFakeTimers(promise)).resolves.toMatchObject({
+      completed: true,
+      nextOffset: 0,
+    });
+    expect(limits).toEqual([256, 128, 64]);
+  });
+
   it('tags parser failures after response bytes as peer responses', async () => {
     const parseError = new Error('bad N-Quads');
     const promise = fetchSyncPages({
@@ -228,7 +277,8 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     sinceBatchId?: string;
   } = {}): Promise<string | undefined> {
     let observed: string | undefined;
-    await runFetchWithFakeTimers(
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const result = await runFetchWithFakeTimers(
       fetchSyncPages({
         ctx: makeCtx(),
         remotePeerId: options.remotePeerId ?? REMOTE_PEER_ID,
@@ -244,11 +294,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         syncDeniedResponse: '#DENIED',
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
-        checkpointStore: {
-          get: () => freshCheckpoint(0),
-          set: () => {},
-          delete: () => {},
-        },
+        checkpointStore,
         sinceBatchId: options.sinceBatchId,
         buildSyncRequest: async (
           _contextGraphId,
@@ -271,6 +317,10 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         logDebug: noopLog,
       }),
     );
+    // Model the verified/store-committed caller boundary. A completed round
+    // deletes its checkpoint, which is what makes the next offset-zero round
+    // mint a fresh responder snapshot token.
+    checkpointStore.delete(result.checkpointKey);
     return observed;
   }
 
@@ -510,6 +560,169 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     });
   });
 
+  it('resumes a durable offset with its persisted responder session after requester restart', async () => {
+    vi.setSystemTime(1_700_050_000_000);
+    const contextGraphId = 'persisted-responder-session-cg';
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      contextGraphId,
+      false,
+      'data',
+    );
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const responderSessionId = 'durable-data:persisted-across-restart';
+    checkpointStore.set(checkpointKey, 573235);
+    checkpointStore.setResponderSession(
+      checkpointKey,
+      responderSessionId,
+      Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    );
+
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    const result = await runFetchWithFakeTimers(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore,
+      buildSyncRequest: async (
+        _contextGraphId,
+        offset,
+        _limit,
+        _includeSharedMemory,
+        _remotePeerId,
+        _phase,
+        _snapshotRef,
+        _sinceBatchId,
+        syncSessionId,
+      ) => {
+        observedBuilds.push({ offset, syncSessionId });
+        return new TextEncoder().encode(`request-${offset}`);
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => new TextEncoder().encode(''),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    }));
+
+    expect(result.resumedFromOffset).toBe(573235);
+    expect(observedBuilds).toEqual([{
+      offset: 573235,
+      syncSessionId: responderSessionId,
+    }]);
+  });
+
+  it('retains a transport-complete session when verification checkpoints a bounded prefix', async () => {
+    vi.setSystemTime(1_700_060_000_000);
+    const contextGraphId = 'bounded-rootless-prefix-cg';
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      contextGraphId,
+      false,
+      'data',
+    );
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    let firstPage = true;
+    let advanceClockOnNextResponse = false;
+
+    const run = () => runFetchWithFakeTimers(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore,
+      buildSyncRequest: async (
+        _contextGraphId,
+        offset,
+        _limit,
+        _includeSharedMemory,
+        _remotePeerId,
+        _phase,
+        _snapshotRef,
+        _sinceBatchId,
+        syncSessionId,
+      ) => {
+        observedBuilds.push({ offset, syncSessionId });
+        return new TextEncoder().encode(`request-${offset}`);
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        if (advanceClockOnNextResponse) {
+          advanceClockOnNextResponse = false;
+          vi.setSystemTime(Date.now() + 9 * 60 * 1000);
+        }
+        if (firstPage) {
+          firstPage = false;
+          return new TextEncoder().encode('one-quad-line');
+        }
+        return new TextEncoder().encode('');
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    }));
+
+    const first = await run();
+    expect(first.completed).toBe(true);
+    expect(first.nextOffset).toBe(1);
+    const firstSessionId = observedBuilds[0].syncSessionId;
+    expect(checkpointStore.get(checkpointKey)).toMatchObject({
+      offset: 0,
+      responderSessionId: firstSessionId,
+    });
+
+    // Mimic rootless manifest verification accepting only the complete graph
+    // prefix after the transport itself ended cleanly.
+    checkpointStore.set(checkpointKey, 1);
+    const firstExpiry = checkpointStore.get(checkpointKey)?.responderSessionExpiresAtMs;
+    observedBuilds.length = 0;
+    advanceClockOnNextResponse = true;
+    const resumed = await run();
+    expect(resumed.resumedFromOffset).toBe(1);
+    expect(observedBuilds[0]).toEqual({
+      offset: 1,
+      syncSessionId: firstSessionId,
+    });
+    expect(checkpointStore.get(checkpointKey)?.responderSessionExpiresAtMs)
+      .toBeGreaterThan(firstExpiry ?? 0);
+
+    // A fully verified/store-committed caller deletes the row. Its next round
+    // must therefore mint a fresh row-list token, not replay the old snapshot.
+    checkpointStore.delete(checkpointKey);
+    observedBuilds.length = 0;
+    const fresh = await run();
+    expect(fresh.resumedFromOffset).toBe(0);
+    expect(observedBuilds[0]?.syncSessionId).not.toBe(firstSessionId);
+  });
+
   /**
    * Codex #1173: the contrast to the test above. A RECOVERY fetch must NOT
    * persist/resume the responder session across an incomplete round — recovery
@@ -644,7 +857,9 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     );
 
     const expiredSessionId = observedBuilds[0].syncSessionId;
-    vi.setSystemTime(1_700_000_000_000 + DURABLE_DATA_SYNC_SESSION_TTL_MS + 1);
+    // A successfully served page slides both responder and requester session
+    // TTLs. Move beyond that refreshed expiry, not merely beyond round start.
+    vi.setSystemTime(Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS + 1);
 
     await runFetchWithFakeTimers(
       fetchSyncPages({
@@ -785,6 +1000,136 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(supersededSessionId);
   });
 
+  it('rotates an expired responder session immediately even when its checkpoint offset is zero', async () => {
+    vi.setSystemTime(1_700_100_000_000);
+    const contextGraphId = 'expired-offset-zero-session-cg';
+    const checkpointKey = `${REMOTE_PEER_ID}|${contextGraphId}|durable|data`;
+    const checkpointStore = new MemorySyncCheckpointStore({ clock: () => Date.now() });
+    checkpointStore.set(checkpointKey, 0);
+    checkpointStore.setResponderSession(
+      checkpointKey,
+      'expired-responder-token',
+      Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    );
+    const observedSessionIds: Array<string | undefined> = [];
+    let expired = true;
+
+    const runFetch = () => runFetchWithFakeTimers(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore,
+      buildSyncRequest: async (
+        _contextGraphId,
+        _offset,
+        _limit,
+        _includeSharedMemory,
+        _remotePeerId,
+        _phase,
+        _snapshotRef,
+        _sinceBatchId,
+        syncSessionId,
+      ) => {
+        observedSessionIds.push(syncSessionId);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        if (expired) throw new Error('Durable data sync session snapshot expired before page completion');
+        return new TextEncoder().encode('');
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    }));
+
+    await expect(runFetch()).rejects.toThrow('snapshot expired before page completion');
+    expect(observedSessionIds.at(-1)).toBe('expired-responder-token');
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+    expired = false;
+    const fresh = await runFetch();
+    expect(fresh.resumedFromOffset).toBe(0);
+    expect(observedSessionIds.at(-1)).not.toBe('expired-responder-token');
+  });
+
+  it('reports whether an offset-zero phase reused an unfinished responder snapshot', async () => {
+    const contextGraphId = 'offset-zero-session-evidence-cg';
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      contextGraphId,
+      false,
+      'data',
+    );
+    const checkpointStore = new MemorySyncCheckpointStore({ clock: () => Date.now() });
+    checkpointStore.set(checkpointKey, 0);
+    checkpointStore.setResponderSession(
+      checkpointKey,
+      'unfinished-offset-zero-token',
+      Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    );
+    const observedSessionIds: Array<string | undefined> = [];
+
+    const runFetch = (forceFreshSession = false) => runFetchWithFakeTimers(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore,
+      forceFreshSession,
+      buildSyncRequest: async (
+        _contextGraphId,
+        _offset,
+        _limit,
+        _includeSharedMemory,
+        _remotePeerId,
+        _phase,
+        _snapshotRef,
+        _sinceBatchId,
+        syncSessionId,
+      ) => {
+        observedSessionIds.push(syncSessionId);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => new Uint8Array(),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    }));
+
+    const reused = await runFetch();
+    expect(reused.resumedFromOffset).toBe(0);
+    expect(reused.responderSessionStartedFresh).toBe(false);
+    expect(observedSessionIds.at(-1)).toBe('unfinished-offset-zero-token');
+
+    const fresh = await runFetch(true);
+    expect(fresh.resumedFromOffset).toBe(0);
+    expect(fresh.responderSessionStartedFresh).toBe(true);
+    expect(observedSessionIds.at(-1)).not.toBe('unfinished-offset-zero-token');
+  });
+
   it('drops a RESUMED session that aborts with a GENERIC transport error (network-path R1 fix)', async () => {
     // 2026-07-07 sync storm. Over the wire the responder's "superseded" message
     // is destroyed by the router's stream.abort, so the requester sees a
@@ -879,7 +1224,118 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(abortedSessionId);
   });
 
+  it('preserves a resumed checkpoint when the responder accepted a page before a transport drop', async () => {
+    vi.setSystemTime(1_700_100_000_000);
+    const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
+    const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
+    const deletedCheckpoints: string[] = [];
+    const checkpointKey = `${REMOTE_PEER_ID}|accepted-page-then-drop-cg|durable|data`;
+    let sendMode: 'timeout' | 'page-then-drop' | 'complete' = 'timeout';
+    let callsThisRound = 0;
+
+    const checkpointStore = {
+      get: (key: string) => checkpointValues.get(key),
+      set: (key: string, value: number) => { checkpointValues.set(key, freshCheckpoint(value)); },
+      delete: (key: string) => { deletedCheckpoints.push(key); checkpointValues.delete(key); },
+    };
+
+    const runFetch = () => {
+      callsThisRound = 0;
+      return runFetchWithFakeTimers(fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'accepted-page-then-drop-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore,
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: async (nquadsText) => nquadsText
+          ? {
+              quads: [{
+                subject: 'urn:test:s',
+                predicate: 'urn:test:p',
+                object: '"value"',
+                graph: GRAPH_URI,
+              }],
+              totalQuads: 1,
+            }
+          : { quads: [], totalQuads: 0 },
+        send: async () => {
+          callsThisRound += 1;
+          if (sendMode === 'timeout') {
+            vi.setSystemTime(1_700_100_060_001);
+            return new TextEncoder().encode('one-quad-line');
+          }
+          if (sendMode === 'page-then-drop') {
+            if (callsThisRound === 1) return new TextEncoder().encode('one-quad-line');
+            throw new Error('peer-closed-stream; All multiaddr dials failed');
+          }
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }));
+    };
+
+    // Establish a resumable offset/session pair.
+    const first = await runFetch();
+    expect(first.completed).toBe(false);
+    checkpointValues.set(checkpointKey, freshCheckpoint(first.nextOffset));
+    const establishedSessionId = observedBuilds[0].syncSessionId;
+
+    // The resumed token is accepted for one page before the transport drops.
+    // Keep the previously certified offset rather than treating this as an
+    // immediate-token supersession and deleting the durable checkpoint.
+    sendMode = 'page-then-drop';
+    const before = deletedCheckpoints.length;
+    const interrupted = await runFetch();
+    expect(interrupted).toMatchObject({
+      completed: false,
+      timedOut: true,
+      resumedFromOffset: first.nextOffset,
+      nextOffset: first.nextOffset + 1,
+    });
+    expect(interrupted.quads).toHaveLength(1);
+    expect(deletedCheckpoints.slice(before)).not.toContain(checkpointKey);
+    expect(checkpointValues.get(checkpointKey)?.offset).toBe(first.nextOffset);
+
+    // Model the durable caller certifying the complete prefix and committing
+    // its safe boundary before the next bounded round.
+    checkpointValues.set(checkpointKey, freshCheckpoint(interrupted.nextOffset));
+    sendMode = 'complete';
+    const resumed = await runFetch();
+    expect(resumed.resumedFromOffset).toBe(interrupted.nextOffset);
+    expect(observedBuilds[observedBuilds.length - 1]).toMatchObject({
+      offset: interrupted.nextOffset,
+      syncSessionId: establishedSessionId,
+    });
+  });
+
   it('restarts durable data checkpoints at offset zero with a stable sync session', async () => {
+    const contextGraphId = 'orphaned-offset-without-session-cg';
     const observedBuilds: Array<{
       offset: number;
       syncSessionId: string | undefined;
@@ -890,7 +1346,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       fetchSyncPages({
         ctx: makeCtx(),
         remotePeerId: REMOTE_PEER_ID,
-        contextGraphId: CG_ID,
+        contextGraphId,
         includeSharedMemory: false,
         phase: 'data',
         graphUri: GRAPH_URI,
@@ -935,7 +1391,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[0].offset).toBe(0);
     expect(typeof observedBuilds[0].syncSessionId).toBe('string');
     expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
-    expect(deletedCheckpoints).toEqual([`${REMOTE_PEER_ID}|${CG_ID}|durable|data`]);
+    expect(deletedCheckpoints).toEqual([`${REMOTE_PEER_ID}|${contextGraphId}|durable|data`]);
   });
 
   it('uses one stable sync session id across pages for durable delta sync', async () => {

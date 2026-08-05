@@ -114,8 +114,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type CollectedACK,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -131,6 +130,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -346,9 +346,6 @@ import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
-  partitionPublishAsyncQuads,
-  signWithPrivateKey,
-  preSignedAttestationToLiftSeal,
   normalizeAgentDid,
   joinDelegationScope,
   normalizeSyncPhase,
@@ -434,6 +431,8 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string;
   }): Promise<void> {
     const ctx = createOperationContext('system');
+    const gm = new GraphManager(this.store);
+    gm.assertNewContextGraphId(opts.id);
     // OT-RFC-56 §4.6: name/description land as raw literals in a
     // network-replicated graph — enforce the protocol limit before ANY
     // side effect (see ensureContextGraphLocal for the incident context).
@@ -445,7 +444,6 @@ export class ContextGraphMethods extends DKGAgentBase {
         label: 'contextGraph.description', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
       });
     }
-    const gm = new GraphManager(this.store);
     const contextGraphUri = `did:dkg:context-graph:${opts.id}`;
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
@@ -556,6 +554,9 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
     );
+    if (!isCurated && !opts.private) {
+      quads.push(...buildAuthoritativePublicMetaQuads(opts.id));
+    }
     if (opts.publishPolicy !== undefined) {
       quads.push({
         subject: contextGraphUri,
@@ -683,7 +684,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     await this.store.insert(quads);
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-    await gm.ensureContextGraph(opts.id);
+    await gm.ensureNewContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
     // Without this, a daemon crash within 50ms of the insert would lose the
@@ -880,6 +881,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     strictEoaCuratorMatch?: boolean;
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
+    new GraphManager(this.store).assertNewContextGraphId(id);
 
     if (opts?.revealOnChain === true) {
       this.log.warn(
@@ -926,6 +928,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           UNION
           { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
         } LIMIT 1`,
+        { source: 'agent.contextGraph.register.accessPolicy' },
       );
       const apValue = accessPolicyResult.type === 'bindings'
         ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
@@ -940,10 +943,14 @@ export class ContextGraphMethods extends DKGAgentBase {
       await this.store.deleteByPattern({ graph: defGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
       await this.store.deleteByPattern({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
       await this.store.deleteByPattern({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
-      await this.store.insert([
+      const authorityQuads: Quad[] = [
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
-      ]);
+      ];
+      if (!isCurated) {
+        authorityQuads.push(...buildAuthoritativePublicMetaQuads(id));
+      }
+      await this.store.insert(authorityQuads);
       this.invalidateListContextGraphsCache();
       this.contextGraphMetaProjection.markDirty(id);
       this.log.info(ctx, `Stamped local node as creator contact and address curator for "${id}" (registration-time lazy stamp)`);
@@ -985,6 +992,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      { source: 'agent.contextGraph.register.status' },
     );
     if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
@@ -1000,6 +1008,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         UNION
         { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
       } LIMIT 1`,
+      { source: 'agent.contextGraph.register.description' },
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
 
@@ -1427,7 +1436,12 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
 
-    // Update _meta with registered status and on-chain ID
+    // Update _meta with registered status and the member-syncable on-chain
+    // binding.  The ontology copy remains for system-graph discovery, while
+    // the authenticated CG-local copy lets a late member learn the immutable
+    // slot from the curator's private `_meta` snapshot.  A private joiner may
+    // have missed the one-shot ontology gossip emitted below and must not be
+    // left unable to start chain-driven VM reconciliation as a result.
     await this.store.deleteByPattern({
       graph: cgMetaGraph,
       subject: contextGraphUri,
@@ -1441,9 +1455,15 @@ export class ContextGraphMethods extends DKGAgentBase {
       subject: contextGraphUri,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
     });
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: contextGraphUri,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+    });
     await this.store.insert([
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
       // Persist the wire-id commitment in the cg's _meta graph so a
       // restart can resume host-mode subscription on the correct
       // topic without re-reading the chain event.
@@ -1460,13 +1480,10 @@ export class ContextGraphMethods extends DKGAgentBase {
     // Update in-memory subscription record and ensure we're subscribed
     const sub = this.subscribedContextGraphs.get(id);
     if (sub) {
-      this.bindSubscriptionOnChainId(id, sub, onChainId);
-      // Keep the forward + reverse maps in lockstep so the receive
-      // path can translate the wire id back to `id` (see
-      // {@link recordCgWireId}).
-      this.recordCgWireId(id, nameHash);
-      if (!sub.subscribed) {
-        sub.subscribed = true;
+      const next = { ...sub, onChainHash: nameHash };
+      this.bindSubscriptionOnChainId(id, next, onChainId);
+      this.setContextGraphSubscription(id, next, { persist: false });
+      if (!next.subscribed) {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
         this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
       }

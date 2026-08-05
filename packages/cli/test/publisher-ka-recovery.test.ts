@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import {
   TripleStoreAsyncLiftPublisher,
   type DKGPublisher,
@@ -14,10 +15,13 @@ import {
 } from '../src/publisher-runner.js';
 
 describe('named KA publisher recovery wiring', () => {
-  it('reconstructs the canonical V10 UAL from a confirmed transaction receipt', async () => {
+  it('preserves the queued graph UAL while generic recovery retains the public token UAL', async () => {
     const txHash = `0x${'ab'.repeat(32)}` as `0x${string}`;
-    const kaId = 123456789n;
+    const blockHash = `0x${'bc'.repeat(32)}` as `0x${string}`;
     const walletId = '0x1111111111111111111111111111111111111111';
+    const kaNumber = 7n;
+    const kaId = (BigInt(walletId) << 96n) | kaNumber;
+    const graphUal = `did:dkg:evm:31337/${walletId}/${kaNumber}`;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const resolvePublishByTxHash = vi.fn(async () => ({
       batchId: kaId,
@@ -29,49 +33,100 @@ describe('named KA publisher recovery wiring', () => {
       endKAId: kaId,
       txHash,
       blockNumber: 77,
+      txIndex: 4,
       blockTimestamp: 1_700_000_077,
       publisherAddress: walletId,
+    }));
+    const resolveCanonicalFinalizationReceipt = vi.fn(async () => ({
+      status: 'confirmed' as const,
+      receipt: {
+        txHash,
+        blockNumber: 77,
+        blockHash,
+        txIndex: 4,
+        merkleRoot: Buffer.from(merkleRoot.slice(2), 'hex'),
+        publisherAddress: walletId,
+        authorAddress: walletId,
+        batchId: kaId,
+        kaId,
+        startKAId: kaId,
+        endKAId: kaId,
+        knowledgeAssetsContract: '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD',
+      },
     }));
     const publisher = {
       chain: {
         chainId: 'evm:31337',
         resolvePublishByTxHash,
+        resolveCanonicalFinalizationReceipt,
       },
     } as unknown as DKGPublisher;
-    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(new Map([[walletId, publisher]]));
+    const publishers = new Map([[walletId, publisher]]);
+    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
 
-    const resolved = await resolver({
+    const job = {
       status: 'broadcast',
+      request: {
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: graphUal,
+        },
+      },
       broadcast: { txHash, walletId },
-    } as LiftJobBroadcast);
+    } as LiftJobBroadcast;
+    const resolved = await resolver(job);
 
-    expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
+    expect(resolveCanonicalFinalizationReceipt).toHaveBeenCalledWith(txHash);
     expect(resolved).toEqual({
       inclusion: {
         txHash,
         blockNumber: 77,
-        blockTimestamp: 1_700_000_077,
+        blockHash,
       },
       finalization: {
         mode: 'published',
         txHash,
-        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
+        ual: graphUal,
         batchId: kaId.toString(),
         startKAId: kaId.toString(),
         endKAId: kaId.toString(),
         publisherAddress: walletId,
       },
-      publishProof: { merkleRoot, authorAddress: walletId },
+      publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4 },
     });
+    await expect(createChainRecoveryResolver(publishers)(job)).resolves.toMatchObject({
+      finalization: {
+        ual: `did:dkg:evm:31337/0xabcdefabcdefabcdefabcdefabcdefabcdefabcd/${kaId}`,
+      },
+    });
+    expect(resolvePublishByTxHash).toHaveBeenCalledWith(txHash);
   });
 
   it('falls back to the adapter knowledge-assets address when the receipt omits it', async () => {
     const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
+    const blockHash = `0x${'bc'.repeat(32)}` as `0x${string}`;
     const walletId = '0x1111111111111111111111111111111111111111';
     const kaId = 42n;
     const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
     const chain = {
       chainId: 'evm:31337',
+      resolveCanonicalFinalizationReceipt: vi.fn(async () => ({
+        status: 'confirmed' as const,
+        receipt: {
+          txHash,
+          blockNumber: 9,
+          blockHash,
+          txIndex: 2,
+          merkleRoot: Buffer.from(merkleRoot.slice(2), 'hex'),
+          publisherAddress: walletId,
+          authorAddress: walletId,
+          batchId: kaId,
+          kaId,
+          startKAId: kaId,
+          endKAId: kaId,
+        },
+      })),
       resolvePublishByTxHash: vi.fn(async () => ({
         batchId: kaId,
         kaId,
@@ -81,6 +136,7 @@ describe('named KA publisher recovery wiring', () => {
         authorAddress: walletId,
         txHash,
         blockNumber: 9,
+        txIndex: 2,
         blockTimestamp: 1_700_000_009,
         publisherAddress: walletId,
       })),
@@ -99,19 +155,37 @@ describe('named KA publisher recovery wiring', () => {
     );
   });
 
-  it('fails closed for named-KA recovery when the receipt lacks immutable proof', async () => {
+  it('fails closed for named-KA recovery when the receipt lacks a transaction index', async () => {
     const txHash = `0x${'de'.repeat(32)}` as `0x${string}`;
     const walletId = '0x1111111111111111111111111111111111111111';
     const kaId = 42n;
     const publisher = {
       chain: {
         chainId: 'evm:31337',
+        resolveCanonicalFinalizationReceipt: vi.fn(async () => ({
+          status: 'confirmed' as const,
+          receipt: {
+            txHash,
+            blockNumber: 9,
+            blockHash: `0x${'bc'.repeat(32)}`,
+            merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+            publisherAddress: walletId,
+            authorAddress: walletId,
+            batchId: kaId,
+            kaId,
+            startKAId: kaId,
+            endKAId: kaId,
+            knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
+          },
+        })),
         resolvePublishByTxHash: vi.fn(async () => ({
           batchId: kaId,
           kaId,
           knowledgeAssetsContract: '0x2222222222222222222222222222222222222222',
           startKAId: kaId,
           endKAId: kaId,
+          merkleRoot: Buffer.from('12'.repeat(32), 'hex'),
+          authorAddress: walletId,
           txHash,
           blockNumber: 9,
           blockTimestamp: 1_700_000_009,
@@ -164,11 +238,17 @@ describe('named KA publisher recovery wiring', () => {
     const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
     const authorAddress = '0x3333333333333333333333333333333333333333';
     const kaId = (BigInt(authorAddress) << 96n) | 7n;
+    const recoveredUal = `did:dkg:evm:31337/${authorAddress.toLowerCase()}/7`;
     const request = {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
-      roots: ['urn:album:one'],
+      roots: [],
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: recoveredUal,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
       seal: {
         merkleRoot: `0x${'12'.repeat(32)}`,
         authorAddress,
@@ -185,11 +265,15 @@ describe('named KA publisher recovery wiring', () => {
     const runtimePublisher = new TripleStoreAsyncLiftPublisher(new OxigraphStore(), {
       knowledgeAssetVmPublishHandler: scoped,
       knowledgeAssetVmPublishRecoveryResolver: async () => ({
-        inclusion: { txHash, blockNumber: 9 },
+        inclusion: {
+          txHash,
+          blockNumber: 9,
+          blockHash: `0x${'bc'.repeat(32)}`,
+        },
         finalization: {
           mode: 'published',
           txHash,
-          ual: `did:dkg:evm:31337/0x4444444444444444444444444444444444444444/${kaId}`,
+          ual: recoveredUal,
           batchId: kaId.toString(),
           startKAId: kaId.toString(),
           endKAId: kaId.toString(),
@@ -198,6 +282,7 @@ describe('named KA publisher recovery wiring', () => {
         publishProof: {
           merkleRoot: request.sealMerkleRoot,
           authorAddress: request.seal.authorAddress,
+          txIndex: 4,
         },
       }),
     });
@@ -205,7 +290,7 @@ describe('named KA publisher recovery wiring', () => {
     await runtimePublisher.claimNext(walletB);
     await runtimePublisher.update(jobId, 'validated', {
       validation: {
-        canonicalRoots: ['urn:album:one'],
+        canonicalRoots: [],
         canonicalRootMap: {},
         swmQuadCount: 1,
         authorityProofRef: 'knowledge-asset-lifecycle',

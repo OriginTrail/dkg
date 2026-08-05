@@ -783,6 +783,8 @@ export interface DkgConfig {
       token?: string;
       /** PeriodicExportingMetricReader interval. Default 30000ms. */
       exportIntervalMs?: number;
+      /** Enable local Node UI SQLite metric snapshots. Default true. */
+      collectionEnabled?: boolean;
     };
   };
   /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */

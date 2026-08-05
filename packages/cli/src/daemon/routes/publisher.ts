@@ -186,6 +186,7 @@ import {
   bindingValue,
   carryForwardBundledMarkItDownBinary,
 } from '../manifest.js';
+import { respondTerminalClearOutcome } from './terminal-clear-response.js';
 import {
   resolveNameToPeerId,
   jsonResponse,
@@ -193,6 +194,7 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
+  normalizeContextGraphIdOrUri,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
@@ -321,6 +323,79 @@ import {
 import type { RequestContext } from './context.js';
 
 
+interface PublisherLifecycleFacts {
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  agentAddress: string;
+  intentKey?: string;
+}
+
+// #1828/#1829 — parse + validate the lifecycle facts shared by GET /job-by-intent and
+// GET /journal from query params, using the SAME normalization admission persisted (or a
+// facts read silently misses entries): contextGraphId trimmed + prefix-stripped
+// (normalizeContextGraphIdOrUri); an empty subGraphName rejected (root lane = OMIT the
+// param); agentAddress defaulted to the caller lane (admission persists a non-empty lane,
+// an explicit param wins); C0/DEL control chars rejected so a crafted value cannot forge a
+// colliding U+001F-joined lifecycle key. Returns null after sending a 400 on any violation.
+function parsePublisherLifecycleFactsFromQuery(
+  url: URL,
+  res: ServerResponse,
+  requestAgentAddress: string,
+): PublisherLifecycleFacts | null {
+  const rawContextGraphId = url.searchParams.get("contextGraphId");
+  const name = url.searchParams.get("name") ?? undefined;
+  if (!rawContextGraphId || !name) {
+    jsonResponse(res, 400, { error: "Missing required contextGraphId and name" });
+    return null;
+  }
+  const intentKey = url.searchParams.get("intentKey") ?? undefined;
+  if (intentKey !== undefined && !/^sha256:[0-9a-f]{64}$/.test(intentKey)) {
+    jsonResponse(res, 400, { error: "Malformed intentKey" });
+    return null;
+  }
+  const contextGraphId = normalizeContextGraphIdOrUri(rawContextGraphId.trim());
+  const rawSubGraphName = url.searchParams.get("subGraphName");
+  if (!validateOptionalSubGraphName(rawSubGraphName, res)) return null;
+  const subGraphName = rawSubGraphName ?? undefined;
+  const explicitAgentAddress = url.searchParams.get("agentAddress")?.trim() || undefined;
+  const agentAddress = explicitAgentAddress ?? requestAgentAddress;
+  const hasControlChar = (value: string | undefined): boolean =>
+    value !== undefined && [...value].some((ch) => {
+      const code = ch.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    });
+  if ([contextGraphId, name, subGraphName, agentAddress].some(hasControlChar)) {
+    jsonResponse(res, 400, {
+      error: "contextGraphId, name, subGraphName and agentAddress must not contain control characters",
+    });
+    return null;
+  }
+  return { contextGraphId, name, subGraphName, agentAddress, intentKey };
+}
+
+// #1890 — one request-body boundary for the publisher admin POST routes (cancel / retry /
+// clear / clear-job). Reads the small JSON body, applies the shared invalid-JSON mapping
+// (400 `{ error: 'Invalid JSON body' }`), and normalizes a missing / `null` / primitive /
+// array body to `{}` so no route destructures a non-object — a `null` body must not
+// TypeError into a 500. Each route keeps its OWN field validation and response shape.
+// Returns `null` AFTER responding, so callers do:
+//   const parsed = await readSmallJsonObject(req, res); if (!parsed) return;
+async function readSmallJsonObject(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body || "{}");
+  } catch {
+    jsonResponse(res, 400, { error: "Invalid JSON body" });
+    return null;
+  }
+  return isPlainRecord(parsed) ? parsed : {};
+}
+
 export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -391,6 +466,34 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { job, payload });
   }
 
+  // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1828 — read-only durable-admission recovery, keyed on the lifecycle facts a
+  // client always retains (the lost 202 also loses jobId + intentKey). intentKey,
+  // when supplied, only qualifies exactIntentMatch. Never mutates.
+  if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
+    const { kind, ...rest } = lookup;
+    return jsonResponse(res, 200, { result: kind, ...rest });
+  }
+
+  // GET /api/publisher/journal?jobId=  OR  ?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
+  // #1829 — read-only append-only admission/transaction journal. By jobId, or facts-pure
+  // by lifecycle identity (derived with the SAME normalization admission persisted).
+  // txHashes are ATTEMPTED submissions — reconcile against chain, never treat as sent.
+  if (req.method === "GET" && path === "/api/publisher/journal") {
+    const jobId = url.searchParams.get("jobId")?.trim() || undefined;
+    if (jobId !== undefined) {
+      const result = await publisherControl.readJournalByJob(jobId);
+      return jsonResponse(res, 200, result);
+    }
+    const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
+    if (!facts) return; // a 400 was already sent
+    const result = await publisherControl.readJournalByIntent(facts);
+    return jsonResponse(res, 200, result);
+  }
+
   // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
   if (req.method === "GET" && path.startsWith("/api/publisher/jobs/")) {
     const segments = path.slice("/api/publisher/jobs/".length).split("/");
@@ -416,14 +519,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/cancel
   if (req.method === "POST" && path === "/api/publisher/cancel") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let parsed: any;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { jobId } = parsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const jobId = parsed.jobId as string | undefined;
     if (!jobId) return jsonResponse(res, 400, { error: "Missing jobId" });
     await publisherControl.cancel(jobId);
     return jsonResponse(res, 200, { cancelled: jobId });
@@ -431,14 +529,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/retry
   if (req.method === "POST" && path === "/api/publisher/retry") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let retryParsed: any;
-    try {
-      retryParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { status } = retryParsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const status = parsed.status as string | undefined;
     if (status && status !== "failed")
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
@@ -449,14 +542,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
 
   // POST /api/publisher/clear
   if (req.method === "POST" && path === "/api/publisher/clear") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let clearParsed: any;
-    try {
-      clearParsed = JSON.parse(body || "{}");
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const { status } = clearParsed;
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const status = parsed.status as string | undefined;
     if (status !== "failed" && status !== "finalized") {
       return jsonResponse(res, 400, {
         error: "status must be failed or finalized",
@@ -464,5 +552,22 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     }
     const count = await publisherControl.clear(status);
     return jsonResponse(res, 200, { cleared: count, status });
+  }
+
+  // POST /api/publisher/clear-job  { jobId }
+  // #1837 — atomic by-exact-jobId TERMINAL clear. DISTINCT from cancel (which aborts an
+  // ACCEPTED job) and from bulk /clear (status-scoped): clears exactly one job iff it is
+  // in a native terminal state, is idempotent for an absent job (already_absent = 200,
+  // NOT 404), and never touches another job. Preserves the #1829 journal (subject-scoped).
+  if (req.method === "POST" && path === "/api/publisher/clear-job") {
+    // readSmallJsonObject normalizes a `null`/primitive body to `{}`, so `jobId` is
+    // undefined there and falls through to the malformed guard (400) — never a 500.
+    const parsed = await readSmallJsonObject(req, res);
+    if (!parsed) return;
+    const jobId = parsed.jobId;
+    if (typeof jobId !== "string" || jobId.trim().length === 0) {
+      return jsonResponse(res, 400, { outcome: "rejected", reason: "malformed", error: "Missing jobId" });
+    }
+    return respondTerminalClearOutcome(res, await publisherControl.clearTerminalJob(jobId), jobId);
   }
 }

@@ -1,5 +1,7 @@
 import {
+  GraphManager,
   loadSelectedSharedMemoryQuads,
+  tryReplaceGraphAtomically,
   type SharedMemoryReadSelection,
   type TripleStore,
   type Quad,
@@ -12,6 +14,7 @@ import type {
   StorageACKDeclineCode,
   StorageACKMsg,
   SubscriptionSource,
+  UpdateIntentMsg,
 } from '@origintrail-official/dkg-core';
 import {
   Logger,
@@ -35,6 +38,11 @@ import {
   contextGraphCatalogUri,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
+  createGraphKnowledgeAssetScope,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
+  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -42,9 +50,179 @@ import {
 } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { replaceCatalogQuads } from './catalog-persistence.js';
+import { generateKnowledgeAssetShareMetadata } from './metadata.js';
+import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
+import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
+
+type GraphScopedPublishIntent = {
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+  subGraphName?: string;
+};
+
+function resolveGraphScopedPublishIntent(
+  intent: PublishIntentMsg,
+): GraphScopedPublishIntent | undefined {
+  const privateMerkleRoot = intent.privateMerkleRoot?.length
+    ? new Uint8Array(intent.privateMerkleRoot)
+    : undefined;
+  const hasGraphField =
+    (intent.contentScopeVersion ?? 0) !== 0
+    || Boolean(intent.kaUal)
+    || Boolean(intent.assertionVersion)
+    || (intent.publicTripleCount ?? 0) > 0
+    || privateMerkleRoot !== undefined
+    || (intent.privateTripleCount ?? 0) > 0;
+  if (!hasGraphField) return undefined;
+  if (intent.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `StorageACK: graph-scoped publish requires contentScopeVersion=${GRAPH_KA_CONTENT_SCOPE_VERSION}`,
+    );
+  }
+  if (!intent.kaUal || !intent.assertionVersion) {
+    throw new Error('StorageACK: graph-scoped publish requires kaUal and assertionVersion');
+  }
+  if ((intent.rootEntities?.length ?? 0) !== 0 || (intent.privateMerkleRoots?.length ?? 0) !== 0) {
+    throw new Error('StorageACK: graph-scoped publish must not carry legacy root commitments');
+  }
+  const publicTripleCount = intent.publicTripleCount ?? 0;
+  const privateTripleCount = intent.privateTripleCount ?? 0;
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error('StorageACK: graph-scoped publish has an invalid content envelope');
+  }
+  const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
+  if (scope.ual !== intent.kaUal || scope.assertionVersion !== '1') {
+    throw new Error('StorageACK: graph-scoped publish requires a canonical version-1 UAL');
+  }
+  const accessPolicy = intent.accessPolicy;
+  const rawAllowedPeers = intent.allowedPeers ?? [];
+  const allowedPeers = [...new Set(rawAllowedPeers.map((peer) => peer.trim()).filter(Boolean))];
+  if (
+    (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList')
+    || allowedPeers.length !== rawAllowedPeers.length
+    || (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new Error('StorageACK: graph-scoped publish has an invalid access envelope');
+  }
+  const subGraphName = intent.subGraphName || undefined;
+  if (subGraphName) {
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) {
+      throw new Error(`StorageACK: invalid graph-scoped subGraphName: ${validation.reason}`);
+    }
+  }
+  return {
+    scope,
+    publicTripleCount,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    accessPolicy,
+    allowedPeers,
+    ...(subGraphName ? { subGraphName } : {}),
+  };
+}
+
+type GraphScopedUpdateIntent = {
+  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  subGraphName?: string;
+};
+
+function updateIntentUint64(value: number | { low: number; high: number }): bigint {
+  return typeof value === 'number'
+    ? BigInt(value)
+    : BigInt(value.low >>> 0) | (BigInt(value.high >>> 0) << 32n);
+}
+
+function resolveGraphScopedUpdateIntent(
+  intent: UpdateIntentMsg,
+): GraphScopedUpdateIntent | undefined {
+  const privateMerkleRoot = intent.privateMerkleRoot?.length
+    ? new Uint8Array(intent.privateMerkleRoot)
+    : undefined;
+  const hasGraphField =
+    (intent.contentScopeVersion ?? 0) !== 0
+    || Boolean(intent.kaUal)
+    || Boolean(intent.assertionVersion)
+    || (intent.publicTripleCount ?? 0) > 0
+    || privateMerkleRoot !== undefined
+    || (intent.privateTripleCount ?? 0) > 0;
+  if (!hasGraphField) return undefined;
+  if (intent.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new Error(
+      `UpdateStorageACK: graph-scoped update requires contentScopeVersion=${GRAPH_KA_CONTENT_SCOPE_VERSION}`,
+    );
+  }
+  if (!intent.kaUal || !intent.assertionVersion) {
+    throw new Error('UpdateStorageACK: graph-scoped update requires kaUal and assertionVersion');
+  }
+  const publicTripleCount = intent.publicTripleCount ?? 0;
+  const privateTripleCount = intent.privateTripleCount ?? 0;
+  if (
+    !Number.isSafeInteger(publicTripleCount)
+    || publicTripleCount < 0
+    || !Number.isSafeInteger(privateTripleCount)
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || (privateTripleCount > 0 && privateMerkleRoot?.length !== 32)
+    || (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+  ) {
+    throw new Error('UpdateStorageACK: invalid graph-scoped content envelope');
+  }
+  const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
+  if (scope.ual !== intent.kaUal) {
+    throw new Error('UpdateStorageACK: graph-scoped kaUal is not canonical');
+  }
+  const kaId = BigInt(intent.kaId);
+  const packedKaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
+  if (packedKaId !== kaId) {
+    throw new Error(
+      `UpdateStorageACK: UAL-derived kaId ${packedKaId} does not match intent kaId ${kaId}`,
+    );
+  }
+  const expectedAssertionVersion = updateIntentUint64(intent.preUpdateMerkleRootCount) + 1n;
+  if (BigInt(scope.assertionVersion) !== expectedAssertionVersion) {
+    throw new Error(
+      `UpdateStorageACK: assertionVersion ${scope.assertionVersion} must equal ` +
+        `preUpdateMerkleRootCount + 1 (${expectedAssertionVersion})`,
+    );
+  }
+  const subGraphName = intent.subGraphName || undefined;
+  if (subGraphName) {
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) {
+      throw new Error(
+        `UpdateStorageACK: invalid graph-scoped subGraphName: ${validation.reason}`,
+      );
+    }
+  }
+  return {
+    scope,
+    publicTripleCount,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    ...(subGraphName ? { subGraphName } : {}),
+  };
+}
 
 export interface StorageAckDecision {
   encoded: Uint8Array;
@@ -442,12 +620,14 @@ export const DEFAULT_ACK_HANDLER_DEADLINE_MS =
  */
 export class StorageACKHandler {
   private store: TripleStore;
+  private readonly graphManager: GraphManager;
   private config: StorageACKHandlerConfig;
   private eventBus: EventBus;
   private readonly log = new Logger('StorageACKHandler');
 
   constructor(store: TripleStore, config: StorageACKHandlerConfig, eventBus: EventBus) {
     this.store = store;
+    this.graphManager = new GraphManager(store);
     this.config = config;
     this.eventBus = eventBus;
   }
@@ -665,6 +845,111 @@ export class StorageACKHandler {
   }
 
   /**
+   * Persist a verified rootless assertion as one exact SWM graph plus the
+   * constant-size workspace head needed by finalization and chain reconcile.
+   *
+   * StorageACK durability is not satisfied by the data graph alone: without
+   * the head, a core that does not subscribe to the CG's live publish topic
+   * cannot bind those triples back to the UAL after the chain event lands.
+   * The operation id binds asset identity, version, and content, so ACK retries
+   * replace the same metadata rows without aliasing identical-content KAs.
+   */
+  private async persistGraphScopedWorkspaceOrDecline(
+    cgId: string,
+    swmGraphId: string,
+    swmGraphUri: string,
+    graphPublish: GraphScopedPublishIntent,
+    parsed: Quad[],
+    publisherPeerId: string,
+    merkleRoot: Uint8Array,
+    replaceGraph: boolean,
+    signal?: AbortSignal,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    assertPersistQuadTermsSafe(parsed);
+    const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
+    const operationId = `storage-ack-${ethers.keccak256(ethers.toUtf8Bytes([
+      graphPublish.scope.ual,
+      graphPublish.scope.assertionVersion,
+      ethers.hexlify(merkleRoot),
+    ].join('\0'))).slice(2)}`;
+    const metaGraph = this.graphManager.sharedMemoryMetaUri(
+      swmGraphId,
+      graphPublish.subGraphName,
+    );
+    const publicDigest = workspacePublicQuadsDigest(
+      normalized.map((quad) => ({ ...quad, graph: '' })),
+    );
+    const metadata = generateKnowledgeAssetShareMetadata(
+      {
+        shareOperationId: operationId,
+        contextGraphId: swmGraphId,
+        kaUal: graphPublish.scope.ual,
+        assertionVersion: graphPublish.scope.assertionVersion,
+        publicTripleCount: normalized.length,
+        ...(graphPublish.privateMerkleRoot
+          ? { privateMerkleRoot: graphPublish.privateMerkleRoot }
+          : {}),
+        privateTripleCount: graphPublish.privateTripleCount,
+        publisherPeerId: publisherPeerId.trim() || 'unknown',
+        accessPolicy: graphPublish.accessPolicy,
+        allowedPeers: graphPublish.allowedPeers,
+        agentAddress: graphPublish.scope.agentAddress,
+        subGraphName: graphPublish.subGraphName,
+        timestamp: new Date(),
+      },
+      metaGraph,
+    );
+    const operationSubject = metadata[0]?.subject;
+    if (!operationSubject) {
+      throw new Error('StorageACK: graph-scoped workspace metadata is empty');
+    }
+    metadata.push({
+      subject: operationSubject,
+      predicate: 'http://dkg.io/ontology/publicQuadsDigest',
+      object: `"${publicDigest}"`,
+      graph: metaGraph,
+    });
+
+    const result = await this.runStoreOpOrDecline(cgId, async () => {
+      if (replaceGraph) {
+        const replaced = await tryReplaceGraphAtomically(
+          this.store,
+          swmGraphUri,
+          normalized,
+          ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
+        );
+        if (!replaced) {
+          throw Object.assign(
+            new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
+            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
+          );
+        }
+      }
+      await this.store.deleteByPattern(
+        { graph: metaGraph, subject: operationSubject },
+        ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
+      );
+      await this.store.insert(
+        metadata,
+        ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta', signal),
+      );
+      await storeKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager: this.graphManager,
+        contextGraphId: swmGraphId,
+        kaUal: graphPublish.scope.ual,
+        assertionVersion: graphPublish.scope.assertionVersion,
+        shareOperationId: operationId,
+        subGraphName: graphPublish.subGraphName,
+      });
+      await this.store.flush?.(
+        ackStoreOptions('storage-ack.persistGraphScoped.flush', signal),
+      );
+    }, signal);
+    return result.ok ? { ok: true } : result;
+  }
+
+  /**
    * Load SWM quads for the recompute, translating a store outage into the
    * transient decline. `loadSWMQuads` tags ONLY the storage loader's store/index
    * throws as `StoreUnavailableError`; its `assertSafeIri` guards throw
@@ -858,7 +1143,7 @@ export class StorageACKHandler {
    */
   private handlePublishIntent = async (
     data: Uint8Array,
-    _peerId: PeerId,
+    peerId: PeerId,
     signal?: AbortSignal,
   ): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
@@ -866,6 +1151,7 @@ export class StorageACKHandler {
     }
 
     const intent = decodePublishIntent(data);
+    const graphPublish = resolveGraphScopedPublishIntent(intent);
     // `cgId` is the TARGET on-chain numeric id used by the ACK digest and
     // the publishDirect tx. `swmGraphId` (optional, from the remap flow)
     // is the SOURCE graph where data lives in SWM. When absent, fall back
@@ -874,9 +1160,11 @@ export class StorageACKHandler {
     const swmGraphId = intent.swmGraphId && intent.swmGraphId.length > 0
       ? intent.swmGraphId
       : cgId;
-    const subGraphName = intent.subGraphName && intent.subGraphName.length > 0
-      ? intent.subGraphName
-      : undefined;
+    const subGraphName = graphPublish?.subGraphName ?? (
+      intent.subGraphName && intent.subGraphName.length > 0
+        ? intent.subGraphName
+        : undefined
+    );
     const merkleRoot = intent.merkleRoot instanceof Uint8Array
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
@@ -888,7 +1176,17 @@ export class StorageACKHandler {
       );
     }
 
-    const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
+    const contentPrivateRoots = graphPublish?.privateMerkleRoot
+      ? [graphPublish.privateMerkleRoot]
+      : privateMerkleRoots;
+    const swmGraphUri = graphPublish
+      ? knowledgeAssetLayerGraphUri(
+          swmGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          graphPublish.scope,
+          subGraphName,
+        )
+      : this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 
     let swmQuads: Quad[];
 
@@ -1024,11 +1322,23 @@ export class StorageACKHandler {
         );
       }
       const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
-      if (claimedLeafCount < 1) {
+      // Curated KAs are sampled through the independently verified catalog
+      // commitment above. Their private assertion may therefore contain zero
+      // public leaves; requiring a positive count here forced an unnecessary
+      // public placeholder that the lifecycle contract itself does not need.
+      if (!Number.isInteger(claimedLeafCount) || claimedLeafCount < 0) {
         return this.encodeDecline(
           cgId,
           STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
-          `curated PublishIntent.merkleLeafCount must be a positive integer; got ${claimedLeafCount}`,
+          `curated PublishIntent.merkleLeafCount must be a non-negative integer; got ${claimedLeafCount}`,
+        );
+      }
+      if (graphPublish && claimedLeafCount === 0 && graphPublish.publicTripleCount !== 0) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `curated graph-scoped PublishIntent claims zero Merkle leaves for ` +
+            `${graphPublish.publicTripleCount} public triples`,
         );
       }
 
@@ -1152,7 +1462,13 @@ export class StorageACKHandler {
         }
       }
 
-      const inMemoryRoot = computeFlatKCRoot(parsed, privateMerkleRoots);
+      if (graphPublish && parsed.length !== graphPublish.publicTripleCount) {
+        throw new Error(
+          `StorageACK: graph-scoped public triple count mismatch ` +
+            `(intent=${graphPublish.publicTripleCount}, inline=${parsed.length})`,
+        );
+      }
+      const inMemoryRoot = computeFlatKCRoot(parsed, contentPrivateRoots);
       if (!bytesEqual(inMemoryRoot, merkleRoot)) {
         throw new Error(
           `Merkle root mismatch (inline quads): publisher=${ethers.hexlify(merkleRoot).slice(0, 18)}..., ` +
@@ -1169,16 +1485,32 @@ export class StorageACKHandler {
       // transient decline instead of resetting the stream — the durability
       // invariant is why we CANNOT sign anyway, so the publisher re-sends
       // once the store worker is back rather than bucketing us as no_response.
-      const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      const persistedStaging = await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
+      const stagingGraphUri = graphPublish
+        ? swmGraphUri
+        : `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
+      const persistedStaging = graphPublish
+        ? await this.persistGraphScopedWorkspaceOrDecline(
+            cgId,
+            swmGraphId,
+            swmGraphUri,
+            graphPublish,
+            parsed,
+            peerId.toString(),
+            merkleRoot,
+            true,
+            signal,
+          )
+        : await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
       if (!persistedStaging.ok) return persistedStaging.decline;
       swmQuads = parsed;
 
       // Schedule cleanup: remove staging graph after 10 minutes.
       // Finalization may promote data to LTM before this fires.
-      setTimeout(async () => {
-        try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
-      }, 10 * 60 * 1000);
+      if (!graphPublish) {
+        setTimeout(async () => {
+          try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
+        }, 10 * 60 * 1000);
+      }
     } else {
       // Fallback: data should already be in SWM (publishFromSharedMemory path).
       // Both the "no data" and "data but wrong merkle root" cases below are
@@ -1193,11 +1525,20 @@ export class StorageACKHandler {
       // the handler and reset the stream. `loadSWMOrDecline` translates a
       // store-op failure (and ONLY that — assertSafeIri malformed-request
       // throws still propagate + reset) into the transient decline.
-      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, intent.rootEntities, signal);
-      if (!loadedSWM.ok) return loadedSWM.decline;
-      swmQuads = loadedSWM.quads;
+      if (graphPublish?.publicTripleCount === 0) {
+        swmQuads = [];
+      } else {
+        const loadedSWM = await this.loadSWMOrDecline(
+          cgId,
+          swmGraphUri,
+          graphPublish ? [] : intent.rootEntities,
+          signal,
+        );
+        if (!loadedSWM.ok) return loadedSWM.decline;
+        swmQuads = loadedSWM.quads;
+      }
 
-      if (swmQuads.length === 0) {
+      if (swmQuads.length === 0 && !graphPublish) {
         return this.encodeDecline(
           cgId,
           STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM,
@@ -1206,7 +1547,15 @@ export class StorageACKHandler {
         );
       }
 
-      const recomputedRoot = computeFlatKCRoot(swmQuads, privateMerkleRoots);
+      if (graphPublish && swmQuads.length !== graphPublish.publicTripleCount) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `StorageACK: graph-scoped public triple count mismatch ` +
+            `(intent=${graphPublish.publicTripleCount}, local=${swmQuads.length})`,
+        );
+      }
+      const recomputedRoot = computeFlatKCRoot(swmQuads, contentPrivateRoots);
       if (!bytesEqual(recomputedRoot, merkleRoot)) {
         return this.encodeDecline(
           cgId,
@@ -1215,6 +1564,20 @@ export class StorageACKHandler {
           `local=${ethers.hexlify(recomputedRoot).slice(0, 18)}... ` +
           `(${swmQuads.length} triples in SWM)`,
         );
+      }
+      if (graphPublish) {
+        const persistedWorkspace = await this.persistGraphScopedWorkspaceOrDecline(
+          cgId,
+          swmGraphId,
+          swmGraphUri,
+          graphPublish,
+          swmQuads,
+          peerId.toString(),
+          merkleRoot,
+          false,
+          signal,
+        );
+        if (!persistedWorkspace.ok) return persistedWorkspace.decline;
       }
     }
 
@@ -1322,8 +1685,8 @@ export class StorageACKHandler {
       ? BigInt(intent.tokenAmountStr)
       : 0n;
 
-    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, privateMerkleRoots);
-    if (verifiedLeafCount === 0) {
+    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, contentPrivateRoots);
+    if (verifiedLeafCount === 0 && !graphPublish?.privateMerkleRoot) {
       throw new Error(
         'StorageACK: empty Knowledge Asset payload (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',
       );
@@ -1441,6 +1804,7 @@ export class StorageACKHandler {
     }
 
     const intent = decodeUpdateIntent(data);
+    const graphUpdate = resolveGraphScopedUpdateIntent(intent);
     // `cgId` is the TARGET on-chain numeric id used by the UPDATE ACK
     // digest and the update tx. `swmGraphId` (optional) is the SOURCE
     // graph where the data lives in SWM. When absent, fall back to `cgId`.
@@ -1448,9 +1812,11 @@ export class StorageACKHandler {
     const swmGraphId = intent.swmGraphId && intent.swmGraphId.length > 0
       ? intent.swmGraphId
       : cgId;
-    const subGraphName = intent.subGraphName && intent.subGraphName.length > 0
-      ? intent.subGraphName
-      : undefined;
+    const subGraphName = graphUpdate?.subGraphName ?? (
+      intent.subGraphName && intent.subGraphName.length > 0
+        ? intent.subGraphName
+        : undefined
+    );
     const newMerkleRoot = intent.newMerkleRoot instanceof Uint8Array
       ? intent.newMerkleRoot
       : new Uint8Array(intent.newMerkleRoot);
@@ -1460,7 +1826,22 @@ export class StorageACKHandler {
       );
     }
 
-    const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
+    const swmGraphUri = graphUpdate
+      ? knowledgeAssetLayerGraphUri(
+          swmGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          graphUpdate.scope,
+          subGraphName,
+        )
+      : this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
+    const inlineVmGraphUri = graphUpdate
+      ? knowledgeAssetLayerGraphUri(
+          swmGraphId,
+          MemoryLayer.VerifiableMemory,
+          graphUpdate.scope,
+          subGraphName,
+        )
+      : undefined;
 
     // Verify the new Merkle root the same way the publish path does:
     // recompute over the updated quads and compare to the publisher's
@@ -1594,6 +1975,92 @@ export class StorageACKHandler {
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
+    } else if (graphUpdate) {
+      let publicQuads: Quad[];
+      let inlineByteLength: number | undefined;
+      if (intent.stagingQuads && intent.stagingQuads.length > 0) {
+        if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
+          throw new Error(
+            `UpdateStorageACK: stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
+            `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
+          );
+        }
+        publicQuads = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+        inlineByteLength = intent.stagingQuads.length;
+      } else if (graphUpdate.publicTripleCount === 0) {
+        publicQuads = [];
+      } else {
+        const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, [], signal);
+        if (!loadedSWM.ok) return loadedSWM.decline;
+        publicQuads = loadedSWM.quads;
+      }
+      if (publicQuads.length !== graphUpdate.publicTripleCount) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `UpdateStorageACK: graph-scoped public triple count mismatch: ` +
+            `intent=${graphUpdate.publicTripleCount}, local=${publicQuads.length}`,
+        );
+      }
+      const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
+        inlineByteLength === undefined
+          ? publicQuads.map((quad) => ({ ...quad, graph: swmGraphUri }))
+          : publicQuads,
+        // Inline public graph updates are emitted by DKGPublisher from its
+        // materialized per-KA VM graph. Only the no-inline fallback loads the
+        // source per-KA SWM graph. Keeping these provenance-specific graph
+        // expectations separate prevents every ordinary public update from
+        // being declined while still rejecting a payload stamped for an
+        // unrelated graph.
+        inlineByteLength === undefined ? swmGraphUri : inlineVmGraphUri!,
+        graphUpdate.publicTripleCount,
+      );
+      if (!validation.valid) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `UpdateStorageACK: invalid graph-scoped RDF: ${validation.errors.join('; ')}`,
+        );
+      }
+      const privateRoots = graphUpdate.privateMerkleRoot
+        ? [graphUpdate.privateMerkleRoot]
+        : [];
+      const recomputedRoot = computeFlatKCRoot(publicQuads, privateRoots);
+      if (!bytesEqual(recomputedRoot, newMerkleRoot)) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `UpdateStorageACK: graph-scoped newMerkleRoot mismatch: ` +
+            `publisher=${ethers.hexlify(newMerkleRoot).slice(0, 18)}..., ` +
+            `computed=${ethers.hexlify(recomputedRoot).slice(0, 18)}... ` +
+            `(${publicQuads.length} public triples)`,
+        );
+      }
+      const recomputedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, privateRoots);
+      const claimedLeafCount = intent.newMerkleLeafCount == null
+        ? 0
+        : Number(intent.newMerkleLeafCount);
+      if (claimedLeafCount !== recomputedLeafCount) {
+        return this.encodeDecline(
+          cgId,
+          STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
+          `UpdateStorageACK: graph-scoped newMerkleLeafCount mismatch: ` +
+            `intent=${claimedLeafCount}, computed=${recomputedLeafCount}`,
+        );
+      }
+      if (inlineByteLength !== undefined) {
+        publicUpdateByteSizeFloor = BigInt(inlineByteLength);
+        publicUpdateFloorBasis = 'exact inline payload bytes';
+      } else {
+        publicUpdateByteSizeFloor = 0n;
+        for (const quad of publicQuads) {
+          publicUpdateByteSizeFloor +=
+            BigInt(Buffer.byteLength(quad.subject, 'utf8'))
+            + BigInt(Buffer.byteLength(quad.predicate, 'utf8'))
+            + BigInt(Buffer.byteLength(quad.object, 'utf8'));
+        }
+        publicUpdateFloorBasis = 'Σ UTF-8 term bytes (lower bound)';
+      }
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
@@ -1683,10 +2150,7 @@ export class StorageACKHandler {
     } catch {
       throw new Error(`UpdateStorageACK: kaId must be a numeric decimal string; got '${intent.kaId}'.`);
     }
-    const preUpdateMerkleRootCount = typeof intent.preUpdateMerkleRootCount === 'number'
-      ? BigInt(intent.preUpdateMerkleRootCount)
-      : BigInt(intent.preUpdateMerkleRootCount.low >>> 0)
-        | (BigInt(intent.preUpdateMerkleRootCount.high >>> 0) << 32n);
+    const preUpdateMerkleRootCount = updateIntentUint64(intent.preUpdateMerkleRootCount);
     const newByteSize = typeof intent.newByteSize === 'number'
       ? BigInt(intent.newByteSize)
       : BigInt(intent.newByteSize.low >>> 0) | (BigInt(intent.newByteSize.high >>> 0) << 32n);
@@ -1716,9 +2180,18 @@ export class StorageACKHandler {
           : BigInt(intent.mintAmount.low >>> 0) | (BigInt(intent.mintAmount.high >>> 0) << 32n));
     const burnTokenIds = (intent.burnTokenIds ?? []).map((id) => BigInt(id));
     const newMerkleLeafCount = intent.newMerkleLeafCount == null ? 0 : Number(intent.newMerkleLeafCount);
-    if (!Number.isInteger(newMerkleLeafCount) || newMerkleLeafCount < 1) {
+    // The encrypted branch above has already proven this is a curated CG and,
+    // when supplied, independently verified its public catalog commitment.
+    // Curated sampling uses that catalog count, so a fully private assertion
+    // legitimately has zero public Merkle leaves. Public updates stay > 0.
+    if (
+      !Number.isInteger(newMerkleLeafCount)
+      || newMerkleLeafCount < 0
+      || (newMerkleLeafCount === 0 && intent.isEncryptedPayload !== true)
+    ) {
       throw new Error(
-        `UpdateStorageACK: newMerkleLeafCount must be a positive integer; got ${newMerkleLeafCount}`,
+        `UpdateStorageACK: newMerkleLeafCount must be positive for public KAs ` +
+          `(zero is valid only for curated encrypted updates); got ${newMerkleLeafCount}`,
       );
     }
 

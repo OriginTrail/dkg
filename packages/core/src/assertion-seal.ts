@@ -21,6 +21,14 @@
 // `0x` prefix per spec); addresses and tx hashes ride as plain
 // string literals; sizes/IDs as `xsd:integer`.
 
+import {
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LEGACY_ROOT_CONTENT_SCOPE_VERSION,
+  createGraphKnowledgeAssetScope,
+  parseDeterministicKnowledgeAssetUal,
+} from './ka-content-scope.js';
+import { parseContextGraphAssertionUri } from './constants.js';
+
 const ONT = 'http://dkg.io/ontology/';
 
 /**
@@ -52,6 +60,18 @@ export const ASSERTION_SEAL_PREDICATES = {
   RESERVED_KA_ID: `${ONT}reservedKaId`,
   /** Daemon-clock dateTime when the seal was written (xsd:dateTime). */
   ASSERTION_FINALIZED_AT: `${ONT}assertionFinalizedAt`,
+  /** Rootless content-scope discriminator. Missing means legacy v1. */
+  CONTENT_SCOPE_VERSION: `${ONT}contentScopeVersion`,
+  /** Canonical deterministic graph-scoped KA UAL. */
+  KA_UAL: `${ONT}kaUal`,
+  /** One-based assertion/Merkle-root index. */
+  ASSERTION_VERSION: `${ONT}assertionVersion`,
+  /** Complete public RDF triple count for the graph-scoped assertion. */
+  PUBLIC_TRIPLE_COUNT: `${ONT}publicTripleCount`,
+  /** Single KA-level private Merkle commitment (xsd:hexBinary). */
+  PRIVATE_MERKLE_ROOT: `${ONT}privateMerkleRoot`,
+  /** Number of private RDF triples committed by PRIVATE_MERKLE_ROOT. */
+  PRIVATE_TRIPLE_COUNT: `${ONT}privateTripleCount`,
   /**
    * Root entity bound to the seal (multi-valued). Recorded at finalize
    * time so that `publishFromFinalizedAssertion` can scope the SWM
@@ -111,10 +131,12 @@ function hexBinaryLexical(hex: string): string {
  * Caller supplies the resolved `assertionUri` (subject), the `_meta`
  * graph URI for the context graph (typically
  * `contextGraphMetaUri(contextGraphId)`), and the seal payload.
- * Every quad is pinned to the `metaGraph` so the gossip layer
- * propagates them with the rest of `_meta`.
+ * Every quad is pinned to the `metaGraph`. NOTE: the seal does NOT ride
+ * SWM live gossip (that path force-rewrites quads onto the KA's data graph
+ * and never carried seal fields); its peer-to-peer transport is the durable
+ * `_meta` sync lane. See GH#1778.
  */
-export function buildAssertionSealQuads(args: {
+interface AssertionSealBuildBaseArgs {
   assertionUri: string;
   metaGraph: string;
   merkleRoot: Uint8Array;
@@ -127,13 +149,29 @@ export function buildAssertionSealQuads(args: {
   /** OT-RFC-43 §F2 — the packed id bound into the AuthorAttestation digest. */
   reservedKaId: bigint;
   finalizedAtIso: string;
-  /**
-   * Root entities the seal commits to (one per emitted quad). Required
-   * — the SWM-publish path uses these to scope its CONSTRUCT instead
-   * of bundling the entire shared-memory graph (Round 4 review §9).
-   */
-  rootEntities: ReadonlyArray<string>;
-}): Array<{ subject: string; predicate: string; object: string; graph: string }> {
+}
+
+export type AssertionSealBuildArgs = AssertionSealBuildBaseArgs & (
+  | {
+      /** Missing/one keeps the deployed root-scoped read-only wire shape. */
+      contentScopeVersion?: typeof LEGACY_ROOT_CONTENT_SCOPE_VERSION;
+      rootEntities: ReadonlyArray<string>;
+      kaUal?: never;
+      assertionVersion?: never;
+      publicTripleCount?: never;
+    }
+  | {
+      contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+      kaUal: string;
+      assertionVersion: string | number | bigint;
+      publicTripleCount: number;
+      privateMerkleRoot?: Uint8Array;
+      privateTripleCount: number;
+      rootEntities?: never;
+    }
+);
+
+export function buildAssertionSealQuads(args: AssertionSealBuildArgs): Array<{ subject: string; predicate: string; object: string; graph: string }> {
   if (args.merkleRoot.length !== 32) {
     throw new Error(`merkleRoot must be 32 bytes, got ${args.merkleRoot.length}`);
   }
@@ -143,8 +181,44 @@ export function buildAssertionSealQuads(args: {
   if (args.authorAttestationVS.length !== 32) {
     throw new Error(`authorAttestationVS must be 32 bytes, got ${args.authorAttestationVS.length}`);
   }
-  if (args.rootEntities.length === 0) {
-    throw new Error('rootEntities must be non-empty: the seal must commit to at least one root entity');
+  let graphScope: ReturnType<typeof createGraphKnowledgeAssetScope> | undefined;
+  let legacyRootEntities: ReadonlyArray<string> = [];
+  let graphPublicTripleCount: number | undefined;
+  let graphPrivateTripleCount: number | undefined;
+  let graphPrivateMerkleRoot: Uint8Array | undefined;
+  if (args.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    graphScope = createGraphKnowledgeAssetScope(args.kaUal, args.assertionVersion);
+    graphPublicTripleCount = args.publicTripleCount;
+    graphPrivateTripleCount = args.privateTripleCount;
+    graphPrivateMerkleRoot = args.privateMerkleRoot;
+    if (!Number.isSafeInteger(graphPublicTripleCount) || graphPublicTripleCount < 0) {
+      throw new Error(
+        `Graph-scoped assertion publicTripleCount must be a non-negative safe integer, got ${graphPublicTripleCount}`,
+      );
+    }
+    if (!Number.isSafeInteger(graphPrivateTripleCount) || graphPrivateTripleCount < 0) {
+      throw new Error(
+        `Graph-scoped assertion privateTripleCount must be a non-negative safe integer, got ${graphPrivateTripleCount}`,
+      );
+    }
+    if (graphPublicTripleCount === 0 && graphPrivateTripleCount === 0) {
+      throw new Error('Graph-scoped assertion must contain at least one public or private triple');
+    }
+    if (graphPrivateTripleCount > 0 && graphPrivateMerkleRoot?.length !== 32) {
+      throw new Error(
+        'Graph-scoped assertion with private triples requires one 32-byte privateMerkleRoot',
+      );
+    }
+    if (graphPrivateTripleCount === 0 && graphPrivateMerkleRoot !== undefined) {
+      throw new Error(
+        'Graph-scoped assertion privateMerkleRoot requires a positive privateTripleCount',
+      );
+    }
+  } else {
+    legacyRootEntities = args.rootEntities;
+    if (legacyRootEntities.length === 0) {
+      throw new Error('rootEntities must be non-empty: the seal must commit to at least one root entity');
+    }
   }
   const merkleRootHex = bytesToHexLower(args.merkleRoot);
   const rHex = bytesToHexLower(args.authorAttestationR);
@@ -164,7 +238,7 @@ export function buildAssertionSealQuads(args: {
   // OT-RFC-43 §10.1 — dual-write the entity list under BOTH the legacy
   // dkg:assertionRootEntity and the new dkg:assertionEntity so a mixed fleet
   // (and the dual-read follow-up) resolves either name.
-  const rootEntityQuads = args.rootEntities.flatMap((root) => {
+  const rootEntityQuads = legacyRootEntities.flatMap((root) => {
     if (UNSAFE_IRI_CHARS.test(root) || root.length === 0) {
       throw new Error(`Unsafe rootEntity literal: ${root}`);
     }
@@ -183,6 +257,30 @@ export function buildAssertionSealQuads(args: {
       },
     ];
   });
+
+  const contentScopeQuads = graphScope ? [
+    quad(
+      ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+      `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^${xsdInteger}`,
+    ),
+    quad(ASSERTION_SEAL_PREDICATES.KA_UAL, `<${graphScope.ual}>`),
+    quad(
+      ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+      `"${graphScope.assertionVersion}"^^${xsdInteger}`,
+    ),
+    quad(
+      ASSERTION_SEAL_PREDICATES.PUBLIC_TRIPLE_COUNT,
+      `"${graphPublicTripleCount}"^^${xsdInteger}`,
+    ),
+    quad(
+      ASSERTION_SEAL_PREDICATES.PRIVATE_TRIPLE_COUNT,
+      `\"${graphPrivateTripleCount}\"^^${xsdInteger}`,
+    ),
+    ...(graphPrivateMerkleRoot ? [quad(
+      ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT,
+      `\"${bytesToHexLower(graphPrivateMerkleRoot)}\"^^${xsdHexBinary}`,
+    )] : []),
+  ] : [];
 
   return [
     quad(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT, `"${merkleRootHex}"^^${xsdHexBinary}`),
@@ -209,6 +307,7 @@ export function buildAssertionSealQuads(args: {
       ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT,
       `"${args.finalizedAtIso}"^^${xsdDateTime}`,
     ),
+    ...contentScopeQuads,
     ...rootEntityQuads,
   ];
 }
@@ -273,6 +372,20 @@ export interface AssertionSeal {
    */
   reservedKaId?: bigint;
   finalizedAtIso: string;
+  /** Missing on disk is normalized to legacy v1 by the parser. */
+  contentScopeVersion:
+    | typeof LEGACY_ROOT_CONTENT_SCOPE_VERSION
+    | typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+  /** Present only for graph-scoped v2 seals. */
+  kaUal?: string;
+  /** Present only for graph-scoped v2 seals. */
+  assertionVersion?: string;
+  /** Present only for graph-scoped v2 seals. */
+  publicTripleCount?: number;
+  /** Present only for graph-scoped v2 seals with private content. */
+  privateMerkleRoot?: Uint8Array;
+  /** Present only for graph-scoped v2 seals. */
+  privateTripleCount?: number;
   /**
    * Root entities the seal commits to. Set at finalize time, used at
    * publish time to scope the SWM SPARQL CONSTRUCT (so a named publish
@@ -282,16 +395,19 @@ export interface AssertionSeal {
 }
 
 /**
- * Parse a `_meta` quad slice (already filtered to subject =
- * assertionUri) into a typed seal record. Returns `undefined` when
- * the assertion has not been finalized (no merkle root present).
- * Throws on partial seals — those signal store corruption.
+ * The single low-level seal-field collector, shared by
+ * {@link parseAssertionSealQuads} and {@link parseGraphScopedAssertionSealCandidate}. Filters to
+ * `subject === assertionUri`, normalises/validates root-entity IRIs, and returns
+ * every non-root-entity object grouped by predicate WITH MULTIPLICITY preserved
+ * — so each caller applies its own cardinality policy (the full parser takes the
+ * last value; durable admission requires exactly one and fails closed on
+ * ambiguity). Throws only on an unsafe root-entity IRI (store corruption).
  */
-export function parseAssertionSealQuads(
+function collectSealFieldObjects(
   quads: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   assertionUri: string,
-): AssertionSeal | undefined {
-  const seen = new Map<string, string>();
+): { fields: Map<string, string[]>; rootEntities: string[] } {
+  const fields = new Map<string, string[]>();
   const rootEntities: string[] = [];
   for (const q of quads) {
     if (q.subject !== assertionUri) continue;
@@ -314,8 +430,28 @@ export function parseAssertionSealQuads(
       rootEntities.push(root);
       continue;
     }
-    seen.set(q.predicate, q.object);
+    const existing = fields.get(q.predicate);
+    if (existing) existing.push(q.object);
+    else fields.set(q.predicate, [q.object]);
   }
+  return { fields, rootEntities };
+}
+
+/**
+ * Parse a `_meta` quad slice (already filtered to subject =
+ * assertionUri) into a typed seal record. Returns `undefined` when
+ * the assertion has not been finalized (no merkle root present).
+ * Throws on partial seals — those signal store corruption.
+ */
+export function parseAssertionSealQuads(
+  quads: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
+  assertionUri: string,
+): AssertionSeal | undefined {
+  const { fields, rootEntities } = collectSealFieldObjects(quads, assertionUri);
+  // Full parse keeps last-writer-wins for a repeated predicate (historical
+  // behaviour): collapse each predicate's objects to its last value.
+  const seen = new Map<string, string>();
+  for (const [predicate, objects] of fields) seen.set(predicate, objects[objects.length - 1]!);
   if (!seen.has(ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT)) return undefined;
 
   const required = [
@@ -336,11 +472,92 @@ export function parseAssertionSealQuads(
       );
     }
   }
-  if (rootEntities.length === 0) {
+  const contentScopeVersion = seen.has(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION)
+    ? Number(integerLiteralToValue(seen.get(ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION)!))
+    : LEGACY_ROOT_CONTENT_SCOPE_VERSION;
+  let kaUal: string | undefined;
+  let assertionVersion: string | undefined;
+  let publicTripleCount: number | undefined;
+  let privateMerkleRoot: Uint8Array | undefined;
+  let privateTripleCount: number | undefined;
+  if (contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    const graphRequired = [
+      ASSERTION_SEAL_PREDICATES.KA_UAL,
+      ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+      ASSERTION_SEAL_PREDICATES.PUBLIC_TRIPLE_COUNT,
+      ASSERTION_SEAL_PREDICATES.PRIVATE_TRIPLE_COUNT,
+    ];
+    for (const predicate of graphRequired) {
+      if (!seen.has(predicate)) {
+        throw new Error(
+          `Partial graph-scoped assertion seal for <${assertionUri}>: missing <${predicate}>.`,
+        );
+      }
+    }
+    if (rootEntities.length > 0) {
+      throw new Error(
+        `Graph-scoped assertion seal for <${assertionUri}> must not contain root entities`,
+      );
+    }
+    const scope = createGraphKnowledgeAssetScope(
+      iriObjectToValue(seen.get(ASSERTION_SEAL_PREDICATES.KA_UAL)!),
+      integerLiteralToValue(seen.get(ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION)!),
+    );
+    const count = integerLiteralToValue(
+      seen.get(ASSERTION_SEAL_PREDICATES.PUBLIC_TRIPLE_COUNT)!,
+    );
+    const privateCount = integerLiteralToValue(
+      seen.get(ASSERTION_SEAL_PREDICATES.PRIVATE_TRIPLE_COUNT)!,
+    );
+    if (count < 0n || count > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `Invalid graph-scoped publicTripleCount for <${assertionUri}>: ${count}`,
+      );
+    }
+    if (privateCount < 0n || privateCount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `Invalid graph-scoped privateTripleCount for <${assertionUri}>: ${privateCount}`,
+      );
+    }
+    if (count === 0n && privateCount === 0n) {
+      throw new Error(
+        `Graph-scoped assertion seal for <${assertionUri}> contains no public or private triples`,
+      );
+    }
+    const privateRootObject = seen.get(ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT);
+    if (privateCount > 0n) {
+      if (privateRootObject === undefined) {
+        throw new Error(
+          `Partial graph-scoped assertion seal for <${assertionUri}>: missing ` +
+            `<${ASSERTION_SEAL_PREDICATES.PRIVATE_MERKLE_ROOT}>.`,
+        );
+      }
+      privateMerkleRoot = hexBinaryLiteralToBytes(privateRootObject);
+      if (privateMerkleRoot.length !== 32) {
+        throw new Error(
+          `Invalid graph-scoped privateMerkleRoot for <${assertionUri}>: expected 32 bytes, got ${privateMerkleRoot.length}`,
+        );
+      }
+    } else if (privateRootObject !== undefined) {
+      throw new Error(
+        `Graph-scoped assertion seal for <${assertionUri}> has privateMerkleRoot with zero privateTripleCount`,
+      );
+    }
+    kaUal = scope.ual;
+    assertionVersion = scope.assertionVersion;
+    publicTripleCount = Number(count);
+    privateTripleCount = Number(privateCount);
+  } else if (contentScopeVersion === LEGACY_ROOT_CONTENT_SCOPE_VERSION) {
+    if (rootEntities.length === 0) {
+      throw new Error(
+        `Partial assertion seal for <${assertionUri}>: at least one ` +
+          `<${ASSERTION_SEAL_PREDICATES.ASSERTION_ROOT_ENTITY}> is required ` +
+          `(seal predates the per-assertion-rootEntities binding — re-finalize the assertion).`,
+      );
+    }
+  } else {
     throw new Error(
-      `Partial assertion seal for <${assertionUri}>: at least one ` +
-        `<${ASSERTION_SEAL_PREDICATES.ASSERTION_ROOT_ENTITY}> is required ` +
-        `(seal predates the per-assertion-rootEntities binding — re-finalize the assertion).`,
+      `Unsupported assertion content scope version ${contentScopeVersion} for <${assertionUri}>`,
     );
   }
   return {
@@ -373,8 +590,77 @@ export function parseAssertionSealQuads(
     finalizedAtIso: dateTimeLiteralToValue(
       seen.get(ASSERTION_SEAL_PREDICATES.ASSERTION_FINALIZED_AT)!,
     ),
+    contentScopeVersion,
+    ...(kaUal ? { kaUal } : {}),
+    ...(assertionVersion ? { assertionVersion } : {}),
+    ...(publicTripleCount !== undefined ? { publicTripleCount } : {}),
+    ...(privateMerkleRoot !== undefined ? { privateMerkleRoot } : {}),
+    ...(privateTripleCount !== undefined ? { privateTripleCount } : {}),
     rootEntities,
   };
+}
+
+/** A validated, publishable graph-scoped author seal candidate + its coordinate. */
+export interface GraphScopedAssertionSealCandidate {
+  seal: AssertionSeal;
+  coordinate: { scope: string; agentAddress: string; name: string };
+}
+
+/**
+ * GH#1778 — the SINGLE canonical definition of a "publishable graph-scoped
+ * author seal", shared by VM-publish author resolution and durable-sync
+ * admission so the two never drift. Returns the parsed seal + its subject
+ * coordinate iff a subject's `_meta` rows form a complete, self-consistent
+ * graph-scoped v2 seal rooted at its own author coordinate; otherwise
+ * `undefined` (never throws — safe on peer-supplied rows during selection).
+ *
+ * A row set qualifies only when ALL of the following hold:
+ *  - the identity/version predicates (`assertionMerkleRoot`, `contentScopeVersion`,
+ *    `kaUal`, `authorAddress`, `assertionVersion`) each have exactly ONE distinct
+ *    value — fail-closed on conflicting/duplicate rows, so a peer cannot rely on
+ *    the full parser's last-writer-wins to slip a tampered value through;
+ *  - `parseAssertionSealQuads` accepts it as a COMPLETE seal (all required fields
+ *    present — the exact check publish performs), and it is graph-scoped v2;
+ *  - the subject `/assertion/<addr>/…` coordinate, the seal's `authorAddress`, and
+ *    the `kaUal` author all agree (case-folded) — a seal that names a different
+ *    author than its subject URI is rejected, not silently trusted.
+ */
+export function parseGraphScopedAssertionSealCandidate(
+  rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
+  subject: string,
+): GraphScopedAssertionSealCandidate | undefined {
+  try {
+    const { fields } = collectSealFieldObjects(rows, subject);
+    // Fail closed on ambiguity BEFORE the last-writer-wins full parse: any
+    // identity/version predicate present with more than one distinct value is
+    // rejected outright.
+    for (const predicate of [
+      ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT,
+      ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+      ASSERTION_SEAL_PREDICATES.KA_UAL,
+      ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS,
+      ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+    ]) {
+      if (new Set(fields.get(predicate) ?? []).size > 1) return undefined;
+    }
+    const seal = parseAssertionSealQuads(rows, subject);
+    if (!seal
+      || seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
+      || !seal.kaUal) {
+      return undefined;
+    }
+    const coordinate = parseContextGraphAssertionUri(subject);
+    if (!coordinate) return undefined;
+    // Identity alignment: subject-coordinate author == seal author == kaUal author.
+    const sealAuthor = seal.authorAddress.toLowerCase();
+    const ualAuthor = parseDeterministicKnowledgeAssetUal(seal.kaUal).agentAddress.toLowerCase();
+    if (coordinate.agentAddress.toLowerCase() !== sealAuthor || ualAuthor !== sealAuthor) {
+      return undefined;
+    }
+    return { seal, coordinate };
+  } catch {
+    return undefined;
+  }
 }
 
 // ── literal helpers ─────────────────────────────────────────────
@@ -411,6 +697,15 @@ function integerLiteralToValue(literal: string): bigint {
     literal.match(/^"(-?\d+)"$/);
   if (!m) throw new Error(`Invalid xsd:integer literal: ${literal}`);
   return BigInt(m[1]);
+}
+
+function iriObjectToValue(object: string): string {
+  const wrapped = object.match(/^<([^>]+)>$/);
+  const iri = wrapped ? wrapped[1] : object;
+  if (!iri || iri.startsWith('"') || UNSAFE_IRI_CHARS.test(iri)) {
+    throw new Error(`Invalid assertion seal IRI object: ${object}`);
+  }
+  return iri;
 }
 
 function dateTimeLiteralToValue(literal: string): string {

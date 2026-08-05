@@ -1,19 +1,10 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  classifyDurableProgress,
+  type DurableProgressSummary,
+} from '../durable-progress.js';
 
-interface SyncProgressSummary {
-  insertedTriples: number;
-  insertedDataTriples?: number;
-  insertedMetaTriples?: number;
-  metaOnlyResponses?: number;
-  completedPhases?: number;
-  checkpointAdvances?: number;
-  timedOutPhases?: number;
-  failedPeers?: number;
-  failedPhases?: number;
-  deniedPhases?: number;
-  backoffWorthyFailures?: number;
-  deferredBackpressure?: number;
-}
+type SyncProgressSummary = DurableProgressSummary & { insertedTriples: number };
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
@@ -74,66 +65,45 @@ export class SyncOnConnectPostSyncError extends Error {
   }
 }
 
-function insertedTriples(result: SyncFromPeerResult): number {
-  return typeof result === 'number' ? result : result.insertedTriples;
+interface SyncResultAccounting {
+  insertedTriples: number;
+  madeProgress: boolean;
+  backoffWorthyFailure: boolean;
+  denied: boolean;
+  failed: boolean;
+  deferredByBackpressure: boolean;
+  metadataOnly: boolean;
+  cleanNonMetadataResponse: boolean;
 }
 
-function madeSyncProgress(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return true;
-  const phaseProgress = !metadataOnlySync(result) && (
-    (result.completedPhases ?? 0) > 0 ||
-    (result.checkpointAdvances ?? 0) > 0
-  );
-  return insertedDataTriplesForProgress(result) > 0
-    || phaseProgress;
-}
+function classifySyncResult(
+  result: SyncFromPeerResult,
+  complete?: boolean,
+): SyncResultAccounting {
+  if (typeof result === 'number') {
+    return {
+      insertedTriples: result,
+      madeProgress: true,
+      backoffWorthyFailure: false,
+      denied: false,
+      failed: false,
+      deferredByBackpressure: false,
+      metadataOnly: false,
+      cleanNonMetadataResponse: true,
+    };
+  }
 
-function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (
-    (result.backoffWorthyFailures ?? 0) > 0 ||
-    (result.failedPeers ?? 0) > 0 ||
-    (result.timedOutPhases ?? 0) > 0
-  );
-}
-
-function hadDeniedPhase(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (result.deniedPhases ?? 0) > 0;
-}
-
-function hadFailedPhase(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (result.failedPhases ?? 0) > 0;
-}
-
-function hadBackpressureDeferral(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return false;
-  return (result.deferredBackpressure ?? 0) > 0;
-}
-
-function cleanDetailedSync(result: SyncFromPeerResult): boolean {
-  if (typeof result === 'number') return true;
-  return (
-    (result.failedPeers ?? 0) === 0 &&
-    (result.failedPhases ?? 0) === 0 &&
-    (result.timedOutPhases ?? 0) === 0 &&
-    (result.deniedPhases ?? 0) === 0 &&
-    !metadataOnlySync(result)
-  );
-}
-
-function insertedDataTriplesForProgress(result: SyncProgressSummary): number {
-  if (result.insertedDataTriples !== undefined) return result.insertedDataTriples;
-  return metadataOnlySync(result) ? 0 : result.insertedTriples;
-}
-
-function metadataOnlySync(result: SyncProgressSummary): boolean {
-  const insertedDataTriples = result.insertedDataTriples ?? 0;
-  return insertedDataTriples === 0 && (
-    (result.metaOnlyResponses ?? 0) > 0 ||
-    ((result.insertedMetaTriples ?? 0) > 0 && result.insertedTriples > 0)
-  );
+  const progress = classifyDurableProgress(result, { complete });
+  return {
+    insertedTriples: result.insertedTriples,
+    madeProgress: progress.madeReconnectProgress,
+    backoffWorthyFailure: progress.backoffWorthyFailure,
+    denied: progress.denied,
+    failed: progress.phaseFailed || progress.integrityRejected,
+    deferredByBackpressure: progress.deferredByBackpressure,
+    metadataOnly: progress.metadataOnly,
+    cleanNonMetadataResponse: progress.cleanNonMetadataResponse,
+  };
 }
 
 export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
@@ -166,20 +136,42 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let sawBackoffWorthyFailure = false;
   let sawBackpressureDeferral = false;
   let sawDurableMetadataOnlyDetailedSync = false;
+  let sawExplicitIncompleteDurableResult = false;
   let cleanDurableDetailedRound = false;
-  const recordSyncAccounting = (result: SyncFromPeerResult, phase: 'durable' | 'shared'): void => {
-    madeProgress = madeProgress || madeSyncProgress(result);
-    sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
-    sawFailedPhase = sawFailedPhase || hadFailedPhase(result);
-    sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
-    sawBackpressureDeferral = sawBackpressureDeferral || hadBackpressureDeferral(result);
+  const recordSyncAccounting = (
+    result: SyncFromPeerResult,
+    phase: 'durable' | 'shared',
+  ): SyncResultAccounting => {
+    const complete = phase === 'durable'
+      && typeof result !== 'number'
+      && 'complete' in result
+      && typeof result.complete === 'boolean'
+        ? result.complete
+        : undefined;
+    const accounting = classifySyncResult(result, complete);
+    madeProgress = madeProgress || accounting.madeProgress;
+    sawDeniedPhase = sawDeniedPhase || accounting.denied;
+    sawFailedPhase = sawFailedPhase || accounting.failed;
+    sawBackoffWorthyFailure = sawBackoffWorthyFailure || accounting.backoffWorthyFailure;
+    sawBackpressureDeferral = sawBackpressureDeferral || accounting.deferredByBackpressure;
     if (phase === 'durable') {
-      sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
-      cleanDurableDetailedRound = cleanDurableDetailedRound || cleanDetailedSync(result);
+      sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || accounting.metadataOnly;
+      sawExplicitIncompleteDurableResult = sawExplicitIncompleteDurableResult || complete === false;
+      // Safely committed prefixes are useful progress, but an explicit
+      // incomplete durable result must not refresh the peer's successful-sync
+      // timestamp and suppress the next recovery attempt. Legacy counter-only
+      // results keep their existing behaviour when no completion verdict is
+      // available.
+      cleanDurableDetailedRound = cleanDurableDetailedRound || (
+        complete !== false && accounting.cleanNonMetadataResponse
+      );
     }
+    return accounting;
   };
   const finishSyncAccounting = (): SyncOnConnectOutcome => {
-    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
+    const cleanDurableRound = cleanDurableDetailedRound
+      && !sawDurableMetadataOnlyDetailedSync
+      && !sawExplicitIncompleteDurableResult;
     if (sawBackpressureDeferral) {
       if (madeProgress) {
         context.onPeerSynced?.(remotePeer, { fresh: false, progress: true });
@@ -232,13 +224,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
     const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
     const synced = await syncFromPeer(remotePeer);
-    recordSyncAccounting(synced, 'durable');
-    logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
-    if (hadBackpressureDeferral(synced)) {
+    const syncedAccounting = recordSyncAccounting(synced, 'durable');
+    logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
+    if (syncedAccounting.deferredByBackpressure) {
       logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
       return finishSyncAccounting();
     }
-    if (hadBackoffWorthyFailure(synced)) {
+    if (syncedAccounting.backoffWorthyFailure) {
       logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
       return finishSyncAccounting();
     }
@@ -257,13 +249,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
-      recordSyncAccounting(discoverSynced, 'durable');
-      logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
-      if (hadBackpressureDeferral(discoverSynced)) {
+      const discoverAccounting = recordSyncAccounting(discoverSynced, 'durable');
+      logInfo(ctx, `Synced ${discoverAccounting.insertedTriples} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      if (discoverAccounting.deferredByBackpressure) {
         logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG admission deferral`);
         return finishSyncAccounting();
       }
-      if (hadBackoffWorthyFailure(discoverSynced)) {
+      if (discoverAccounting.backoffWorthyFailure) {
         logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG durable sync hit backoff-worthy pressure`);
         return finishSyncAccounting();
       }
@@ -276,9 +268,9 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       : getSyncContextGraphs() ?? [];
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-      recordSyncAccounting(wsSynced, 'shared');
-      logInfo(ctx, `Synced ${insertedTriples(wsSynced)} shared memory triples from peer ${shortPeer}`);
-      if (hadBackpressureDeferral(wsSynced)) {
+      const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
+      logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
+      if (sharedAccounting.deferredByBackpressure) {
         logInfo(ctx, `Shared-memory sync from peer ${shortPeer} deferred by local admission pressure`);
       }
     } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {

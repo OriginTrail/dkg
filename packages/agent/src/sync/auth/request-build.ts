@@ -1,4 +1,11 @@
 import { ethers } from 'ethers';
+import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
+  SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
+import { requireExactAssetUals } from '../exact-assets.js';
+import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -29,6 +36,16 @@ export interface SyncRequestEnvelope {
   authPurpose?: string;
   authSelector?: string;
   /**
+   * Additive, UNSIGNED response-shaping capability. The signed `limit` remains
+   * at or below the legacy 500-row cap, so old responders can authenticate and
+   * serve the request unchanged. New responders may honor `pageRowsHint`, but
+   * only under their own hard row and byte caps. This cannot expand the caller's
+   * authorization scope; it only changes how much already-authorized durable
+   * data is returned in one response.
+   */
+  pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;
+  pageRowsHint?: number;
+  /**
    * Phase C — optional, UNSIGNED delta-sync hint. When set, the responder
    * returns only Knowledge Assets whose KC `dkg:batchId` is strictly greater
    * than this value (the requester's per-CG high-water mark). Encoded as a
@@ -41,6 +58,14 @@ export interface SyncRequestEnvelope {
    * full scan; new responders honor it and return a delta.
    */
   sinceBatchId?: string;
+  /**
+   * Additive, UNSIGNED exact-KA response filter. It can only narrow an already
+   * authorized Context Graph read. Upgraded responders serve metadata and data
+   * for these UALs only; old responders ignore it, while the upgraded requester
+   * accepts and filters only a bounded legacy prefix that covers every requested
+   * descriptor. An over-limit or incomplete legacy response remains fail-closed.
+   */
+  assetUals?: string[];
   /**
    * R9 (SECURITY) — member SWM recovery marker. When set, the recovery path
    * serves PLAINTEXT member-to-member, so the responder MUST authorize it via
@@ -73,6 +98,7 @@ interface BuildSyncRequestParams {
   authPurpose?: string;
   authSelector?: string;
   sinceBatchId?: string;
+  assetUals?: string[];
   syncSessionId?: string;
   needsAuth: boolean;
   /**
@@ -132,6 +158,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     authPurpose,
     authSelector,
     sinceBatchId,
+    assetUals: rawAssetUals,
     syncSessionId,
     needsAuth,
     recovery,
@@ -154,6 +181,20 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     throw new Error(`Cannot build agent-signed sync request for "${contextGraphId}": forced agent signing requires an authenticated envelope`);
   }
 
+  const requestedLimit = Number.isSafeInteger(limit)
+    ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
+    : SYNC_PAGE_SIZE;
+  // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
+  // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
+  // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
+  // and a NEW responder treats a request WITHOUT meta pageMode as non-negotiated
+  // (plain meta serializer). The signed `limit` still rides the 500-row legacy
+  // cap below, so digests stay wire-compatible.
+  const useByteBudgetPage = !includeSharedMemory
+    && (phase === 'data' || phase === 'meta')
+    && requestedLimit > SYNC_PAGE_SIZE;
+  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
+
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
     const phaseSuffix = phase === 'meta'
@@ -167,17 +208,31 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
           // wire and the responder routes to readCatalogPage instead of falling
           // back to the DEFAULT data phase (which is gated and serves nothing).
           ? '|catalog'
-          : '';
-    // Trailing keyed tokens are additive; old responders ignore the extra parts.
-    const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
-    const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}${sessionSuffix}${sinceSuffix}`);
+          // Byte-budget tokens make the otherwise implicit DATA phase explicit,
+          // so upgraded parsers have an unambiguous start for the keyed tail.
+          : useByteBudgetPage
+            ? '|data'
+            : '';
+    const tail = encodePipeSyncRequestTail({
+      pageMode: useByteBudgetPage ? SYNC_BYTE_BUDGET_PAGE_MODE : undefined,
+      pageRowsHint: useByteBudgetPage ? requestedLimit : undefined,
+      syncSessionId,
+      sinceBatchId,
+      assetUals,
+    });
+    return new TextEncoder().encode(
+      `${prefix}|${offset}|${requestedLimit}${phaseSuffix}${tail}`,
+    );
   }
 
   const request: SyncRequestEnvelope = {
     contextGraphId,
     offset,
-    limit,
+    // Keep this signed field within the legacy cap. An old responder clamps to
+    // the same value before verifying the digest, so rolling upgrades remain
+    // wire-compatible even when the additive hint below asks a new responder
+    // for a larger byte-bounded page.
+    limit: Math.min(requestedLimit, SYNC_PAGE_SIZE),
     includeSharedMemory,
     targetPeerId,
     requesterPeerId,
@@ -217,6 +272,11 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // authorization; only narrows the responder's result set).
   if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
+  if (assetUals) request.assetUals = assetUals;
+  if (useByteBudgetPage) {
+    request.pageMode = SYNC_BYTE_BUDGET_PAGE_MODE;
+    request.pageRowsHint = requestedLimit;
+  }
   // R9: unsigned recovery marker (only ever escalates strictness — see field
   // docs). The responder authorizes against the recovered signer, not this flag.
   if (recovery) request.recovery = true;

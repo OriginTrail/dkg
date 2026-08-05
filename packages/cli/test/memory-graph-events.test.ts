@@ -141,7 +141,7 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
   it('emits WM+SWM refresh events after assertion sharing (swm/share)', async () => {
     const cg = await freshCg();
     await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: cg, quads: QUADS });
-    const res = await postJson(daemon, '/api/knowledge-assets/draft/swm/share', { contextGraphId: cg, entities: ['urn:root'] });
+    const res = await postJson(daemon, '/api/knowledge-assets/draft/swm/share', { contextGraphId: cg });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ swmShared: true });
     const frame = await stream.waitFor(isFrame(cg, 'assertion_promoted'));

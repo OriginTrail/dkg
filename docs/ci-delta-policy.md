@@ -2,11 +2,14 @@
 
 ## Decision
 
-Use affected-lane CI for pull-request feedback, then run full CI against the
-exact merge candidate in GitHub's merge queue. Keep full CI on protected-branch
-pushes and manual dispatches. Do not add a `develop` branch solely for CI: that
-would postpone integration failures and collect unrelated changes into a large
-`develop -> main` batch.
+Use affected-lane CI for pull-request feedback, then run every Node/EVM lane
+against the exact merge candidate in GitHub's merge queue. Keep full CI on
+protected-branch pushes and manual dispatches. Solidity remains independently
+path-gated on pull requests: contract-relevant PRs run the four Hardhat shards,
+merge candidates rerun them against the exact combined commit, and protected
+pushes run the full coverage ratchet after merge. Do not add a `develop` branch
+solely for CI: that would postpone integration failures and collect unrelated
+changes into a large `develop -> main` batch.
 
 The delta planner is deliberately conservative. It selects the changed
 workspace's owning lane plus known downstream consumers, and falls back to full
@@ -19,14 +22,15 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
 | Documentation only | Planner and aggregate gates only |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
-| `evm-module` | Full CI, including Solidity |
-| Root dependency/build config, workflow, planner, or generic scripts | Full CI |
+| `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
+| Root dependency/build config, workflow, planner, or generic scripts | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Any workspace `package.json` | Full CI because the base and head dependency graphs may differ |
 | Rename, copy, deletion, unknown path, or no diff | Full CI |
 | More than 100 production files or at least 4 workspaces | Full CI |
-| PR with `ci:full` label | Full CI |
-| Deterministic 5% PR audit sample | Full CI |
-| Merge queue, protected-branch push, or manual dispatch | Full CI |
+| PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
+| Deterministic 5% PR audit sample | Full Node/EVM CI; Solidity remains path-gated |
+| Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
+| Protected-branch push or manual dispatch | Full CI, including Solidity coverage |
 
 The planner reads `git diff --name-status -z`, so spaces and other shell-hostile
 file names cannot alter the decision. Its routing table lives in
@@ -44,8 +48,22 @@ file names cannot alter the decision. Its routing table lives in
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
   selected job was accidentally skipped, failed, or was cancelled.
-- Full merge-queue CI tests the exact combined commit before it lands. Full
-  protected-branch CI remains a second safety net after merge.
+- CI controller changes use a two-phase rollout. The controller implementation
+  lands first while every workflow remains pinned to an immutable SHA already
+  present on protected `main`. Only a follow-up PR may rotate that pin to the
+  landed controller. During this rollout, ABI freshness runs unconditionally,
+  so candidate code cannot suppress it by choosing its own planner.
+
+  Before any follow-up rotates the pin, fetch protected `main` and require this
+  command to exit zero for the proposed immutable SHA:
+
+  ```sh
+  git fetch origin main
+  git merge-base --is-ancestor <controller-sha> origin/main
+  ```
+- The merge queue tests every Node/EVM lane and the sharded Solidity suite
+  against the exact combined commit before it lands. Protected-branch Solidity
+  coverage remains the post-merge safety net.
 - Five percent of PR commits run full CI even when delta would be possible. This
   continuously audits the routing model and exposes a missing dependency edge.
 - The routing tests enumerate all package/demo workspaces with a `test` script.
@@ -60,8 +78,9 @@ correctness gate.
 ## Required repository settings
 
 Delta selection is **default-off**. Until the repository variable
-`CI_DELTA_ENABLED` is exactly `true`, PRs deliberately receive full CI. Activate
-it only after all safeguards below are configured:
+`CI_DELTA_ENABLED` is exactly `true`, PRs deliberately receive full Node/EVM CI.
+The independent Solidity path gate still applies. Activate delta only after all
+safeguards below are configured:
 
 1. Create the `ci:full` label.
 2. Enable GitHub merge queue for `main`.

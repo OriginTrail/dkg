@@ -7,8 +7,11 @@ import {
   contextGraphSessionsTopic,
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
+  contextGraphAssertionUri,
+  parseContextGraphAssertionUri,
   DHT_PROTOCOL,
   validateContextGraphId,
+  validateNewContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   deriveCuratorDidFromCgId,
@@ -18,6 +21,68 @@ import {
   wireTopicForNetwork,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
+
+describe('parseContextGraphAssertionUri (inverse of contextGraphAssertionUri)', () => {
+  const ADDR = '0xA32f1cc125401B55911678847426759094055B2d';
+  // Wallet-scoped context graph IDs may contain '/' (validateContextGraphId allows it).
+  const SLASH_CG = '0x1111111111111111111111111111111111111111/project';
+
+  it('round-trips the no-subgraph coordinate (scope = contextGraphId)', () => {
+    const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: 'construction',
+      agentAddress: ADDR,
+      name: 'justTriplets',
+    });
+  });
+
+  it('round-trips the sub-graph coordinate (scope = contextGraphId/subGraphName)', () => {
+    const uri = contextGraphAssertionUri('construction', ADDR, 'justTriplets', 'wing-a');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: 'construction/wing-a',
+      agentAddress: ADDR,
+      name: 'justTriplets',
+    });
+  });
+
+  it('preserves a slash-containing contextGraphId (GH#1778 review) — no subgraph', () => {
+    const uri = contextGraphAssertionUri(SLASH_CG, ADDR, 'asset');
+    // The whole cg id (incl. its slash) is the scope; it is NOT mis-split into a subgraph.
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: SLASH_CG,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('preserves a slash-containing contextGraphId with a subGraphName', () => {
+    const uri = contextGraphAssertionUri(SLASH_CG, ADDR, 'asset', 'wing-a');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: `${SLASH_CG}/wing-a`,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('anchors on the rightmost assertion coordinate even when the scope contains one', () => {
+    const trickyCg = `weird/assertion/${ADDR}/inner`;
+    const uri = contextGraphAssertionUri(trickyCg, ADDR, 'asset');
+    expect(parseContextGraphAssertionUri(uri)).toEqual({
+      scope: trickyCg,
+      agentAddress: ADDR,
+      name: 'asset',
+    });
+  });
+
+  it('returns undefined for non-assertion, malformed, or non-0x-author subjects', () => {
+    expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/_meta')).toBeUndefined();
+    expect(parseContextGraphAssertionUri(`did:dkg:context-graph:construction/_shared_memory/${ADDR}/7`)).toBeUndefined();
+    expect(parseContextGraphAssertionUri('did:dkg:gnosis:100/0xabc/7')).toBeUndefined();
+    expect(parseContextGraphAssertionUri('urn:dkg:assertion:construction:0xabc:name')).toBeUndefined();
+    // author segment is not a 0x40 address
+    expect(parseContextGraphAssertionUri('did:dkg:context-graph:construction/assertion/notanaddr/asset')).toBeUndefined();
+  });
+});
 
 describe('context graph topic helpers (V10)', () => {
   it('contextGraphFinalizationTopic matches deprecated contextGraphPublishTopic', () => {
@@ -157,6 +222,18 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('urn:uuid:12345').valid).toBe(true);
     expect(validateContextGraphId('my-graph_v2').valid).toBe(true);
     expect(validateContextGraphId('user@domain').valid).toBe(true);
+  });
+
+  it('reserves structural partition segments for new IDs without breaking legacy reads', () => {
+    for (const id of [
+      'victim/_meta',
+      'victim/_private',
+      'victim/_shared_memory',
+      'victim/_future-partition',
+    ]) {
+      expect(validateContextGraphId(id)).toEqual({ valid: true });
+      expect(validateNewContextGraphId(id)).toMatchObject({ valid: false });
+    }
   });
 
   it('rejects IDs exceeding 256 chars', () => {

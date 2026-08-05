@@ -1,4 +1,5 @@
 import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
+import { STORAGE_ACK_MAX_STAGING_BYTES } from './protocol-limits.js';
 import { assertSafeIri } from './sparql-safe.js';
 
 // ── V10 Protocol Stream IDs ─────────────────────────────────────────────
@@ -23,6 +24,10 @@ export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
 // (sync is a self-healing catch-up net, so the brief mixed-version
 // window during auto-update is no-data-loss).
 export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
+// Framed, long-lived transport overlay for PROTOCOL_SYNC. The logical request
+// and response bytes are unchanged; the distinct wire id lets upgraded peers
+// negotiate stream reuse while older peers cleanly fall back to one-shot sync.
+export const PROTOCOL_SYNC_POOLED = '/dkg/10.0.3/sync';
 // OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
 // PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
 // structured (era, headSeq, nextSeq, records) head cannot ride the existing
@@ -164,6 +169,15 @@ export const PROTOCOL_STORAGE_ACK_V2 = '/dkg/10.0.2/storage-ack';
 export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
 
 /**
+ * Graph-scoped UPDATE StorageACK protocol. V1 update responders interpret
+ * `subGraphName` using the legacy entity-root layout and do not validate the
+ * graph-scoped content envelope. Keep V2 on a distinct capability so a
+ * rootless update can never be acknowledged by a peer that silently ignores
+ * its scope/version fields.
+ */
+export const PROTOCOL_STORAGE_UPDATE_ACK_V2 = '/dkg/10.0.2/storage-update-ack';
+
+/**
  * OT-RFC-38 LU-11 / OT-RFC-39 — point-to-point sync verb for one
  * curated-CG ciphertext chunk identified by (cgId, batchId,
  * chunkIndex). Used by late-joining hosting cores (and any
@@ -218,8 +232,12 @@ export function logicalTopicFromWireTopic(networkId: string | undefined, wireTop
   return `dkg/${suffix}`;
 }
 
-/** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */
-export const DKG_GOSSIP_MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
+/**
+ * Maximum application payload size allowed for one DKG GossipSub message.
+ * Kept equal to the 4 MiB inline StorageACK staging ceiling so one Knowledge
+ * Asset has one consistent application-payload limit across SWM and ACK paths.
+ */
+export const DKG_GOSSIP_MAX_MESSAGE_BYTES = STORAGE_ACK_MAX_STAGING_BYTES;
 
 /** Allows GossipSub RPC framing around one max-sized application payload. */
 export const DKG_GOSSIP_MAX_RPC_BYTES = DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024;
@@ -321,6 +339,66 @@ export function contextGraphVerifiableMemoryMetaUri(contextGraphId: string, veri
 export function contextGraphAssertionUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
   if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/${agentAddress}/${name}`;
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
+}
+
+/**
+ * Inverse of {@link contextGraphAssertionUri}: split an assertion-coordinate
+ * subject `did:dkg:context-graph:<scope>/assertion/<addr>/<name>` into its
+ * cryptographic coordinate, or `undefined` when the shape does not match.
+ * Centralises the URI layout so consumers (VM-publish author resolution,
+ * durable-sync seal identity) do not re-derive it with bespoke slicing/regex.
+ *
+ * Anchored on the `/assertion/<addr>/<name>` suffix from the RIGHT so it is
+ * robust to slash-containing context-graph IDs (which {@link validateContextGraphId}
+ * permits, e.g. wallet-scoped `0xabc…/project`). `scope` is the raw
+ * `contextGraphId` OR `contextGraphId/<subGraphName>` and is deliberately NOT
+ * split: a context-graph ID may itself contain `/`, so it cannot be separated
+ * from an optional sub-graph name by the URI alone. Callers that know the
+ * expected context graph compare `scope` to
+ * `subGraphName ? contextGraphId + "/" + subGraphName : contextGraphId`.
+ * `subGraphName` and `name` cannot contain `/`, so the suffix is unambiguous;
+ * `agentAddress` is validated as a 0x EVM address.
+ */
+export function parseContextGraphAssertionUri(subject: string): {
+  scope: string;
+  agentAddress: string;
+  name: string;
+} | undefined {
+  const PREFIX = 'did:dkg:context-graph:';
+  if (!subject.startsWith(PREFIX)) return undefined;
+  const parts = subject.slice(PREFIX.length).split('/');
+  // Minimum shape: <scope(>=1)>/assertion/<addr>/<name> → at least 4 segments.
+  if (parts.length < 4) return undefined;
+  const name = parts[parts.length - 1]!;
+  const agentAddress = parts[parts.length - 2]!;
+  const sentinel = parts[parts.length - 3]!;
+  if (sentinel !== 'assertion' || name.length === 0) return undefined;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(agentAddress)) return undefined;
+  const scope = parts.slice(0, parts.length - 3).join('/');
+  if (scope.length === 0) return undefined;
+  return { scope, agentAddress, name };
+}
+
+/**
+ * Query bounds for locating the assertion-coordinate subjects of one
+ * `(contextGraphId, name[, subGraphName])` in `_meta`, derived from the same
+ * grammar as {@link contextGraphAssertionUri} so callers do not re-encode the
+ * URI layout. `prefix`/`suffix` bound a `STRSTARTS`/`STRENDS` filter (the prefix
+ * carries the full context-graph id verbatim, so a slash-containing id matches
+ * correctly); `scope` is what a matched subject's {@link parseContextGraphAssertionUri}
+ * `scope` must equal (see that function for why cg and subGraph are not split).
+ */
+export function contextGraphAssertionQueryBounds(
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): { scope: string; prefix: string; suffix: string } {
+  const scope = subGraphName ? `${contextGraphId}/${subGraphName}` : contextGraphId;
+  return {
+    scope,
+    prefix: `did:dkg:context-graph:${scope}/assertion/`,
+    suffix: `/${name}`,
+  };
 }
 
 /** Canonical identity segment used by all new per-KA memory-layer writes. */
@@ -515,6 +593,28 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
+  return { valid: true };
+}
+
+/**
+ * Validate a newly-created context graph ID against the storage namespace.
+ *
+ * Existing stores may contain IDs that predate the reserved-partition rule,
+ * so read/sync paths intentionally keep using {@link validateContextGraphId}.
+ * New roots must not claim a path segment used by a structural graph such as
+ * `_meta`, otherwise their payload graph can alias another root's control
+ * plane.
+ */
+export function validateNewContextGraphId(id: string): { valid: boolean; reason?: string } {
+  const validation = validateContextGraphId(id);
+  if (!validation.valid) return validation;
+  const reservedSegment = id.split('/').find((segment) => segment.startsWith('_'));
+  if (reservedSegment) {
+    return {
+      valid: false,
+      reason: `Context graph ID contains reserved storage partition segment "${reservedSegment}"`,
+    };
+  }
   return { valid: true };
 }
 

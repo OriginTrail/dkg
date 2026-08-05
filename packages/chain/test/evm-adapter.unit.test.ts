@@ -48,6 +48,80 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
+describe('EVMChainAdapter historical KA update verification', () => {
+  const kaId = 42n;
+  const publisher = '0x1111111111111111111111111111111111111111';
+  const storageAddress = '0x2222222222222222222222222222222222222222';
+  const root = ethers.keccak256(ethers.toUtf8Bytes('historical-update'));
+  const iface = new Interface([
+    'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
+  ]);
+
+  function adapterWithHistoricalRead(
+    roots: unknown[] | Error,
+  ): { adapter: EVMChainAdapter; latestRead: ReturnType<typeof recorder> } {
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = async () => {};
+    const encoded = iface.encodeEventLog(
+      iface.getEvent('KnowledgeAssetUpdated')!,
+      [kaId, publisher, 'op', root, 10n, 1n],
+    );
+    adapter.getTransactionReceiptWithFailover = async () => ({
+      status: 1,
+      blockNumber: 77,
+      index: 2,
+      logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }],
+    });
+    adapter.contracts.knowledgeAssetStorage = {
+      getAddress: async () => storageAddress,
+      interface: iface,
+    };
+    const latestRead = recorder(async () => publisher);
+    adapter.readContractWithOptions = async () => {
+      if (roots instanceof Error) throw roots;
+      return roots;
+    };
+    return { adapter, latestRead };
+  }
+
+  it.each([
+    ['receipt-block history has no matching publisher/root', [{ publisher, merkleRoot: ethers.ZeroHash }]],
+    ['receipt-block history cannot be read', new Error('archive state unavailable')],
+  ])('fails closed when %s', async (_label, historicalResult) => {
+    const { adapter, latestRead } = adapterWithHistoricalRead(historicalResult as unknown[] | Error);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .resolves.toEqual({ verified: false });
+    expect(latestRead.calls).toHaveLength(0);
+  });
+
+  it.each([
+    'RPC_ENDPOINTS_EXHAUSTED',
+    'RPC_RECEIPT_LOOKUP_FAILED',
+    'RPC_TIMEOUT',
+  ])('preserves typed %s receipt failures for durable retry', async (code) => {
+    const { adapter } = adapterWithHistoricalRead([]);
+    const transportError = Object.assign(new Error(`transport failed: ${code}`), { code });
+    (adapter as any).getTransactionReceiptWithFailover = async () => {
+      throw transportError;
+    };
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .rejects.toBe(transportError);
+  });
+
+  it('preserves typed receipt-block history failures for durable retry', async () => {
+    const transportError = Object.assign(new Error('archive RPC timed out'), {
+      code: 'RPC_TIMEOUT',
+    });
+    const { adapter } = adapterWithHistoricalRead(transportError);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher))
+      .rejects.toBe(transportError);
+  });
+});
+
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   const ADDR = '0x00000000000000000000000000000000000000a1';
   const ADDR2 = '0x00000000000000000000000000000000000000a2';
@@ -4677,6 +4751,54 @@ const rawTooLowAllowanceRevert = () => {
 };
 
 describe('populateAndSignV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
+
+  it('applies 25% gas headroom to every concurrent V10 publish preparation', async () => {
+    const { a } = makeRecoveryAdapter();
+    const signerA = new ethers.Wallet(DEPLOYER_PK);
+    const signerB = new ethers.Wallet(OTHER_PK);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const populateAndSign = recorder(async (..._args: unknown[]) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await Promise.resolve();
+      inFlight -= 1;
+      return { signedTx: '0xsigned', txHash: '0xhash' };
+    });
+    (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+    await Promise.all([
+      (a as any).populateAndSignV10WithAllowanceRecovery(
+        signerA, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label A',
+      ),
+      (a as any).populateAndSignV10WithAllowanceRecovery(
+        signerB, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label B',
+      ),
+    ]);
+
+    expect(populateAndSign.calls).toHaveLength(2);
+    expect(maxInFlight).toBe(2);
+    for (const call of populateAndSign.calls) {
+      expect(call[4]).toBe('V10 publish');
+      expect(call[5]).toEqual({ gasLimitBufferBps: 2_500 });
+    }
+  });
+
+  it('applies the same 25% gas headroom to V10 update preparation', async () => {
+    const { a, signer } = makeRecoveryAdapter();
+    const populateAndSign = recorder(async (..._args: unknown[]) => (
+      { signedTx: '0xsigned', txHash: '0xhash' }
+    ));
+    (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+    await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer, {}, 'update', {}, V10_KA_ADDRESS, 1n, 'label',
+    );
+
+    expect(populateAndSign.calls).toHaveLength(1);
+    expect(populateAndSign.calls[0][4]).toBe('V10 update');
+    expect(populateAndSign.calls[0][5]).toEqual({ gasLimitBufferBps: 2_500 });
+  });
 
   // The 🔴 fix: BOTH write paths recover from a pre-broadcast
   // `TooLowAllowance` revert, not just publish.

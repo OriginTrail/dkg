@@ -1,6 +1,7 @@
 import { isOversizedRdfLiteralError } from '@origintrail-official/dkg-core';
+import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
-type SyncErrorTag = 'syncPeerResponded' | 'syncTransportFailure';
+type SyncErrorTag = 'syncPeerResponded' | 'syncTransportFailure' | 'syncValidationRejected';
 
 function markSyncError(error: unknown, tag: SyncErrorTag): void {
   if (!error || (typeof error !== 'object' && typeof error !== 'function')) return;
@@ -25,6 +26,28 @@ export function markSyncPeerResponded(error: unknown): void {
 
 export function markSyncTransportFailure(error: unknown): void {
   markSyncError(error, 'syncTransportFailure');
+}
+
+/**
+ * The peer's response ARRIVED and the in-transport validator then rejected it
+ * (W1 attempt outcome `validation_rejected`, whose received bytes still count).
+ *
+ * Tagging, never replacing: `makeLegacySyncBusyError`'s message is matched by
+ * {@link isSyncBackoffWorthyError}, so minting a substitute error would silently
+ * change peer backoff, the durable-data verifiable-prefix return and
+ * `failedPhases` accounting — a behaviour change dressed as telemetry. The tag
+ * is non-enumerable and best-effort, exactly like the two above.
+ *
+ * There is no message fallback for this marker. A rejection that reaches the
+ * record site untagged is classified by its terminal state, never guessed from
+ * text: the deadline/cancel/reset surfaces are indistinguishable by message.
+ */
+export function markSyncValidationRejection(error: unknown): void {
+  markSyncError(error, 'syncValidationRejected');
+}
+
+export function isSyncValidationRejection(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { syncValidationRejected?: boolean }).syncValidationRejected);
 }
 
 export function didSyncPeerRespond(error: unknown): boolean {
@@ -53,7 +76,7 @@ export function isSyncPermanentRejection(error: unknown): boolean {
 }
 
 export function isSyncBackoffWorthyError(error: unknown): boolean {
-  if (isSyncTransportFailure(error)) return true;
+  if (isSyncTransportFailure(error) || isChainRpcTransportError(error)) return true;
 
   const message = error instanceof Error
     ? error.message.toLowerCase()
@@ -67,6 +90,14 @@ export function isSyncBackoffWorthyError(error: unknown): boolean {
       message.includes('snapshot limit exceeded') ||
       message.includes('busy')
     )) ||
+    // These libp2p/router surfaces are transport interruptions too, but an
+    // outer retry/span boundary can occasionally recreate the Error and lose
+    // our non-enumerable syncTransportFailure tag. Keep the message fallback
+    // aligned with Messenger's recoverable dial classifier so a successfully
+    // received durable prefix is not discarded merely because the final page
+    // lost its relay stream.
+    message.includes('peer-closed-stream') ||
+    message.includes('all multiaddr dials failed') ||
     message.includes('stream reset') ||
     message.includes('connection reset') ||
     message.includes('econnreset') ||

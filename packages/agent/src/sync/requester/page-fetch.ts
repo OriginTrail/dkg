@@ -1,9 +1,14 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { sendSyncRequest } from '../../p2p/sync-transport.js';
-import { markSyncPeerResponded } from '../error-tags.js';
+import {
+  sendSyncRequest,
+  type SingleUseSyncSender,
+} from '../../p2p/sync-transport.js';
+import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
+import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
+import { exactAssetFilterKey } from '../exact-assets.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
   createDurableDataSyncSessionId,
@@ -13,6 +18,10 @@ import {
 import {
   createRequesterPhaseTelemetry,
 } from '../memory-telemetry.js';
+import {
+  SYNC_PAGE_SIZE,
+  SYNC_REQUEST_SAFE_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -42,8 +51,51 @@ function rememberUnfinishedSyncResponderSession(checkpointKey: string, session: 
   unfinishedSyncResponderSessions.set(checkpointKey, session);
 }
 
-function isSyncResponderSessionSupersededError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes('sync session was superseded');
+function getPersistedSyncResponderSession(
+  checkpoint: ReturnType<SyncCheckpointStore['get']>,
+  now = Date.now(),
+): UnfinishedSyncResponderSession | undefined {
+  if (
+    !checkpoint?.responderSessionId
+    || !Number.isSafeInteger(checkpoint.responderSessionExpiresAtMs)
+    || (checkpoint.responderSessionExpiresAtMs ?? 0) <= now
+  ) return undefined;
+  return {
+    syncSessionId: checkpoint.responderSessionId,
+    expiresAt: checkpoint.responderSessionExpiresAtMs!,
+  };
+}
+
+function persistUnfinishedSyncResponderSession(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+  session: UnfinishedSyncResponderSession,
+  now = Date.now(),
+): void {
+  rememberUnfinishedSyncResponderSession(checkpointKey, session, now);
+  checkpointStore.setResponderSession?.(
+    checkpointKey,
+    session.syncSessionId,
+    session.expiresAt,
+    now,
+  );
+}
+
+function forgetUnfinishedSyncResponderSession(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+): void {
+  unfinishedSyncResponderSessions.delete(checkpointKey);
+  checkpointStore.clearResponderSession?.(checkpointKey);
+}
+
+function isSyncResponderSessionInvalidError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message.toLowerCase();
+  return message.includes('sync session') && (
+    message.includes('superseded')
+    || message.includes('expired')
+  );
 }
 
 function usesResponderSession(includeSharedMemory: boolean, phase: SyncPhase): boolean {
@@ -60,10 +112,29 @@ export interface SyncPageResult {
   quads: Quad[];
   bytesReceived: number;
   resumedFromOffset: number;
+  /**
+   * True only when this phase started without reusing a requester-side
+   * responder snapshot token. Optional for rolling deep-import compatibility;
+   * proof-sensitive callers must treat an omitted value as unknown.
+   */
+  responderSessionStartedFresh?: boolean;
   nextOffset: number;
   checkpointKey: string;
   completed: boolean;
   timedOut: boolean;
+}
+
+export class SyncPageAccumulationLimitError extends Error {
+  readonly code = 'SYNC_PAGE_ACCUMULATION_LIMIT' as const;
+
+  constructor(
+    readonly dimension: 'bytes' | 'quads',
+    readonly actual: number,
+    readonly limit: number,
+  ) {
+    super(`Sync phase ${dimension} accumulation ${actual} exceeds limit ${limit}`);
+    this.name = 'SyncPageAccumulationLimitError';
+  }
 }
 
 interface FetchSyncPagesParams {
@@ -111,7 +182,7 @@ interface FetchSyncPagesParams {
    * members-only `isMemberRecoveryAuthorized`). Default false ⇒ normal sync.
    */
   recovery?: boolean;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean) => Promise<Uint8Array>;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean, assetUals?: string[]) => Promise<Uint8Array>;
   /**
    * Phase C — optional, gap-safe delta-sync high-water mark. Forwarded to the
    * responder for the durable DATA phase so it returns only KAs with
@@ -119,6 +190,11 @@ interface FetchSyncPagesParams {
    * (never local MAX, which would skip gaps). Omitted ⇒ full scan.
    */
   sinceBatchId?: string;
+  /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
+  assetUals?: string[];
+  /** Optional cumulative ceilings for proof-sensitive narrow fetches. */
+  maxAcceptedBytes?: number;
+  maxAcceptedQuads?: number;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   /**
    * Per-attempt send hook. `DKGAgent`'s production adapter sends raw
@@ -132,16 +208,11 @@ interface FetchSyncPagesParams {
    * enabled silent replay of stale cached responses past sync's
    * app-layer freshness gate (`SYNC_AUTH_MAX_AGE_MS`). Fresh-per-
    * attempt is the only design that holds under all timing scenarios —
-   * see jsdoc on `sendSyncRequest` for the full rationale.
+   * see jsdoc on `sendSyncRequest` for the full rationale. Production creates
+   * this hook with `createSingleUseSyncSender`, which prevents lower layers
+   * from replaying an envelope before the outer retry can rebuild it.
    */
-  send: (
-    peerId: string,
-    protocolId: string,
-    data: Uint8Array,
-    timeoutMs: number,
-    messageId: string,
-    signal?: AbortSignal,
-  ) => Promise<Uint8Array>;
+  send: SingleUseSyncSender;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -201,6 +272,9 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     recovery,
     buildSyncRequest,
     sinceBatchId,
+    assetUals,
+    maxAcceptedBytes,
+    maxAcceptedQuads,
     parseAndFilter,
     send,
     logWarn,
@@ -214,24 +288,58 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // terminal outcome. Every started phase is guaranteed a finish() below.
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
-  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
+  const assetKey = assetUals ? exactAssetFilterKey(assetUals) : undefined;
+  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery, assetKey);
   if (forceFreshSession) {
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
   }
-  let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
+  const checkpoint = checkpointStore.get(checkpointKey);
+  let offset = checkpoint?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
+  // A successful caller deletes the checkpoint after verification/storage.
+  // The process-local cache can outlive that synchronous delete, so never let
+  // a cache-only token resurrect a completed snapshot at offset zero.
+  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
   const savedResponderSession = usesPageSession
-    ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+    ? (
+        (checkpoint
+          ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+          : undefined)
+        ?? getPersistedSyncResponderSession(checkpoint, sessionStartedAt)
+      )
     : undefined;
+  const responderSessionStartedFresh = savedResponderSession === undefined;
   if (usesPageSession && offset > 0 && !savedResponderSession) {
     checkpointStore.delete(checkpointKey);
     offset = 0;
   }
   const resumedFromOffset = offset;
   let bytesReceived = 0;
+  let responsePages = 0;
   let timedOut = false;
+  // Start with the throughput-oriented page size, but reduce it within the
+  // existing bounded retry budget if a response cannot traverse the wire.
+  // ProtocolRouter may surface an oversized response as a generic stream reset,
+  // so the reduction intentionally applies to any retryable transport failure.
+  // A transient failure merely makes the remainder of this phase conservative;
+  // it never changes offsets or responder-session identity.
+  const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+  // Byte-budget pagination: a SHORT page is NOT EOF — only an empty response is
+  // (see the loop's EOF checks). This is a REQUESTER-SIDE default derived from
+  // `syncPageSize > SYNC_PAGE_SIZE` (the fetch wrapper passes
+  // SYNC_REQUEST_PAGE_SIZE=8192 for every phase), NOT a wire-negotiated
+  // capability. Durable meta relies on it: since #1916 the responder byte-caps
+  // durable-meta pages, so a page can be short for byte reasons; a requester
+  // that treated "short = EOF" for meta could end the phase early. Every
+  // testnet-canary+ requester uses 8192 here, so short≠EOF holds for meta and
+  // data alike; a pre-canary requester using the 500-row cap is the only one
+  // that would regress, and only on an oversized (>4 MiB) meta subject.
+  const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
+  let activePageSize = syncPageSize;
+  let successfulPageSize = syncPageSize;
+  let consecutiveSuccessfulPages = 0;
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
@@ -266,6 +374,12 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         contextGraphId,
         offset,
         protocolId: protocolSync,
+        // W1 attempt labels. The admission source is NOT threaded here: it
+        // belongs to the enclosing operation and is read from the ambient
+        // context at the record site, which also keeps it structurally out of
+        // every coalescing key.
+        plane: syncPlaneFor(includeSharedMemory),
+        phase,
         // `requestFactory` runs per-attempt so each retry carries a
         // fresh `issuedAtMs`/`requestId`. Required for sync's auth
         // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +
@@ -275,7 +389,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
+          successfulPageSize = activePageSize;
+          const request = await buildSyncRequest(contextGraphId, curOffset, activePageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery, assetUals);
           throwIfAborted(signal);
           return request;
         },
@@ -286,12 +401,37 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           }
         },
         onRetry: (attempt, delay, err) => {
-          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+          const priorPageSize = activePageSize;
+          if (activePageSize > safePageSize) {
+            // Adapt to the actual path capacity instead of falling all the way
+            // from 8192 rows to the 64-row emergency floor. A lossy relay can
+            // often carry 1k-4k rows reliably; halving finds that stable point
+            // within the existing retry budget without turning the remainder
+            // of the phase into hundreds of tiny round trips.
+            activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
+          }
+          consecutiveSuccessfulPages = 0;
+          const pageSizeNote = activePageSize < priorPageSize
+            ? `; reducing page size ${priorPageSize}->${activePageSize}`
+            : '';
+          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
       });
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
+      responsePages += 1;
       phaseTelemetry.recordPage();
+
+      const nextBytesReceived = bytesReceived + responseBytes.byteLength;
+      if (maxAcceptedBytes !== undefined && nextBytesReceived > maxAcceptedBytes) {
+        const error = new SyncPageAccumulationLimitError(
+          'bytes',
+          nextBytesReceived,
+          maxAcceptedBytes,
+        );
+        markSyncPeerResponded(error);
+        throw error;
+      }
 
       let parsed: { quads: Quad[]; totalQuads: number };
       let decodeDurationMs = 0;
@@ -300,7 +440,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         const decodeStartedAt = Date.now();
         const nquadsText = decodeSyncResponse(responseBytes);
         decodeDurationMs = Date.now() - decodeStartedAt;
-        bytesReceived += responseBytes.byteLength;
+        bytesReceived = nextBytesReceived;
         if (
           nquadsText === syncDeniedResponse ||
           (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
@@ -316,6 +456,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         throwIfAborted(signal);
         parseDurationMs = Date.now() - parseStartedAt;
         phaseTelemetry.recordQuads(parsed.quads);
+        const nextAcceptedQuads = allQuads.length + parsed.quads.length;
+        if (maxAcceptedQuads !== undefined && nextAcceptedQuads > maxAcceptedQuads) {
+          throw new SyncPageAccumulationLimitError(
+            'quads',
+            nextAcceptedQuads,
+            maxAcceptedQuads,
+          );
+        }
       } catch (error) {
         markSyncPeerResponded(error);
         throw error;
@@ -336,6 +484,19 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
       appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
+      // Keep the size that actually crossed the path. Probe upward only after
+      // three consecutive successful pages, and at most double at a time.
+      // This avoids the old 8192 -> 64 -> 8192 oscillation where every useful
+      // page paid for a doomed large request and its timeout first.
+      if (usesByteBudgetPagination && activePageSize < syncPageSize) {
+        consecutiveSuccessfulPages += 1;
+        if (consecutiveSuccessfulPages >= 3) {
+          activePageSize = Math.min(syncPageSize, activePageSize * 2);
+          consecutiveSuccessfulPages = 0;
+        }
+      } else {
+        consecutiveSuccessfulPages = 0;
+      }
 
       if (debugSyncProgress) {
         logInfo(
@@ -343,19 +504,30 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
         );
       }
-      if (parsed.totalQuads < syncPageSize) break;
+      // A new responder may deliberately return a short prefix to stay inside
+      // its byte budget, while an old responder returns at most its legacy
+      // 500-row cap. Therefore short pages are not EOF in negotiated mode; an
+      // explicit empty response is. Legacy pagination keeps the old shortcut.
+      if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
-    if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
-      // Exact-message match — only fires IN-PROCESS (same-node tests). Over the
-      // wire the responder's "superseded" text is destroyed by the router's
-      // stream.abort (it becomes a generic reset), which is why the
-      // `resumedFromOffset > 0` branch below is the real network-path fix.
+    if (usesPageSession && err instanceof SyncPageAccumulationLimitError) {
+      // The exact response proved that this responder ignored (or violated)
+      // the requested narrow scope. Never resume that incompatible row list:
+      // a later retry must mint a fresh session and start from offset zero.
+      unfinishedSyncResponderSessions.delete(checkpointKey);
+      checkpointStore.delete(checkpointKey);
+    } else if (usesPageSession && isSyncResponderSessionInvalidError(err)) {
+      // A responder-declared superseded/expired token can never make progress.
+      // Rotate it immediately even at offset zero instead of re-saving the
+      // terminal token until its requester-side TTL elapses. Some transports
+      // still destroy a responder's text and expose a generic reset, which is
+      // why the zero-accepted-page fallback below remains necessary.
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
     } else if (usesPageSession && responderSession && !recovery && !denied) {
-      if (resumedFromOffset > 0) {
+      if (resumedFromOffset > 0 && responsePages === 0) {
         // R1 fix (2026-07-07 sync storm). This round RESUMED a saved session at
         // offset>0 and then aborted. The responder supersedes any resume whose
         // session token it no longer holds (a concurrent flow to the same
@@ -375,16 +547,71 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // likely valid, and a supersede there just costs one wasted resume
         // attempt before this branch catches it next round. Precise
         // per-supersede handling that never loses resume is the
-        // in-band-sentinel follow-up.
+        // in-band-sentinel follow-up. This inference is valid only when the
+        // responder accepted ZERO pages in this round. Once at least one page
+        // has succeeded, the responder demonstrably accepted this exact token;
+        // a later stream/dial failure is therefore safe to retry from the last
+        // previously certified checkpoint. At worst, a concurrent supersession
+        // after that accepted page costs one extra retry: its zero-page failure
+        // reaches this branch and then rotates the session safely.
         unfinishedSyncResponderSessions.delete(checkpointKey);
         checkpointStore.delete(checkpointKey);
       } else {
-        // Fresh round (no resume) — keep the session so a retry can resume from
-        // where it got to. Recovery never persists a responder session to
-        // resume (see the timeout branch below + Codex #1173).
-        rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+        // Fresh round, or a resumed round that demonstrably delivered at least
+        // one page with this token: keep the session so a retry can resume from
+        // the last certified checkpoint. Recovery never persists a responder
+        // session to resume (see the timeout branch below + Codex #1173).
+        const refreshedResponderSession = responsePages > 0
+          ? {
+              ...responderSession,
+              // The responder touches both its token and immutable row-list
+              // TTL on every successfully served page. Mirror that sliding
+              // expiry locally so a long, progressing snapshot is not forced
+              // back to offset zero merely because it crossed ten minutes.
+              expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+            }
+          : responderSession;
+        persistUnfinishedSyncResponderSession(
+          checkpointStore,
+          checkpointKey,
+          refreshedResponderSession,
+        );
       }
     }
+    // A durable data prefix that already crossed the wire is still useful when
+    // a later page loses its stream. Return it through the same bounded,
+    // incomplete-result contract as a deadline so the caller can verify whole
+    // graph boundaries, materialize only exact KAs, and advance to the last
+    // certified offset. Throwing here discarded every accepted page and made
+    // an unstable relay replay the entire round forever. Keep this narrowly on
+    // durable DATA transport failures: denials, parse/integrity failures,
+    // responder-session invalidation, metadata, and recovery retain their
+    // existing fail-closed error semantics.
+    if (
+      !includeSharedMemory
+      && phase === 'data'
+      && !recovery
+      && responsePages > 0
+      && allQuads.length > 0
+      && isSyncBackoffWorthyError(err)
+    ) {
+      logWarn(
+        ctx,
+        `Durable data transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; returning a verifiable prefix at raw offset ${offset}`,
+      );
+      phaseTelemetry.finish('timed_out', allQuads.length);
+      return {
+        quads: allQuads,
+        bytesReceived,
+        resumedFromOffset,
+        responderSessionStartedFresh,
+        nextOffset: offset,
+        checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
+
     phaseTelemetry.finish('error', allQuads.length);
     throw err;
   }
@@ -398,8 +625,28 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     // the session TTL old) instead of current state, because the responder's
     // `refreshRowList` only fires on a NEW syncSessionId (Codex #1173). Drop the
     // session so the retry mints a fresh id and the responder re-reads.
-    if (timedOut && !recovery) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
-    else unfinishedSyncResponderSessions.delete(checkpointKey);
+    if (!recovery) {
+      // Durable rootless verification may safely reclassify a transport-
+      // complete response as an incomplete manifest prefix. Retain the token
+      // until that higher layer deletes the checkpoint after a truly complete
+      // verified/store commit, otherwise its safe offset cannot be resumed
+      // even without a process restart. Persistent stores additionally write
+      // the token through setResponderSession(); the process-local path keeps
+      // older/custom checkpoint stores correct within one daemon lifetime.
+      const refreshedResponderSession = responsePages > 0
+        ? {
+            ...responderSession,
+            expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+          }
+        : responderSession;
+      persistUnfinishedSyncResponderSession(
+        checkpointStore,
+        checkpointKey,
+        refreshedResponderSession,
+      );
+    } else {
+      forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
+    }
   }
 
   if (timedOut) {
@@ -416,6 +663,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     quads: allQuads,
     bytesReceived,
     resumedFromOffset,
+    responderSessionStartedFresh,
     nextOffset: offset,
     checkpointKey,
     completed: !timedOut,

@@ -150,13 +150,12 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls).toHaveLength(0);
   });
 
-  // #1116 — the `layer` field must reach the wire (FakeClient tests only prove the
-  // tool→client arg pass-through; this pins the actual POST body).
-  it('knowledgeAssetFinalize puts layer:"swm" in the POST body', async () => {
+  it('knowledgeAssetFinalize rejects the retired SWM write bridge before HTTP', async () => {
     const { client, calls } = makeClient();
-    await client.knowledgeAssetFinalize({ contextGraphId: 'cg-1', name: 'f', layer: 'swm' });
-    expect(calls[0].url).toContain('/api/knowledge-assets/f/wm/finalize');
-    expect(calls[0].body).toMatchObject({ contextGraphId: 'cg-1', layer: 'swm' });
+    await expect(
+      client.knowledgeAssetFinalize({ contextGraphId: 'cg-1', name: 'f', layer: 'swm' }),
+    ).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetFinalize omits the layer key when not passed', async () => {
@@ -165,20 +164,66 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls[0].body).not.toHaveProperty('layer');
   });
 
-  // #1116 — the `skipSeal` field must reach the wire.
-  it('knowledgeAssetShare puts skipSeal:true in the POST body', async () => {
+  it('knowledgeAssetFinalize accepts legacy layer:wm but omits it from the wire', async () => {
     const { client, calls } = makeClient();
-    await client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f', skipSeal: true });
-    expect(calls[0].url).toContain('/api/knowledge-assets/f/swm/share');
-    expect(calls[0].body).toMatchObject({ contextGraphId: 'cg-1', skipSeal: true });
+    await client.knowledgeAssetFinalize({ contextGraphId: 'cg-1', name: 'f', layer: 'wm' });
+    expect(calls[0].body).toEqual({ contextGraphId: 'cg-1' });
   });
 
-  it('knowledgeAssetShare omits skipSeal (and entities) when not passed', async () => {
+  it('knowledgeAssetShare rejects unsealed sharing before HTTP', async () => {
     const { client, calls } = makeClient();
-    await client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f' });
+    await expect(
+      client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f', skipSeal: true }),
+    ).rejects.toMatchObject({ code: 'UNSEALED_SHARE_BLOCKED' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetShare rejects root selection and emits no legacy fields for atomic share', async () => {
+    const rejected = makeClient();
+    await expect(
+      rejected.client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f', entities: ['urn:x'] }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    await expect(
+      rejected.client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f', entities: 'urn:not-all' as any }),
+    ).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    await expect(
+      rejected.client.knowledgeAssetShare({ contextGraphId: 'cg-1', name: 'f', skipSeal: 'yes' as any }),
+    ).rejects.toThrow('skipSeal must be false or omitted');
+    expect(rejected.calls).toHaveLength(0);
+
+    const { client, calls } = makeClient();
+    await client.knowledgeAssetShare({
+      contextGraphId: 'cg-1', name: 'f', entities: 'all', skipSeal: false,
+    });
     expect(calls[0].body).toEqual({ contextGraphId: 'cg-1' });
     expect(calls[0].body).not.toHaveProperty('skipSeal');
     expect(calls[0].body).not.toHaveProperty('entities');
+  });
+
+  it('keeps promoteAssertion as a deprecated alias for complete atomic sharing', async () => {
+    const { client, calls } = makeClient();
+    await client.promoteAssertion({
+      contextGraphId: 'cg-1', assertionName: 'legacy', subGraphName: 'sg', entities: 'all',
+    });
+    await client.promoteAssertion({ contextGraphId: 'cg-1', assertionName: 'legacy-default' });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      url: expect.stringContaining('/api/knowledge-assets/legacy/swm/share'),
+      body: { contextGraphId: 'cg-1', subGraphName: 'sg' },
+    });
+    expect(calls[1]).toEqual({
+      url: expect.stringContaining('/api/knowledge-assets/legacy-default/swm/share'),
+      body: { contextGraphId: 'cg-1' },
+    });
+  });
+
+  it('makes legacy promoteAssertion subsets fail through the atomic share guard before HTTP', async () => {
+    const { client, calls } = makeClient();
+    await expect(client.promoteAssertion({
+      contextGraphId: 'cg-1', assertionName: 'legacy', entities: ['urn:x'],
+    })).rejects.toMatchObject({ code: 'KA_ATOMIC_SHARE_REQUIRED' });
+    expect(calls).toHaveLength(0);
   });
 
   it('createKnowledgeAsset translates an alsoPublishVm options object', async () => {

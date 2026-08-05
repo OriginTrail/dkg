@@ -1,6 +1,50 @@
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
-import { markSyncTransportFailure } from '../sync/error-tags.js';
+import {
+  markSyncTransportFailure,
+  markSyncValidationRejection,
+  isSyncValidationRejection,
+} from '../sync/error-tags.js';
+import {
+  recordSyncAttempt,
+  recordSyncAttemptRequestBytes,
+  recordSyncAttemptResponseBytes,
+  syncAttemptAttributes,
+  type SyncAttemptOutcome,
+  type SyncAttemptPhase,
+  type SyncAttemptPlane,
+} from '../sync/attempt-telemetry.js';
+import type { Messenger } from './messenger.js';
+
+/**
+ * Per-attempt sync sender. Production instances must be created with
+ * {@link createSingleUseSyncSender} so the router never reuses authenticated
+ * envelope bytes before this transport can rebuild them for an outer retry.
+ */
+export type SingleUseSyncSender = (
+  peerId: string,
+  protocolId: string,
+  data: Uint8Array,
+  timeoutMs: number,
+  messageId: string,
+  signal?: AbortSignal,
+) => Promise<Uint8Array>;
+
+/**
+ * Own the sync payload-reuse invariant at the sync transport boundary.
+ * `messageId` remains part of the callback contract for test/telemetry
+ * stability, but raw sync delivery does not use the reliable-message frame.
+ */
+export function createSingleUseSyncSender(
+  messenger: Pick<Messenger, 'sendToPeer'>,
+): SingleUseSyncSender {
+  return (peerId, protocolId, data, timeoutMs, _messageId, signal) =>
+    messenger.sendToPeer(peerId, protocolId, data, {
+      timeoutMs,
+      payloadReuse: 'single-use',
+      signal,
+    });
+}
 
 /**
  * Sync-page transport. Wraps `withRetry` around a per-attempt
@@ -60,17 +104,12 @@ interface SyncSendParams {
    */
   requestFactory: () => Promise<Uint8Array>;
   /**
-   * Per-attempt send hook. Receives a fresh `messageId` on every
-   * attempt — see jsdoc on `sendSyncRequest` for the rationale.
+   * Per-attempt single-use send hook. Receives a fresh `messageId` on every
+   * attempt — see jsdoc on `sendSyncRequest` for the rationale. Production
+   * callers construct it with `createSingleUseSyncSender`; this helper owns
+   * rebuilding the authenticated request between outer retries.
    */
-  send: (
-    peerId: string,
-    protocolId: string,
-    data: Uint8Array,
-    timeoutMs: number,
-    messageId: string,
-    signal?: AbortSignal,
-  ) => Promise<Uint8Array>;
+  send: SingleUseSyncSender;
   /**
    * Optional per-attempt response validator. Throwing here keeps the attempt
    * inside `withRetry`, which lets sync-level retry sentinels share the same
@@ -79,6 +118,14 @@ interface SyncSendParams {
   validateResponse?: (responseBytes: Uint8Array) => void | Promise<void>;
   protocolId: string;
   onRetry: (attempt: number, delay: number, err: unknown) => void;
+  /**
+   * W1 attempt labels. Both vary per call and are always locally known at the
+   * page loop, so they are ordinary parameters — unlike the admission source,
+   * which is a property of the enclosing operation and is read from the ambient
+   * context (see `sync/attempt-telemetry.ts`). Never a Context Graph or peer id.
+   */
+  plane: SyncAttemptPlane;
+  phase: SyncAttemptPhase;
 }
 
 export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Array> {
@@ -88,28 +135,88 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       try {
         const out = await withRetry(
     async () => {
-      throwIfAborted(params.signal);
-      const requestBytes = await params.requestFactory();
-      throwIfAborted(params.signal);
-      const messageId = randomUUID();
-      let responseBytes: Uint8Array;
+      // Resolved once per attempt so all three W1 points describe the same
+      // send, and so the ambient source is read once rather than three times.
+      const attributes = syncAttemptAttributes({
+        transport: 'legacy',
+        plane: params.plane,
+        phase: params.phase,
+      });
+      // `sendStarted` is what makes this an ATTEMPT counter rather than a
+      // closure counter. A `finally` on the whole retry closure would fire on
+      // five distinct states, three of which move zero bytes (abort before the
+      // factory, a factory/signing throw, abort after the factory) — so a
+      // signing failure would be reported as a network attempt.
+      let sendStarted = false;
+      let responded = false;
+      let responseByteLength = 0;
+      let outcome: SyncAttemptOutcome | undefined;
       try {
-        responseBytes = await params.send(
-          params.remotePeerId,
-          params.protocolId,
-          requestBytes,
-          params.timeoutMs,
-          messageId,
-          params.signal,
-        );
+        throwIfAborted(params.signal);
+        const requestBytes = await params.requestFactory();
+        throwIfAborted(params.signal);
+        const messageId = randomUUID();
+        let responseBytes: Uint8Array;
+        sendStarted = true;
+        recordSyncAttemptRequestBytes(attributes, requestBytes.byteLength);
+        try {
+          responseBytes = await params.send(
+            params.remotePeerId,
+            params.protocolId,
+            requestBytes,
+            params.timeoutMs,
+            messageId,
+            params.signal,
+          );
+        } catch (error) {
+          markSyncTransportFailure(error);
+          // Classified by TERMINAL STATE, never by message text: a deadline
+          // `TimeoutError` and a caller cancel reach here as the same
+          // `AbortError` shape, and `PooledStreamResetError('request timeout')`
+          // is the same class as 'pool closed'. The caller's own signal is the
+          // only non-textual evidence of caller cancellation that exists.
+          outcome = params.signal?.aborted === true ? 'cancelled' : 'transport_error';
+          throw error;
+        }
+        responded = true;
+        responseByteLength = responseBytes.byteLength;
+        // Cancellation requested AFTER receipt is still a delivered response:
+        // the bytes crossed the wire and cost exactly what a used page costs.
+        throwIfAborted(params.signal);
+        try {
+          await params.validateResponse?.(responseBytes);
+        } catch (error) {
+          // Tag, never replace — the original error's message drives peer
+          // backoff and `failedPhases` accounting downstream.
+          markSyncValidationRejection(error);
+          throw error;
+        }
+        throwIfAborted(params.signal);
+        outcome = 'response';
+        return responseBytes;
       } catch (error) {
-        markSyncTransportFailure(error);
+        if (outcome === undefined && responded) {
+          // The send resolved, so this is a post-receipt failure. Only the
+          // validator's own rejection is `validation_rejected`; everything else
+          // (a post-receipt abort, a caller-side throw) is still `response`.
+          // No message fallback: an untagged error is never guessed from text.
+          outcome = isSyncValidationRejection(error) ? 'validation_rejected' : 'response';
+        }
         throw error;
+      } finally {
+        // I1 is finalized HERE, in the surrounding per-attempt `finally`, after
+        // validation and cancellation classification. An outcome fixed at send
+        // resolution could never later become `validation_rejected`.
+        if (sendStarted) {
+          const terminal = outcome ?? 'transport_error';
+          recordSyncAttempt(attributes, terminal);
+          // I3 exists only if the send RESOLVED — including a response the
+          // validator rejected, whose bytes were still received and paid for.
+          if (responded) {
+            recordSyncAttemptResponseBytes(attributes, responseByteLength, terminal);
+          }
+        }
       }
-      throwIfAborted(params.signal);
-      await params.validateResponse?.(responseBytes);
-      throwIfAborted(params.signal);
-      return responseBytes;
     },
     {
       maxAttempts: params.retryAttempts,
