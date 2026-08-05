@@ -182,7 +182,11 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let deferredBackpressure = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
-  let deniedPeers = 0;
+  // Also DISTINCT peers, for the reason above — a peer that denies on every
+  // pass would otherwise be counted once per pass. The agent driver already
+  // models this as a set (`accessDeniedPeers`), so a scalar here additionally
+  // made the two drivers disagree on the semantics of a field they both return.
+  const deniedPeers = new Set<string>();
   let noProtocolPeers = 0;
 
   const cleanPlaneCompletions: NonNullable<CatchupJobResult['cleanPlaneCompletions']> = {
@@ -407,7 +411,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     return { peerId, fromAuthority, ...round };
   };
 
-  const accumulate = ({ peerId, durable, shared, fromAuthority }: PeerRound): void => {
+  const accumulate = (
+    { peerId, durable, shared, fromAuthority }: PeerRound,
+    isContinuationRound = false,
+  ): void => {
     let peerDenied = false;
     if (shared) {
       passTracker.recordPeerRound(
@@ -474,7 +481,30 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.snapshotPlaneIncomplete += shared.snapshotPlaneIncomplete ?? 0;
       diagnostics.sharedMemory.replayPhaseBytesReceived += shared.replayPhaseBytesReceived ?? 0;
       diagnostics.sharedMemory.snapshotPhaseBytesReceived += shared.snapshotPhaseBytesReceived ?? 0;
-      deferredBackpressure += shared.deferredBackpressure ?? 0;
+      // The DIAGNOSTIC above counts every deferral, including continuation
+      // ones — that is the honest observability number. The JOB-LEVEL scalar
+      // below must not, and the reason is a behaviour change rather than a
+      // tidy-up.
+      //
+      // `deferredBackpressure > 0` makes the daemon route short-circuit BEFORE
+      // classification (`routes/context-graph.ts`), which is the only path to
+      // `classifyContextGraphCatchupReadiness`, the readiness write, the
+      // subscription state patch and `PROJECT_SYNCED`. Its premise — "an
+      // incomplete round has no readiness to inspect" — holds when the round
+      // was cut short. It is FALSE when pass 1 completed and only a
+      // best-effort EXTRA pass was refused capacity: nothing was lost, and the
+      // readiness pass 1 earned is real.
+      //
+      // Without this gate the continuation loop can demote an already
+      // successful job to `deferred` and discard its readiness, on exactly the
+      // workload #2050 targets — a large public graph under store pressure is
+      // precisely when admission defers. The pass budget's own rationale
+      // anticipates it ("sized so at least two extra passes fit even when a
+      // peer's plane is deferred"), so this is a designed-for state, not an
+      // edge case.
+      if (!isContinuationRound) {
+        deferredBackpressure += shared.deferredBackpressure ?? 0;
+      }
       // Coverage is the one field here that is SELECTED, not summed. Summing —
       // or taking independent maxima over resolved and total — would let a peer
       // reporting 178/250 and a peer reporting 200/200 combine into 200/250: a
@@ -504,7 +534,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     }
 
     if (peerDenied) {
-      deniedPeers += 1;
+      deniedPeers.add(peerId);
     }
 
     if (catchupPeerResponded(durable, shared)) {
@@ -590,7 +620,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       Math.min(CATCHUP_MAX_CONCURRENT_PEER_SYNCS, wave.length),
       (peerId) => syncPeer(peerId, pass),
     );
-    for (const round of rounds) accumulate(round);
+    // `sharedMemoryOnly` is set only by the continuation loop; pass 1 is the
+    // mandatory round. See the deferral gate inside `accumulate`.
+    for (const round of rounds) accumulate(round, pass.sharedMemoryOnly);
     settleAuthorityForWave();
     if (CATCHUP_STOP_ON_PROOF && authorityProvedEverything()) break;
   }
@@ -691,8 +723,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     deferredBackpressure,
     dataSynced,
     sharedMemorySynced,
-    denied: deniedPeers > 0,
-    deniedPeers,
+    denied: deniedPeers.size > 0,
+    deniedPeers: deniedPeers.size,
     cleanPlaneCompletions,
     diagnostics,
   };

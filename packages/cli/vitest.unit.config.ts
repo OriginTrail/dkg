@@ -78,6 +78,10 @@ export default defineConfig({
           'test/catchup-runner-worker-pass-budget-killswitch.test.ts',
           // #2050 — the sibling lever, `DKG_SWM_CATCHUP_MAX_PASSES=1`.
           'test/catchup-runner-worker-max-passes-cap.test.ts',
+          // #2050 — a deferred CONTINUATION pass must not demote a job that
+          // already succeeded (the daemon route short-circuits classification
+          // on the job-level scalar), and denial counts DISTINCT peers.
+          'test/catchup-runner-worker-continuation-deferral.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
