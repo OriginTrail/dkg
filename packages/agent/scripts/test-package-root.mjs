@@ -124,6 +124,7 @@ const blockedRfc64Modules = [
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
+  'inventory-v1/swm-author-inventory-contracts.js',
   'inventory-v1/swm-author-inventory-persistence.js',
   'finalized-vm-agent-precommit-v1.js',
   'finalized-vm-composer-v1.js',

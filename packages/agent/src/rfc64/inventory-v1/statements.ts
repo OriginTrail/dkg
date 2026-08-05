@@ -268,7 +268,8 @@ WHERE catalog_scope_digest = :scope
 
   getSwmAuthorHead: `
 SELECT current_head_digest, inventory_version_u64be, total_rows_u64be,
-       rows_digest, signed_head_envelope
+       rows_digest, signed_head_envelope, expected_head_digest,
+       canonical_mutation
 FROM rfc64_swm_author_inventory_heads_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author;`,
@@ -286,10 +287,11 @@ ORDER BY ka_ual;`,
   insertSwmAuthorHead: `
 INSERT INTO rfc64_swm_author_inventory_heads_v1 (
   inventory_scope_digest, author_address, current_head_digest,
-  inventory_version_u64be, total_rows_u64be, rows_digest, signed_head_envelope
+  inventory_version_u64be, total_rows_u64be, rows_digest, signed_head_envelope,
+  expected_head_digest, canonical_mutation
 ) VALUES (
   :scope, :author, :nextHead, :inventoryVersion, :totalRows,
-  :rowsDigest, :signedHeadEnvelope
+  :rowsDigest, :signedHeadEnvelope, :expectedHead, :canonicalMutation
 );`,
 
   updateSwmAuthorHeadCas: `
@@ -298,7 +300,9 @@ SET current_head_digest = :nextHead,
     inventory_version_u64be = :inventoryVersion,
     total_rows_u64be = :totalRows,
     rows_digest = :rowsDigest,
-    signed_head_envelope = :signedHeadEnvelope
+    signed_head_envelope = :signedHeadEnvelope,
+    expected_head_digest = :expectedHead,
+    canonical_mutation = :canonicalMutation
 WHERE inventory_scope_digest = :scope
   AND author_address = :author
   AND current_head_digest = :expectedHead;`,

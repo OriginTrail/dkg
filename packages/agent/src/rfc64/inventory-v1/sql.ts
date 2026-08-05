@@ -348,10 +348,24 @@ CREATE TABLE rfc64_swm_author_inventory_heads_v1 (
     AND length(signed_head_envelope) >= 1
     AND length(signed_head_envelope) <= 4096
   ),
+  expected_head_digest BLOB CHECK (
+    expected_head_digest IS NULL OR (
+      typeof(expected_head_digest) = 'blob' AND length(expected_head_digest) = 32
+    )
+  ),
+  canonical_mutation BLOB NOT NULL CHECK (
+    typeof(canonical_mutation) = 'blob'
+    AND length(canonical_mutation) >= 2
+    AND length(canonical_mutation) <= 8388609
+  ),
   PRIMARY KEY (inventory_scope_digest, author_address)
 ) WITHOUT ROWID, STRICT`;
 
-/** Current exact SWM-only row set committed by the corresponding signed head. */
+/**
+ * Current exact SWM-only row set committed by the corresponding signed head.
+ * P3.3 mutates one KA per publication and permits up to 100k rows / 8 MiB, so
+ * relational rows deliberately avoid rewriting the full inventory each time.
+ */
 export const INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL = `
 CREATE TABLE rfc64_swm_author_inventory_rows_v1 (
   inventory_scope_digest BLOB NOT NULL CHECK (

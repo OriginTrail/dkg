@@ -79,6 +79,11 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       mutation: { kind: 'upsert', row: ROW_B },
       expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
     }).status).toBe('applied');
+    expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: successor,
+      mutation: { kind: 'upsert', row: ROW_B },
+      expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
+    }).status).toBe('existing');
     expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
       snapshot: snapshot([ROW_A], genesis),
       mutation: { kind: 'upsert', row: ROW_A },
@@ -91,6 +96,11 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       mutation: { kind: 'remove', kaUal: ROW_B.kaUal },
       expectedCurrentHeadDigest: successor.head.objectDigest as `0x${string}`,
     }).status).toBe('applied');
+    expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: afterRemoval,
+      mutation: { kind: 'remove', kaUal: ROW_B.kaUal },
+      expectedCurrentHeadDigest: successor.head.objectDigest as `0x${string}`,
+    }).status).toBe('existing');
 
     inventory.close();
     foundations.splice(foundations.indexOf(inventory), 1);
@@ -173,6 +183,28 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       snapshot: genesis,
       mutation: { kind: 'remove', kaUal: ROW_B.kaUal },
       expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+  });
+
+  it('requires exact durable mutation evidence for a non-genesis replay', async () => {
+    const inventory = await openInventoryV1(temporaryDirectory());
+    foundations.push(inventory);
+    const genesis = snapshot([ROW_A]);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    });
+    const successor = snapshot([ROW_A, ROW_B], genesis);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: successor,
+      mutation: { kind: 'upsert', row: ROW_B },
+      expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
+    });
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: successor,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
     })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
   });
 

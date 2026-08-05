@@ -44,7 +44,6 @@ import {
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
-  type SwmAuthorInventoryRowV1,
   type SwmAuthorInventorySnapshotV1,
   type VerifiedAuthorCatalogDirectoryPathV1,
   type VerifiedCgSharedProjectionV1,
@@ -70,6 +69,16 @@ import {
   encodeSwmAuthorInventoryKeyV1,
   prepareSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-persistence.js';
+import type {
+  CompareAndSwapSwmAuthorInventoryInputV1,
+  SwmAuthorInventoryCasResultV1,
+  SwmAuthorInventoryErrorCodeV1,
+} from './swm-author-inventory-contracts.js';
+export type {
+  CompareAndSwapSwmAuthorInventoryInputV1,
+  SwmAuthorInventoryCasResultV1,
+  SwmAuthorInventoryMutationV1,
+} from './swm-author-inventory-contracts.js';
 
 const MAX_PAGE_SIZE = 256;
 const STATEMENT_LATENCY_BUDGET_MS = 10_000;
@@ -181,22 +190,6 @@ export interface AppliedCatalogHeadCasResultV1 {
   readonly snapshot: AppliedCatalogHeadSnapshotV1;
 }
 
-export type SwmAuthorInventoryMutationV1 =
-  | { readonly kind: 'upsert'; readonly row: SwmAuthorInventoryRowV1 }
-  | { readonly kind: 'remove'; readonly kaUal: SwmAuthorInventoryRowV1['kaUal'] };
-
-export interface CompareAndSwapSwmAuthorInventoryInputV1 {
-  readonly snapshot: SwmAuthorInventorySnapshotV1;
-  readonly mutation: SwmAuthorInventoryMutationV1;
-  /** `null` initializes version 0; otherwise the exact current head must match. */
-  readonly expectedCurrentHeadDigest: Digest32V1 | null;
-}
-
-export interface SwmAuthorInventoryCasResultV1 {
-  readonly status: 'applied' | 'existing';
-  readonly snapshot: SwmAuthorInventorySnapshotV1;
-}
-
 /**
  * Precommit evidence for one exact live candidate row. Both fields are opaque,
  * process-local capabilities. This container proves neither catalog-head authority
@@ -230,9 +223,7 @@ export type InventoryV1CandidateErrorCode =
   | 'applied-head-input'
   | 'applied-head-cas-conflict'
   | 'applied-head-database-corrupt'
-  | 'swm-inventory-input'
-  | 'swm-inventory-cas-conflict'
-  | 'swm-inventory-database-corrupt'
+  | SwmAuthorInventoryErrorCodeV1
   | 'candidate-database-corrupt'
   | 'latency-budget-exceeded'
   | 'candidate-database-error';

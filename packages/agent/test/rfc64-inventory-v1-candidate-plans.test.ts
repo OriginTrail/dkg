@@ -228,6 +228,7 @@ function parametersFor(sql: string): Record<string, Uint8Array | number | string
     totalRows: hexBytes('0000000000000001'),
     rowsDigest: hexBytes('77'.repeat(32)),
     signedHeadEnvelope: hexBytes('7b7d'),
+    canonicalMutation: hexBytes('7258'),
     kaUal: 'did:dkg:otp:20430/0x4444444444444444444444444444444444444444/1',
     assertionCoordinate: 'fixture-row',
     assertionVersion: hexBytes('0000000000000001'),
