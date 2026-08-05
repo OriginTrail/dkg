@@ -337,6 +337,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type ContextGraphSubscriptionRecord,
@@ -451,6 +452,7 @@ export type {
   PeerDiagnostics,
   ChatSendResult,
   ContextGraphSub,
+  ContextGraphSyncMode,
   ContextGraphDiscoveryMetadata,
   ContextGraphDiscoveryOptions,
   ContextGraphSubscriptionRecord,
@@ -1228,6 +1230,7 @@ export class DKGAgent extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = {
       ...existing,
+      syncMode: existing?.syncMode ?? 'always-on',
       name: metadata.name ?? existing?.name,
       subscribed: existing?.subscribed === true,
       synced: existing?.synced === true,
@@ -1254,6 +1257,7 @@ export class DKGAgent extends DKGAgentBase {
     if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
       this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: options.trackSyncScope,
+        syncMode: 'always-on',
       });
     }
 

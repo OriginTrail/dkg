@@ -605,9 +605,21 @@ export interface ChatSendResult {
 
 // ── Context-graph surface ───────────────────────────────────────────
 
+/**
+ * Lifetime of an edge node's active Context Graph synchronization intent.
+ *
+ * `on-demand` remains active only for the current process. `always-on` is
+ * restart-durable through the configured subscription store. Persisted rows
+ * written before this distinction existed are therefore implicitly
+ * `always-on` for backward compatibility.
+ */
+export type ContextGraphSyncMode = 'on-demand' | 'always-on';
+
 /** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
+  /** Requested synchronization lifetime, normalized before entering live state. */
+  syncMode: ContextGraphSyncMode;
   /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
@@ -684,6 +696,17 @@ export interface ContextGraphSub {
    */
   pendingMeta?: boolean;
 }
+
+/**
+ * Mutation input normalized at the one live-subscription state boundary.
+ *
+ * Callers that predate explicit lifetimes remain compatible; live state never
+ * observes the optional form because the mutation boundary inherits the
+ * previous mode or applies the restart-durable legacy default.
+ */
+export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
+  syncMode?: ContextGraphSyncMode;
+};
 
 /**
  * Metadata that passive discovery is allowed to contribute to the local
