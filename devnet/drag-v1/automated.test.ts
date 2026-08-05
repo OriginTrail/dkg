@@ -135,6 +135,13 @@ describe('dRAG P2 — single-node grounded, verifiable answer', () => {
     const a = await answer(N(1), { question: 'which suppliers were flagged in the audit?' });
     expect(a.citations.length).toBeGreaterThan(0);
     expect(a.citations.every((c: VerifiableCitation) => c.checks.verified)).toBe(true);
+    // The author SEAL must recover, not silently degrade to the chain-author-only
+    // fallback (authorSig null) — guards seal parsing against KA-format changes
+    // (e.g. graph-scoped v2 KAs, which today's publish path writes).
+    expect(
+      a.citations.every((c: VerifiableCitation) => c.checks.authorSig === true),
+      'every citation must carry a recovered author seal (authorSig=true, not the null fallback)',
+    ).toBe(true);
     expect(entitiesOf(a)).toContain('northwind');
   });
 });
@@ -149,11 +156,15 @@ describe('dRAG P1 — citations are independently verifiable + tamper-evident', 
   });
 });
 
-describe('dRAG P3 — cross-node fan-out, re-verified by an asker that holds nothing', () => {
-  it('node3 (no local copy) assembles a verified answer from remote serving nodes', async () => {
-    const n3local = await answer(N(3), { question: 'which suppliers were flagged in the audit?' });
-    expect(n3local.stats.factsCited, 'node3 holds no local copy of the CG').toBe(0);
-
+describe('dRAG P3 — cross-node fan-out, every remote citation re-verified by the asker', () => {
+  it('node3 assembles a verified answer from BOTH remote serving nodes', async () => {
+    // NOTE: since the 10.0.12 merge, public-CG sync is eager enough that node3
+    // usually holds a synced copy too — so a zero-local-facts precondition can
+    // no longer be staged on this devnet. The explicit `peers` list still forces
+    // the REMOTE protocol path (responder answers, asker-side re-verification),
+    // and the asker-holds-nothing trustless property (rejects tampered triples,
+    // lying `verified` verdicts, off-scope citations) is pinned by the unit
+    // suite: packages/agent/test/drag-network-trustless.test.ts.
     const net = (await post(N(3), '/api/answer', {
       contextGraphId: CG,
       scope: 'network',
