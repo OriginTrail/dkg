@@ -153,6 +153,23 @@ describe('SWM author inventory v1', () => {
     ] as SwmAuthorInventoryRowV1[])).toThrow(/shareOperationId must be unique/);
   });
 
+  it('orders canonical KA identities by their numeric uint96 asset number', () => {
+    const row2 = Object.freeze({
+      ...ROW_A,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/2`,
+      shareOperationId: 'swm-operation-2',
+    }) as SwmAuthorInventoryRowV1;
+    const row10 = Object.freeze({
+      ...ROW_B,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/10`,
+      shareOperationId: 'swm-operation-10',
+    }) as SwmAuthorInventoryRowV1;
+
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([row2, row10])).not.toThrow();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([row10, row2]))
+      .toThrow(/strictly ordered/);
+  });
+
   it('rejects count, digest, author, and temporal binding failures', () => {
     const rows = Object.freeze([ROW_A, ROW_B]);
     expect(() => assertSwmAuthorInventorySnapshotBindingV1({

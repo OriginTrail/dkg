@@ -1,13 +1,15 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import {
+  assertAssertionCoordinateV1,
+  type AssertionCoordinateV1,
+} from './author-catalog-codec.js';
+import {
   AUTHOR_LANE_SCOPE_KEYS_V1,
   assertAuthorLaneScopeV1,
-  assertAssertionCoordinateV1,
   snapshotAuthorLaneScopeV1,
-  type AssertionCoordinateV1,
   type AuthorLaneScopeV1,
-} from './author-catalog-codec.js';
+} from './author-lane-scope-v1.js';
 import {
   MAX_SEAL_TRIPLE_COUNT_V1,
 } from './canonical-graph-scoped-author-seal.js';
@@ -228,7 +230,17 @@ export function compareSwmAuthorInventoryRowsV1(
   left: SwmAuthorInventoryRowV1,
   right: SwmAuthorInventoryRowV1,
 ): number {
-  return left.kaUal < right.kaUal ? -1 : left.kaUal > right.kaUal ? 1 : 0;
+  const leftIdentity = assertCanonicalDeterministicUalV1(left.kaUal);
+  const rightIdentity = assertCanonicalDeterministicUalV1(right.kaUal);
+  if (leftIdentity.chainId !== rightIdentity.chainId) {
+    return leftIdentity.chainId < rightIdentity.chainId ? -1 : 1;
+  }
+  if (leftIdentity.agentAddress !== rightIdentity.agentAddress) {
+    return leftIdentity.agentAddress < rightIdentity.agentAddress ? -1 : 1;
+  }
+  const leftNumber = BigInt(leftIdentity.kaNumber);
+  const rightNumber = BigInt(rightIdentity.kaNumber);
+  return leftNumber < rightNumber ? -1 : leftNumber > rightNumber ? 1 : 0;
 }
 
 export function canonicalizeSwmAuthorInventoryRowsBytesV1(
