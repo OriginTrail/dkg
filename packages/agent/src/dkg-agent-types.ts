@@ -698,11 +698,11 @@ export interface ContextGraphSub {
 }
 
 /**
- * Legacy compatibility input for the standalone gossip handler only.
+ * Mutation input normalized at the one live-subscription state boundary.
  *
- * Agent-owned live-state mutations use normalized {@link ContextGraphSub}
- * values and must choose a synchronization lifetime explicitly. This shape is
- * retained solely for older standalone handler callbacks that predate modes.
+ * Callers that predate explicit lifetimes remain compatible; live state never
+ * observes the optional form because the mutation boundary inherits the
+ * previous mode or applies the restart-durable legacy default.
  */
 export type ContextGraphSubInput = Omit<ContextGraphSub, 'syncMode'> & {
   syncMode?: ContextGraphSyncMode;

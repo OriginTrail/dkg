@@ -5,7 +5,7 @@ import type {
   ContextGraphSyncMode,
 } from './dkg-agent-types.js';
 
-export function normalizeLegacyContextGraphSubscriptionInput(
+export function normalizeContextGraphSubscriptionTransition(
   previous: ContextGraphSub | undefined,
   next: ContextGraphSubInput,
 ): ContextGraphSub {

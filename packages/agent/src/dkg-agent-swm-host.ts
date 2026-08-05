@@ -1805,7 +1805,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // that did not create or join the CG.
     if (!this.subscribedContextGraphs.has(wireId)) {
       this.setContextGraphSubscription(wireId, {
-        syncMode: 'always-on',
         subscribed: false,
         synced: false,
         onChainHash: wireId,

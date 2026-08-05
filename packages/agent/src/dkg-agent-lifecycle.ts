@@ -488,6 +488,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSubInput,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
@@ -505,7 +506,10 @@ import {
   type SyncReconcilerProbe,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
-import { projectContextGraphSubscriptionPersistence } from './context-graph-subscription-policy.js';
+import {
+  normalizeContextGraphSubscriptionTransition,
+  projectContextGraphSubscriptionPersistence,
+} from './context-graph-subscription-policy.js';
 import {
   authoritativeSyncPeerId,
   resolveCuratorSyncPeer,
@@ -2546,7 +2550,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // upsert a minimal stub first.
             if (!this.subscribedContextGraphs.has(localId)) {
               this.setContextGraphSubscription(localId, {
-                syncMode: 'always-on',
                 subscribed: false,
                 synced: false,
                 onChainHash: hashLower,
@@ -7127,11 +7130,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
     const previous = this.subscribedContextGraphs.get(contextGraphId);
+    const normalizedNext = normalizeContextGraphSubscriptionTransition(previous, next);
     // A local id is always cleartext unless the subscription explicitly says
     // otherwise through `onChainHash`. This distinction matters for a valid
     // user-chosen id that happens to match the 0x+64-hex wire-id shape.
@@ -7139,13 +7143,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const previousWireId = previous?.onChainHash
       ? this.contextGraphWireId(previous.onChainHash)
       : localWireId;
-    const nextOnChainHash = next.onChainHash
-      ? this.contextGraphWireId(next.onChainHash)
+    const nextOnChainHash = normalizedNext.onChainHash
+      ? this.contextGraphWireId(normalizedNext.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
     const canonicalNext: ContextGraphSub = {
-      ...next,
-      ...(next.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
+      ...normalizedNext,
+      ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
     if (
       previousWireId !== nextWireId

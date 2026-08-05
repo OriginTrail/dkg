@@ -468,6 +468,44 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
   );
 }
 
+type SubscribeLifetimeSnapshot = Readonly<{
+  subscribed?: boolean;
+  syncMode?: ContextGraphSyncMode;
+}>;
+
+type SubscribeLifetimePlan = Readonly<{
+  changesLifetime: boolean;
+  effectiveSyncMode: ContextGraphSyncMode;
+}>;
+
+function resolveSubscribeLifetimeChange(
+  existing: SubscribeLifetimeSnapshot | undefined,
+  requestedSyncMode: ContextGraphSyncMode,
+): SubscribeLifetimePlan {
+  const effectiveSyncMode = existing?.subscribed === true && existing.syncMode === 'always-on'
+    ? 'always-on'
+    : requestedSyncMode;
+  return {
+    changesLifetime: existing?.syncMode !== effectiveSyncMode,
+    effectiveSyncMode,
+  };
+}
+
+function applySubscriptionMutationAfterAdmission(input: Readonly<{
+  plan: SubscribeLifetimePlan;
+  acceptingJobs: boolean;
+  subscribe: () => ContextGraphSyncMode;
+}>): Readonly<
+  | { accepted: false }
+  | { accepted: true; syncMode: ContextGraphSyncMode }
+> {
+  if (!input.plan.changesLifetime) {
+    return { accepted: true, syncMode: input.plan.effectiveSyncMode };
+  }
+  if (!input.acceptingJobs) return { accepted: false };
+  return { accepted: true, syncMode: input.subscribe() };
+}
+
 async function handleReconcileContextGraphRoute(
   ctx: Pick<RequestContext, 'req' | 'res' | 'agent'>,
   isNodeAdminCaller: boolean,
@@ -1789,25 +1827,25 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // agent. The authoritative normalization still happens in
     // subscribeToContextGraph below, after the shutdown admission guard and
     // after the final readiness await.
-    let effectiveSyncMode: ContextGraphSyncMode =
-      existingSub?.subscribed === true && existingSub.syncMode === 'always-on'
-        ? 'always-on'
-        : requestedSyncMode;
+    const lifetimePlan = resolveSubscribeLifetimeChange(existingSub, requestedSyncMode);
+    let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
-        const changesLifetime = existingSub.syncMode !== effectiveSyncMode;
-        if (changesLifetime && !daemonState.catchupAcceptingJobs) {
+        const lifetimeMutation = applySubscriptionMutationAfterAdmission({
+          plan: lifetimePlan,
+          acceptingJobs: daemonState.catchupAcceptingJobs,
+          subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode,
+        });
+        if (!lifetimeMutation.accepted) {
           return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
         }
-        if (changesLifetime) {
-          effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
-            syncMode: requestedSyncMode,
-          }).syncMode;
-        }
+        effectiveSyncMode = lifetimeMutation.syncMode;
         // Dedupe: hands back a job that already exists and mints nothing, so
         // it needs no job-admission guard and produces no I8 point. A lifetime
         // promotion above is independently guarded because it is a mutation.
@@ -1837,7 +1875,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
       if (existingReadiness.alreadyReady) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
-        const changesLifetime = existingSub.syncMode !== effectiveSyncMode;
         // Second mint site. Guard the MINT, not the read: the guard sits AFTER
         // `reusableDoneJob` is computed, so a replay of an existing completed
         // job still answers 200 during shutdown, and BEFORE the id below is
@@ -1846,14 +1883,20 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         // the tracker. A 503 must therefore leave no id in existence at all —
         // suppressing only the tracker insert would ship a 200 naming a
         // resource that immediately 404s.
-        if ((changesLifetime || !reusableDoneJob) && !daemonState.catchupAcceptingJobs) {
+        if (!reusableDoneJob && !daemonState.catchupAcceptingJobs) {
           return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
         }
-        if (changesLifetime) {
-          effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
+        const lifetimeMutation = applySubscriptionMutationAfterAdmission({
+          plan: lifetimePlan,
+          acceptingJobs: daemonState.catchupAcceptingJobs,
+          subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
             syncMode: requestedSyncMode,
-          }).syncMode;
+          }).syncMode,
+        });
+        if (!lifetimeMutation.accepted) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
         }
+        effectiveSyncMode = lifetimeMutation.syncMode;
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         if (!reusableDoneJob) {
           const syntheticJob: CatchupJob = {

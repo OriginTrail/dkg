@@ -1490,9 +1490,9 @@ export class ApiClient {
     return this.post('/api/query-remote', { peerId, ...request });
   }
 
-  async subscribeToContextGraph(contextGraphId: string, options: {
+  async subscribeToContextGraph(contextGraphId: string, options?: {
     includeSharedMemory?: boolean;
-    syncMode: ContextGraphSyncMode;
+    syncMode?: ContextGraphSyncMode;
   }): Promise<{
     subscribed: string;
     syncMode: ContextGraphSyncMode;
@@ -1559,8 +1559,8 @@ export class ApiClient {
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
-      includeWorkspace: options.includeSharedMemory,
-      syncMode: options.syncMode,
+      includeWorkspace: options?.includeSharedMemory,
+      syncMode: options?.syncMode ?? 'always-on',
     });
   }
 

@@ -480,6 +480,22 @@ describe('ApiClient', () => {
       });
     });
 
+    it('subscribeToContextGraph() preserves the omitted-options legacy contract', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-legacy-direct', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-legacy-direct');
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-legacy-direct',
+        syncMode: 'always-on',
+      });
+    });
+
     it('subscribe() keeps the legacy restart-durable lifetime explicit', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,

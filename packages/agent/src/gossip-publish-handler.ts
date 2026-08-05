@@ -36,7 +36,7 @@ import type {
   ContextGraphSub,
   ContextGraphSubInput,
 } from './dkg-agent-types.js';
-import { normalizeLegacyContextGraphSubscriptionInput } from './context-graph-subscription-policy.js';
+import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -204,7 +204,7 @@ export class GossipPublishHandler {
     options?: { persist?: boolean },
   ): void {
     const previous = this.subscribedContextGraphs.get(id);
-    const normalized = normalizeLegacyContextGraphSubscriptionInput(previous, next);
+    const normalized = normalizeContextGraphSubscriptionTransition(previous, next);
     const setter = this.callbacks.setContextGraphSubscription;
     if (setter) {
       setter(id, normalized, options);

@@ -637,6 +637,68 @@ describe('A21 — a subscribe crossing shutdown never names a job that does not 
     }
   });
 
+  it('promotes on-demand lifetime while reusing a running catch-up job', async () => {
+    daemonState.catchupRunner = createCatchupRunner({} as unknown as DKGAgent);
+    const harness = await createHarness({
+      subscriptions: {
+        'cg-running-promotion': { subscribed: true, syncMode: 'on-demand' },
+      },
+    });
+    try {
+      const queued = await harness.subscribe({
+        contextGraphId: 'cg-running-promotion',
+        syncMode: 'on-demand',
+      });
+      await waitForDispatchedRun();
+
+      const promoted = await harness.subscribe({
+        contextGraphId: 'cg-running-promotion',
+        syncMode: 'always-on',
+      });
+
+      expect(promoted.status).toBe(200);
+      expect(promoted.body.catchup.jobId).toBe(queued.body.catchup.jobId);
+      expect(promoted.body.syncMode).toBe('always-on');
+      expect(harness.subscribeCalls).toEqual([
+        { id: 'cg-running-promotion', syncMode: 'on-demand' },
+        { id: 'cg-running-promotion', syncMode: 'always-on' },
+      ]);
+      expect(harness.subscriptions.get('cg-running-promotion')?.syncMode).toBe('always-on');
+      expect(metrics.results()).toEqual(['queued', 'deduped']);
+    } finally {
+      await (daemonState.catchupRunner as ReturnType<typeof createCatchupRunner>).close();
+      await harness.close();
+    }
+  });
+
+  it('promotes an already-ready on-demand subscription without starting catch-up work', async () => {
+    const harness = await createHarness({
+      subscriptions: {
+        'cg-ready-promotion': { ...readySubscription, syncMode: 'on-demand' },
+      },
+      readiness: { 'cg-ready-promotion': { ...readyProvenance } },
+    });
+    try {
+      const postedBefore = workerControl.state.posted.length;
+      const promoted = await harness.subscribe({
+        contextGraphId: 'cg-ready-promotion',
+        syncMode: 'always-on',
+      });
+
+      expect(promoted.status).toBe(200);
+      expect(promoted.body.syncMode).toBe('always-on');
+      expect(promoted.body.catchup.status).toBe('done');
+      expect(harness.subscribeCalls).toEqual([
+        { id: 'cg-ready-promotion', syncMode: 'always-on' },
+      ]);
+      expect(harness.subscriptions.get('cg-ready-promotion')?.syncMode).toBe('always-on');
+      expect(workerControl.state.posted).toHaveLength(postedBefore);
+      expect(metrics.results()).toEqual(['ready_synthetic']);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('refuses an on-demand-to-always-on promotion while admission is closed', async () => {
     daemonState.catchupRunner = createCatchupRunner({} as unknown as DKGAgent);
     const harness = await createHarness({
