@@ -58,6 +58,8 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
+import { loadMeterConfig } from "../metering/ledger.js";
+import { SCHEDULE_VERSION } from "../metering/read-meter.js";
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -711,7 +713,23 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
       }
     }
+    // V2-B2: publish the read ask so clients can price BEFORE paying (D10/D13
+    // discovery; mirrors the publish-side ask). `mode` is advertised honestly:
+    // in shadow the node meters but bills nobody, and saying so is part of the
+    // contract — a consumer must never think a shadow node is charging.
+    let readMetering: Record<string, unknown> | undefined;
+    try {
+      const mc = loadMeterConfig(process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`);
+      readMetering = {
+        mode: mc.mode,
+        scheduleVersion: SCHEDULE_VERSION,
+        readAskMicroPer1k: mc.readAskMicroPer1k,
+        unit: "mockTRAC-u per 1000 U",
+        billing: mc.mode === "enforce" ? "per-principal" : "none (metering only)",
+      };
+    } catch { /* metering must never break status */ }
     return jsonResponse(res, 200, {
+      ...(readMetering ? { readMetering } : {}),
       name: config.name,
       version: nodeVersion,
       commit: buildInfo.commit !== "uncommitted" ? buildInfo.commit : (nodeCommit || null),
