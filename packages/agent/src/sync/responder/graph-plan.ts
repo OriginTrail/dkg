@@ -21,6 +21,8 @@ import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+  SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS,
+  SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
 } from './snapshot-cache.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -2960,13 +2962,16 @@ async function buildFreshSwmMetaPlan(
     for (const entry of subjects) {
       bytesEstimate += estimateStringRowHeapBytes(entry.subject, '', '', graph);
     }
-    if (bytesEstimate > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE) {
+    // Pinned to SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE: a plan holds scalars
+    // (subject IRI + row count), so its ceiling is independent of how large a
+    // materialized snapshot may be.
+    if (bytesEstimate > SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE) {
       throw snapshotBudgetError({
         key: budgetKey,
         reason: 'snapshot_bytes',
         rows: subjects.length,
         bytesEstimate,
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     entries.push({
@@ -3115,13 +3120,16 @@ async function readFreshSwmMetaRowsPageFromPlan(
         continue;
       }
       if (window.length === 0) windowStart = beforeWindow;
-      if (subject.rowCount > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS) {
+      // Pinned to SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS, NOT the snapshot
+      // build cap: this guards row-group atomicity (#1788), not materialization
+      // size, so it must not drift when the snapshot caps move.
+      if (subject.rowCount > SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS) {
         throw snapshotBudgetError({
           key: budgetKey,
           reason: 'snapshot_rows',
           rows: subject.rowCount,
           bytesEstimate: 0,
-          limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+          limit: SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS,
         });
       }
       window.push(subject);

@@ -7,6 +7,12 @@ import {
   type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
+  SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS,
+  SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+} from '../src/sync/responder/snapshot-cache.js';
+import {
   SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
@@ -58,6 +64,46 @@ describe('sync responder snapshot budget defaults', () => {
       maxSnapshotRows: SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
       maxSnapshotBytesEstimate: SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
     });
+  });
+
+  it('keeps hard build caps below the retained per-snapshot caps', () => {
+    // The documented ordering ("hard build caps are intentionally lower than
+    // the retained-cache defaults") is what guarantees a snapshot that passes
+    // the build check is always admissible, rather than being built and then
+    // rejected by budget.admit(). If a future bump inverts this, that failure
+    // mode returns silently — so pin it.
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS).toBe(200_000);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE).toBe(96 * 1024 * 1024);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS)
+      .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT);
+    expect(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE)
+      .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT);
+  });
+
+  it('keeps the row-group atomicity and plan-scalar ceilings pinned to their own constants', () => {
+    // These two guard different things from snapshot materialization size and
+    // must NOT drift with the build caps: the first is #1788 row-group
+    // atomicity, the second bounds control-plane scalars.
+    expect(SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS).toBe(64_000);
+    expect(SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
+    expect(SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS)
+      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
+    expect(SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE)
+      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+  });
+
+  it('resolves memo build limits to the build caps under default budgets', () => {
+    // snapshotLoadLimits is min(BUILD_CAP, configured). Under production
+    // defaults the build cap must be the binding one, or the raise is inert.
+    const memo = createResponderSyncRowListMemo(120_000, 64, {
+      phase: 'durable_meta',
+      budget: createSyncResponderSnapshotBudget(
+        resolveSyncResponderSnapshotBudgetOptions(undefined, {}),
+      ),
+    });
+    expect(memo.snapshotLoadLimits?.maxRows).toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
+    expect(memo.snapshotLoadLimits?.maxBytesEstimate)
+      .toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {

@@ -6,6 +6,7 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
+import { SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS } from '../src/sync/responder/snapshot-cache.js';
 import {
   createResponderFreshSwmMetaPlanMemo,
   FRESH_SWM_META_PLAN_MAX_SUBJECTS,
@@ -200,7 +201,23 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await insertChunked(store, quads);
     const seedDurationMs = Date.now() - seedStartedAt;
 
-    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 5000 });
+    // The point of this test is the DEGRADATION path — an admitted set larger
+    // than the per-snapshot ceiling must still be served, page by page, rather
+    // than refused. Express that ceiling EXPLICITLY instead of relying on the
+    // global build cap: snapshotLoadLimits is min(BUILD_CAP, configured), so a
+    // 60,000-row session limit forces degradation no matter what the build cap
+    // is. Relying on the constant is how this test would silently stop
+    // exercising the degradation path the next time the cap moves.
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 5000,
+      snapshotBudget: {
+        maxRows: 1_000_000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 60_000,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
     const watch = forbidSwmMetaSortOrOffsetQueries(store);
 
     const serveStartedAt = Date.now();
@@ -604,22 +621,29 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   }, 120_000);
 
-  it('keeps a bounded refusal ONLY for a single pathological subject exceeding the hard 64,000-row build cap', async () => {
+  it('keeps a bounded refusal ONLY for a single pathological subject exceeding the hard build cap', async () => {
     const cgId = 'meta-ceiling-monster';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const fresh = freshIso();
     const store = new OxigraphStore();
-    // ONE fresh subject carrying 64,001 rows. Whole-subject windows are the
-    // consistency unit of the plan lane (they are what keeps a seal/head
-    // row-group atomic per #1788), so this single row-group can never be
-    // served coherently within the hard build cap — a bounded refusal, at
-    // DEFAULT budgets, is the correct answer. Ordinary multi-row subjects
-    // under a shrunken session budget are covered by the paged tests above.
+    // ONE fresh subject carrying SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS + 1 rows.
+    // Whole-subject windows are the consistency unit of the plan lane (they are
+    // what keeps a seal/head row-group atomic per #1788), so this single
+    // row-group can never be served coherently within the hard build cap — a
+    // bounded refusal, at DEFAULT budgets, is the correct answer. Ordinary
+    // multi-row subjects under a shrunken session budget are covered by the
+    // paged tests above.
+    //
+    // The seed is sized off the CONSTANT, not a literal: the subject must
+    // exceed the build cap to be forced into the plan lane at all, and only
+    // there does the pinned SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS check fire.
+    // Hard-coding 64,000 here is exactly how this test silently stopped
+    // exercising the refusal when the build cap was raised to 200,000.
     const subject = 'urn:monster';
     const monsterQuads: Quad[] = [
       { graph: metaGraph, subject, predicate: `${DKG_NS}publishedAt`, object: `"${fresh}"^^<${XSD_DT}>` },
     ];
-    for (let index = 1; index <= 64_000; index += 1) {
+    for (let index = 1; index <= SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS; index += 1) {
       monsterQuads.push({
         graph: metaGraph, subject, predicate: `${DKG_NS}note`, object: `"filler-${index}"`,
       });
