@@ -2271,7 +2271,7 @@ export async function runDaemonInner(
     promoteWorkerLifecycle = startPromoteWorkerDaemonLifecycle({
       agent,
       log,
-      emitMemoryGraphChanged,
+      emitMemoryGraphChanged: onMemoryGraphChanged,
       isShuttingDown: () => shuttingDown,
       enabled: promoteWorkerConfig?.enabled !== false,
       workerConfig: {
@@ -2985,6 +2985,17 @@ export async function runDaemonInner(
             triples: typeof data.tripleCount === "number" ? data.tripleCount : undefined,
           },
         });
+        // dRAG warm on remote publishes is MEMBERSHIP-GATED: KC_PUBLISHED fires
+        // for ANY CG overheard on gossip, and a foreign CG must not trigger
+        // embedder/index work on this node (gossip spam would amplify into
+        // model calls). Local mutation paths warm via onMemoryGraphChanged.
+        if (localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
+          void warmDragIndexIfAllowed(
+            agent,
+            data.contextGraphId,
+            config.drag?.allowPrivateModelCalls === true,
+          );
+        }
         // ADR-002 / CR-2: cross-node `published` activity for a collaborator's
         // publish. REMOTE-ONLY — gate on `data.from` (the gossip payload's
         // sender peer id, set ONLY on gossipsub-received publishes by
@@ -3047,10 +3058,18 @@ export async function runDaemonInner(
       ...event,
       timestamp: new Date().toISOString(),
     });
-    // dRAG: warm the semantic index for this CG after a memory change (e.g. a
-    // publish) so the first query against fresh facts is not the one that pays
-    // for embedding. The event has no authenticated caller, so fail closed
-    // unless the CG is proven public or private model calls are explicitly on.
+  }
+  // Domain-level memory-change hook: SSE refresh PLUS dRAG semantic-index warm,
+  // so the first query against fresh facts is not the one that pays for
+  // embedding. Kept separate from the SSE emitter above (a notification helper
+  // must stay side-effect free) and used only by paths acting on memory this
+  // node actually holds — routes, promote worker, sync, agent tool writes. The
+  // gossip KC_PUBLISHED handler warms separately behind a membership gate. The
+  // event has no authenticated caller, so the warm policy fails closed unless
+  // the CG is proven public or private model calls are explicitly on.
+  function onMemoryGraphChanged(event: MemoryGraphChangedEvent) {
+    if (!event.contextGraphId) return;
+    emitMemoryGraphChanged(event);
     void warmDragIndexIfAllowed(
       agent,
       event.contextGraphId,
@@ -3161,7 +3180,7 @@ export async function runDaemonInner(
       if (data.dataSynced) layers.push("vm");
       if (data.sharedMemorySynced) layers.push("swm");
       if (data.contextGraphId && layers.length > 0) {
-        emitMemoryGraphChanged({
+        onMemoryGraphChanged({
           contextGraphId: data.contextGraphId,
           layers,
           operation: "project_synced",
@@ -3186,7 +3205,7 @@ export async function runDaemonInner(
       const counts = data.counts && typeof data.counts === "object"
         ? data.counts as MemoryGraphChangedEvent["counts"]
         : undefined;
-      emitMemoryGraphChanged({
+      onMemoryGraphChanged({
         contextGraphId: String(data.contextGraphId),
         layers,
         ...(typeof data.subGraphName === "string" ? { subGraphName: data.subGraphName } : {}),
@@ -3243,7 +3262,7 @@ export async function runDaemonInner(
         quads,
         opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
       );
-      emitMemoryGraphChanged({
+      onMemoryGraphChanged({
         contextGraphId,
         layers: ["wm"],
         subGraphName: opts?.subGraphName,
@@ -3704,7 +3723,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
-        emitMemoryGraphChanged,
+        emitMemoryGraphChanged: onMemoryGraphChanged,
         emitNotification,
       });
     } catch (err: any) {
