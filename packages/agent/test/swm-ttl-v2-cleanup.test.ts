@@ -10,7 +10,7 @@
  *      resolveKnowledgeAssetWorkspaceHead),
  *   3. the operation's public snapshot graph.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -236,4 +236,35 @@ describe('SWM TTL cleanup of graph-scoped V2 operations', () => {
     expect(await graphTripleCount(store, assertionGraph)).toBe(0);
     expect(await graphTripleCount(store, seeded.snapshotGraph)).toBe(0);
   }, 60_000);
+
+  it('honors an explicit public owner/name context graph during finalized cleanup', async () => {
+    const cg = '0x1111111111111111111111111111111111111111/public-finalized-cleanup';
+    const listSpy = vi.spyOn(node, 'listContextGraphs').mockResolvedValue([{
+      id: cg,
+      uri: `did:dkg:context-graph:${cg}`,
+      name: 'public-finalized-cleanup',
+      isSystem: false,
+      subscribed: true,
+      synced: true,
+    }]);
+    const originalQuery = store.query.bind(store);
+    const discoveryQueries: string[] = [];
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source === 'agent.finalizedSwmCleanup.discover') {
+        discoveryQueries.push(query);
+      }
+      return originalQuery(query, options);
+    });
+
+    try {
+      await node.runFinalizedSwmCleanupSweep();
+    } finally {
+      querySpy.mockRestore();
+      listSpy.mockRestore();
+    }
+
+    expect(discoveryQueries.some((query) => query.includes(
+      `GRAPH <${contextGraphSharedMemoryMetaUri(cg)}>`,
+    ))).toBe(true);
+  });
 });

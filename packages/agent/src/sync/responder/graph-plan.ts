@@ -30,7 +30,13 @@ import {
   type SyncResponderSnapshotBudget,
 } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
-import { SYNC_BYTE_BUDGET_RESPONSE_BYTES } from '../../dkg-agent-constants.js';
+import {
+  FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+} from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -53,6 +59,31 @@ const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
 const DKG_KA_UAL = `${DKG}kaUal`;
 const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
 const DKG_SHARE_OPERATION_ID = `${DKG}shareOperationId`;
+// DERIVED from the canonical constants the marker WRITER uses, never retyped.
+// These four decide what stays local: three predicates the row filter strips,
+// and the task type the subject-level FILTER NOT EXISTS matches. A local
+// literal that drifted from the writer would keep filtering the old IRI and
+// silently advertise local GC bookkeeping to peers — and per the mutation
+// matrix on this filter, in-process-only drift survives testing, so nothing
+// would catch it. Short aliases only, so the SPARQL templates stay readable.
+const DKG_FINALIZED_SWM_CLEANUP_ROOT = FINALIZED_SWM_CLEANUP_ROOT_PREDICATE;
+const DKG_FINALIZED_SWM_CLEANUP_MARKED_AT = FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE;
+const DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT = FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE;
+const DKG_FINALIZED_SWM_CLEANUP_TASK = FINALIZED_SWM_CLEANUP_TASK_TYPE;
+/** In-process mirror of the store-side predicate filter below. */
+const LOCAL_FINALIZED_SWM_CLEANUP_PREDICATES = new Set([
+  DKG_FINALIZED_SWM_CLEANUP_ROOT,
+  DKG_FINALIZED_SWM_CLEANUP_MARKED_AT,
+  DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT,
+]);
+const localFinalizedSwmCleanupRowFilter = (subject: string, predicate: string): string => `
+  FILTER(${predicate} NOT IN (
+    <${DKG_FINALIZED_SWM_CLEANUP_ROOT}>,
+    <${DKG_FINALIZED_SWM_CLEANUP_MARKED_AT}>,
+    <${DKG_FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT}>
+  ))
+  FILTER NOT EXISTS { ${subject} <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_FINALIZED_SWM_CLEANUP_TASK}> }
+`;
 const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
@@ -2600,9 +2631,18 @@ async function readBoundedSwmMetaSnapshot(
     }
     let result;
     try {
+      // Filter local finalized-cleanup rows AT THE STORE, like the fresh/TTL
+      // lanes already do. Stripping them in-process afterwards is not enough:
+      // every such row would first be accumulated against the peer-serving
+      // snapshot budget, so purely local GC bookkeeping could push a large
+      // context graph over SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS/_BYTES and
+      // make it unsyncable (#1847/#1868 snapshotBudgetError).
       result = await store.query(`
         SELECT ?s ?p ?o WHERE {
-          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+          GRAPH <${assertSafeIri(graph)}> {
+            ?s ?p ?o .
+            ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
+          }
         }
         LIMIT ${remainingRows + 1}
       `, {
@@ -2659,10 +2699,30 @@ function filterSwmMetaSnapshotRows(
   rows: readonly SyncRow[],
   cutoffIso: string | null,
 ): SyncRow[] {
-  if (cutoffIso == null) return [...rows].sort(compareRows);
-  const cutoffMs = Date.parse(cutoffIso);
-  if (!Number.isFinite(cutoffMs)) return [];
+  // An unparseable cutoff admits nothing, so settle it BEFORE any O(rows)
+  // work — otherwise the responder indexes and scans the whole snapshot only
+  // to throw it away.
+  const cutoffMs = cutoffIso == null ? Number.NaN : Date.parse(cutoffIso);
+  if (cutoffIso != null && !Number.isFinite(cutoffMs)) return [];
 
+  // Finalized-SWM markers/tasks are local maintenance state. Strip only those
+  // rows; the active SWM lifecycle and its payload remain syncable until the
+  // independent idle GC safely removes them. This must stay ABOVE the
+  // TTL-disabled return: that lane is served from this function too, and an
+  // unfiltered return there advertises local GC metadata to peers.
+  const cleanupTaskSubjects = new Set<string>();
+  for (const row of rows) {
+    if (row.p === DKG_ONTOLOGY.RDF_TYPE && row.o === DKG_FINALIZED_SWM_CLEANUP_TASK) {
+      cleanupTaskSubjects.add(row.s);
+    }
+  }
+  const syncableRows = rows.filter((row) =>
+    !cleanupTaskSubjects.has(row.s) && !LOCAL_FINALIZED_SWM_CLEANUP_PREDICATES.has(row.p));
+  if (cutoffIso == null) return syncableRows.sort(compareRows);
+
+  // TTL lane only: the per-subject index exists solely to answer the freshness
+  // and tuple-key questions below, so it is built after the lanes that cannot
+  // use it have already returned.
   const bySubject = new Map<string, SyncRow[]>();
   for (const row of rows) {
     const bucket = bySubject.get(row.s) ?? [];
@@ -2694,7 +2754,6 @@ function filterSwmMetaSnapshotRows(
     }
     return keys;
   };
-
   const admitted = new Set<string>();
   const freshOperationKeys = new Set<string>();
   for (const [subject] of bySubject) {
@@ -2710,12 +2769,14 @@ function filterSwmMetaSnapshotRows(
     if (tupleKeys(subject).some((key) => freshOperationKeys.has(key))) admitted.add(subject);
   }
 
-  return rows.filter((row) => admitted.has(row.s)).sort(compareRows);
+  return syncableRows.filter((row) => admitted.has(row.s)).sort(compareRows);
 }
 
 /**
- * Legacy UNFILTERED store-paged compatibility path (cutoffIso == null sessions
- * only). The former TTL variant of this query — DISTINCT + a six-predicate
+ * Legacy TTL-unfiltered store-paged compatibility path (cutoffIso == null
+ * sessions only). Local finalized-cleanup metadata is filtered while the SWM
+ * lifecycle itself remains syncable until idle GC removes it. The former TTL
+ * variant of this query — DISTINCT + a six-predicate
  * UNION join + global `ORDER BY ?g ?s ?p ?o` re-evaluated with a growing
  * OFFSET per page over a mutable graph family — was the #1847 store-melter and
  * is deliberately DELETED, not gated: TTL-filtered sessions page from the
@@ -2734,12 +2795,13 @@ async function readSwmMetaRowsPage(
   const swmMetaValues = graphValues(swmMetaGraphs);
   if (!swmMetaValues) return [];
   // sparql-scan-allow: R2 -- ?g is bound by a finite VALUES list of pre-admitted SWM meta graph IRIs
-  // sparql-scan-allow: R3 -- pre-existing legacy (cutoff-less) compatibility lane, unchanged behavior; TTL sessions page from the session plan instead (#1847)
+  // sparql-scan-allow: R3 -- legacy cutoff-less compatibility lane; TTL sessions page from the session plan instead (#1847)
   const res = await store.query(`
     SELECT DISTINCT ?g ?s ?p ?o WHERE {
       VALUES ?g { ${swmMetaValues} }
       GRAPH ?g {
         ?s ?p ?o .
+        ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
       }
     }
     ORDER BY ?g ?s ?p ?o
@@ -2838,6 +2900,7 @@ async function readFreshSwmMetaSubjects(
     SELECT DISTINCT ?s WHERE {
       GRAPH <${assertSafeIri(graph)}> {
         ?s <${DKG_PUBLISHED_AT}> ?ts .
+        FILTER NOT EXISTS { ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_FINALIZED_SWM_CLEANUP_TASK}> }
         ${cutoffFilter}
       }
     }
@@ -2850,6 +2913,7 @@ async function readFreshSwmMetaSubjects(
            <${DKG_KA_UAL}> ?headUal ;
            <${DKG_ASSERTION_VERSION}> ?headVersion ;
            <${DKG_SHARE_OPERATION_ID}> ?shareId .
+        FILTER NOT EXISTS { ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_FINALIZED_SWM_CLEANUP_TASK}> }
         ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
            <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
            <${DKG_KA_UAL}> ?headUal ;
@@ -2882,7 +2946,10 @@ async function countFreshSwmMetaSubjectRows(
       res = await store.query(`
         SELECT ?s (COUNT(*) AS ?count) WHERE {
           VALUES ?s { ${subjectValues(chunk)} }
-          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+          GRAPH <${assertSafeIri(graph)}> {
+            ?s ?p ?o .
+            ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
+          }
         }
         GROUP BY ?s
       `, {
@@ -3029,7 +3096,10 @@ async function readFreshSwmMetaSubjectWindowRows(
     const res = await store.query(`
       SELECT ?s ?p ?o WHERE {
         VALUES ?s { ${subjectValues(chunk.map((entry) => entry.subject))} }
-        GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+        GRAPH <${assertSafeIri(graph)}> {
+          ?s ?p ?o .
+          ${localFinalizedSwmCleanupRowFilter('?s', '?p')}
+        }
       }
     `, {
       ...syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmMetaSubjectRows'),

@@ -160,6 +160,8 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import type { FinalizedSwmCleanupWorker } from './finalized-swm-cleanup-worker.js';
+import type { FinalizedSwmCleanupService } from './finalized-swm-cleanup-service.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -887,6 +889,24 @@ export class DKGAgentBase {
   static readonly SWM_ACK_QUORUM_TICK_MS = 5_000;
 
   /**
+   * Finalized-SWM GC slice budgets. The sweep yields once either is spent and
+   * resumes at the next context graph in its rotation, so these trade cleanup
+   * latency against how long one background slice may hold store capacity.
+   * Env-overridable for ops tuning; the service clamps candidates to 16.
+   */
+  static readonly FINALIZED_SWM_CLEANUP_MAX_CANDIDATES =
+    Math.max(1, Number(process.env['DKG_FINALIZED_SWM_CLEANUP_MAX_CANDIDATES']) || 4);
+  static readonly FINALIZED_SWM_CLEANUP_BUDGET_MS =
+    Math.max(1, Number(process.env['DKG_FINALIZED_SWM_CLEANUP_BUDGET_MS']) || 10_000);
+  /**
+   * Delay before re-waking the GC after a sweep yielded on pressure or budget,
+   * or drained part of a known backlog. This is the cadence that actually fires
+   * while the node is draining, so it is the knob ops reach for first.
+   */
+  static readonly FINALIZED_SWM_CLEANUP_RETRY_MS =
+    Math.max(1, Number(process.env['DKG_FINALIZED_SWM_CLEANUP_RETRY_MS']) || 5_000);
+
+  /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
    * is the safety net behind the live `KnowledgeAssetRegisteredToContextGraph`
    * nudge: it guarantees eventual reconciliation even if an event was missed or
@@ -999,6 +1019,9 @@ export class DKGAgentBase {
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  protected finalizedSwmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  protected finalizedSwmCleanupWorker?: FinalizedSwmCleanupWorker;
+  protected finalizedSwmCleanupService?: FinalizedSwmCleanupService;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — unified per-CG coalescing and node-wide admission policy. */

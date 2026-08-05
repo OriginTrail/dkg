@@ -26,6 +26,7 @@ import {
   tryReplaceGraphAndSubjectAtomically,
   StoreSchedulerBusyError,
   type GraphWriteGenSource,
+  type QueryOptions,
   type SharedMemoryResultBudget,
   type SwmKaGraphBound,
   type TripleStore,
@@ -46,10 +47,15 @@ import {
   shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad,
   withMaterializationLock,
   KnowledgeAssetWorkspaceHeadCorruptError,
+  resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
+  workspaceOperationSubject,
   workspacePublicQuadsDigest,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
+  type WorkspacePublicSnapshotStore,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -93,6 +99,23 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import {
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+} from './dkg-agent-constants.js';
+export {
+  FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+} from './dkg-agent-constants.js';
+import {
+  buildFinalizedSwmCleanupTaskQuads,
+} from './finalized-swm-cleanup-marker.js';
+import {
+  verifyExactGraphScopedLayer,
+  type ExactGraphScopedLayerVerification,
+} from './graph-scoped-layer-verification.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -176,27 +199,6 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length
     && left.every((byte, index) => byte === right[index]);
 }
-
-type ExactGraphScopedLayerVerification =
-  | {
-      status: 'verified';
-      graphUri: string;
-      quads: Quad[];
-      merkleRoot: Uint8Array;
-    }
-  | {
-      status: 'count-mismatch';
-      graphUri: string;
-      actualCount: number;
-    }
-  | {
-      status: 'merkle-mismatch';
-      graphUri: string;
-    }
-  | {
-      status: 'head-mismatch';
-      graphUri: string;
-    };
 
 type GraphScopedMaterializationEnvelope = Pick<
   KnowledgeAssetWorkspaceHead,
@@ -292,6 +294,15 @@ export interface FinalizationHandlerOptions {
   eventBus?: EventBus;
   resolveContextGraphOnChainId?: ResolveContextGraphOnChainId;
   markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads;
+  /**
+   * The SAME per-KA SWM writer lock map catch-up and the finalized-SWM GC use.
+   * Taken around the cleanup-marker write so it cannot land inside catch-up's
+   * read-delete-reinsert of the operation subject. Absent => that write is
+   * unserialized; see `markFinalizedGraphScopedSwmForCleanup`.
+   */
+  writeLocks?: Map<string, Promise<void>>;
+  publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  wakeFinalizedSwmCleanup?: () => void;
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
@@ -361,6 +372,9 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
+  private readonly writeLocks: Map<string, Promise<void>> | undefined;
+  private readonly publicSnapshotStore: WorkspacePublicSnapshotStore | undefined;
+  private readonly wakeFinalizedSwmCleanup: (() => void) | undefined;
   private readonly recovery: FinalizationRecovery<PreparedGraphScopedMaterialization>;
   private readonly log = new Logger('FinalizationHandler');
   private readonly lifecycle: FinalizationLifecycleLogger;
@@ -420,6 +434,9 @@ export class FinalizationHandler {
     this.eventBus = options.eventBus;
     this.resolveContextGraphOnChainId = options.resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = options.markContextGraphMetaDirtyFromQuads;
+    this.writeLocks = options.writeLocks;
+    this.publicSnapshotStore = options.publicSnapshotStore;
+    this.wakeFinalizedSwmCleanup = options.wakeFinalizedSwmCleanup;
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -1083,15 +1100,17 @@ export class FinalizationHandler {
     });
     let layerVerification = vmVerification;
     if (layerVerification.status !== 'verified') {
-      layerVerification = await this.verifyExactGraphScopedLayer({
+      layerVerification = await this.resolveVerifiedGraphScopedFinalizationSource({
         contextGraphId,
         scope,
-        layer: MemoryLayer.SharedWorkingMemory,
         publicTripleCount,
         privateMerkleRoot,
         expectedMerkleRoot: msg.kcMerkleRoot,
         expectedPublicQuadsDigest: head.publicQuadsDigest,
+        expectedHead: head,
         subGraphName,
+        allowImmutableSnapshot: true,
+        ctx,
       });
       if (layerVerification.status === 'count-mismatch') {
         this.log.warn(
@@ -1187,6 +1206,14 @@ export class FinalizationHandler {
         subGraphName,
       });
       if (metadataState === 'matching') {
+        await this.markFinalizedGraphScopedSwmForCleanup({
+          contextGraphId,
+          scope,
+          expectedHead: head,
+          expectedMerkleRoot: msg.kcMerkleRoot,
+          subGraphName,
+          ctx,
+        });
         this.markProcessed(dedupeKey);
         this.log.info(ctx, `Finalization: graph-scoped KA ${scope.ual} is already confirmed`);
         return 'already-confirmed';
@@ -1217,6 +1244,16 @@ export class FinalizationHandler {
       this.markProcessed(dedupeKey);
       this.log.info(ctx, `Finalization: newer graph-scoped assertion already materialized for ${scope.ual}`);
       return 'already-confirmed';
+    }
+    if (outcome === 'applied') {
+      await this.markFinalizedGraphScopedSwmForCleanup({
+        contextGraphId,
+        scope,
+        expectedHead: head,
+        expectedMerkleRoot: msg.kcMerkleRoot,
+        subGraphName,
+        ctx,
+      });
     }
 
     this.markProcessed(dedupeKey);
@@ -1317,37 +1354,330 @@ export class FinalizationHandler {
     expectedMerkleRoot: Uint8Array;
     expectedPublicQuadsDigest?: string;
     subGraphName?: string;
+    queryOptions?: QueryOptions;
   }): Promise<ExactGraphScopedLayerVerification> {
-    const graphUri = knowledgeAssetLayerGraphUri(
+    return verifyExactGraphScopedLayer({
+      store: this.store,
+      ...input,
+      queryOptions: {
+        source: 'agent.finalization.verifyExactLayer',
+        ...input.queryOptions,
+      },
+    });
+  }
+
+  /**
+   * Rebuild a finalized source from its immutable operation snapshot when the
+   * active SWM graph has already been drained. This keeps durable receipt/reorg
+   * recovery independent from retaining a second live copy of the payload.
+   *
+   * Once the idle GC has done its job this is the NORMAL path for a late
+   * receipt, not an exception, so its cost has to be held down — but this is a
+   * SEARCH, and the only sound way to make a search cheaper is to remove work
+   * that provably cannot change its answer:
+   *
+   * - Discovery stays a bounded metadata read (one bound `kaUal`, LIMIT 16)
+   *   and keeps the receipt lane's default priority. Receipts are
+   *   latency-sensitive; demoting them to the background lane would trade a
+   *   CPU spike for receipt starvation under load, which is the worse failure.
+   * - Payload verification is the expensive half — a full snapshot read plus
+   *   digest plus Merkle root per candidate — and it is deduplicated BY
+   *   CONTENT (see the memo below), not truncated by candidate count. When the
+   *   evidence carries a digest, every candidate advertises that same digest,
+   *   so the memo collapses the whole list to one payload read. When it does
+   *   not (`VerifiedGraphScopedFinalizationEvidence.publicQuadsDigest` is
+   *   optional), the candidates genuinely differ and each one has to be
+   *   checked; that residue is inherent to the search and stays bounded by the
+   *   discovery LIMIT.
+   */
+  private async verifyImmutableGraphScopedSnapshot(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    expectedHead?: KnowledgeAssetWorkspaceHead;
+    publicTripleCount: number;
+    expectedPublicQuadsDigest?: string;
+    privateMerkleRoot?: Uint8Array;
+    expectedMerkleRoot: Uint8Array;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<Extract<ExactGraphScopedLayerVerification, { status: 'verified' }> | undefined> {
+    const graphManager = new GraphManager(this.store);
+    const shareOperationIds: Array<{ shareOperationId: string; digest?: string }> = [];
+    if (input.expectedHead) {
+      shareOperationIds.push({ shareOperationId: input.expectedHead.shareOperationId });
+    } else {
+      const metaGraph = graphManager.sharedMemoryMetaUri(
+        input.contextGraphId,
+        input.subGraphName,
+      );
+      // Every DISCRIMINATING test must run inside the query, ahead of LIMIT.
+      // With only the version filter here, the limit truncated the CANDIDATE
+      // SET rather than the work: sixteen same-version operations with the
+      // wrong triple count filled the window, the matching one was never
+      // returned, and since `ORDER BY ?shareId` is deterministic over stable
+      // store state, every retry re-derived the identical sixteen and missed
+      // the same snapshot permanently. A KA re-shared repeatedly at one version
+      // reaches that without anything unusual happening.
+      //
+      // `?count` is compared numerically first, so a non-canonical typed
+      // literal ("02"^^xsd:integer) still matches, with the lexical form as a
+      // fallback for an untyped one. The JS check below parses either, and this
+      // filter must never be STRICTER than it — a filter that rejects a
+      // candidate the caller would have accepted is the same missed-discovery
+      // bug wearing different clothes.
+      const countFilter = Number.isSafeInteger(input.publicTripleCount)
+        ? `\n            FILTER(?count = ${input.publicTripleCount}`
+          + ` || STR(?count) = ${JSON.stringify(String(input.publicTripleCount))})`
+        : '';
+      const digestFilter = input.expectedPublicQuadsDigest === undefined
+        ? ''
+        : `\n            FILTER(STR(?digest) = ${JSON.stringify(input.expectedPublicQuadsDigest)})`;
+      const result = await this.store.query(
+        `SELECT DISTINCT ?shareId ?digest ?count WHERE {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            ?operation <${DKG_NS}contentScopeVersion> 2 ;
+              <${DKG_NS}kaUal> <${assertSafeIri(input.scope.ual)}> ;
+              <${DKG_NS}assertionVersion> ?version ;
+              <${DKG_NS}shareOperationId> ?shareId ;
+              <${DKG_NS}publicQuadsDigest> ?digest ;
+              <${DKG_NS}publicQuadsCount> ?count .
+            FILTER(STR(?version) = ${JSON.stringify(input.scope.assertionVersion)})${countFilter}${digestFilter}
+          }
+        } ORDER BY ?shareId LIMIT 16`,
+        { source: 'agent.finalization.verifyImmutableSnapshot' },
+      );
+      if (result.type === 'bindings') {
+        for (const row of result.bindings) {
+          const shareId = stripOptionalLiteral(row['shareId']);
+          const digest = stripOptionalLiteral(row['digest']);
+          const count = Number.parseInt(stripOptionalLiteral(row['count']) ?? '', 10);
+          if (
+            shareId
+            && count === input.publicTripleCount
+            && (
+              input.expectedPublicQuadsDigest === undefined
+              || digest === input.expectedPublicQuadsDigest
+            )
+          ) {
+            shareOperationIds.push({ shareOperationId: shareId, ...(digest ? { digest } : {}) });
+          }
+        }
+      }
+    }
+
+    const seenShareOperationIds = new Set<string>();
+    const candidates = shareOperationIds.filter((candidate) => {
+      if (seenShareOperationIds.has(candidate.shareOperationId)) return false;
+      seenShareOperationIds.add(candidate.shareOperationId);
+      return true;
+    });
+    // Content-level memo. `resolveKnowledgeAssetOperationPublicQuads` throws
+    // unless the resolved payload hashes to the digest stored on that operation
+    // subject, so two candidates advertising the same digest resolve to the
+    // same quads and therefore to the same count and Merkle root. Once one of
+    // them has been fully resolved and rejected, every other candidate with
+    // that digest is provably a repeat of work already done — skipping it
+    // cannot change the answer. A THROW must not memo: that means we could not
+    // read THAT operation's snapshot, not that the content is wrong, and a
+    // sibling operation may still hold a readable copy.
+    //
+    // This bounds the repeated work without bounding the SEARCH. A cap on the
+    // candidate count would do the opposite: with `ORDER BY ?shareId` the order
+    // is unrelated to which candidate matches, so truncating it does not do
+    // less work, it returns a different answer — `undefined`, which decays into
+    // 'no-swm'. That outcome leaves the cursor for a sweep retry, but the
+    // candidate list is deterministic, so every retry re-derives the identical
+    // truncation and the receipt is stranded rather than delayed.
+    const rejectedDigests = new Set<string>();
+    for (const { shareOperationId, digest: candidateDigest } of candidates) {
+      if (candidateDigest !== undefined && rejectedDigests.has(candidateDigest)) continue;
+      let quads: Quad[];
+      try {
+        const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
+          store: this.store,
+          graphManager,
+          contextGraphId: input.contextGraphId,
+          shareOperationId,
+          kaUal: input.scope.ual,
+          assertionVersion: input.scope.assertionVersion,
+          subGraphName: input.subGraphName,
+          publicSnapshotStore: this.publicSnapshotStore,
+          queryOptions: { source: 'agent.finalization.resolveImmutableSnapshotPayload' },
+        });
+        quads = snapshot.quads.map((quad) => ({ ...quad, graph: '' }));
+      } catch (error) {
+        if (error instanceof StoreSchedulerBusyError) throw error;
+        continue;
+      }
+      if (
+        quads.length !== input.publicTripleCount
+        || (
+          input.expectedPublicQuadsDigest !== undefined
+          && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
+        )
+      ) {
+        if (candidateDigest !== undefined) rejectedDigests.add(candidateDigest);
+        continue;
+      }
+      const merkleRoot = computeFlatKCRoot(
+        quads,
+        input.privateMerkleRoot ? [input.privateMerkleRoot] : [],
+      );
+      if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
+        if (candidateDigest !== undefined) rejectedDigests.add(candidateDigest);
+        continue;
+      }
+      return {
+        status: 'verified',
+        graphUri: knowledgeAssetLayerGraphUri(
+          input.contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          input.scope,
+          input.subGraphName,
+        ),
+        quads,
+        merkleRoot,
+      };
+    }
+    this.log.warn(
+      input.ctx,
+      `Finalization: no immutable graph-scoped snapshot matches ${input.scope.ual}`,
+    );
+    return undefined;
+  }
+
+  /**
+   * Resolve one exact finalization source from the live SWM graph first and
+   * then, when receipt-backed recovery permits it, the immutable operation
+   * snapshot. Every finalization entrypoint shares this order and validation.
+   */
+  private async resolveVerifiedGraphScopedFinalizationSource(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    publicTripleCount: number;
+    privateMerkleRoot?: Uint8Array;
+    expectedMerkleRoot: Uint8Array;
+    expectedPublicQuadsDigest?: string;
+    expectedHead?: KnowledgeAssetWorkspaceHead;
+    subGraphName?: string;
+    allowImmutableSnapshot: boolean;
+    ctx: OperationContext;
+  }): Promise<ExactGraphScopedLayerVerification> {
+    const liveVerification = await this.verifyExactGraphScopedLayer({
+      contextGraphId: input.contextGraphId,
+      scope: input.scope,
+      layer: MemoryLayer.SharedWorkingMemory,
+      publicTripleCount: input.publicTripleCount,
+      privateMerkleRoot: input.privateMerkleRoot,
+      expectedMerkleRoot: input.expectedMerkleRoot,
+      expectedPublicQuadsDigest: input.expectedPublicQuadsDigest,
+      subGraphName: input.subGraphName,
+    });
+    if (liveVerification.status === 'verified' || !input.allowImmutableSnapshot) {
+      return liveVerification;
+    }
+    const snapshotVerification = await this.verifyImmutableGraphScopedSnapshot({
+      contextGraphId: input.contextGraphId,
+      scope: input.scope,
+      expectedHead: input.expectedHead,
+      publicTripleCount: input.publicTripleCount,
+      expectedPublicQuadsDigest: input.expectedPublicQuadsDigest,
+      privateMerkleRoot: input.privateMerkleRoot,
+      expectedMerkleRoot: input.expectedMerkleRoot,
+      subGraphName: input.subGraphName,
+      ctx: input.ctx,
+    });
+    return snapshotVerification ?? liveVerification;
+  }
+
+  /**
+   * Persist one constant-size cleanup task plus an immutable operation
+   * tombstone. This is the ONLY finalized-SWM work performed in the foreground:
+   * no payload read, graph hash, cleanup discovery, or deletion is awaited.
+   *
+   * The task subject is independent from the mutable workspace head, so a late
+   * snapshot replacement cannot erase the worker's durable backlog entry. The
+   * operation tombstone survives task retirement so a late snapshot can re-arm
+   * the independent task before it materializes. Ingest still performs no
+   * discovery, graph verification, or deletion.
+   */
+  private async markFinalizedGraphScopedSwmForCleanup(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    expectedHead: KnowledgeAssetWorkspaceHead;
+    expectedMerkleRoot: Uint8Array;
+    subGraphName?: string;
+    ctx: OperationContext;
+  }): Promise<'marked' | 'preserved'> {
+    const graphManager = new GraphManager(this.store);
+    const metaGraph = graphManager.sharedMemoryMetaUri(
       input.contextGraphId,
-      input.layer,
-      input.scope,
       input.subGraphName,
     );
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graphUri)}> { ?s ?p ?o } }`,
-      { source: 'agent.finalization.verifyExactLayer' },
+    const operationSubject = workspaceOperationSubject(
+      input.contextGraphId,
+      input.expectedHead.shareOperationId,
     );
-    const quads = result.type === 'quads'
-      ? result.quads.map((quad) => ({ ...quad, graph: '' }))
-      : [];
-    if (quads.length !== input.publicTripleCount) {
-      return { status: 'count-mismatch', graphUri, actualCount: quads.length };
+    const cleanupRootHex = ethers.hexlify(input.expectedMerkleRoot).toLowerCase();
+    const cleanupRoot = JSON.stringify(cleanupRootHex);
+    const markedAtIso = new Date().toISOString();
+    const markedAt = `"${markedAtIso}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
+    const writeMarker = () => this.store.insert([
+      ...buildFinalizedSwmCleanupTaskQuads({
+        contextGraphId: input.contextGraphId,
+        subGraphName: input.subGraphName,
+        head: input.expectedHead,
+        expectedMerkleRootHex: cleanupRootHex,
+        metaGraph,
+        markedAtIso,
+      }),
+      {
+        subject: operationSubject,
+        predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+        object: cleanupRoot,
+        graph: metaGraph,
+      },
+      {
+        subject: operationSubject,
+        predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+        object: markedAt,
+        graph: metaGraph,
+      },
+    ]);
+    // Serialize against the other writers of this operation subject. The
+    // tombstone lands on `operationSubject`, which catch-up REPLACES under this
+    // same lock: it reads the tombstone, then deletes the subject, then
+    // re-inserts from that snapshot. An unlocked marker write can land inside
+    // that window — the marker runs at default priority while the replace's
+    // reads and deletes are queued at background, so it is admitted ahead of
+    // them — and the re-insert then restores a snapshot taken before the marker
+    // existed. The tombstone is gone, the independent task survives, the GC
+    // cleans the lifecycle once and retires the task, and the next catch-up
+    // re-materializes the SWM copy with nothing left to re-arm cleanup. That is
+    // a PERMANENT resurrection of exactly what this component exists to remove.
+    //
+    // This is compatible with keeping finalization foreground work O(1): the
+    // constraint is on WORK, not on waiting. This path already read and hashed
+    // the entire SWM payload via `verifyExactGraphScopedLayer` before reaching
+    // here, so a bounded wait behind one KA's replace is smaller than what it
+    // has already done, and it adds no cleanup discovery, verification,
+    // deletion, or GC wait. The insert is a leaf operation, so taking the lock
+    // here cannot nest and cannot deadlock.
+    if (this.writeLocks) {
+      await withKeyedLocks(
+        this.writeLocks,
+        [swmKaWriteLockKey(input.contextGraphId, input.subGraphName, input.scope.ual)],
+        writeMarker,
+      );
+    } else {
+      // No shared lock map wired (test/embedded construction). Still mark —
+      // refusing would leave the finalized copy with no cleanup record at all,
+      // which is worse than an unserialized write — but this path is NOT
+      // protected against the interleaving above.
+      await writeMarker();
     }
-    const merkleRoot = computeFlatKCRoot(
-      quads,
-      input.privateMerkleRoot ? [input.privateMerkleRoot] : [],
-    );
-    if (!equalBytes(merkleRoot, input.expectedMerkleRoot)) {
-      return { status: 'merkle-mismatch', graphUri };
-    }
-    if (
-      input.expectedPublicQuadsDigest !== undefined
-      && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
-    ) {
-      return { status: 'head-mismatch', graphUri };
-    }
-    return { status: 'verified', graphUri, quads, merkleRoot };
+    this.wakeFinalizedSwmCleanup?.();
+    return 'marked';
   }
 
   /** Recognize exact confirmed VM state from surviving immutable metadata. */
@@ -1552,6 +1882,23 @@ export class FinalizationHandler {
       this.log.warn(ctx, `Chain-reconcile: invalid private commitment for graph-scoped KA ${ual}`);
       return 'no-swm';
     }
+    const markMatchedWorkspaceHeadForCleanup = async (): Promise<void> => {
+      if (
+        !workspaceHead
+        || preserveNewerWorkspaceLifecycle
+        || workspaceHead.assertionVersion !== scope.assertionVersion
+      ) {
+        return;
+      }
+      await this.markFinalizedGraphScopedSwmForCleanup({
+        contextGraphId,
+        scope,
+        expectedHead: workspaceHead,
+        expectedMerkleRoot: merkleRoot,
+        subGraphName,
+        ctx,
+      });
+    };
     const vmVerification = await this.verifyExactGraphScopedLayer({
       contextGraphId,
       scope,
@@ -1588,6 +1935,7 @@ export class FinalizationHandler {
           scope,
           materializedVersion,
         });
+        await markMatchedWorkspaceHeadForCleanup();
         this.log.info(ctx, `Chain-reconcile: ${ual} already has exact VM content and metadata`);
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
@@ -1656,21 +2004,26 @@ export class FinalizationHandler {
         );
         return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
       }
+      await markMatchedWorkspaceHeadForCleanup();
       this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
       return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
 
-    const swmVerification = await this.verifyExactGraphScopedLayer({
+    const swmVerification = await this.resolveVerifiedGraphScopedFinalizationSource({
       contextGraphId,
       scope,
-      layer: MemoryLayer.SharedWorkingMemory,
       publicTripleCount: head.publicTripleCount,
       privateMerkleRoot,
       expectedMerkleRoot: merkleRoot,
       expectedPublicQuadsDigest: trustedAssertionEvidence
         ? trustedAssertionEvidence.publicQuadsDigest
         : workspaceHead?.publicQuadsDigest,
+      expectedHead: workspaceHead?.assertionVersion === scope.assertionVersion
+        ? workspaceHead
+        : undefined,
       subGraphName,
+      allowImmutableSnapshot: trustedAssertionEvidence !== undefined,
+      ctx,
     });
     if (swmVerification.status === 'count-mismatch') {
       this.log.info(
@@ -1735,6 +2088,7 @@ export class FinalizationHandler {
       );
       return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
+    await markMatchedWorkspaceHeadForCleanup();
     this.log.info(
       ctx,
       `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,

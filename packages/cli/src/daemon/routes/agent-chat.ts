@@ -1174,6 +1174,16 @@ export function buildSloPayload(agent: {
     deadlineExpired: number;
     pending: number;
   };
+  getFinalizedSwmCleanupStats?: () => {
+    backlogDepth: number;
+    oldestMarkerAgeMs: number | null;
+    backlogStale: boolean;
+    pressureSkips: number;
+    deletedItems: number;
+    runs: number;
+    lastRunAt: string | null;
+    lastError: string | null;
+  };
 }): {
   protocols: Record<string, unknown>;
   gossip: {
@@ -1220,11 +1230,28 @@ export function buildSloPayload(agent: {
       deadlineExpired: number;
       pending: number;
     };
+    finalizedCleanup?: {
+      backlogDepth: number;
+      oldestMarkerAgeMs: number | null;
+      /**
+       * True while `backlogDepth`/`oldestMarkerAgeMs` are not a current
+       * whole-node measurement — the GC deferred on store pressure or its slice
+       * budget, or is part-way through a context-graph rotation. Depth 0 with
+       * this set means "unknown", not "drained".
+       */
+      backlogStale: boolean;
+      pressureSkips: number;
+      deletedItems: number;
+      runs: number;
+      lastRunAt: string | null;
+      lastError: string | null;
+    };
   };
 } {
   const swmHandler = agent.getSwmHandlerStats();
   const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
   const shareAckQuorum = agent.getSwmAckQuorumStats?.();
+  const finalizedCleanup = agent.getFinalizedSwmCleanupStats?.();
   return {
     protocols: agent.getMessengerSloStats(),
     gossip: agent.getSwmGossipStats(),
@@ -1232,6 +1259,7 @@ export function buildSloPayload(agent: {
       ...swmHandler,
       ...(substrateFanout !== undefined ? { substrateFanout } : {}),
       ...(shareAckQuorum !== undefined ? { shareAckQuorum } : {}),
+      ...(finalizedCleanup !== undefined ? { finalizedCleanup } : {}),
     },
   };
 }

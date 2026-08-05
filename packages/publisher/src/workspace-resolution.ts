@@ -1,4 +1,4 @@
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -101,6 +101,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   contextGraphId: string;
   kaUal: string;
   subGraphName?: string;
+  queryOptions?: QueryOptions;
 }): Promise<KnowledgeAssetWorkspaceHead | undefined> {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, 1);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
@@ -128,6 +129,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
         OPTIONAL { ?operation <${DKG}accessPolicy> ?accessPolicy }
       }
     } LIMIT 1`,
+    params.queryOptions,
   );
   if (result.type !== 'bindings') {
     throw new Error(
@@ -138,6 +140,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     const existence = await params.store.query(
       `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
       `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+      params.queryOptions,
     );
     if (existence.type !== 'boolean') {
       throw new Error(
@@ -240,6 +243,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   const peersResult = await params.store.query(
     `SELECT ?peer WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
       `<${assertSafeIri(expectedOperationSubject)}> <${DKG}allowedPeer> ?peer } }`,
+    params.queryOptions,
   );
   if (peersResult.type !== 'bindings') {
     throw new Error(
@@ -270,6 +274,33 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     ...(accessPolicy ? { accessPolicy } : {}),
     allowedPeers,
   };
+}
+
+/**
+ * Canonical identity comparison for the current graph-scoped SWM head.
+ *
+ * Cleanup and writers share this helper so adding a lifecycle field cannot
+ * silently make a destructive cleanup compare less state than the workspace
+ * model owns.
+ */
+export function sameKnowledgeAssetWorkspaceHead(
+  left: KnowledgeAssetWorkspaceHead,
+  right: KnowledgeAssetWorkspaceHead,
+): boolean {
+  const sameAllowedPeers = [...left.allowedPeers].sort().join('\0')
+    === [...right.allowedPeers].sort().join('\0');
+  return left.kaUal === right.kaUal
+    && left.assertionVersion === right.assertionVersion
+    && left.assertionGraph === right.assertionGraph
+    && left.publicQuadsDigest === right.publicQuadsDigest
+    && left.publicTripleCount === right.publicTripleCount
+    && (left.privateMerkleRoot?.toLowerCase() ?? undefined)
+      === (right.privateMerkleRoot?.toLowerCase() ?? undefined)
+    && left.privateTripleCount === right.privateTripleCount
+    && left.shareOperationId === right.shareOperationId
+    && left.publisherPeerId === right.publisherPeerId
+    && left.accessPolicy === right.accessPolicy
+    && sameAllowedPeers;
 }
 
 /** Replace the durable current-assertion pointer after data and snapshot land. */
@@ -543,6 +574,12 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
   assertionVersion: string | number | bigint;
   subGraphName?: string;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /**
+   * Scheduler attribution for the reads below. Optional for callers that run
+   * off a request they already account for; supply it from lanes where this
+   * resolution is itself the cost being measured (finalization receipts).
+   */
+  queryOptions?: QueryOptions;
 }): Promise<KnowledgeAssetOperationPublicSnapshot> {
   const expectedScope = createGraphKnowledgeAssetScope(
     params.kaUal,
@@ -567,6 +604,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
         OPTIONAL { <${assertSafeIri(subject)}> <${DKG}publisherPeerId> ?publisherPeerId }
       }
     } LIMIT 1`,
+    params.queryOptions,
   );
   if (result.type !== 'bindings') {
     throw new Error(
@@ -578,6 +616,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     const existence = await params.store.query(
       `ASK { GRAPH <${assertSafeIri(workspaceMetaGraph)}> { ` +
       `<${assertSafeIri(subject)}> ?predicate ?object } }`,
+      params.queryOptions,
     );
     if (existence.type !== 'boolean') {
       throw new Error(
@@ -632,7 +671,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
         `share operation ${params.shareOperationId}: unsafe snapshot graph`,
       );
     }
-    quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph);
+    quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph, params.queryOptions);
   }
   if (!quads) {
     throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
@@ -1124,7 +1163,7 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
   return normalized;
 }
 
-function workspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
+export function workspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
   const normalizedContextGraphId = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
   const normalizedShareOperationId = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
   const subject = `urn:dkg:share:${normalizedContextGraphId}:${normalizedShareOperationId}`;
@@ -1132,7 +1171,7 @@ function workspaceOperationSubject(contextGraphId: string, shareOperationId: str
   return subject;
 }
 
-function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
+export function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
   const scope = createGraphKnowledgeAssetScope(kaUal, 1);
   const subject = `${scope.ual}#dkg-swm-head`;
   assertSafeIri(subject);
@@ -1177,9 +1216,14 @@ function workspaceKnowledgeAssetOperationSnapshotGraph(
   return graph;
 }
 
-async function resolveSnapshotGraphQuads(store: TripleStore, snapshotGraph: string): Promise<Quad[]> {
+async function resolveSnapshotGraphQuads(
+  store: TripleStore,
+  snapshotGraph: string,
+  queryOptions?: QueryOptions,
+): Promise<Quad[]> {
   const result = await store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(snapshotGraph)}> { ?s ?p ?o } }`,
+    queryOptions,
   );
   return result.type === 'quads'
     ? result.quads.map((quad) => ({ ...quad, graph: '' }))

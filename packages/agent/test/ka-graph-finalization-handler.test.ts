@@ -15,7 +15,9 @@ import {
   GraphManager,
   OxigraphStore,
   StoreSchedulerBusyError,
+  asGraphWriteGenSource,
   type Quad,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -24,8 +26,16 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
+  workspaceOperationSubject,
+  workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
-import { FinalizationHandler } from '../src/finalization-handler.js';
+import {
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+  FinalizationHandler,
+} from '../src/finalization-handler.js';
 import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
@@ -37,6 +47,9 @@ import {
   type ChainReconcilerDeps,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
+import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import { FinalizedSwmCleanupService } from '../src/finalized-swm-cleanup-service.js';
 
 const CG = 'rootless-finalization';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -124,6 +137,33 @@ function legacyFinalizationChain(
   } as ChainAdapter;
 }
 
+/** The read the cleanup service takes again once it owns the writer lock. */
+const WORKSPACE_HEAD_READ_PREFIX = 'SELECT ?scopeVersion ?kaUal ?assertionVersion';
+
+const WRITE_GEN_CAPABILITY_KEYS = new Set(['getWriteGen', 'innerStore', 'inner']);
+
+/**
+ * A store whose per-graph write-generation capability cannot be recovered.
+ *
+ * `asGraphWriteGenSource` is documented as fail-open, so on such a store every
+ * generation comparison in the cleanup service is inert and the head re-read
+ * taken inside the writer lock is the only remaining proof that nothing moved
+ * while verification ran outside it.
+ */
+function withoutWriteGenTracking(inner: OxigraphStore): TripleStore {
+  return new Proxy(inner as unknown as object, {
+    get(target, prop) {
+      if (WRITE_GEN_CAPABILITY_KEYS.has(prop as string)) return undefined;
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+    has(target, prop) {
+      if (WRITE_GEN_CAPABILITY_KEYS.has(prop as string)) return false;
+      return Reflect.has(target, prop);
+    },
+  }) as unknown as TripleStore;
+}
+
 async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): Promise<void> {
   await inbox?.close().catch(() => {});
 }
@@ -169,12 +209,36 @@ describe('graph-scoped finalization handler', () => {
   let store: OxigraphStore;
   let graphManager: GraphManager;
   let handler: FinalizationHandler;
+  let writeLocks: Map<string, Promise<void>>;
 
   beforeEach(() => {
     store = new OxigraphStore();
     graphManager = new GraphManager(store);
-    handler = new FinalizationHandler(store, legacyFinalizationChain());
+    writeLocks = new Map<string, Promise<void>>();
+    handler = new FinalizationHandler(store, legacyFinalizationChain(), { writeLocks });
   });
+
+  function cleanupService(
+    locks: Map<string, Promise<void>> | null = writeLocks,
+  ): FinalizedSwmCleanupService {
+    return new FinalizedSwmCleanupService({
+      store,
+      writeLocks: locks ?? undefined,
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [graphManager.sharedMemoryMetaUri(CG)],
+    });
+  }
+
+  async function drainFinalizedSwm(
+    locks: Map<string, Promise<void>> | null = writeLocks,
+    subGraphName?: string,
+  ): Promise<number> {
+    return cleanupService(locks).cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG, subGraphName),
+      maxCandidates: 16,
+    });
+  }
 
   async function stageGraph(durableAccess?: {
     accessPolicy: 'ownerOnly' | 'allowList';
@@ -183,6 +247,7 @@ describe('graph-scoped finalization handler', () => {
     message: FinalizationMessageMsg;
     swmGraph: string;
     vmGraph: string;
+    publicQuads: Quad[];
   }> {
     const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
     const swmGraph = knowledgeAssetLayerGraphUri(
@@ -246,6 +311,7 @@ describe('graph-scoped finalization handler', () => {
     return {
       swmGraph,
       vmGraph,
+      publicQuads,
       message: {
         ual: scope.ual,
         contextGraphId: CG,
@@ -356,6 +422,19 @@ describe('graph-scoped finalization handler', () => {
 
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toBeUndefined();
+    await expect(store.query(
+      `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> {
+        ?operation <http://dkg.io/ontology/shareOperationId> ${JSON.stringify(SHARE_ID)} .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
     const stale = await store.query(
       `ASK { GRAPH <${vmGraph}> { <urn:stale:must-be-replaced> ?p ?o } }`,
     );
@@ -395,6 +474,66 @@ describe('graph-scoped finalization handler', () => {
       `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );
     expect(legacyRoots).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('eventually removes a late repeated snapshot after the node becomes idle again', async () => {
+    const { message, swmGraph, vmGraph, publicQuads } = await stageGraph();
+    const metaGraph = graphManager.sharedMemoryMetaUri(CG);
+    const beforeFinalization = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+    );
+    expect(beforeFinalization.type).toBe('quads');
+    if (beforeFinalization.type !== 'quads') throw new Error('expected SWM metadata');
+    const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: beforeFinalization.quads.map((quad) => ({ ...quad, graph: metaGraph })),
+    });
+    expect(descriptor).toBeDefined();
+    if (!descriptor) throw new Error('expected graph-scoped SWM descriptor');
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+
+    // A delayed/repeated snapshot lands normally. Ingest only re-arms the
+    // constant-size durable task; it never scans VM or deletes SWM.
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks,
+      invalidateListContextGraphsCache: () => {},
+      insertReplacementMetadata: (quads) => store.insert([...quads]),
+    });
+    await materializer.withKaWriteLock(CG, undefined, UAL, async () => {
+      await materializer.ensureFinalizedCleanupTask(CG, descriptor);
+      await materializer.replaceGraph(swmGraph, publicQuads);
+      await materializer.replaceHeadMetadata(CG, descriptor);
+    });
+    expect(await store.countQuads(swmGraph)).toBe(publicQuads.length);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+
+    // Once idle, only the dedicated GC performs the expensive verification
+    // and exact conditional delete. VM remains byte-for-byte intact.
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+    expect(await drainFinalizedSwm()).toBe(0);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { ?task `
+        + `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> `
+        + `<${FINALIZED_SWM_CLEANUP_TASK_TYPE}> } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${workspaceOperationSubject(CG, SHARE_ID)}> `
+        + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    const finalVm = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+    );
+    expect(finalVm.type).toBe('quads');
+    if (finalVm.type !== 'quads') throw new Error('expected VM content');
+    expect(workspacePublicQuadsDigest(finalVm.quads.map((quad) => ({ ...quad, graph: '' }))))
+      .toBe(workspacePublicQuadsDigest(publicQuads.map((quad) => ({ ...quad, graph: '' }))));
   });
 
   it('accepts adapter batch metadata when the singleton KA range matches the UAL', async () => {
@@ -944,7 +1083,8 @@ describe('graph-scoped finalization handler', () => {
     store.replaceGraphAndSubject = replaceGraphAndSubject;
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
     await expect(store.query(
       `ASK { GRAPH <${metaGraph}> { <${UAL}> <http://dkg.io/ontology/transactionHash> "${message.txHash}" } }`,
     )).resolves.toMatchObject({ type: 'boolean', value: true });
@@ -2135,6 +2275,822 @@ describe('graph-scoped finalization handler', () => {
     expect(currentHead?.assertionVersion).toBe('2');
   });
 
+  it('preserves finalized SWM when the committed VM graph disappears before cleanup', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+
+    // Simulate external VM loss only after finalization has persisted the
+    // cleanup marker. The drain must re-verify VM durability and fail closed.
+    await store.dropGraph(vmGraph);
+
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
+  });
+
+  it('preserves finalized SWM when its exact assertion changes before cleanup', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    // Keep the finalized rows but add one new row after the marker is written.
+    // Exact-digest re-verification must reject this three-row graph.
+    await store.insert([{
+      subject: 'urn:asset:post-finalization-change',
+      predicate: 'urn:predicate:value',
+      object: '"newer"',
+      graph: swmGraph,
+    }]);
+
+    expect(await store.countQuads(swmGraph)).toBe(3);
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(3);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
+  });
+
+  /**
+   * Despite its previous name, this test does not observe cleanup serializing
+   * against a contended lock: the blocking writer is released before the drain
+   * ever runs. Pointing that writer at an unrelated lock key leaves the test
+   * green, which is the proof. What it does verify is still worth keeping —
+   * finalization commits the VM graph even while another writer holds the
+   * per-KA SWM lock, and it leaves SWM entirely to the independent drain.
+   *
+   * The serialization property itself is covered by
+   * `re-reads the head under the lock when the store cannot track write
+   * generations`, which queues the drain behind a held lock and asserts the
+   * ordering across it.
+   */
+  it('commits VM under a held per-KA SWM lock and leaves SWM to the later drain', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const writeLocks = new Map<string, Promise<void>>();
+    const lockingHandler = new FinalizationHandler(store, legacyFinalizationChain(), {
+      writeLocks,
+    });
+    let releaseWriterLock!: () => void;
+    let markWriterLockAcquired!: () => void;
+    const writerLockAcquired = new Promise<void>((resolve) => {
+      markWriterLockAcquired = resolve;
+    });
+    const holdWriterLock = new Promise<void>((resolve) => {
+      releaseWriterLock = resolve;
+    });
+    const blocker = withKeyedLocks(
+      writeLocks,
+      [swmKaWriteLockKey(CG, undefined, UAL)],
+      async () => {
+        markWriterLockAcquired();
+        await holdWriterLock;
+      },
+    );
+    await writerLockAcquired;
+
+    let markVmCommitted!: () => void;
+    const vmCommitted = new Promise<void>((resolve) => {
+      markVmCommitted = resolve;
+    });
+    const replaceGraphAndSubject = store.replaceGraphAndSubject?.bind(store);
+    if (!replaceGraphAndSubject) throw new Error('Oxigraph replaceGraphAndSubject unavailable');
+    store.replaceGraphAndSubject = async (
+      graphUri,
+      quads,
+      metadataGraph,
+      subject,
+      metadata,
+      options,
+    ) => {
+      await replaceGraphAndSubject(
+        graphUri,
+        quads,
+        metadataGraph,
+        subject,
+        metadata,
+        options,
+      );
+      if (graphUri === vmGraph) markVmCommitted();
+    };
+
+    const finalization = lockingHandler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    );
+    await vmCommitted;
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    releaseWriterLock();
+    await blocker;
+    await finalization;
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm(writeLocks)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  it('preserves an assertion replaced between the pre-lock head read and the in-lock re-check', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    // Discovery and both payload verifications run OUTSIDE the per-KA writer
+    // lock by design, so everything the drain has proven is only as fresh as
+    // the head it read before taking the lock. The re-read taken under the
+    // lock is the sole check that closes that window: the write-generation
+    // comparisons are already behind us by then, and the marker ASK only
+    // proves the cleanup task still exists, not that the assertion is still
+    // the one that was verified.
+    //
+    // Mutating the head *before* the drain does not reach this branch — the
+    // pre-lock triage in `cleanupMetaGraph` sees the mismatch first and
+    // retires the task. The race has to land between the two reads.
+    const originalQuery = store.query.bind(store);
+    let racedInsideLock = false;
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (
+        !racedInsideLock
+        && options?.source === 'agent.finalizedSwmCleanup'
+        && query.startsWith(WORKSPACE_HEAD_READ_PREFIX)
+      ) {
+        racedInsideLock = true;
+        // Drop the seam first so the staging writes and the rest of the commit
+        // path run against the real store.
+        querySpy.mockRestore();
+        await stageNewerWorkspaceAssertion(
+          swmGraph,
+          message.privateMerkleRoot,
+          message.privateTripleCount,
+        );
+      }
+      return originalQuery(query, options);
+    });
+
+    await expect(drainFinalizedSwm()).resolves.toBe(0);
+    expect(racedInsideLock).toBe(true);
+
+    // The newer assertion shares the SWM graph URI with the finalized one, so
+    // a delete here destroys unpublished data rather than a redundant copy.
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+        + `<urn:predicate:value> "newer" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
+  });
+
+  it('re-reads the head under the lock when the store cannot track write generations', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    const untrackedStore = withoutWriteGenTracking(store);
+    expect(asGraphWriteGenSource(untrackedStore)).toBeNull();
+
+    const lockKey = swmKaWriteLockKey(CG, undefined, UAL);
+    let releaseWriter!: () => void;
+    let markWriterHolding!: () => void;
+    const writerHolding = new Promise<void>((resolve) => { markWriterHolding = resolve; });
+    const writerDone = new Promise<void>((resolve) => { releaseWriter = resolve; });
+    const blocker = withKeyedLocks(writeLocks, [lockKey], async () => {
+      markWriterHolding();
+      await writerDone;
+    });
+    // `withKeyedLocks` installs its gate synchronously, before its first await.
+    const writerGate = writeLocks.get(lockKey);
+    expect(writerGate).toBeDefined();
+    await writerHolding;
+
+    const drain = new FinalizedSwmCleanupService({
+      store: untrackedStore,
+      writeLocks,
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [graphManager.sharedMemoryMetaUri(CG)],
+    }).cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    });
+
+    // Wait until the drain has finished discovery plus both verifications and
+    // queued behind the writer; the map entry flips to the drain's own gate.
+    let drainQueuedBehindWriter = false;
+    for (let attempt = 0; attempt < 1_000 && !drainQueuedBehindWriter; attempt += 1) {
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+      drainQueuedBehindWriter = writeLocks.get(lockKey) !== writerGate;
+    }
+    expect(drainQueuedBehindWriter).toBe(true);
+
+    // The lock holder replaces the assertion the drain just verified. Nothing
+    // the drain captured before queueing is true any more.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+    releaseWriter();
+    await blocker;
+
+    await expect(drain).resolves.toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+        + `<urn:predicate:value> "newer" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
+  });
+
+  /**
+   * The lock that matters here belongs to the cleanup SERVICE, not the handler:
+   * `cleanupService(null)` is what makes this fail closed. The uncoordinated
+   * handler is incidental — finalization no longer takes a per-KA SWM lock at
+   * all, and its `writeLocks` option has since been deleted as dead.
+   */
+  it('preserves finalized SWM when the cleanup service has no writer lock map', async () => {
+    const { message, swmGraph } = await stageGraph();
+    const uncoordinated = new FinalizationHandler(store, legacyFinalizationChain());
+
+    await uncoordinated.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    );
+
+    expect(await cleanupService(null).cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    })).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: SHARE_ID });
+  });
+
+  /**
+   * `retireStaleTask` is the ONLY path that removes a cleanup task whose head
+   * has moved on, and no test reached it — including its call site. Its
+   * lifecycle transitions are asserted here.
+   *
+   * Retirement is deliberately NOT observable through the drain's return value:
+   * that counts reclaimed SWM lifecycles only, so a retiring sweep reports 0.
+   * These assert task presence directly for that reason.
+   */
+  async function countCleanupTasks(subGraphName?: string): Promise<number> {
+    const result = await store.query(
+      `SELECT (COUNT(DISTINCT ?task) AS ?count) WHERE { GRAPH `
+        + `<${graphManager.sharedMemoryMetaUri(CG, subGraphName)}> { ?task `
+        + `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> `
+        + `<${FINALIZED_SWM_CLEANUP_TASK_TYPE}> } }`,
+    );
+    if (result.type !== 'bindings') throw new Error('expected cleanup task count bindings');
+    const raw = result.bindings[0]?.['count'] ?? '0';
+    return Number.parseInt(raw.replace(/^"|"\^\^.*$/g, ''), 10);
+  }
+
+  async function deleteWorkspaceHeadSubject(): Promise<void> {
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+    });
+  }
+
+  it('retires a superseded task without disturbing the newer assertion', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // The head moves to v2 while the task still names v1.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+
+    await drainFinalizedSwm();
+
+    expect(await countCleanupTasks()).toBe(0);
+    // Asserting only that the stale task went is half a test: a change that
+    // retires v1 AND damages v2 would pass it. The newer lifecycle must survive
+    // intact, which is what makes this a lifecycle assertion.
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '2' });
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${swmGraph}> { <urn:asset:newer-unpublished> `
+        + `<urn:predicate:value> "newer" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('retires a headless task once its payload is gone', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    await deleteWorkspaceHeadSubject();
+    await store.dropGraph(swmGraph);
+
+    await drainFinalizedSwm();
+
+    expect(await countCleanupTasks()).toBe(0);
+  });
+
+  /**
+   * The guard this whole suite exists for. An absent head with the payload
+   * still present is NOT a finished lifecycle — it is a resurrected SWM copy
+   * whose head has not been rebuilt yet. Retiring its task strands that copy
+   * with nothing left to collect it, which is the resurrection #1996 exists to
+   * prevent, reached through the retirement path instead of the deletion path.
+   */
+  it('does not retire a headless task while its payload is still present', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Head gone, payload deliberately left behind.
+    await deleteWorkspaceHeadSubject();
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    await drainFinalizedSwm();
+
+    expect(await countCleanupTasks()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+  });
+
+  /**
+   * Retirement of a headless task is silently inert when the store cannot
+   * report write generations — `asGraphWriteGenSource` returns null and the
+   * absent-head branch returns before its payload check. Blazegraph ships no
+   * tracker, so this is production behaviour there, and it is indistinguishable
+   * from "nothing needed retiring" without a test saying otherwise.
+   *
+   * Pinning the inertness itself is deliberate: if a later change decides
+   * retiring on non-write-gen evidence is safe, this goes red and forces that
+   * to be a considered decision rather than a silent one.
+   */
+  it('leaves a headless task untouched when the store cannot track write generations', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Exactly the shape that retires in the test above.
+    await deleteWorkspaceHeadSubject();
+    await store.dropGraph(swmGraph);
+
+    const untrackedStore = withoutWriteGenTracking(store);
+    expect(asGraphWriteGenSource(untrackedStore)).toBeNull();
+    await new FinalizedSwmCleanupService({
+      store: untrackedStore,
+      writeLocks,
+      listContextGraphIds: async () => [CG],
+      listSharedMemoryMetaGraphs: async () => [graphManager.sharedMemoryMetaUri(CG)],
+    }).cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    });
+
+    expect(await countCleanupTasks()).toBe(1);
+  });
+
+  /**
+   * `retireStaleTask`'s own in-lock TOCTOU re-check — the twin of the guard in
+   * `clearIfStillExact`. The pre-lock triage found a stale head, but by the
+   * time the writer lock is held the head has moved BACK to matching, so the
+   * task is live again and must not be retired. Retiring it strands a finalized
+   * SWM copy with nothing left to collect it.
+   *
+   * Narrower than the deletion-path twin — this removes a marker rather than
+   * payload, so the damage is a stranded copy rather than destroyed data — but
+   * the same class, and unpinned for the same reason: reaching it needs the
+   * head to change BETWEEN the two reads, which no static fixture produces.
+   *
+   * THE SEAM IS POSITIONAL, NOT BY SOURCE. Both head resolutions on this path
+   * carry `source: 'agent.finalizedSwmCleanup.discover'`, so the fixture counts
+   * occurrences: 1st = the pre-lock triage in `cleanupMetaGraph`, 2nd = the
+   * in-lock re-read. Adding a third query with that source ahead of these
+   * silently retargets the seam — the test would keep passing while no longer
+   * exercising the guard.
+   */
+  it('does not retire a task whose head becomes current again inside the lock', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await countCleanupTasks()).toBe(1);
+
+    // Pre-lock triage must see a stale head, so advance it to v2.
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+
+    const originalQuery = store.query.bind(store);
+    let headReads = 0;
+    let restoredInsideLock = false;
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (query.startsWith(WORKSPACE_HEAD_READ_PREFIX)) {
+        headReads += 1;
+        if (headReads === 2 && !restoredInsideLock) {
+          restoredInsideLock = true;
+          // Drop the seam first so the restore and the rest of the commit path
+          // run against the real store.
+          querySpy.mockRestore();
+          // The lifecycle this task names is current again.
+          await storeKnowledgeAssetWorkspaceHead({
+            store,
+            graphManager,
+            contextGraphId: CG,
+            shareOperationId: SHARE_ID,
+            kaUal: UAL,
+            assertionVersion: '1',
+          });
+        }
+      }
+      return originalQuery(query, options);
+    });
+
+    await drainFinalizedSwm();
+
+    expect(restoredInsideLock).toBe(true);
+    // Still armed: the task describes a lifecycle that is live again.
+    expect(await countCleanupTasks()).toBe(1);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ assertionVersion: '1', shareOperationId: SHARE_ID });
+  });
+
+  it('defers durable cleanup while the store is busy and resumes after restart when idle', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    let busy = true;
+    Object.defineProperty(store, 'getPressureSnapshot', {
+      configurable: true,
+      value: () => ({
+        ackInflight: 0,
+        healthInflight: 0,
+        normalInflight: busy ? 1 : 0,
+        backgroundInflight: 0,
+        ackQueued: 0,
+        healthQueued: 0,
+        normalQueued: 0,
+        backgroundQueued: 0,
+        maxConcurrent: 4,
+        ackReservedSlots: 1,
+      }),
+    });
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+
+    busy = false;
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toBeUndefined();
+    const immutableFinalizationTombstone = await store.query(
+      `ASK { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> { `
+        + `<${workspaceOperationSubject(CG, SHARE_ID)}> `
+        + `<${FINALIZED_SWM_CLEANUP_ROOT_PREDICATE}> ?root } }`,
+    );
+    expect(immutableFinalizationTombstone).toMatchObject({
+      type: 'boolean',
+      value: true,
+    });
+  });
+
+  it('never bypasses active store pressure for finalized cleanup', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    Object.defineProperty(store, 'getPressureSnapshot', {
+      configurable: true,
+      value: () => ({
+        ackInflight: 1,
+        healthInflight: 1,
+        normalInflight: 2,
+        backgroundInflight: 2,
+        ackQueued: 3,
+        healthQueued: 2,
+        normalQueued: 4,
+        backgroundQueued: 4,
+        maxConcurrent: 4,
+        ackReservedSlots: 1,
+      }),
+    });
+
+    const querySpy = vi.spyOn(store, 'query');
+    expect(await drainFinalizedSwm()).toBe(0);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(querySpy).not.toHaveBeenCalled();
+    querySpy.mockRestore();
+  });
+
+  it('discovers the independent cleanup task for bounded subgraph cleanup', async () => {
+    const subGraphName = 'named-cleanup';
+    const { message, swmGraph } = await stageGraph(undefined, subGraphName);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const discoverQueries: string[] = [];
+    const originalQuery = store.query.bind(store);
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source === 'agent.finalizedSwmCleanup.discover') {
+        discoverQueries.push(query);
+      }
+      return originalQuery(query, options);
+    });
+
+    await expect(cleanupService().cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG, subGraphName),
+      maxCandidates: 1,
+    })).resolves.toBe(1);
+    expect(discoverQueries.some((query) => query.includes(
+      '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/FinalizedSwmCleanupTask>',
+    ))).toBe(true);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+      subGraphName,
+    })).resolves.toBeUndefined();
+    querySpy.mockRestore();
+  });
+
+  it('keeps cleanup background-only and leaves retry to the worker after scheduler pressure', async () => {
+    const { message, swmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const originalQuery = store.query.bind(store);
+    let injectedBusyTimeout = false;
+    const cleanupPriorities: Array<string | undefined> = [];
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source?.startsWith('agent.finalizedSwmCleanup')) {
+        cleanupPriorities.push(options.priority);
+      }
+      if (
+        !injectedBusyTimeout
+        && options?.source === 'agent.finalizedSwmCleanup.discover'
+        && query.includes('SELECT DISTINCT ?task ?ual ?version ?root ?shareId')
+      ) {
+        injectedBusyTimeout = true;
+        throw new StoreSchedulerBusyError(
+          'queue_wait_timeout',
+          'background',
+          options.source,
+        );
+      }
+      return originalQuery(query, options);
+    });
+
+    await expect(cleanupService().cleanupKnownMetaGraph({
+      contextGraphId: CG,
+      swmMetaGraph: graphManager.sharedMemoryMetaUri(CG),
+      maxCandidates: 16,
+    })).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    expect(injectedBusyTimeout).toBe(true);
+    expect(cleanupPriorities.length).toBeGreaterThan(0);
+    expect(new Set(cleanupPriorities)).toEqual(new Set(['background']));
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    querySpy.mockRestore();
+  });
+
+  it('repairs VM from the immutable operation snapshot after deferred SWM cleanup', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({
+      graph: graphManager.metaGraphUri(CG),
+      subject: UAL,
+    });
+
+    await expect(handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
+    }, createOperationContext('system'))).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
+  /**
+   * Stage extra operation subjects for the SAME assertion, so late-receipt
+   * discovery has several candidates to choose between. `shareOperationId`
+   * values are chosen to sort BEFORE the real one, because discovery is
+   * `ORDER BY ?shareId` and that order is unrelated to which candidate matches.
+   */
+  async function stageDecoyOperations(input: {
+    count: number;
+    prefix: string;
+    contentFor: (index: number) => string;
+  }): Promise<string[]> {
+    const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
+    const shareIds: string[] = [];
+    for (let index = 0; index < input.count; index += 1) {
+      const shareOperationId = `${input.prefix}-${index}`;
+      shareIds.push(shareOperationId);
+      const value = input.contentFor(index);
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        shareOperationId,
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+        // Same public triple count as the real assertion, so the count filter
+        // in discovery cannot separate them — only a full payload resolution can.
+        quads: [
+          { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: `"${value}-one"`, graph: '' },
+          { subject: 'urn:asset:two', predicate: 'urn:predicate:value', object: `"${value}-two"`, graph: '' },
+        ],
+        publisherPeerId: '12D3KooWPublisher',
+      });
+    }
+    return shareIds;
+  }
+
+  async function reconcileFromImmutableSnapshot(
+    message: FinalizationMessageMsg,
+  ): Promise<string> {
+    const internals = handler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    return handler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+      // Carries no publicQuadsDigest, so discovery cannot pre-filter by content
+      // and every candidate must be resolved to be told apart. This is the case
+      // a candidate cap silently broke.
+      trustedAssertionEvidence: trustedRecoveryEvidence(message),
+    }, createOperationContext('system'));
+  }
+
+  /**
+   * Regression guard against re-introducing a candidate cap.
+   *
+   * Discovery orders by `?shareId`, which has no relationship to which snapshot
+   * actually matches the receipt. Truncating that list therefore does not do
+   * less work, it returns a different answer — and because the list is
+   * deterministic, every retry re-derives the identical truncation, so the
+   * receipt is stranded permanently rather than delayed. Five candidates with
+   * the matching one last is past the boundary of the cap this replaced.
+   */
+  it('verifies a late receipt whose matching snapshot sorts last among many candidates', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+
+    // 'aaa-decoy-*' sorts before 'graph-finalization-share'.
+    await stageDecoyOperations({
+      count: 4,
+      prefix: 'aaa-decoy',
+      contentFor: (index) => `decoy-${index}`,
+    });
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({ graph: graphManager.metaGraphUri(CG), subject: UAL });
+
+    await expect(reconcileFromImmutableSnapshot(message)).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  /**
+   * The subtle half of the content memo: a THROW must not memo.
+   *
+   * Failing to READ one operation's snapshot says nothing about whether that
+   * content is correct, and a sibling operation may hold a readable copy of the
+   * very same content. Memoing on throw would therefore skip the readable copy
+   * and strand the receipt. Both candidates here carry identical content, so
+   * they share a digest — which is exactly when a wrongly-placed memo bites.
+   */
+  it('still verifies a readable snapshot after an identical-content sibling fails to resolve', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+
+    // Same content as the real assertion, so it advertises the same digest, and
+    // it sorts first. Its snapshot payload is then made unreadable.
+    const scope = createGraphKnowledgeAssetScope(UAL, VERSION);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: 'aaa-unreadable-twin',
+      kaUal: scope.ual,
+      assertionVersion: scope.assertionVersion,
+      quads: [
+        { subject: 'urn:asset:one', predicate: 'urn:predicate:value', object: '"one"', graph: '' },
+        { subject: 'urn:asset:two', predicate: 'urn:predicate:value', object: '"two"', graph: '' },
+      ],
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: message.privateTripleCount,
+      publisherPeerId: '12D3KooWPublisher',
+    });
+    const twinSnapshotGraph = (await store.query(
+      `SELECT ?graph WHERE { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> { `
+        + `<${workspaceOperationSubject(CG, 'aaa-unreadable-twin')}> `
+        + `<http://dkg.io/ontology/publicSnapshotGraph> ?graph } }`,
+    ));
+    if (twinSnapshotGraph.type !== 'bindings' || !twinSnapshotGraph.bindings[0]?.['graph']) {
+      throw new Error('expected a snapshot graph for the twin operation');
+    }
+    await store.dropGraph(twinSnapshotGraph.bindings[0]['graph']!);
+
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({ graph: graphManager.metaGraphUri(CG), subject: UAL });
+
+    await expect(reconcileFromImmutableSnapshot(message)).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  /**
+   * The other half of the memo: a content rejection MUST memo, or the bound on
+   * repeated work does not exist and we are back to a full payload read per
+   * candidate. The answer is identical either way, so this can only be observed
+   * by counting payload resolutions — an output-equality assertion here would
+   * pass with the memo deleted.
+   */
+  it('resolves an already-rejected snapshot digest only once across candidates', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
+
+    // Two candidates with IDENTICAL wrong content, so they advertise the same
+    // digest and the second is provably a repeat of work already done.
+    await stageDecoyOperations({ count: 2, prefix: 'aaa-dup', contentFor: () => 'same-wrong' });
+    await store.dropGraph(vmGraph);
+    await store.deleteByPattern({ graph: graphManager.metaGraphUri(CG), subject: UAL });
+
+    const payloadReads: string[] = [];
+    const originalQuery = store.query.bind(store);
+    const querySpy = vi.spyOn(store, 'query').mockImplementation(async (query, options) => {
+      if (
+        options?.source === 'agent.finalization.resolveImmutableSnapshotPayload'
+        && query.startsWith('CONSTRUCT')
+      ) payloadReads.push(query);
+      return originalQuery(query, options);
+    });
+
+    await expect(reconcileFromImmutableSnapshot(message)).resolves.toBe('promoted');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    // One rejected duplicate plus the matching snapshot — never the skipped twin.
+    expect(payloadReads).toHaveLength(2);
+    querySpy.mockRestore();
+  });
+
   it('rejects mixed graph-scope and legacy-root finalization envelopes', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(
@@ -2172,7 +3128,7 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
-  it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
+  it('verifies chain binding and exact private VM metadata before cleaning an exact SWM copy', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
@@ -2217,7 +3173,8 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('already-confirmed');
     expect(bindingVerified).toBe(true);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
   });
 
   it('recognizes only exact confirmed Verifiable Memory metadata after the workspace head is lost', async () => {
@@ -2498,7 +3455,8 @@ describe('graph-scoped finalization handler', () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    expect(await store.countQuads(swmGraph)).toBe(2);
+    expect(await drainFinalizedSwm()).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(0);
 
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
     const materializedVersionPredicate = 'http://dkg.io/ontology/materializedVersion';
@@ -2615,9 +3573,10 @@ describe('graph-scoped finalization handler', () => {
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     const staged = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
     );
     if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.insert(staged.quads.map((quad) => ({ ...quad, graph: swmGraph })));
     await storeKnowledgeAssetOperationPublicQuads({
       store,
       graphManager,
@@ -2729,9 +3688,10 @@ describe('graph-scoped finalization handler', () => {
     await store.deleteByPattern({ graph: metaGraph, subject: UAL });
 
     const staged = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
     );
     if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.insert(staged.quads.map((quad) => ({ ...quad, graph: swmGraph })));
     await storeKnowledgeAssetOperationPublicQuads({
       store,
       graphManager,

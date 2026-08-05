@@ -134,6 +134,14 @@ export const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 export const DEBUG_SYNC_PROGRESS = process.env.DKG_DEBUG_SYNC_PROGRESS === '1';
 export const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 export const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
+export const FINALIZED_SWM_CLEANUP_ROOT_PREDICATE =
+  'http://dkg.io/ontology/finalizedSwmCleanupRoot';
+export const FINALIZED_SWM_CLEANUP_TASK_TYPE =
+  'http://dkg.io/ontology/FinalizedSwmCleanupTask';
+export const FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE =
+  'http://dkg.io/ontology/finalizedSwmCleanupMarkedAt';
+export const FINALIZED_SWM_CLEANUP_HEAD_FINGERPRINT_PREDICATE =
+  'http://dkg.io/ontology/finalizedSwmCleanupHeadFingerprint';
 export const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
 
 // ── Gossip reconnect ──────────────────────────────────────────────────

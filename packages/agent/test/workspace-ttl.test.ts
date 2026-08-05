@@ -2,12 +2,13 @@
  * Tests for workspace TTL / expiry: expired workspace operations are cleaned
  * up and not served to peers during sync.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -89,14 +90,14 @@ describe('Workspace TTL', () => {
   }, 20000);
 });
 
-describe('setSharedMemoryTtlMs timer lifecycle', () => {
+describe('setSharedMemoryTtlMs maintenance timer lifecycle', () => {
   let node: DKGAgent;
 
   afterAll(async () => {
     try { await node?.stop(); } catch {}
   });
 
-  it('starts cleanup timer when TTL transitions from 0 to positive', async () => {
+  it('keeps finalized-SWM maintenance active when TTL expiry is disabled', async () => {
     node = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'TtlLifecycleNode',
@@ -108,16 +109,53 @@ describe('setSharedMemoryTtlMs timer lifecycle', () => {
     await node.start();
     await sleep(300);
 
-    // Timer should not be running (TTL=0)
+    // Finalized graph-scoped SWM GC has its own timer; ordinary TTL expiry is
+    // genuinely disabled.
     expect((node as any).swmCleanupTimer).toBeNull();
+    expect((node as any).finalizedSwmCleanupTimer).not.toBeNull();
+
+    const store = (node as unknown as { store: TripleStore }).store;
+    let busy = true;
+    const pressureSpy = vi.spyOn(store, 'getPressureSnapshot').mockImplementation(() => ({
+      ackInflight: 0,
+      healthInflight: 0,
+      normalInflight: busy ? 1 : 0,
+      backgroundInflight: 0,
+      ackQueued: 0,
+      healthQueued: 0,
+      normalQueued: 0,
+      backgroundQueued: 0,
+      maxConcurrent: 4,
+      ackReservedSlots: 1,
+    }));
+    const graphDiscoverySpy = vi.spyOn(node, 'listContextGraphs');
+
+    // A TTL-disabled periodic-style call exits before graph discovery while
+    // foreground work is active.
+    await expect(node.runFinalizedSwmCleanupSweep()).resolves.toMatchObject({
+      pressureSkipped: true,
+      deletedItems: 0,
+    });
+    expect(graphDiscoverySpy).not.toHaveBeenCalled();
+
+    // Once the store becomes idle, the same TTL-disabled maintenance path
+    // resumes graph discovery for deferred finalized-SWM cleanup.
+    busy = false;
+    await expect(node.runFinalizedSwmCleanupSweep()).resolves.toMatchObject({
+      pressureSkipped: false,
+    });
+    expect(graphDiscoverySpy).toHaveBeenCalledTimes(1);
+    pressureSpy.mockRestore();
+    graphDiscoverySpy.mockRestore();
 
     // Enable TTL at runtime
     node.setSharedMemoryTtlMs(60_000);
     expect((node as any).swmCleanupTimer).not.toBeNull();
 
-    // Disable again
+    // Disabling TTL expiry must not disable finalized-SWM maintenance.
     node.setSharedMemoryTtlMs(0);
     expect((node as any).swmCleanupTimer).toBeNull();
+    expect((node as any).finalizedSwmCleanupTimer).not.toBeNull();
   }, 10000);
 });
 

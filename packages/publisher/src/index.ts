@@ -44,10 +44,13 @@ export {
 } from './catalog-trust.js';
 export {
   resolveKnowledgeAssetWorkspaceHead,
+  sameKnowledgeAssetWorkspaceHead,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveLiftWorkspaceSlice,
   storeKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
+  workspaceKnowledgeAssetHeadSubject,
+  workspaceOperationSubject,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   KnowledgeAssetWorkspaceHeadCorruptError,
   type KnowledgeAssetWorkspaceHead,

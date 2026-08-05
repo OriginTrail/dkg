@@ -408,6 +408,235 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(out).not.toContain('urn:dkg:share:devnet-test:stale-rootless');
       await storeTtl.close();
     });
+
+    it.each([0, 5_000])(
+      'keeps pending SWM syncable but never advertises local GC metadata (ttl=%s)',
+      async (sharedMemoryTtlMs) => {
+        const markedStore = new OxigraphStore();
+        const publishedAt = new Date(Date.now() - 1_000).toISOString();
+        const ual = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/9';
+        const opId = 'finalized-deferred-cleanup';
+        const op = `urn:dkg:share:${CG_ID}:${opId}`;
+        const cleanupTask = 'urn:dkg:finalized-swm-cleanup:responder-test';
+        const head = `${ual}#dkg-swm-head`;
+        const assertionGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/9`;
+        const markedAt = new Date(Date.now() - 2_000).toISOString();
+        const markedEntity = 'urn:swm:finalized:still-syncable';
+        const unmarkedGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ac/10`;
+        const unmarkedRoot = 'urn:swm:unmarked:must-sync';
+        const unmarkedOp = `urn:dkg:share:${CG_ID}:unmarked-data`;
+        const tupleRows = (subject: string) => [
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}kaUal`, object: ual },
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}assertionVersion`, object: '"9"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject, predicate: `${DKG_NS}shareOperationId`, object: `"${opId}"` },
+        ];
+        await markedStore.insert([
+          { graph: ROOT_SWM_META, subject: op, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}rootEntity`, object: markedEntity },
+          ...tupleRows(op),
+          ...tupleRows(head),
+          ...tupleRows(cleanupTask),
+          { graph: ROOT_SWM_META, subject: head, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: RDF_TYPE, object: `${DKG_NS}FinalizedSwmCleanupTask` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
+          // The task subject carries all three local predicates, exactly as
+          // buildFinalizedSwmCleanupTaskQuads writes them.
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupMarkedAt`, object: `"${markedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: cleanupTask, predicate: `${DKG_NS}finalizedSwmCleanupHeadFingerprint`, object: `"${'cd'.repeat(32)}"` },
+          // The OPERATION subject is the one that matters for the predicate
+          // guard. It is served to peers, so the subject-level
+          // `FILTER NOT EXISTS { ?s a FinalizedSwmCleanupTask }` does not cover
+          // it and only the predicate list keeps these rows local.
+          //
+          // Root and markedAt are what markFinalizedGraphScopedSwmForCleanup
+          // actually writes here (finalization-handler.ts:1602-1612). The head
+          // fingerprint is NOT written on an operation subject today — it is
+          // seeded anyway so the predicate guard is pinned as load-bearing
+          // rather than incidental: a future writer must not be able to leak it
+          // by putting it on a subject the responder serves.
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupRoot`, object: `"0x${'ab'.repeat(32)}"` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupMarkedAt`, object: `"${markedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}finalizedSwmCleanupHeadFingerprint`, object: `"${'cd'.repeat(32)}"` },
+          { graph: assertionGraph, subject: markedEntity, predicate: 'http://schema.org/name', object: '"finalized-copy"' },
+          { graph: unmarkedGraph, subject: unmarkedRoot, predicate: 'http://schema.org/name', object: '"live-copy"' },
+          { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+          { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: unmarkedOp, predicate: `${DKG_NS}rootEntity`, object: unmarkedRoot },
+        ]);
+        const markedCap = captureHandler();
+        registerSyncHandler({
+          register: markedCap.register,
+          protocolSync: '/origintrail/dkg/sync/1.0.0',
+          syncDeniedResponse: 'sync-denied',
+          syncPageSize: 5000,
+          sharedMemoryTtlMs,
+          store: markedStore,
+          peerId: 'self-peer',
+          parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+          authorizeSyncRequest: async () => true,
+          logWarn: noopLog,
+          logDebug: noopLog,
+        });
+
+        const out = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+
+        // Every local predicate, asserted by name. One predicate standing in
+        // for three is how two thirds of this guard went unheld: the fixtures
+        // only ever carried `finalizedSwmCleanupRoot`, so dropping either other
+        // entry from the filter leaked it to peers with the suite still green.
+        const expectNoLocalGcLeak = (payload: string) => {
+          expect(payload).not.toContain('finalizedSwmCleanupRoot');
+          expect(payload).not.toContain('finalizedSwmCleanupMarkedAt');
+          expect(payload).not.toContain('finalizedSwmCleanupHeadFingerprint');
+          expect(payload).not.toContain(cleanupTask);
+        };
+
+        expect(out).toContain(head);
+        expect(out).toContain(op);
+        // Positive half: filtering everything would satisfy the absence checks.
+        expect(out).toContain(`${DKG_NS}shareOperationId`);
+        expect(out).toContain(`${DKG_NS}assertionGraph`);
+        expectNoLocalGcLeak(out);
+
+        // The TTL-disabled lane serves two different readers: without a session
+        // it store-pages via readSwmMetaRowsPage, with one it loads the bounded
+        // snapshot. They filter in different places — store-side SPARQL vs the
+        // in-process strip — so a per-predicate hole can exist in one and not
+        // the other.
+        const sessionOut = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          syncSessionId: `finalized-cleanup-session-${sharedMemoryTtlMs}`,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+        expect(sessionOut).toContain(op);
+        expectNoLocalGcLeak(sessionOut);
+
+        const dataOut = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          syncSessionId: `finalized-cleanup-data-${sharedMemoryTtlMs}`,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'data',
+        });
+        expect(dataOut).toContain(markedEntity);
+        expect(dataOut).toContain('"finalized-copy"');
+        expect(dataOut).toContain(unmarkedRoot);
+        expect(dataOut).toContain('"live-copy"');
+
+        // After idle cleanup removes the active head/task, immutable operation
+        // history remains syncable with only its local tombstone stripped.
+        await markedStore.deleteByPattern({
+          graph: ROOT_SWM_META,
+          subject: head,
+        });
+        await markedStore.deleteByPattern({
+          graph: ROOT_SWM_META,
+          subject: cleanupTask,
+        });
+        const afterCleanup = await markedCap.invoke({
+          contextGraphId: CG_ID,
+          syncSessionId: `finalized-cleanup-drained-${sharedMemoryTtlMs}`,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+        expect(afterCleanup).toContain(op);
+        expectNoLocalGcLeak(afterCleanup);
+        await markedStore.close();
+      },
+    );
+
+    /**
+     * One assertion per predicate, so the three entries in the local-cleanup
+     * filter are pinned INDEPENDENTLY.
+     *
+     * The test above asserts all three inside one case, which proves none of
+     * them leaks but cannot show that the coverage discriminates: every
+     * single-predicate mutant kills exactly the same two cases, so an identical
+     * kill set is equally consistent with one assertion doing all the work.
+     * Splitting per predicate makes the kill sets differ — dropping
+     * `finalizedSwmCleanupMarkedAt` from the filter reddens only the markedAt
+     * rows, and likewise for the other two.
+     *
+     * Seeded on the OPERATION subject deliberately. The subject-level
+     * `FILTER NOT EXISTS { ?s a FinalizedSwmCleanupTask }` removes whole task
+     * subjects, so a predicate placed there is stripped whatever the predicate
+     * list says, and the assertion would hold with the entry deleted.
+     */
+    it.each([
+      ['finalizedSwmCleanupRoot', 0],
+      ['finalizedSwmCleanupMarkedAt', 0],
+      ['finalizedSwmCleanupHeadFingerprint', 0],
+      ['finalizedSwmCleanupRoot', 5_000],
+      ['finalizedSwmCleanupMarkedAt', 5_000],
+      ['finalizedSwmCleanupHeadFingerprint', 5_000],
+    ] as const)(
+      'never advertises the %s local cleanup predicate on a served subject (ttl=%s)',
+      async (leakedPredicate, sharedMemoryTtlMs) => {
+        const store = new OxigraphStore();
+        const publishedAt = new Date(Date.now() - 1_000).toISOString();
+        const ual = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ad/11';
+        const opId = 'per-predicate-leak';
+        const op = `urn:dkg:share:${CG_ID}:${opId}`;
+        const assertionGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ad/11`;
+        const rootEntity = 'urn:swm:per-predicate:root';
+        await store.insert([
+          { graph: ROOT_SWM_META, subject: op, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}rootEntity`, object: rootEntity },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}contentScopeVersion`, object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}kaUal`, object: ual },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}assertionVersion`, object: '"11"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}shareOperationId`, object: `"${opId}"` },
+          { graph: ROOT_SWM_META, subject: op, predicate: `${DKG_NS}${leakedPredicate}`, object: `"local-only-${leakedPredicate}"` },
+          { graph: assertionGraph, subject: rootEntity, predicate: 'http://schema.org/name', object: '"served-payload"' },
+        ]);
+        const cap = captureHandler();
+        registerSyncHandler({
+          register: cap.register,
+          protocolSync: '/origintrail/dkg/sync/1.0.0',
+          syncDeniedResponse: 'sync-denied',
+          syncPageSize: 5000,
+          sharedMemoryTtlMs,
+          store,
+          peerId: 'self-peer',
+          parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+          authorizeSyncRequest: async () => true,
+          logWarn: noopLog,
+          logDebug: noopLog,
+        });
+
+        const out = await cap.invoke({
+          contextGraphId: CG_ID,
+          offset: 0,
+          limit: 5000,
+          includeSharedMemory: true,
+          phase: 'meta',
+        });
+
+        // Positive first: the subject IS served, so absence of the predicate
+        // cannot be explained by the whole subject being filtered out.
+        expect(out).toContain(op);
+        expect(out).toContain(`${DKG_NS}shareOperationId`);
+        expect(out).not.toContain(leakedPredicate);
+        expect(out).not.toContain(`local-only-${leakedPredicate}`);
+        await store.close();
+      },
+    );
   });
 
   // Codex review on #885 — URI shape alone is NOT a sufficient CG

@@ -31,22 +31,36 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
   resolveKnowledgeAssetWorkspaceHead,
+  swmKaWriteLockKey,
+  withKeyedLocks,
   workspacePublicQuadsDigest,
+  type KnowledgeAssetWorkspaceHead,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import {
+  createSharedMemorySnapshotMaterializer,
+  replaceGraphScopedSwmHeadMetadata,
+} from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import {
+  FinalizationHandler,
+  FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+  FINALIZED_SWM_CLEANUP_TASK_TYPE,
+} from '../src/finalization-handler.js';
 
 const CG = 'ws00-materializer-real-store';
 const WS_META = contextGraphWorkspaceMetaGraphUri(CG);
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const UAL = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/9';
+const FINALIZED_ROOT = `"0x${'11'.repeat(32)}"`;
 const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
 
 class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
@@ -116,6 +130,7 @@ function materializerFor(store: TripleStore) {
     store,
     writeLocks: new Map<string, Promise<void>>(),
     invalidateListContextGraphsCache: () => { invalidations += 1; },
+    insertReplacementMetadata: (quads) => store.insert([...quads]),
   });
   return { materializer, invalidations: () => invalidations };
 }
@@ -130,6 +145,19 @@ async function distinctObjects(store: TripleStore, graph: string, subject: strin
   );
   if (result.type !== 'bindings') throw new Error(`unexpected ${result.type}`);
   return result.bindings.map((row) => String(row['o'])).sort();
+}
+
+async function distinctSubjects(
+  store: TripleStore,
+  graph: string,
+  predicate: string,
+  object: string,
+): Promise<string[]> {
+  const result = await store.query(
+    `SELECT DISTINCT ?s WHERE { GRAPH <${graph}> { ?s <${predicate}> <${object}> } }`,
+  );
+  if (result.type !== 'bindings') throw new Error(`unexpected ${result.type}`);
+  return result.bindings.map((row) => String(row['s'])).sort();
 }
 
 describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', () => {
@@ -199,7 +227,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
   });
 
   describe('replaceHeadMetadata', () => {
-    it('deletes the head and every referenced operation, sparing unrelated subjects', async () => {
+    it('replaces the head and every referenced operation, sparing unrelated subjects', async () => {
       const store = new OxigraphStore();
       await store.insert([...v1.meta]);
       await store.insert([...v2.meta]);
@@ -214,9 +242,11 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
 
       await materializer.replaceHeadMetadata(CG, descriptorFor(v2));
 
-      expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`)).toEqual([]);
+      expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`))
+        .toEqual([`"2"^^<${XSD_INTEGER}>`]);
       expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`)).toEqual([]);
-      expect(await distinctObjects(store, WS_META, v2.operationSubject, `${DKG}shareOperationId`)).toEqual([]);
+      expect(await distinctObjects(store, WS_META, v2.operationSubject, `${DKG}shareOperationId`))
+        .toEqual([`"${v2.operationId}"`]);
       expect(await distinctObjects(store, WS_META, unrelated.subject, `${DKG}shareOperationId`)).toEqual(['"unrelated"']);
     });
 
@@ -237,9 +267,120 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
 
       await materializer.replaceHeadMetadata(CG, descriptorFor(v1));
 
-      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`)).toEqual([]);
-      expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`)).toEqual([]);
+      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+        .toEqual([`"${v1.operationId}"`]);
+      expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+        .toEqual([`"${v1.operationId}"`]);
       expect(await distinctObjects(store, WS_META, foreignOp, `${DKG}shareOperationId`)).toEqual(['"foreign-op"']);
+    });
+
+    it('preserves the operation tombstone and re-arms GC for the exact lifecycle', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        ...v1.meta,
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+          object: '"2026-07-31T10:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          graph: WS_META,
+        },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+          object: '"2026-07-31T11:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          graph: WS_META,
+        },
+      ]);
+      const { materializer } = materializerFor(store);
+
+      await materializer.withKaWriteLock(CG, undefined, UAL, async () => {
+        const descriptor = descriptorFor(v1);
+        await materializer.ensureFinalizedCleanupTask(CG, descriptor);
+        await materializer.replaceHeadMetadata(CG, descriptor);
+      });
+
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.headSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([FINALIZED_ROOT]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+      )).toEqual([
+        '"2026-07-31T10:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+      ]);
+      const tasks = await distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      );
+      expect(tasks).toHaveLength(1);
+      expect(await distinctObjects(store, WS_META, tasks[0]!, `${DKG}kaUal`)).toEqual([UAL]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        tasks[0]!,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([FINALIZED_ROOT]);
+    });
+
+    it('drops the old finalized-cleanup token when synchronized metadata is a newer lifecycle', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        ...v1.meta,
+        {
+          subject: v1.headSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+      ]);
+      const { materializer } = materializerFor(store);
+
+      await materializer.withKaWriteLock(CG, undefined, UAL, () =>
+        materializer.replaceHeadMetadata(CG, descriptorFor(v2)));
+
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v2.headSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v1.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
+      expect(await distinctObjects(
+        store,
+        WS_META,
+        v2.operationSubject,
+        FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+      )).toEqual([]);
     });
   });
 
@@ -362,5 +503,294 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(again.failedPhases).toBe(0);
       expect(h.replaceCalls()).toBe(1);
     });
+
+    it('lets a late snapshot restore temporarily and re-arms the independent GC task', async () => {
+      const store = new OxigraphStore();
+      await store.insert([
+        ...v1.meta,
+        {
+          subject: v1.operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+      ]);
+      const h = realHarness(store, v1);
+
+      const first = await h.run();
+      expect(first.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+      expect(await distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      )).toHaveLength(1);
+
+      // A repeated snapshot is a no-op because content now matches; it does not
+      // create duplicate tasks or add any cleanup work to the sync path.
+      const again = await h.run();
+      expect(again.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(1);
+      expect(await distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      )).toHaveLength(1);
+    });
+
+    /**
+     * The re-arm invariant, pinned on EVERY decision path — not just the two a
+     * happy-path catch-up happens to take.
+     *
+     * `runSharedMemorySync` reaches four distinct outcomes inside the per-KA
+     * write lock, and only two of them call `replaceHeadMetadata` (which re-arms
+     * the GC task from the tombstone read it already performs). The other two
+     * write nothing at all and must re-arm via `ensureFinalizedCleanupTask`.
+     * Covering only the writing paths lets the whole gate be removed — the ASK
+     * can be forced to `false`, or either explicit call deleted — while a
+     * happy-path suite stays green and a finalized SWM copy is resurrected with
+     * no GC task to collect it. That is the exact resurrection this work exists
+     * to prevent, so each path is asserted on its own.
+     *
+     * The negative half matters just as much: a KA that was never finalized must
+     * arm NOTHING, or the GC gains a backlog entry for a live asset.
+     */
+    describe('re-arms the finalized-cleanup GC task on every decision path', () => {
+      const tombstone = (operationSubject: string): Quad[] => [
+        {
+          subject: operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+          object: FINALIZED_ROOT,
+          graph: WS_META,
+        },
+        {
+          subject: operationSubject,
+          predicate: FINALIZED_SWM_CLEANUP_MARKED_AT_PREDICATE,
+          object: '"2026-07-31T10:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          graph: WS_META,
+        },
+      ];
+
+      const armedTasks = (store: TripleStore): Promise<string[]> => distinctSubjects(
+        store,
+        WS_META,
+        'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        FINALIZED_SWM_CLEANUP_TASK_TYPE,
+      );
+
+      /**
+       * Each seed steers the lock body to exactly ONE outcome for a served v1
+       * snapshot. Keep them distinguishable: if two seeds collapsed onto the same
+       * branch the suite would look complete while leaving a path unguarded.
+       */
+      const paths: Record<string, (store: TripleStore) => Promise<void>> = {
+        // Stored head is NEWER than the descriptor: sync must not write.
+        'superseded head': async (store) => {
+          await store.insert([...v2.meta]);
+        },
+        // Content already present, head rows absent: repair via replaceHeadMetadata.
+        'materialized with a missing head': async (store) => {
+          await store.insert([
+            ...v1.meta.filter((quad) => quad.subject !== v1.headSubject),
+            ...inGraph(v1.payload, v1.assertionGraph),
+          ]);
+        },
+        // Content present and head already clean: sync must not write.
+        'materialized with a clean head': async (store) => {
+          await store.insert([...v1.meta, ...inGraph(v1.payload, v1.assertionGraph)]);
+        },
+        // Content absent: full replaceGraph + replaceHeadMetadata.
+        'absent content': async (store) => {
+          await store.insert([...v1.meta]);
+        },
+      };
+
+      for (const [label, seed] of Object.entries(paths)) {
+        it(`arms exactly one task for a finalized operation: ${label}`, async () => {
+          const store = new OxigraphStore();
+          await seed(store);
+          await store.insert(tombstone(v1.operationSubject));
+
+          const summary = await realHarness(store, v1).run();
+
+          expect(summary.failedPhases).toBe(0);
+          const tasks = await armedTasks(store);
+          expect(tasks).toHaveLength(1);
+          // Bound to THIS lifecycle: an arbitrary task subject would satisfy a
+          // bare length check while pointing the GC at the wrong asset.
+          expect(await distinctObjects(store, WS_META, tasks[0]!, `${DKG}kaUal`)).toEqual([UAL]);
+        });
+
+        it(`arms nothing when the operation was never finalized: ${label}`, async () => {
+          const store = new OxigraphStore();
+          await seed(store);
+
+          const summary = await realHarness(store, v1).run();
+
+          expect(summary.failedPhases).toBe(0);
+          expect(await armedTasks(store)).toEqual([]);
+        });
+      }
+    });
+  });
+
+  /**
+   * The cleanup-marker write must serialize against catch-up's replacement of
+   * the SAME operation subject.
+   *
+   * `replaceGraphScopedSwmHeadMetadata` reads the tombstone, deletes the
+   * operation subject, then re-inserts from that snapshot. A marker written
+   * inside that window is destroyed by the delete and never restored, because
+   * the snapshot predates it. The independent task subject survives, so the GC
+   * cleans the lifecycle once and retires the task — and the next catch-up
+   * re-materializes the SWM copy with no tombstone left to re-arm cleanup from.
+   * The finalized copy is then resurrected permanently, which is the exact
+   * failure this component exists to prevent.
+   *
+   * The interleaving is injected rather than raced: a marker write that only
+   * *sometimes* lands in the window is not a proof, and this is precisely the
+   * race that passes ninety-nine runs in a hundred. The marker is started at
+   * the moment catch-up is about to delete the operation subject and given
+   * twenty event-loop turns to complete. Unlocked it finishes inside that
+   * window every time; correctly locked it CANNOT finish, because the lock is
+   * held by the replace itself — so the assertion turns on mutual exclusion,
+   * not on timing.
+   */
+  it('preserves the tombstone when a cleanup marker lands during a head replace', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...v1.meta]);
+    const writeLocks = new Map<string, Promise<void>>();
+    const handler = new FinalizationHandler(store, undefined as never, { writeLocks });
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const expectedHead = {
+      kaUal: UAL,
+      assertionVersion: '1',
+      assertionGraph: v1.assertionGraph,
+      publicQuadsDigest: v1.digest,
+      publicTripleCount: v1.payload.length,
+      privateTripleCount: 0,
+      shareOperationId: v1.operationId,
+      publisherPeerId: 'peer-source',
+      allowedPeers: [],
+    } as unknown as KnowledgeAssetWorkspaceHead;
+
+    let markerStarted = false;
+    let marker: Promise<unknown> | undefined;
+    const realDeleteByPattern = store.deleteByPattern.bind(store);
+    store.deleteByPattern = (async (pattern: Partial<Quad>, options?: unknown) => {
+      if (!markerStarted && pattern.subject === v1.operationSubject) {
+        markerStarted = true;
+        marker = (handler as unknown as {
+          markFinalizedGraphScopedSwmForCleanup(input: unknown): Promise<string>;
+        }).markFinalizedGraphScopedSwmForCleanup({
+          contextGraphId: CG,
+          scope,
+          expectedHead,
+          expectedMerkleRoot: new Uint8Array(32).fill(0xab),
+          ctx,
+        });
+        for (let turn = 0; turn < 20; turn += 1) {
+          await new Promise((resolve) => { setImmediate(resolve); });
+        }
+      }
+      return realDeleteByPattern(pattern, options as never);
+    }) as typeof store.deleteByPattern;
+
+    await withKeyedLocks(writeLocks, [swmKaWriteLockKey(CG, undefined, UAL)], () =>
+      replaceGraphScopedSwmHeadMetadata({
+        store,
+        contextGraphId: CG,
+        descriptor: descriptorFor(v1),
+        sourcePrefix: 'test.replaceHead',
+        insertReplacementMetadata: (quads) => store.insert([...quads]),
+      }));
+    await marker;
+
+    expect(markerStarted).toBe(true);
+    // The tombstone the GC re-arms from must have survived the replace.
+    expect(await distinctObjects(
+      store,
+      WS_META,
+      v1.operationSubject,
+      FINALIZED_SWM_CLEANUP_ROOT_PREDICATE,
+    )).toHaveLength(1);
+    // And the lifecycle itself is still intact, so this is not passing because
+    // the replace silently did nothing.
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual([`"${v1.operationId}"`]);
+  });
+
+  /**
+   * Immutable-snapshot discovery must not let `LIMIT` truncate the CANDIDATE
+   * SET — only the work.
+   *
+   * The discovery query binds every same-version operation and takes
+   * `ORDER BY ?shareId LIMIT 16`. While the triple-count and digest tests ran
+   * in JS on the returned rows, sixteen non-matching operations sorting ahead
+   * of the real one filled the window and the matching snapshot was never
+   * examined. The ordering is deterministic over stable store state, so this is
+   * not a flake that clears on retry: every attempt re-derives the identical
+   * sixteen and strands the same recovery permanently.
+   *
+   * This lives with the materializer suite rather than the finalization suite
+   * on purpose: it is driven directly against the private method with a real
+   * store, needs no chain fixture, and keeps this branch out of a test file
+   * another branch is editing.
+   */
+  it('finds a matching snapshot that sorts past the discovery limit', async () => {
+    const store = new OxigraphStore();
+    const snapshotStore = new MemorySnapshotStore();
+    const version = 4;
+    const scope = createGraphKnowledgeAssetScope(UAL, version);
+    const payload: Quad[] = [
+      { subject: 'urn:late:a', predicate: 'http://schema.org/status', object: '"late-match"', graph: '' },
+      { subject: 'urn:late:b', predicate: 'http://schema.org/status', object: '"late-match"', graph: '' },
+    ];
+    const digest = workspacePublicQuadsDigest(payload);
+    await snapshotStore.putSnapshot({ digest, quads: payload });
+
+    const operationRows = (shareId: string, publicCount: number, quadsDigest: string): Quad[] => {
+      const subject = `urn:dkg:share:${CG}:${shareId}`;
+      return [
+        { subject, predicate: `${DKG}contentScopeVersion`, object: `"2"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject, predicate: `${DKG}kaUal`, object: UAL, graph: WS_META },
+        { subject, predicate: `${DKG}assertionVersion`, object: `"${version}"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject, predicate: `${DKG}shareOperationId`, object: `"${shareId}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publicQuadsDigest`, object: `"${quadsDigest}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publicQuadsCount`, object: `"${publicCount}"^^<${XSD_INTEGER}>`, graph: WS_META },
+        { subject, predicate: `${DKG}publicSnapshotRef`, object: `"${quadsDigest}"`, graph: WS_META },
+      ];
+    };
+
+    // Sixteen decoys that sort BEFORE the real operation and are rejected only
+    // by their triple count — exactly the rows that used to consume the window.
+    for (let index = 0; index < 16; index += 1) {
+      await store.insert(operationRows(
+        `aaa-decoy-${String(index).padStart(2, '0')}`,
+        payload.length + 1,
+        `sha256:decoy-${index}`,
+      ));
+    }
+    await store.insert(operationRows('zzz-real-operation', payload.length, digest));
+
+    const handler = new FinalizationHandler(store, undefined as never, {
+      publicSnapshotStore: snapshotStore,
+    });
+    const verified = await (handler as unknown as {
+      verifyImmutableGraphScopedSnapshot(input: unknown): Promise<{ status: string } | undefined>;
+    }).verifyImmutableGraphScopedSnapshot({
+      contextGraphId: CG,
+      scope,
+      publicTripleCount: payload.length,
+      expectedPublicQuadsDigest: undefined,
+      expectedMerkleRoot: computeFlatKCRootV10(payload, []),
+      ctx,
+    });
+
+    expect(verified?.status).toBe('verified');
   });
 });

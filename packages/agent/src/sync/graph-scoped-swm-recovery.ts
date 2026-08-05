@@ -44,9 +44,13 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly shareOperationId: string;
   readonly publicQuadsDigest: string;
   readonly publicQuadsCount: number;
+  readonly privateMerkleRoot?: string;
+  readonly privateTripleCount: number;
   readonly publicSnapshotRef?: string;
   readonly publicSnapshotGraph?: string;
   readonly publisherPeerId: string;
+  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: readonly string[];
   readonly subGraphName?: string;
   /** Only the active head and its referenced operation, for snapshot fetch. */
   readonly metadataQuads: readonly Quad[];
@@ -222,6 +226,15 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     if (!publisherPeerId) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an empty publisherPeerId`);
     }
+    const accessPolicy = optionalLiteral(operationRows, ACCESS_POLICY, 'accessPolicy')?.trim() as
+      | 'public'
+      | 'ownerOnly'
+      | 'allowList'
+      | undefined;
+    const allowedPeers = distinctObjects(operationRows, ALLOWED_PEER)
+      .map(stripLiteral)
+      .filter(Boolean)
+      .sort();
     descriptors.push({
       metaGraph,
       headSubject,
@@ -232,9 +245,13 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       shareOperationId,
       publicQuadsDigest,
       publicQuadsCount,
+      ...(privateRoot ? { privateMerkleRoot: stripLiteral(privateRoot).toLowerCase() } : {}),
+      privateTripleCount,
       ...(publicSnapshotRef ? { publicSnapshotRef } : {}),
       ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
       publisherPeerId,
+      ...(accessPolicy ? { accessPolicy } : {}),
+      allowedPeers,
       ...(subGraphName ? { subGraphName } : {}),
       metadataQuads: [...headRows, ...operationRows],
     });
