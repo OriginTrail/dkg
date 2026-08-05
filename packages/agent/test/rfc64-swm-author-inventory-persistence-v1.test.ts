@@ -48,6 +48,8 @@ const SCOPE_DIGEST = computeSwmAuthorInventoryScopeDigestV1(SCOPE);
 
 const ROW_A = row('7', 'draft-a', 'share-a', '11', '22');
 const ROW_B = row('8', 'draft-b', 'share-b', '33', '44');
+const ROW_2 = row('2', 'draft-2', 'share-2', '12', '23');
+const ROW_10 = row('10', 'draft-10', 'share-10', '13', '24');
 const MIGRATION_HEAD = `0x${'55'.repeat(32)}` as const;
 const MIGRATION_ROWS = `0x${'66'.repeat(32)}` as const;
 const directories: string[] = [];
@@ -114,6 +116,156 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(
       afterRemoval,
     );
+  });
+
+  it('persists and restarts numeric KA order rather than lexical UAL order', async () => {
+    const directory = temporaryDirectory();
+    let inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+
+    const genesis = snapshot([ROW_2]);
+    inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'upsert', row: ROW_2 },
+      expectedCurrentHeadDigest: null,
+    });
+    const successor = snapshot([ROW_2, ROW_10], genesis);
+    expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: successor,
+      mutation: { kind: 'upsert', row: ROW_10 },
+      expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
+    })).toEqual({ status: 'applied', snapshot: successor });
+
+    inventory.close();
+    foundations.splice(foundations.indexOf(inventory), 1);
+    inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(
+      successor,
+    );
+  });
+
+  for (const commitLanded of [false, true]) {
+    it(`resolves an SWM CAS when the failed COMMIT ${commitLanded ? 'landed' : 'rolled back'}`, () => {
+      const path = join(temporaryDirectory(), `swm-commit-${commitLanded}.sqlite3`);
+      let database = new DatabaseSync(path);
+      database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+      let failNextCommit = true;
+      let commitAttempts = 0;
+      const makeFacade = (): DatabaseSync => commitFaultFacade(database, (sql, exec) => {
+        if (sql.trim().toUpperCase() === 'COMMIT') {
+          commitAttempts += 1;
+          if (failNextCommit) {
+            failNextCommit = false;
+            if (commitLanded) exec(sql);
+            throw new Error(`injected ${commitLanded ? 'post' : 'pre'}-COMMIT failure`);
+          }
+        }
+        exec(sql);
+      });
+      let facade = makeFacade();
+      const reopen = vi.fn((abandoned: DatabaseSync): DatabaseSync => {
+        expect(abandoned).toBe(facade);
+        database.close();
+        database = new DatabaseSync(path);
+        database.exec('PRAGMA foreign_keys = ON');
+        facade = makeFacade();
+        return facade;
+      });
+      const inventory = new CandidateInventoryV1(facade, reopen);
+      try {
+        const genesis = snapshot([ROW_A]);
+        expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+          snapshot: genesis,
+          mutation: { kind: 'upsert', row: ROW_A },
+          expectedCurrentHeadDigest: null,
+        })).toEqual({ status: 'applied', snapshot: genesis });
+        expect(reopen).toHaveBeenCalledOnce();
+        expect(commitAttempts).toBe(commitLanded ? 1 : 2);
+        expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+          snapshot: genesis,
+          mutation: { kind: 'upsert', row: ROW_A },
+          expectedCurrentHeadDigest: null,
+        })).toEqual({ status: 'existing', snapshot: genesis });
+        expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(
+          genesis,
+        );
+        expect(database.prepare(
+          'SELECT count(*) AS count FROM rfc64_swm_author_inventory_heads_v1',
+        ).get()?.count).toBe(1);
+        expect(database.prepare(
+          'SELECT count(*) AS count FROM rfc64_swm_author_inventory_rows_v1',
+        ).get()?.count).toBe(1);
+      } finally {
+        inventory.close();
+        try { database.close(); } catch { /* inventory owns the current handle */ }
+      }
+    });
+  }
+
+  it('fails closed when an indeterminate SWM CAS resolves to a competing valid head', () => {
+    const path = join(temporaryDirectory(), 'swm-commit-conflict.sqlite3');
+    let database = new DatabaseSync(path);
+    database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+    let facade = database;
+    let injectConflict = false;
+    let genesisForConflict: SwmAuthorInventorySnapshotV1 | null = null;
+    const reopen = vi.fn((abandoned: DatabaseSync): DatabaseSync => {
+      expect(abandoned).toBe(facade);
+      database.close();
+      if (injectConflict) {
+        injectConflict = false;
+        const competitorDatabase = new DatabaseSync(path);
+        competitorDatabase.exec('PRAGMA foreign_keys = ON');
+        const competitor = new CandidateInventoryV1(
+          competitorDatabase,
+          () => { throw new Error('competitor must not reopen'); },
+        );
+        try {
+          if (genesisForConflict === null) throw new Error('missing conflict predecessor');
+          competitor.compareAndSwapSwmAuthorInventoryV1({
+            snapshot: snapshot([ROW_A, ROW_10], genesisForConflict),
+            mutation: { kind: 'upsert', row: ROW_10 },
+            expectedCurrentHeadDigest:
+              genesisForConflict.head.objectDigest as `0x${string}`,
+          });
+        } finally {
+          competitor.close();
+        }
+      }
+      database = new DatabaseSync(path);
+      database.exec('PRAGMA foreign_keys = ON');
+      facade = commitFaultFacade(database, (sql, exec) => exec(sql));
+      return facade;
+    });
+    facade = commitFaultFacade(database, (sql, exec) => {
+      if (injectConflict && sql.trim().toUpperCase() === 'COMMIT') {
+        throw new Error('injected pre-COMMIT conflict window');
+      }
+      exec(sql);
+    });
+    const inventory = new CandidateInventoryV1(facade, reopen);
+    try {
+      const genesis = snapshot([ROW_A]);
+      genesisForConflict = genesis;
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis,
+        mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      });
+      const requested = snapshot([ROW_A, ROW_B], genesis);
+      injectConflict = true;
+      expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: requested,
+        mutation: { kind: 'upsert', row: ROW_B },
+        expectedCurrentHeadDigest: genesis.head.objectDigest as `0x${string}`,
+      })).toThrowError(expect.objectContaining({ code: 'swm-inventory-cas-conflict' }));
+      expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)?.rows)
+        .toEqual([ROW_A, ROW_10]);
+    } finally {
+      inventory.close();
+      try { database.close(); } catch { /* inventory owns the current handle */ }
+    }
   });
 
   it('rejects a signed head whose exact rows are not the requested one-row mutation', async () => {
@@ -528,6 +680,22 @@ function latencyFaultFacade(
             },
           } as unknown as StatementSync;
         };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function commitFaultFacade(
+  database: DatabaseSync,
+  execOverride: (sql: string, exec: (sql: string) => void) => void,
+): DatabaseSync {
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === 'exec') {
+        const exec = target.exec.bind(target);
+        return (sql: string): void => execOverride(sql, exec);
       }
       const value = Reflect.get(target, property, target) as unknown;
       return typeof value === 'function' ? value.bind(target) : value;

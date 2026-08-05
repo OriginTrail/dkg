@@ -5,6 +5,7 @@ import {
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
+  compareSwmAuthorInventoryRowsV1,
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
@@ -110,7 +111,11 @@ export class SwmAuthorInventoryPersistenceV1 {
       ) {
         throw new Error('stored head columns do not match the signed envelope');
       }
-      const rows = Object.freeze(storedRows.map(decodeStoredSwmAuthorInventoryRowV1));
+      const rows = Object.freeze(
+        storedRows
+          .map(decodeStoredSwmAuthorInventoryRowV1)
+          .sort(compareSwmAuthorInventoryRowsV1),
+      );
       const snapshot = Object.freeze({ head, rows });
       assertSwmAuthorInventorySnapshotBindingV1(snapshot);
       const expectedHead = headRow.expected_head_digest === null

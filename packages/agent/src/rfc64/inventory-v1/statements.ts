@@ -281,8 +281,7 @@ SELECT ka_ual, assertion_coordinate, assertion_version_u64be,
        expires_at_u64be
 FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
-  AND author_address = :author
-ORDER BY ka_ual;`,
+  AND author_address = :author;`,
 
   insertSwmAuthorHead: `
 INSERT INTO rfc64_swm_author_inventory_heads_v1 (

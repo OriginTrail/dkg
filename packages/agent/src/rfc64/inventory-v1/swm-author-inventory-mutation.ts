@@ -1,6 +1,7 @@
 import {
   assertCanonicalDeterministicUalV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
+  compareSwmAuthorInventoryRowsV1,
   parseCanonicalSwmAuthorInventoryRowsV1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
@@ -101,9 +102,7 @@ export function applySwmAuthorInventoryMutationV1(
 function canonicalRows(
   rows: readonly SwmAuthorInventoryRowV1[],
 ): readonly SwmAuthorInventoryRowV1[] {
-  const ordered = [...rows].sort((left, right) => (
-    left.kaUal < right.kaUal ? -1 : left.kaUal > right.kaUal ? 1 : 0
-  ));
+  const ordered = [...rows].sort(compareSwmAuthorInventoryRowsV1);
   return parseCanonicalSwmAuthorInventoryRowsV1(
     canonicalizeSwmAuthorInventoryRowsBytesV1(ordered),
   );
