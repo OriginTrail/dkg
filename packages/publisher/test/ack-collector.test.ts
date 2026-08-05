@@ -665,6 +665,48 @@ describe('ACKCollector', () => {
     }
   });
 
+  it('does not retry a peer that cannot negotiate the required ACK protocol', async () => {
+    const callsByPeer = new Map<string, number>();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sleep: async () => {},
+      sendP2P: async (peerId, protocol) => {
+        callsByPeer.set(peerId, (callsByPeer.get(peerId) ?? 0) + 1);
+        throw new Error(`Protocol selection failed - could not negotiate ${protocol}`);
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect({
+      merkleRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
+      ackMode: { kind: 'public' },
+    })).rejects.toMatchObject({
+      peerOutcomes: expect.arrayContaining([
+        expect.objectContaining({
+          dialOk: true,
+          protocolSupported: false,
+          reason: 'PROTOCOL_UNSUPPORTED',
+        }),
+      ]),
+    });
+
+    for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
+      expect(callsByPeer.get(peerId)).toBe(1);
+    }
+  });
+
   // PR #896 review (🟡): the widened #887 transient-decline budget (~31s)
   // must NOT keep a losing peer dialing after quorum has already formed
   // elsewhere. A peer still mid-retry when the last needed ACK lands must

@@ -71,6 +71,7 @@ import {
 } from './finalization-lifecycle-logger.js';
 import type { FinalizationRuntime } from './finalization-runtime.js';
 import {
+  FinalizationRecoveryCapacityError,
   FinalizationRecovery,
   type FinalizationRecoveryApplyOutcome,
   type FinalizationRecoveryInvalidationOutcome,
@@ -488,7 +489,10 @@ export class FinalizationHandler {
       try {
         if (await this.recovery.processLive(liveAdmission.input)) return;
       } catch (error) {
-        if (error instanceof StoreSchedulerBusyError) throw error;
+        if (
+          error instanceof StoreSchedulerBusyError
+          || error instanceof FinalizationRecoveryCapacityError
+        ) throw error;
         const ctx = candidate.msg.operationId
           ? createOperationContext('gossip', candidate.msg.operationId)
           : createOperationContext('gossip');

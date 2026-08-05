@@ -36,6 +36,22 @@ export interface FinalizationRecoveryLiveInput {
   candidate: ParsedGraphScopedFinalization;
 }
 
+export class FinalizationRecoveryCapacityError extends Error {
+  readonly code = 'FINALIZATION_RECOVERY_CAPACITY';
+  readonly retryable = true;
+
+  constructor(readonly ual: string) {
+    super(`Finalization recovery durable capacity exhausted for ${ual}`);
+    this.name = 'FinalizationRecoveryCapacityError';
+  }
+}
+
+type FinalizationRecoveryReceiveOutcome =
+  | { status: 'entry'; entry: FinalizationRecoveryEntry }
+  | { status: 'pending' }
+  | { status: 'capacity' }
+  | { status: 'rejected' };
+
 export type FinalizationRecoveryLiveAdmission =
   | {
     status: 'admitted';
@@ -298,13 +314,20 @@ export class FinalizationRecovery<
       txHash: input.candidate.msg.txHash,
     });
     return this.withEntryLock(key, async () => {
-      let entry = await this.receive(input);
-      // A configured inbox fails closed: capacity, conflict, corruption, and
-      // write failures leave Oxigraph untouched.
-      if (!entry) return true;
+      const received = await this.receiveOutcome(input);
+      if (received.status === 'pending') return true;
+      if (received.status === 'capacity') {
+        throw new FinalizationRecoveryCapacityError(input.candidate.scope.ual);
+      }
+      // Conflicts, corruption, and write failures fail closed and leave
+      // Oxigraph untouched. Capacity is handled separately above because it is
+      // retryable and must never look successfully consumed.
+      if (received.status === 'rejected') return true;
+      let { entry } = received;
       if (entry.state === 'SETTLED') {
-        entry = await this.revalidateSettled(input, entry);
-        if (!entry) return true;
+        const revalidated = await this.revalidateSettled(input, entry);
+        if (!revalidated) return true;
+        entry = revalidated;
       }
       // Terminal rows remain audited and inert until retention removes them.
       // In particular, duplicate gossip must not revive an entry that exhausted
@@ -354,6 +377,17 @@ export class FinalizationRecovery<
     if (!store) return 0;
     try {
       if (!this.chain || this.chain.chainId === 'none') return 0;
+      let promoted = 0;
+      if (store.promotePending) {
+        try {
+          promoted = await store.promotePending(limit);
+        } catch (error) {
+          this.log.warn(
+            `Finalization recovery deferred-inbox promotion failed: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       let entries: FinalizationRecoveryEntry[];
       try {
         entries = await store.listDue(limit);
@@ -382,7 +416,7 @@ export class FinalizationRecovery<
         }
         getMetrics().finalizationRecoveryAttemptsTotal?.add(1, { outcome });
       }
-      return entries.length;
+      return Math.max(entries.length, promoted);
     } finally {
       await this.recordDueMetrics(store);
     }
@@ -394,6 +428,7 @@ export class FinalizationRecovery<
       const metrics = getMetrics();
       metrics.finalizationRecoveryDueEntries?.record(health.dueEntries);
       metrics.finalizationRecoveryOldestDueAgeMs?.record(health.oldestDueAgeMs ?? 0);
+      metrics.finalizationRecoveryDeferredEntries?.record(health.deferredEntries ?? 0);
     } catch (error) {
       this.log.warn(
         `Finalization recovery metrics snapshot failed: `
@@ -540,8 +575,15 @@ export class FinalizationRecovery<
   async receive(
     input: FinalizationRecoveryLiveInput,
   ): Promise<FinalizationRecoveryEntry | undefined> {
+    const outcome = await this.receiveOutcome(input);
+    return outcome.status === 'entry' ? outcome.entry : undefined;
+  }
+
+  private async receiveOutcome(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<FinalizationRecoveryReceiveOutcome> {
     const store = this.getStore();
-    if (!store) return undefined;
+    if (!store) return { status: 'rejected' };
     const { candidate } = input;
     const key = finalizationRecoveryEntryKey({
       chainId: this.chain?.chainId ?? 'none',
@@ -578,7 +620,8 @@ export class FinalizationRecovery<
             `Finalization recovery inbox rejected changed immutable envelope for `
               + `${candidate.scope.ual}`,
           );
-          return undefined;
+          getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'conflict' });
+          return { status: 'rejected' };
         }
         if (
           result.entry.state === 'RECEIVED'
@@ -586,20 +629,37 @@ export class FinalizationRecovery<
           || result.entry.state === 'REORGED'
           || result.entry.state === 'SETTLED'
         ) {
-          return result.entry;
+          getMetrics().finalizationRecoveryAdmissionTotal?.add(1, {
+            outcome: result.status,
+          });
+          return { status: 'entry', entry: result.entry };
         }
-        return undefined;
+        getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'conflict' });
+        return { status: 'rejected' };
+      }
+      if (result.status === 'pending') {
+        getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'deferred' });
+        this.log.info(
+          `Finalization recovery deferred ${candidate.scope.ual} until live inbox capacity is available`,
+        );
+        return { status: 'pending' };
       }
       this.log.warn(
         `Finalization recovery inbox rejected ${candidate.scope.ual}: ${result.status}`,
       );
-      return undefined;
+      getMetrics().finalizationRecoveryAdmissionTotal?.add(1, {
+        outcome: result.status,
+      });
+      return result.status === 'capacity'
+        ? { status: 'capacity' }
+        : { status: 'rejected' };
     } catch (error) {
       this.log.warn(
         `Finalization recovery inbox write failed for ${candidate.scope.ual}: `
           + `${error instanceof Error ? error.message : String(error)}`,
       );
-      return undefined;
+      getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'write-failure' });
+      return { status: 'rejected' };
     }
   }
 

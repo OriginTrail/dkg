@@ -135,6 +135,21 @@ export interface ACKCollectorParams {
 }
 
 /**
+ * libp2p negotiation failures are capability verdicts, not transient network
+ * failures. Retrying the same peer and protocol cannot succeed until that peer
+ * upgrades or re-registers the handler, so the current ACK round should settle
+ * that candidate immediately and let quorum/fallback logic decide.
+ */
+export function isStorageACKProtocolNegotiationFailure(
+  error: unknown,
+  protocol: string,
+): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('Protocol selection failed')
+    && message.includes(`could not negotiate ${protocol}`);
+}
+
+/**
  * Default ACK quorum when the chain's `minimumRequiredSignatures()` is
  * unavailable. Exported so peer-pool providers (see
  * `DKGAgent.getACKCandidatePeers`) can size their candidate pools to the
@@ -822,6 +837,14 @@ export class ACKCollector {
         const decline = declines.get(peerId);
         if (decline) {
           const code = decline.code;
+          if (code === 'PROTOCOL_UNSUPPORTED') {
+            return {
+              peerId,
+              dialOk: true,
+              protocolSupported: false,
+              reason: 'PROTOCOL_UNSUPPORTED',
+            };
+          }
           const reason = code === 'TRANSPORT_ERROR'
             ? 'TRANSPORT_ERROR'
             : `STORAGE_ACK_DECLINE:${code}`;
@@ -1091,6 +1114,18 @@ export class ACKCollector {
           };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (isStorageACKProtocolNegotiationFailure(err, ackProtocolId)) {
+            getMetrics().ackPeerTotal.add(1, { result: 'protocol_unsupported' });
+            declines.set(peerId, {
+              code: 'PROTOCOL_UNSUPPORTED',
+              message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
+            });
+            log(
+              `[ACKCollector] Peer ${peerId.slice(-8)} does not negotiate ${ackProtocolId}; `
+                + 'settling it without transport retries',
+            );
+            return null;
+          }
           transportAttempts += 1;
           getMetrics().ackPeerTotal.add(1, { result: 'transport_error' });
           if (transportAttempts < MAX_RETRIES) {

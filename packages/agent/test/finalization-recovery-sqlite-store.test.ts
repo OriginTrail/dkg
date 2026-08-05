@@ -120,6 +120,38 @@ setInterval(() => {}, 60_000);
 }
 
 describe('SQLite finalization recovery store', () => {
+  it('migrates a v1 inbox in place without losing accepted entries', async () => {
+    const directory = await temporaryDirectory();
+    const databasePath = join(directory, FINALIZATION_INBOX_DATABASE_FILENAME);
+    try {
+      const initial = await openSqliteFinalizationRecoveryStore(directory);
+      await initial.receive(received());
+      await initial.close();
+
+      const legacy = new DatabaseSync(databasePath);
+      legacy.exec(`
+        DROP INDEX finalization_pending_peer_v2;
+        DROP INDEX finalization_pending_graph_v2;
+        DROP INDEX finalization_pending_time_v2;
+        DROP TABLE finalization_pending_v2;
+        PRAGMA user_version = 1;
+      `);
+      legacy.close();
+
+      const migrated = await openSqliteFinalizationRecoveryStore(directory);
+      expect(await migrated.list()).toMatchObject([{ key: 'entry-1', state: 'RECEIVED' }]);
+      const schema = new DatabaseSync(databasePath, { readOnly: true });
+      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(2);
+      expect(schema.prepare(
+        "SELECT name FROM sqlite_schema WHERE name = 'finalization_pending_v2'",
+      ).get()?.name).toBe('finalization_pending_v2');
+      schema.close();
+      await migrated.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lists only due live work in bounded oldest-first batches', async () => {
     const directory = await temporaryDirectory();
     try {
@@ -594,7 +626,7 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('keeps VERIFIED evidence when live capacity is full', async () => {
+  it('durably defers a new envelope when live capacity is full', async () => {
     const directory = await temporaryDirectory();
     try {
       const store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
@@ -603,13 +635,128 @@ describe('SQLite finalization recovery store', () => {
       await expect(store.receive(received({
         key: 'entry-2',
         txHash: `0x${'ef'.repeat(32)}`,
-      }))).resolves.toEqual({ status: 'capacity' });
+      }))).resolves.toEqual({ status: 'pending' });
       expect(await store.list()).toMatchObject([{ key: 'entry-1', state: 'VERIFIED' }]);
       expect(await store.health()).toMatchObject({
         available: true,
         ready: false,
         degradedReason: 'capacity-exhausted',
+        deferredEntries: 1,
       });
+
+      await store.transition('entry-1', 0, 'SETTLED');
+      await expect(store.promotePending(16)).resolves.toBe(1);
+      expect(await store.list()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: 'entry-2', state: 'RECEIVED' }),
+      ]));
+      expect(await store.health()).toMatchObject({ deferredEntries: 0 });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the durable deferred lane bounded and reports hard exhaustion', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        maxDeferredEntries: 1,
+        maxDeferredPerPeer: 1,
+        maxDeferredPerContextGraph: 1,
+      });
+      await store.receive(received());
+      await expect(store.receive(received({
+        key: 'entry-2',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      await expect(store.receive(received({
+        key: 'entry-3',
+        txHash: `0x${'12'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'capacity' });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a quota-blocked oldest graph starve a later eligible graph', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 2,
+        maxPerPeer: 8,
+        maxPerContextGraph: 1,
+      });
+      await store.receive(received({
+        key: 'live-graph-a',
+        contextGraphId: 'graph-a',
+        txHash: `0x${'a1'.repeat(32)}`,
+      }));
+      await store.receive(received({
+        key: 'live-graph-x',
+        contextGraphId: 'graph-x',
+        txHash: `0x${'a2'.repeat(32)}`,
+      }));
+      await expect(store.receive(received({
+        key: 'pending-graph-a',
+        contextGraphId: 'graph-a',
+        txHash: `0x${'b1'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      await expect(store.receive(received({
+        key: 'pending-graph-b',
+        contextGraphId: 'graph-b',
+        txHash: `0x${'b2'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+
+      await store.transition('live-graph-x', 0, 'SUPERSEDED');
+      await expect(store.promotePending(1)).resolves.toBe(1);
+      expect(await store.get('pending-graph-b')).toMatchObject({
+        key: 'pending-graph-b',
+        state: 'RECEIVED',
+      });
+      expect(await store.get('pending-graph-a')).toBeUndefined();
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the 129th envelope durably and promotes it after the 128-entry backlog drains', async () => {
+    const directory = await temporaryDirectory();
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 128,
+        maxPerPeer: 128,
+        maxPerContextGraph: 128,
+      });
+      for (let index = 0; index < 128; index += 1) {
+        await expect(store.receive(received({
+          key: `entry-${index}`,
+          txHash: `0x${index.toString(16).padStart(64, '0')}`,
+          kaId: String(index),
+        }))).resolves.toMatchObject({ status: 'inserted' });
+      }
+      const overflow = received({
+        key: 'entry-128',
+        txHash: `0x${'ff'.repeat(32)}`,
+        kaId: '128',
+      });
+      await expect(store.receive(overflow)).resolves.toEqual({ status: 'pending' });
+      expect(await store.health()).toMatchObject({
+        deferredEntries: 1,
+        dueEntries: 128,
+      });
+
+      await store.transition('entry-0', 0, 'SUPERSEDED');
+      await expect(store.promotePending(16)).resolves.toBe(1);
+      expect(await store.get('entry-128')).toMatchObject({
+        state: 'RECEIVED',
+        kaId: '128',
+      });
+      expect(await store.health()).toMatchObject({ deferredEntries: 0 });
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
