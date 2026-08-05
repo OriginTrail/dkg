@@ -64,6 +64,65 @@ interface StoredSwmAuthorInventoryCommitV1 {
   readonly canonicalMutation: Uint8Array;
 }
 
+type SwmAuthorInventoryCommitPlanV1 =
+  | Readonly<{
+      state: 'committed';
+      current: StoredSwmAuthorInventoryCommitV1;
+    }>
+  | Readonly<{ state: 'not-committed' }>
+  | Readonly<{
+      state: 'conflict';
+      actual: Digest32V1 | null;
+      expected: Digest32V1 | null;
+      reason: 'predecessor' | 'same-head-state' | 'same-head-replay';
+    }>
+  | Readonly<{
+      state: 'apply-writes';
+      current: StoredSwmAuthorInventoryCommitV1 | null;
+    }>;
+
+/** Pure, shared state machine for normal apply and indeterminate-COMMIT recovery. */
+function planSwmAuthorInventoryCommitV1(
+  current: StoredSwmAuthorInventoryCommitV1 | null,
+  next: PreparedSwmAuthorInventoryCommitV1,
+  phase: 'apply' | 'resolve',
+): SwmAuthorInventoryCommitPlanV1 {
+  const actual = (
+    current?.snapshot.head.objectDigest as Digest32V1 | undefined
+  ) ?? null;
+  const expected = next.expectedHead === null ? null : inputDigestV1(next.expectedHead);
+  if (actual === next.snapshot.head.objectDigest && current !== null) {
+    if (!swmAuthorInventorySnapshotsEqualV1(current.snapshot, next.snapshot)) {
+      return Object.freeze({
+        state: 'conflict' as const,
+        actual,
+        expected,
+        reason: 'same-head-state' as const,
+      });
+    }
+    if (!swmAuthorInventoryReplayEvidenceEqualV1(current, next)) {
+      return Object.freeze({
+        state: 'conflict' as const,
+        actual,
+        expected,
+        reason: 'same-head-replay' as const,
+      });
+    }
+    return Object.freeze({ state: 'committed' as const, current });
+  }
+  if (actual !== expected) {
+    return Object.freeze({
+      state: 'conflict' as const,
+      actual,
+      expected,
+      reason: 'predecessor' as const,
+    });
+  }
+  return phase === 'apply'
+    ? Object.freeze({ state: 'apply-writes' as const, current })
+    : Object.freeze({ state: 'not-committed' as const });
+}
+
 /**
  * Connection-bound SWM persistence store. Commit planning, canonical mutation
  * semantics, and SQL row encoding live behind focused sibling modules.
@@ -151,26 +210,33 @@ export class SwmAuthorInventoryPersistenceV1 {
   }
 
   apply(next: PreparedSwmAuthorInventoryCommitV1): SwmAuthorInventoryCasResultV1 {
-    const current = this.readStored(next);
-    if (
-      current !== null
-      && current.snapshot.head.objectDigest === next.snapshot.head.objectDigest
-    ) {
-      if (!swmAuthorInventorySnapshotsEqualV1(current.snapshot, next.snapshot)) {
+    const plan = planSwmAuthorInventoryCommitV1(this.readStored(next), next, 'apply');
+    if (plan.state === 'committed') {
+      return Object.freeze({ status: 'existing' as const, snapshot: plan.current.snapshot });
+    }
+    if (plan.state === 'conflict') {
+      if (plan.reason === 'same-head-state') {
         throw this.host.error(
           'swm-inventory-database-corrupt',
           'one SWM inventory head digest resolved to different exact state',
         );
       }
-      if (!swmAuthorInventoryReplayEvidenceEqualV1(current, next)) {
+      if (plan.reason === 'same-head-replay') {
         throw this.host.error(
           'swm-inventory-input',
           'already-current SWM inventory was not produced by the exact requested CAS mutation',
         );
       }
-      return Object.freeze({ status: 'existing' as const, snapshot: current.snapshot });
+      throw this.conflict(plan.actual, plan.expected);
     }
-    this.assertTransition(current?.snapshot ?? null, next);
+    if (plan.state !== 'apply-writes') {
+      throw this.host.error(
+        'swm-inventory-database-corrupt',
+        'normal SWM inventory apply resolved as not committed without a write plan',
+      );
+    }
+    const current = plan.current;
+    this.assertMutationTransition(current?.snapshot ?? null, next);
 
     const headParameters = swmAuthorHeadParametersV1(next);
     if (current === null) {
@@ -223,43 +289,38 @@ export class SwmAuthorInventoryPersistenceV1 {
       }
     }
 
-    const committed = this.readStored(next);
-    if (
-      committed === null
-      || !swmAuthorInventorySnapshotsEqualV1(committed.snapshot, next.snapshot)
-      || !swmAuthorInventoryReplayEvidenceEqualV1(committed, next)
-    ) {
+    const committed = planSwmAuthorInventoryCommitV1(
+      this.readStored(next),
+      next,
+      'resolve',
+    );
+    if (committed.state !== 'committed') {
       throw this.host.error(
         'swm-inventory-database-corrupt',
         'SWM author inventory write did not exact-read as the requested next state',
       );
     }
-    return Object.freeze({ status: 'applied' as const, snapshot: committed.snapshot });
+    return Object.freeze({
+      status: 'applied' as const,
+      snapshot: committed.current.snapshot,
+    });
   }
 
   resolve(next: PreparedSwmAuthorInventoryCommitV1): SwmAuthorInventoryCommitResolutionV1 {
-    const current = this.readStored(next);
-    if (
-      current !== null
-      && current.snapshot.head.objectDigest === next.snapshot.head.objectDigest
-      && swmAuthorInventorySnapshotsEqualV1(current.snapshot, next.snapshot)
-      && swmAuthorInventoryReplayEvidenceEqualV1(current, next)
-    ) return 'committed';
-    const expected = next.expectedHead === null ? null : inputDigestV1(next.expectedHead);
-    if ((current?.snapshot.head.objectDigest ?? null) === expected) return 'not-committed';
-    throw this.conflict(
-      (current?.snapshot.head.objectDigest as Digest32V1 | undefined) ?? null,
-      expected,
+    const plan = planSwmAuthorInventoryCommitV1(this.readStored(next), next, 'resolve');
+    if (plan.state === 'committed') return 'committed';
+    if (plan.state === 'not-committed') return 'not-committed';
+    if (plan.state === 'conflict') throw this.conflict(plan.actual, plan.expected);
+    throw this.host.error(
+      'swm-inventory-database-corrupt',
+      'indeterminate SWM inventory resolution produced an apply-only write plan',
     );
   }
 
-  private assertTransition(
+  private assertMutationTransition(
     current: SwmAuthorInventorySnapshotV1 | null,
     next: PreparedSwmAuthorInventoryCommitV1,
   ): void {
-    const actual = current?.head.objectDigest as Digest32V1 | undefined;
-    const expected = next.expectedHead === null ? null : inputDigestV1(next.expectedHead);
-    if ((actual ?? null) !== expected) throw this.conflict(actual ?? null, expected);
     const nextHead = next.snapshot.head.payload;
     if (current === null) {
       if (nextHead.version !== '0' || nextHead.previousHeadDigest !== null) {
