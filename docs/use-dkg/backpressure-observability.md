@@ -69,6 +69,14 @@ The first registered sources are:
   `normal`, and `background` lanes;
 - `sync-global`: the process-wide sync admission queue and its sync lanes.
 
+The two divide capacity differently, and every lane row names the model it is
+reported under in its `capacityModel` field:
+
+| `capacityModel` | Meaning | Source |
+| --- | --- | --- |
+| `partitioned` | The lane holds a private queue allocation and fills independently of its neighbours. Lane allocations add up to the scheduler's capacity. | `store` |
+| `shared` | Every lane draws on one queue and one concurrency pool. The lane's `queueLimit`/`inflightLimit` **are** that pool's ceilings — the same number on every lane, never to be summed — and `queued` is only this lane's share of a depth the whole pool contributes to. `totals.queued` is that depth. | `sync-global` |
+
 ### Attributing `sync-global` pressure to a trigger
 
 The `lane` of a `sync-global` entry says *what kind of work* is queued
@@ -106,9 +114,16 @@ closed sets, so the label space stays bounded (5 × 7) and, as before, no Contex
 Graph id or peer id ever reaches a metric, log line, or diagnostics response —
 an unrecognized source is clamped to `unspecified`.
 
+The sync **responder** limiter is a separate queue and is not instrumented, so
+its `pre_authorization` and `responder` lanes appear in no snapshot, metric, or
+log line. `sync-global` covers requester-side admission only.
+
 Other schedulers can extend `ObservableScheduler` and call its protected
 lifecycle methods at their existing admission boundaries. They keep complete
-ownership of policy.
+ownership of policy, and declare how their lanes divide capacity through
+`capacityModel` — a scheduler that declares nothing is `partitioned`, and a lane
+of a partitioned scheduler that publishes no limit of its own is simply not
+classified on depth.
 
 ## Pressure states
 
@@ -122,6 +137,17 @@ ownership of policy.
 State precedence is `stalled` > `saturated` > `degraded` > `healthy`. A recent
 rejection remains visible for 60 seconds so a short full-queue event is not
 missed between monitor samples.
+
+"A queue is full" means the queue that lane's work is actually waiting behind.
+For a `partitioned` lane that is its own allocation. For a `shared` lane it is
+the pool, so **every lane holding queued work reports the pool's pressure** —
+one lane at 1 of a full pool of 4 is `saturated`, because the next admission in
+that lane is the one that gets rejected. A lane with nothing queued stays
+`healthy` however full the pool is: it is not being held back, and per-lane
+`queued` and `queuedOperations` remain the attribution signal for who is. On a
+shared pool the log line carries `poolQueued` beside `queued` for this reason,
+and because the scheduler's own `lane: "all"` line is emitted only while the
+rollup outranks every lane — which, on an all-shared scheduler, it never does.
 
 These states describe evidence, not root cause. For example, a stalled store
 operation can be caused by Blazegraph, Oxigraph, disk, or a caller that never
