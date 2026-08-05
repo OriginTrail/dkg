@@ -20,6 +20,7 @@ import {
   parseGraphScopedAssertionSealCandidate,
   type AssertionCoordinateV1,
   type AssertionSeal,
+  type AuthorLaneScopeV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
@@ -133,7 +134,8 @@ interface ResolvedRfc64AcceptedPublicRootLaneV1 {
   readonly networkId: NetworkIdV1;
   readonly service: Rfc64PublicCatalogServiceV1;
   readonly autoPublishConfig: Readonly<Rfc64PublicCatalogAutoPublishConfigV1>;
-  readonly scopeBase: Readonly<Omit<SwmAuthorInventoryScopeV1, 'authorAddress'>>;
+  /** Domain-neutral accepted public-root lane shared by catalog and SWM builders. */
+  readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
 export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
