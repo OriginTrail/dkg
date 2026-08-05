@@ -697,7 +697,14 @@ function assertCompleteNQuads(text: string): void {
   const trimmed = text.trim();
   if (trimmed.length === 0) return;
 
-  const javaError = /^(?:[\w.$]+\.)?(?:\w*Exception|\w*Error)\b|\bat com\.bigdata\./m.exec(trimmed);
+  // Both alternatives are line-start anchored on purpose. The engine appends
+  // its failure text as standalone lines ("java.util.…Exception", "\tat
+  // com.bigdata.…"), while the same words inside a *stored literal* sit
+  // mid-line: n-quads forbids raw newlines in literals (they arrive as the
+  // two-character escape \n), and a valid statement line always starts with an
+  // IRI or blank node. An unanchored match here would let user-published
+  // content containing a Java stack trace poison every read of its graph.
+  const javaError = /^(?:[\w.$]+\.)?(?:\w*Exception|\w*Error)\b|^\s*at com\.bigdata\./m.exec(trimmed);
   if (javaError) {
     throw new Error(
       'Blazegraph returned a truncated CONSTRUCT result: the response body carries an engine error '
@@ -706,13 +713,20 @@ function assertCompleteNQuads(text: string): void {
     );
   }
 
-  const lastLine = trimmed.slice(trimmed.lastIndexOf('\n') + 1).trim();
-  if (!lastLine.endsWith('.')) {
-    throw new Error(
-      'Blazegraph returned a truncated CONSTRUCT result: the final statement is incomplete '
-      + `(${JSON.stringify(lastLine.slice(-120))}). Treating this as a failure rather than as a `
-      + 'partial result — see assertCompleteNQuads.',
-    );
+  // Find the final *statement*, skipping blank and comment-only lines — a body
+  // that ends with a comment is complete, not truncated.
+  const lines = trimmed.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (line.length === 0 || line.startsWith('#')) continue;
+    if (!line.endsWith('.')) {
+      throw new Error(
+        'Blazegraph returned a truncated CONSTRUCT result: the final statement is incomplete '
+        + `(${JSON.stringify(line.slice(-120))}). Treating this as a failure rather than as a `
+        + 'partial result — see assertCompleteNQuads.',
+      );
+    }
+    break;
   }
 }
 

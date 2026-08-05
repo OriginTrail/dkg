@@ -300,6 +300,24 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       .rejects.toThrow(/truncated CONSTRUCT result/i);
   });
 
+  it('does not misread a trailing comment or an error-like literal as truncation', async () => {
+    // Two false positives a narrower guard must not have: (1) a body whose
+    // final line is a comment is complete, not cut short; (2) a STORED literal
+    // containing Java-stack-trace text sits mid-line inside its quad (n-quads
+    // forbids raw newlines in literals), so the line-start-anchored error scan
+    // must not fire on it. User-published content is arbitrary — a KA holding
+    // error logs must not poison every read of its graph.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> "logs: at com.bigdata.Journal.run TimeoutException" <http://ctx/1> .\n'
+      + '# end of results\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const r = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(r.type).toBe('quads');
+    expect((r as { quads: unknown[] }).quads).toHaveLength(1);
+  });
+
   it('still accepts complete CONSTRUCT bodies, including empty results and comments', async () => {
     // The guard must not start rejecting shapes the tolerant parser has
     // always accepted, or it becomes a worse bug than the one it fixes.
