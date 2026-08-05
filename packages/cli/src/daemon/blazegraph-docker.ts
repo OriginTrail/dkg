@@ -262,10 +262,45 @@ async function findFreePort(
   );
 }
 
+/**
+ * Journal location *inside* the container. The image pins
+ * `com.bigdata.journal.AbstractJournal.file=/data/bigdata.jnl` in
+ * `WEB-INF/classes/RWStore.properties`, so everything Blazegraph durably
+ * writes lives under this directory. Without a volume mounted here the
+ * journal is written into the container's writable layer and `docker rm`
+ * destroys it.
+ */
+export const BLAZEGRAPH_DATA_DIR = '/data';
+
+/**
+ * Named docker volume holding the journal.
+ *
+ * Deliberately NOT derived from the container name: the volume and the
+ * container are independent objects with independent lifetimes, and an
+ * already-provisioned host may carry either name. The authoritative source
+ * for an existing container is always its own `.Mounts` — see
+ * {@link ContainerInspectInfo.dataVolume}. This constant is only the name
+ * used when creating a store that does not have one yet.
+ */
+export const DEFAULT_BLAZEGRAPH_VOLUME = 'dkg-blazegraph-data';
+
 interface ContainerInspectInfo {
   exists: boolean;
   running: boolean;
   hostPort?: number;
+  /**
+   * Name of the named volume mounted at {@link BLAZEGRAPH_DATA_DIR}, when the
+   * container has one. This is the ONLY trustworthy way to learn where an
+   * existing container's journal lives.
+   */
+  dataVolume?: string;
+  /**
+   * True when something is mounted at {@link BLAZEGRAPH_DATA_DIR} that is not
+   * a named volume (e.g. an operator's bind mount). We must never silently
+   * recreate over one of these — we cannot reproduce the mount, so the
+   * replacement container would come up on an empty store.
+   */
+  foreignDataMount?: boolean;
 }
 
 async function inspectContainer(
@@ -294,7 +329,19 @@ async function inspectContainer(
     const hostPort = Array.isArray(portBinding) && portBinding.length > 0
       ? Number(portBinding[0].HostPort)
       : undefined;
-    return { exists: true, running, hostPort };
+    // Resolve the journal mount from the container itself. Never infer it
+    // from the container name — a host provisioned by an earlier tool may
+    // use any volume name, and guessing wrong means recreating onto an
+    // empty store while the real journal is orphaned.
+    const mounts = Array.isArray(info.Mounts) ? info.Mounts : [];
+    const dataMount = mounts.find(
+      (m: { Destination?: unknown }) => m?.Destination === BLAZEGRAPH_DATA_DIR,
+    );
+    const dataVolume = dataMount?.Type === 'volume' && typeof dataMount.Name === 'string'
+      ? dataMount.Name
+      : undefined;
+    const foreignDataMount = dataMount !== undefined && dataVolume === undefined;
+    return { exists: true, running, hostPort, dataVolume, foreignDataMount };
   } catch {
     return { exists: true, running: false };
   }
@@ -429,6 +476,11 @@ export async function provisionBlazegraphDocker(
     };
   }
 
+  // Journal volume used by any container created below. An existing container
+  // is authoritative about where its own journal lives; the default name is
+  // only for a store that does not have one yet.
+  const journalVolume = inspectInfo.dataVolume ?? DEFAULT_BLAZEGRAPH_VOLUME;
+
   // 3. Stopped-but-exists path — start it back up before re-creating.
   if (inspectInfo.exists && !inspectInfo.running) {
     log(`  Container "${containerName}" exists but is stopped; starting it.`);
@@ -436,7 +488,24 @@ export async function provisionBlazegraphDocker(
     if (startResult.exitCode !== 0) {
       // Fall through to recreate — `docker start` failed for some
       // reason (e.g. config drift); remove and start fresh.
-      log(`  docker start failed (${startResult.stderr.trim() || 'unknown'}); recreating.`);
+      //
+      // Fail closed when the journal mount cannot be reproduced. Recreating
+      // over a bind mount we cannot reconstruct brings the node up on an
+      // EMPTY store while the real journal survives unreferenced on disk —
+      // silent total data unavailability for that node. An operator fixing
+      // one stopped container by hand is strictly cheaper than that.
+      if (inspectInfo.foreignDataMount) {
+        throw new Error(
+          `Blazegraph container "${containerName}" failed to start and has a non-volume mount at ` +
+          `${BLAZEGRAPH_DATA_DIR}; refusing to recreate because the replacement would start on an empty ` +
+          `store and orphan the existing journal. Recover the container manually, then re-run. ` +
+          `docker start stderr: ${startResult.stderr.trim() || '(empty)'}`,
+        );
+      }
+      log(
+        `  docker start failed (${startResult.stderr.trim() || 'unknown'}); ` +
+        `recreating with journal volume "${journalVolume}".`,
+      );
       await docker.run(['rm', '-f', containerName]);
     } else {
       const port = (await inspectContainer(docker, containerName)).hostPort
@@ -473,6 +542,13 @@ export async function provisionBlazegraphDocker(
     // Blazegraph is an implementation detail of the local node. Do not publish
     // its unauthenticated SPARQL/update endpoint on every host interface.
     '-p', `127.0.0.1:${chosenPort}:${BLAZEGRAPH_CONTAINER_PORT}`,
+    // Keep the journal OUTSIDE the container's writable layer. Without this
+    // the store lives and dies with the container, so any recreate (including
+    // the `docker rm -f` recovery above) silently destroys the graph.
+    // `docker volume create` is implicit: `docker run -v <name>:<path>`
+    // creates the named volume when it does not already exist, and reuses it
+    // — with its contents — when it does.
+    '-v', `${journalVolume}:${BLAZEGRAPH_DATA_DIR}`,
     BLAZEGRAPH_IMAGE,
   ]);
   if (runResult.exitCode !== 0) {

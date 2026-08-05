@@ -43,6 +43,8 @@ import {
   isDockerAvailable,
   BLAZEGRAPH_IMAGE,
   BLAZEGRAPH_CONTAINER_PORT,
+  BLAZEGRAPH_DATA_DIR,
+  DEFAULT_BLAZEGRAPH_VOLUME,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   type DockerRunner,
   type DockerCommandResult,
@@ -141,11 +143,12 @@ function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
   };
 }
 
-function dockerInspectStopped(): DockerCommandResult {
+function dockerInspectStopped(mounts?: unknown[]): DockerCommandResult {
   return {
     stdout: JSON.stringify([
       {
         State: { Running: false },
+        ...(mounts ? { Mounts: mounts } : {}),
         NetworkSettings: {
           Ports: {
             [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: '9999' }],
@@ -349,6 +352,100 @@ describe('provisionBlazegraphDocker', () => {
     expect(result.reused).toBe(false);
     expect(calls.some((c) => c[0] === 'rm')).toBe(true);
     expect(calls.some((c) => c[0] === 'run')).toBe(true);
+  });
+
+  it('mounts a named journal volume at /data on a fresh create', async () => {
+    // Without this the journal lives in the container's writable layer and
+    // `docker rm` destroys the entire graph.
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: dockerInspectNotFound },
+      ],
+    });
+    const { fn } = mockFetch(() => new Response('ok', { status: 200 }));
+    await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    });
+    const runCall = calls.find((c) => c[0] === 'run');
+    expect(runCall).toBeDefined();
+    const vIdx = runCall!.indexOf('-v');
+    expect(vIdx).toBeGreaterThan(-1);
+    expect(runCall![vIdx + 1]).toBe(`${DEFAULT_BLAZEGRAPH_VOLUME}:${BLAZEGRAPH_DATA_DIR}`);
+    // The image must remain the final argument.
+    expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
+  });
+
+  it('reuses the EXISTING journal volume when recreating, rather than a name derived from the container', async () => {
+    // Regression guard for the mainnet fleet: containers are named
+    // `dkg-blazegraph-dkg` but the journal volume is `dkg-blazegraph-data`.
+    // Deriving the volume from the container name yields
+    // `dkg-blazegraph-dkg-data`, which does not exist — docker would create it
+    // empty and the node would come up serving zero triples while the real
+    // 11-18 GB journal sat orphaned.
+    const FLEET_VOLUME = 'dkg-blazegraph-data';
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        {
+          when: (a) => a[0] === 'inspect',
+          respond: () => dockerInspectStopped([
+            { Type: 'volume', Name: FLEET_VOLUME, Destination: BLAZEGRAPH_DATA_DIR },
+          ]),
+        },
+        { when: (a) => a[0] === 'start', respond: () => ({ stdout: '', stderr: 'config drift', exitCode: 1 }) },
+        { when: (a) => a[0] === 'rm', respond: () => ({ stdout: '', stderr: '', exitCode: 0 }) },
+        { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
+      ],
+    });
+    const { fn } = mockFetch(() => new Response('ok', { status: 200 }));
+    await provisionBlazegraphDocker({
+      namespace: 'dkg',
+      containerName: 'dkg-blazegraph-dkg',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    });
+    const runCall = calls.find((c) => c[0] === 'run');
+    expect(runCall).toBeDefined();
+    const vIdx = runCall!.indexOf('-v');
+    expect(runCall![vIdx + 1]).toBe(`${FLEET_VOLUME}:${BLAZEGRAPH_DATA_DIR}`);
+    // Explicitly NOT the container-name-derived form.
+    expect(runCall![vIdx + 1]).not.toContain('dkg-blazegraph-dkg-data');
+  });
+
+  it('refuses to recreate over a bind mount it cannot reproduce', async () => {
+    // A bind mount at /data cannot be reconstructed from `docker inspect`
+    // alone in a way we can trust, so recreating would silently start an
+    // empty store. Fail closed instead.
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        {
+          when: (a) => a[0] === 'inspect',
+          respond: () => dockerInspectStopped([
+            { Type: 'bind', Source: '/srv/blazegraph', Destination: BLAZEGRAPH_DATA_DIR },
+          ]),
+        },
+        { when: (a) => a[0] === 'start', respond: () => ({ stdout: '', stderr: 'config drift', exitCode: 1 }) },
+      ],
+    });
+    const { fn } = mockFetch(() => new Response('ok', { status: 200 }));
+    await expect(provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    })).rejects.toThrow(/refusing to recreate/i);
+    // Critically: it must not have removed the container.
+    expect(calls.some((c) => c[0] === 'rm')).toBe(false);
+    expect(calls.some((c) => c[0] === 'run')).toBe(false);
   });
 
   it('auto-bumps to the next free loopback port and uses the multi-architecture image', async () => {
