@@ -180,6 +180,47 @@ test('accepts the heartbeat-aware activation load equation with deadline reserve
   }, LOAD_CAPTURE_EXPECTATION).eligible, true);
 });
 
+test('rejects every activation resource cap at the first overflow value', () => {
+  const baseline = {
+    activeRecords: SYSTEM_RECORD_LIMITS_V1.activationRecords,
+    activeBundleBytes: SYSTEM_RECORD_LIMITS_V1.activationBundleBytes,
+    activeVerificationClosureBytes:
+      SYSTEM_RECORD_LIMITS_V1.activationVerificationClosureBytes,
+    inventoryLeaves: SYSTEM_RECORD_LIMITS_V1.activationLeaves,
+    ...loadMeasurement(loadIntervals()),
+  };
+  const overflows = [
+    [
+      { activeRecords: SYSTEM_RECORD_LIMITS_V1.activationRecords + 1 },
+      'active_record_cap',
+    ],
+    [
+      { activeBundleBytes: SYSTEM_RECORD_LIMITS_V1.activationBundleBytes + 1 },
+      'active_bundle_byte_cap',
+    ],
+    [
+      {
+        activeVerificationClosureBytes:
+          SYSTEM_RECORD_LIMITS_V1.activationVerificationClosureBytes + 1,
+      },
+      'active_closure_byte_cap',
+    ],
+    [
+      { inventoryLeaves: SYSTEM_RECORD_LIMITS_V1.activationLeaves + 1 },
+      'inventory_leaf_cap',
+    ],
+  ] as const;
+
+  for (const [overflow, expectedFailure] of overflows) {
+    const verdict = evaluateLoadEnvelopeV1(
+      { ...baseline, ...overflow },
+      LOAD_CAPTURE_EXPECTATION,
+    );
+    assert.equal(verdict.eligible, false);
+    assert.deepEqual(verdict.failures, [expectedFailure]);
+  }
+});
+
 test('blocks activation when arrivals saturate service or measurements are absent', () => {
   const untrusted = evaluateLoadEnvelopeV1({
     activeRecords: 1,
