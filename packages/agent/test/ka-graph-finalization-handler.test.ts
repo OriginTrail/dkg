@@ -1370,6 +1370,8 @@ describe('graph-scoped finalization handler', () => {
         get: inbox.get.bind(inbox),
         receive: inbox.receive.bind(inbox),
         promotePending: inbox.promotePending.bind(inbox),
+        recordPendingTrustedPublisher:
+          inbox.recordPendingTrustedPublisher.bind(inbox),
         recordTrustedPublisher: inbox.recordTrustedPublisher.bind(inbox),
         recordSettledPublisherUpgrade:
           inbox.recordSettledPublisherUpgrade.bind(inbox),
@@ -1448,6 +1450,9 @@ describe('graph-scoped finalization handler', () => {
           return { status: 'capacity' };
         },
         promotePending: async () => 0,
+        recordPendingTrustedPublisher: async () => {
+          throw new Error('recordPendingTrustedPublisher must not run after failed admission');
+        },
         recordTrustedPublisher: async () => {
           throw new Error('recordTrustedPublisher must not run after failed admission');
         },

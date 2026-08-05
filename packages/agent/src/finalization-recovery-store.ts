@@ -96,6 +96,11 @@ export interface FinalizationRecoveryStore {
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
   /** Moves a bounded oldest-first deferred snapshot into the live inbox. */
   promotePending(limit: number): Promise<number>;
+  /** Monotonically records publisher authority validated while an envelope is deferred. */
+  recordPendingTrustedPublisher(
+    key: string,
+    publisherPeerId: string,
+  ): Promise<boolean>;
   recordTrustedPublisher(
     key: string,
     generation: number,

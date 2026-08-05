@@ -339,7 +339,10 @@ export class FinalizationRecovery<
     });
     return this.withEntryLock(key, async () => {
       const received = await this.receiveOutcome(input);
-      if (received.status === 'pending') return { status: 'handled' };
+      if (received.status === 'pending') {
+        await this.recordPendingPublisherAuthority(store, key, input);
+        return { status: 'handled' };
+      }
       if (received.status === 'capacity') {
         return {
           status: 'retryable-capacity',
@@ -392,6 +395,52 @@ export class FinalizationRecovery<
       }
       return { status: 'handled' };
     });
+  }
+
+  private async recordPendingPublisherAuthority(
+    store: FinalizationRecoveryStore,
+    key: string,
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<void> {
+    if (!input.sourcePeerId) return;
+    let prepared: Prepared | undefined;
+    try {
+      prepared = await this.materializer.prepare(input);
+    } catch (error) {
+      this.log.info(
+        `Finalization recovery deferred publisher authority check for `
+          + `${input.candidate.scope.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (!prepared || input.sourcePeerId !== prepared.publisherPeerId) return;
+    try {
+      if (await store.recordPendingTrustedPublisher(key, prepared.publisherPeerId)) return;
+      // Promotion is serialized by the store but is intentionally independent
+      // of the per-entry recovery lock. If it moved this row between admission
+      // and the authority CAS, preserve the same monotonic evidence on the live row.
+      const promoted = await store.get(key);
+      if (
+        promoted
+        && this.isLiveEntry(promoted)
+        && await store.recordTrustedPublisher(
+          key,
+          promoted.generation,
+          prepared.publisherPeerId,
+        )
+      ) return;
+      this.log.warn(
+        `Finalization recovery inbox refused publisher authority for `
+          + `${input.candidate.scope.ual}`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery pending publisher authority commit failed for `
+          + `${input.candidate.scope.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

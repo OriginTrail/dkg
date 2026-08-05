@@ -1,4 +1,5 @@
 import { rm } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import {
   openSqliteFinalizationRecoveryStore,
@@ -35,6 +36,36 @@ describe('SQLite finalization recovery deferred spool', () => {
       expect(await store.health()).toMatchObject({ deferredEntries: 0 });
       await store.close();
       store = undefined;
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('drops a corrupt deferred envelope instead of poisoning the live inbox', async () => {
+    const directory = await temporaryDirectory();
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
+      await store.receive(received());
+      await expect(store.receive(received({
+        key: 'entry-2',
+        txHash: `0x${'ef'.repeat(32)}`,
+      }))).resolves.toEqual({ status: 'pending' });
+      const { databasePath } = store;
+      await store.close();
+
+      const database = new DatabaseSync(databasePath);
+      database.prepare(`
+        UPDATE finalization_pending_v2 SET raw_envelope = ? WHERE key = ?
+      `).run(Buffer.from([9, 9, 9]), 'entry-2');
+      database.close();
+
+      store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
+      await store.transition('entry-1', 0, 'SUPERSEDED');
+      await expect(store.promotePending(1)).resolves.toBe(0);
+      await expect(store.get('entry-2')).resolves.toBeUndefined();
+      await expect(store.health()).resolves.toMatchObject({ deferredEntries: 0 });
     } finally {
       await store?.close().catch(() => {});
       await rm(directory, { recursive: true, force: true });

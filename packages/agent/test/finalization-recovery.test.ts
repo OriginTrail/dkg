@@ -143,6 +143,93 @@ describe('graph-scoped finalization recovery admission', () => {
     expect(processUnjournaled).toHaveBeenCalledWith(input);
   });
 
+  it('preserves publisher authority when a trusted duplicate arrives while deferred', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-pending-publisher-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
+      await store.receive({
+        key: 'capacity-blocker',
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWRelay',
+        ual: `${UAL}-blocker`,
+        txHash: `0x${'12'.repeat(32)}`,
+        assertionVersion: '1',
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: '8',
+        batchId: '8',
+        targetContextGraphId: '42',
+        rawMessage: Uint8Array.from([9]),
+      });
+      const preparedSources: Array<string | undefined> = [];
+      let appliedAccess: { policy: string; peers: string[] } | undefined;
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare: async (input) => {
+            preparedSources.push(input.sourcePeerId);
+            return {
+              onChainContextGraphId: '42',
+              localTopicOnChainContextGraphId: '42',
+              publisherPeerId: '12D3KooWPublisher',
+              accessPolicy: 'allowList' as const,
+              allowedPeers: ['12D3KooWReader'],
+            };
+          },
+          apply: async ({ prepared }) => {
+            appliedAccess = {
+              policy: prepared.accessPolicy,
+              peers: prepared.allowedPeers,
+            };
+            return 'applied' as const;
+          },
+        },
+      );
+      const baseInput = {
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        candidate: parsedMessage(),
+      };
+
+      await recovery.processLiveOutcome({
+        ...baseInput,
+        sourcePeerId: '12D3KooWRelay',
+      });
+      await recovery.processLiveOutcome({
+        ...baseInput,
+        sourcePeerId: '12D3KooWPublisher',
+      });
+      await recovery.processLiveOutcome({
+        ...baseInput,
+        sourcePeerId: '12D3KooWLaterRelay',
+      });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+
+      await store.transition('capacity-blocker', 0, 'SUPERSEDED');
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(preparedSources.at(-1)).toBe('12D3KooWPublisher');
+      expect(appliedAccess).toEqual({
+        policy: 'allowList',
+        peers: ['12D3KooWReader'],
+      });
+      expect(await store.list()).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          state: 'SETTLED',
+          ual: UAL,
+          sourcePeerId: '12D3KooWRelay',
+          trustedPublisherPeerId: '12D3KooWPublisher',
+        }),
+      ]));
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('autonomously settles a durable RECEIVED entry without a chain-cursor replay', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-worker-'));
     try {

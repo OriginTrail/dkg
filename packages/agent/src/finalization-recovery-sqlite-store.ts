@@ -13,6 +13,7 @@ import {
   type FinalizationRecoveryVerifyResult,
 } from './finalization-recovery-store.js';
 import {
+  finalizationEnvelopeFromRow,
   finalizationEnvelopeSha256,
   finalizationRecoveryRowToEntry,
   sameFinalizationRecoveryEvidence,
@@ -67,6 +68,7 @@ interface PendingFinalizationRow {
   chain_id: string;
   context_graph_id: string;
   source_peer_id: string | null;
+  trusted_publisher_peer_id: string | null;
   ual: string;
   tx_hash: string;
   assertion_version: string;
@@ -81,6 +83,7 @@ interface PendingFinalizationRow {
 }
 
 function pendingRowToReceiveInput(row: PendingFinalizationRow): FinalizationRecoveryReceiveInput {
+  const { raw } = finalizationEnvelopeFromRow(row as unknown as Record<string, unknown>);
   return {
     key: row.key,
     chainId: row.chain_id,
@@ -95,7 +98,7 @@ function pendingRowToReceiveInput(row: PendingFinalizationRow): FinalizationReco
     ...(row.target_context_graph_id
       ? { targetContextGraphId: row.target_context_graph_id }
       : {}),
-    rawMessage: new Uint8Array(row.raw_envelope),
+    rawMessage: new Uint8Array(raw),
   };
 }
 
@@ -163,18 +166,21 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     digest: string,
     createdAt: number,
     updatedAt = createdAt,
+    trustedPublisherPeerId?: string,
   ): void {
     this.database.prepare(`
       INSERT INTO finalization_inbox_v1 (
-        key, state, chain_id, context_graph_id, source_peer_id, ual, tx_hash,
+        key, state, chain_id, context_graph_id, source_peer_id,
+        trusted_publisher_peer_id, ual, tx_hash,
         assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
         envelope_sha256, raw_envelope, created_at, updated_at
-      ) VALUES (?, 'RECEIVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, 'RECEIVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.key,
       input.chainId,
       input.contextGraphId,
       input.sourcePeerId ?? null,
+      trustedPublisherPeerId ?? null,
       input.ual,
       input.txHash.toLowerCase(),
       input.assertionVersion,
@@ -196,15 +202,17 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   ): void {
     this.database.prepare(`
       INSERT INTO finalization_pending_v2 (
-        key, chain_id, context_graph_id, source_peer_id, ual, tx_hash,
+        key, chain_id, context_graph_id, source_peer_id,
+        trusted_publisher_peer_id, ual, tx_hash,
         assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
         envelope_sha256, raw_envelope, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.key,
       input.chainId,
       input.contextGraphId,
       input.sourcePeerId ?? null,
+      null,
       input.ual,
       input.txHash.toLowerCase(),
       input.assertionVersion,
@@ -258,9 +266,17 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         'SELECT * FROM finalization_pending_v2 WHERE key = ?',
       ).get(input.key) as PendingFinalizationRow | undefined;
       if (pendingRow) {
-        return samePendingFinalization(pendingRow, input, digest)
-          ? { status: 'pending' }
-          : { status: 'conflict' };
+        try {
+          pendingRowToReceiveInput(pendingRow);
+          return samePendingFinalization(pendingRow, input, digest)
+            ? { status: 'pending' }
+            : { status: 'conflict' };
+        } catch {
+          this.database.prepare(
+            'DELETE FROM finalization_pending_v2 WHERE key = ?',
+          ).run(pendingRow.key);
+          return { status: 'conflict' };
+        }
       }
       const now = this.#policy.now();
       if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
@@ -299,7 +315,15 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         `).all(this.#policy.maxDeferredEntries) as unknown as PendingFinalizationRow[];
         for (const row of rows) {
           if (promoted >= boundedLimit) break;
-          const input = pendingRowToReceiveInput(row);
+          let input: FinalizationRecoveryReceiveInput;
+          try {
+            input = pendingRowToReceiveInput(row);
+          } catch {
+            this.database.prepare(
+              'DELETE FROM finalization_pending_v2 WHERE key = ?',
+            ).run(row.key);
+            continue;
+          }
           if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
             continue;
           }
@@ -308,6 +332,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             row.envelope_sha256,
             row.created_at,
             now,
+            row.trusted_publisher_peer_id ?? undefined,
           );
           this.database.prepare(
             'DELETE FROM finalization_pending_v2 WHERE key = ?',
@@ -316,6 +341,31 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         }
       });
       return promoted;
+    });
+  }
+
+  recordPendingTrustedPublisher(
+    key: string,
+    publisherPeerId: string,
+  ): Promise<boolean> {
+    if (
+      this.#closed
+      || this.#closing
+      || publisherPeerId.length === 0
+      || publisherPeerId.trim() !== publisherPeerId
+    ) return Promise.resolve(false);
+    return this.mutate(() => {
+      if (this.#closed) return false;
+      const result = this.database.prepare(`
+        UPDATE finalization_pending_v2
+        SET trusted_publisher_peer_id = ?, updated_at = ?
+        WHERE key = ?
+          AND (
+            trusted_publisher_peer_id IS NULL
+            OR trusted_publisher_peer_id = ?
+          )
+      `).run(publisherPeerId, this.#policy.now(), key, publisherPeerId);
+      return result.changes > 0;
     });
   }
 
