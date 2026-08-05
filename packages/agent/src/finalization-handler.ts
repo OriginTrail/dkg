@@ -76,6 +76,7 @@ import {
   type FinalizationRecoveryApplyOutcome,
   type FinalizationRecoveryInvalidationOutcome,
   type FinalizationRecoveryLiveInput,
+  type FinalizationRecoveryLiveProcessResult,
   type FinalizationRecoveryMaterializer,
   type FinalizationRecoveryPreparedMaterialization,
   type FinalizationRecoveryReplayOutcome,
@@ -486,7 +487,7 @@ export class FinalizationHandler {
     let candidate: ParsedGraphScopedFinalization | undefined;
     if (liveAdmission.status === 'admitted') {
       candidate = liveAdmission.input.candidate;
-      let recoveryResult;
+      let recoveryResult: FinalizationRecoveryLiveProcessResult;
       try {
         recoveryResult = await this.recovery.processLive(liveAdmission.input);
       } catch (error) {
@@ -509,9 +510,17 @@ export class FinalizationHandler {
         this.log.warn(ctx, `Finalization: failed to process graph-scoped message: ${reason}`);
         return;
       }
-      if (recoveryResult.status === 'handled') return;
-      if (recoveryResult.status === 'retryable-capacity') {
-        throw new FinalizationRecoveryCapacityError(recoveryResult.ual);
+      switch (recoveryResult.status) {
+        case 'handled':
+          return;
+        case 'retryable-capacity':
+          throw new FinalizationRecoveryCapacityError(recoveryResult.ual);
+        case 'fallback':
+          break;
+        default: {
+          const exhaustive: never = recoveryResult;
+          throw new Error(`Unhandled finalization recovery result: ${JSON.stringify(exhaustive)}`);
+        }
       }
       envelope = {
         rawMessage: data,

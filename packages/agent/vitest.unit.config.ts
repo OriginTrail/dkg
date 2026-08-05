@@ -117,6 +117,8 @@ export default defineConfig({
       "test/finalization-handler-defensive-cg-id.test.ts",
       "test/finalization-recovery.test.ts",
       "test/finalization-recovery-worker.test.ts",
+      "test/finalization-recovery-sqlite-deferred.test.ts",
+      "test/finalization-recovery-sqlite-migration.test.ts",
       "test/finalization-recovery-sqlite-store.test.ts",
       "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
