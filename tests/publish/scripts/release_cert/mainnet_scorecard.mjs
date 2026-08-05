@@ -30,12 +30,21 @@ async function mainnetDb() {
     return client;
 }
 
+// `NULLIF(col, '')` is only safe when the column is text. Against a NUMERIC
+// column Postgres coerces the empty-string literal to numeric to make the
+// comparison, and fails with `invalid input syntax for type numeric: ""` before
+// it reads a single row — which is why this surfaced the first time a release
+// actually came due rather than on the many runs that returned early. Casting to
+// text first is correct either way, and this table is written by
+// insert_summary_to_db.js from JSON, so both shapes are plausible over time.
+const NUM = (col) => `NULLIF(${col}::text, '')::float`;
+
 async function windowStats(db, fromTs, toTs) {
     const { rows } = await db.query(
         `SELECT COUNT(*)::int AS runs,
-                ROUND(AVG(NULLIF(publish_success_rate, '')::float)::numeric, 1)::float AS publish_pct,
-                ROUND(AVG(CASE WHEN NULLIF(publish_success_rate, '')::float > 0 THEN NULLIF(average_publish_time, '')::float END)::numeric, 2)::float AS avg_publish_s,
-                ROUND(AVG(NULLIF(non_publisher_get_success_rate, '')::float)::numeric, 1)::float AS remote_get_pct
+                ROUND(AVG(${NUM('publish_success_rate')})::numeric, 1)::float AS publish_pct,
+                ROUND(AVG(CASE WHEN ${NUM('publish_success_rate')} > 0 THEN ${NUM('average_publish_time')} END)::numeric, 2)::float AS avg_publish_s,
+                ROUND(AVG(${NUM('non_publisher_get_success_rate')})::numeric, 1)::float AS remote_get_pct
          FROM publish_mainnet_summary
          WHERE time_stamp >= $1 AND time_stamp < $2`, [fromTs, toTs]);
     return rows[0];

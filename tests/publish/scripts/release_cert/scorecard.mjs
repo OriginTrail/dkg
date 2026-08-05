@@ -45,11 +45,20 @@ async function layerStats(db, fromTs, toTs) {
     return rows;
 }
 
+// Same trap as mainnet_scorecard.mjs: `NULLIF(col, '')` is only safe on a text
+// column — against NUMERIC, Postgres coerces the empty-string literal and fails
+// with `invalid input syntax for type numeric: ""` before reading a row.
+// Casting to text first is correct for either shape.
+const NUM = (col) => `NULLIF(${col}::text, '')::float`;
+
 async function summaryStats(db, fromTs, toTs) {
     const { rows } = await db.query(
+        // The `::numeric` before ROUND is required, not cosmetic: two-argument
+        // ROUND exists only for numeric, so `ROUND(<double precision>, 1)` is
+        // `function round(double precision, integer) does not exist`.
         `SELECT COUNT(*)::int AS runs,
-                ROUND(AVG(NULLIF(publish_success_rate, '')::float), 1)::float AS publish_pct,
-                ROUND(AVG(CASE WHEN NULLIF(publish_success_rate, '')::float > 0 THEN NULLIF(average_publish_time, '')::float END)::numeric, 2)::float AS avg_publish_s
+                ROUND(AVG(${NUM('publish_success_rate')})::numeric, 1)::float AS publish_pct,
+                ROUND(AVG(CASE WHEN ${NUM('publish_success_rate')} > 0 THEN ${NUM('average_publish_time')} END)::numeric, 2)::float AS avg_publish_s
          FROM publish_testnet_summary
          WHERE time_stamp >= $1 AND time_stamp < $2`, [fromTs, toTs]);
     return rows[0];
