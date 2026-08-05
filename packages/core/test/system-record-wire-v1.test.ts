@@ -1,0 +1,134 @@
+import { describe, expect, it } from 'vitest';
+
+import { digestSystemRecordBytesV1 } from '../src/system-record-objects-v1.js';
+import {
+  SYSTEM_RECORD_DIGEST_DOMAINS_V1,
+  SYSTEM_RECORD_MAX_FRAME_BYTES,
+  SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
+  SYSTEM_RECORD_MAX_HEADER_BYTES,
+} from '../src/system-record-limits-v1.js';
+import {
+  decodeSystemRecordRequestFrameV1,
+  decodeSystemRecordResponseFrameV1,
+  decodeSystemRecordResponseHeaderV1,
+  encodeSystemRecordRequestFrameV1,
+  encodeSystemRecordResponseFrameV1,
+  readSystemRecordHeaderLengthV1,
+  verifySystemRecordResponsePayloadV1,
+  type SystemRecordRequestHeaderV1,
+} from '../src/system-record-wire-v1.js';
+
+const REQUEST_ID = '0123456789abcdef0123456789abcdef';
+const DIGEST = `0x${'aa'.repeat(32)}` as const;
+const COMMON = {
+  wireVersion: '1', requestId: REQUEST_ID, kind: 'agents', networkId: 'otp:20430',
+  payloadBytes: '0',
+} as const;
+
+describe('system-record wire request framing', () => {
+  it('round-trips every request operation with exact omission branches', () => {
+    const requests: SystemRecordRequestHeaderV1[] = [
+      { ...COMMON, operation: 'get-root' },
+      {
+        ...COMMON, operation: 'get-inventory-object', rootDescriptorDigest: DIGEST,
+        path: [0, 255], objectKind: 'inventory-leaf', objectDigest: DIGEST,
+      },
+      { ...COMMON, operation: 'get-control-object', objectKind: 'fork-resolution', objectDigest: DIGEST },
+      { ...COMMON, operation: 'get-bundle', objectKind: 'profile-bundle', objectDigest: DIGEST },
+    ];
+    for (const request of requests) {
+      expect(decodeSystemRecordRequestFrameV1(encodeSystemRecordRequestFrameV1(request)))
+        .toEqual(request);
+    }
+  });
+
+  it('rejects malformed request IDs, unknown/null fields, paths, and payloads', () => {
+    expect(() => encodeSystemRecordRequestFrameV1({
+      ...COMMON, requestId: `0x${REQUEST_ID}`, operation: 'get-root',
+    })).toThrow(/requestId/);
+    expect(() => encodeSystemRecordRequestFrameV1({
+      ...COMMON, operation: 'get-root', objectDigest: null,
+    } as unknown as SystemRecordRequestHeaderV1)).toThrow(/omit optional|unknown or missing/);
+    expect(() => encodeSystemRecordRequestFrameV1({
+      ...COMMON, operation: 'get-inventory-object', rootDescriptorDigest: DIGEST,
+      path: [0, 1, 2], objectKind: 'inventory-leaf', objectDigest: DIGEST,
+    })).toThrow(/path/);
+    const request = encodeSystemRecordRequestFrameV1({ ...COMMON, operation: 'get-root' });
+    const withPayload = new Uint8Array(request.byteLength + 1);
+    withPayload.set(request);
+    expect(() => decodeSystemRecordRequestFrameV1(withPayload)).toThrow(/payload-free/);
+  });
+
+  it('checks the four-byte header cap before body allocation', () => {
+    const prefix = new Uint8Array(4);
+    new DataView(prefix.buffer).setUint32(0, SYSTEM_RECORD_MAX_HEADER_BYTES + 1, false);
+    expect(() => readSystemRecordHeaderLengthV1(prefix)).toThrow(/preallocation/);
+  });
+});
+
+describe('system-record wire response framing', () => {
+  it('round-trips and digest-verifies an exact bundle response', () => {
+    const payload = new TextEncoder().encode('canonical bundle bytes');
+    const objectDigest = digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, payload);
+    const request = {
+      ...COMMON, operation: 'get-bundle', objectKind: 'profile-bundle', objectDigest,
+    } as const;
+    const header = {
+      wireVersion: '1', requestId: REQUEST_ID, status: 'ok', objectKind: 'profile-bundle',
+      objectDigest, payloadBytes: String(payload.byteLength),
+    } as const;
+    const frame = encodeSystemRecordResponseFrameV1(header, payload);
+    const decoded = decodeSystemRecordResponseFrameV1(frame);
+    expect(decoded.header).toEqual(header);
+    expect(decoded.payload).toEqual(payload);
+    expect(() => verifySystemRecordResponsePayloadV1(request, decoded.header, decoded.payload))
+      .not.toThrow();
+    expect(frame.byteLength).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_FRAME_BYTES);
+    expect(decoded.payload.buffer).toBe(frame.buffer);
+  });
+
+  it('accepts the exact payload ceiling, rejects +1, and rejects hostile JSON encodings', () => {
+    const payload = new Uint8Array(SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES);
+    const objectDigest = digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, payload);
+    const header = {
+      wireVersion: '1', requestId: REQUEST_ID, status: 'ok', objectKind: 'profile-bundle',
+      objectDigest, payloadBytes: String(payload.byteLength),
+    } as const;
+    expect(encodeSystemRecordResponseFrameV1(header, payload).byteLength)
+      .toBeLessThanOrEqual(SYSTEM_RECORD_MAX_FRAME_BYTES);
+    expect(() => encodeSystemRecordResponseFrameV1(
+      { ...header, payloadBytes: String(payload.byteLength + 1) },
+      new Uint8Array(payload.byteLength + 1),
+    )).toThrow(/object cap/);
+    const duplicate = new TextEncoder().encode(
+      `{"objectDigest":"${DIGEST}","objectDigest":"${DIGEST}","objectKind":"profile-bundle","payloadBytes":"1","requestId":"${REQUEST_ID}","status":"ok","wireVersion":"1"}`,
+    );
+    expect(() => decodeSystemRecordResponseHeaderV1(duplicate)).toThrow(/[Dd]uplicate|canonical/);
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('{}')]);
+    expect(() => decodeSystemRecordResponseHeaderV1(bom)).toThrow();
+    expect(readSystemRecordHeaderLengthV1(Uint8Array.of(0, 0, 0x20, 0))).toBe(SYSTEM_RECORD_MAX_HEADER_BYTES);
+  });
+
+  it('rejects status/error mismatches, declared over-cap bodies, and digest mismatch', () => {
+    expect(() => encodeSystemRecordResponseFrameV1({
+      wireVersion: '1', requestId: REQUEST_ID, status: 'busy', payloadBytes: '0',
+      errorCode: 'internal',
+    }, new Uint8Array())).toThrow(/tuple/);
+
+    const oversizedHeader = new TextEncoder().encode(JSON.stringify({
+      objectDigest: DIGEST, objectKind: 'conflict-evidence', payloadBytes: '16385',
+      requestId: REQUEST_ID, status: 'ok', wireVersion: '1',
+    }));
+    expect(() => decodeSystemRecordResponseHeaderV1(oversizedHeader)).toThrow(/object cap/);
+
+    const payload = new TextEncoder().encode('bytes');
+    const request = {
+      ...COMMON, operation: 'get-bundle', objectKind: 'profile-bundle', objectDigest: DIGEST,
+    } as const;
+    const response = {
+      wireVersion: '1', requestId: REQUEST_ID, status: 'ok', objectKind: 'profile-bundle',
+      objectDigest: DIGEST, payloadBytes: String(payload.byteLength),
+    } as const;
+    expect(() => verifySystemRecordResponsePayloadV1(request, response, payload)).toThrow(/digest/);
+  });
+});

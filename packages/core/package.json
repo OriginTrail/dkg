@@ -15,12 +15,20 @@
       "import": "./dist/project-ontology.js",
       "default": "./dist/project-ontology.js"
     },
+    "./system-record-v1": {
+      "types": "./dist/system-record-v1.d.ts",
+      "import": "./dist/system-record-v1.js",
+      "default": "./dist/system-record-v1.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "pnpm run test:baseline && pnpm run test:system-record",
+    "test:baseline": "vitest run --exclude 'test/system-record-*.test.ts' --maxWorkers=4",
+    "test:system-record": "vitest run test/system-record-applied-state-v1.test.ts test/system-record-golden-v1.test.ts test/system-record-inventory-v1.test.ts test/system-record-limits-v1.test.ts test/system-record-objects-v1.test.ts test/system-record-wire-v1.test.ts --maxWorkers=1 --no-file-parallelism",
+    "test:system-record-exhaustive": "DKG_SYSTEM_RECORD_EXHAUSTIVE=1 vitest run test/system-record-inventory-v1.test.ts test/system-record-objects-v1.test.ts -t \"complete height-three|exactly 128 MiB\" --maxWorkers=1 --no-file-parallelism",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
@@ -43,6 +51,7 @@
     "@libp2p/websockets": "^10.1.13",
     "@libp2p/yamux": "^8.0.1",
     "@multiformats/multiaddr": "^13.0.3",
+    "@noble/curves": "2.2.0",
     "@noble/ed25519": "^3.1.0",
     "@noble/hashes": "^2.2.0",
     "@opentelemetry/api": "^1.9.1",
@@ -54,6 +63,7 @@
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",
+    "multiformats": "14.0.0",
     "vitest": "^4.0.18"
   },
   "publishConfig": {

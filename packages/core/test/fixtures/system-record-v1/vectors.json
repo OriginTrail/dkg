@@ -1,0 +1,695 @@
+{
+  "identities": {
+    "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+    "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+    "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+    "rootSubject": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91"
+  },
+  "emptyTableDigest": "0xa5d0d8dd0d515e86b3ac7b3f369f207292697946eddfd1c6801cb85e2fde068c",
+  "variants": {
+    "active": {
+      "object": {
+        "objectType": "agent-profile-head",
+        "kind": "agents",
+        "state": "active",
+        "networkId": "otp:20430",
+        "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+        "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+        "authoritySequence": "0",
+        "version": "0",
+        "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "rootSubject": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "projectionSchemaDigest": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issuedAt": "2026-08-05T12:00:00Z",
+        "ownedSubjectTableDigest": "0xd3b20a13150e282ad850425126571c262561854e01c0f52266b5852596084187",
+        "ownedSubjectCount": "1",
+        "projectionBytes": "256",
+        "projectionQuads": "3",
+        "validUntil": "2026-08-06T12:00:00Z",
+        "assertionCoordinate": "agent-profile-v1",
+        "graphScopedAuthorSeal": {
+          "assertionMerkleRoot": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "authorAddress": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "authorAttestationR": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "authorAttestationVS": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "authorSchemeVersion": "1",
+          "assertedAtChainId": "20430",
+          "assertedAtKav10Address": "0x4444444444444444444444444444444444444444",
+          "reservedKaId": "46806809665542465519237074629721481070900809877125630156311884283657903407111",
+          "assertionFinalizedAt": "2026-08-05T11:59:59.000Z",
+          "contentScopeVersion": "2",
+          "kaUal": "did:dkg:otp:20430/0x677bb7270e0b03f0a2993a697654fb8ecb6dee91/7",
+          "assertionVersion": "1",
+          "publicTripleCount": "3",
+          "privateTripleCount": "0",
+          "privateMerkleRoot": null
+        },
+        "contentDigest": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bundleDigest": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "canonical": "{\"assertionCoordinate\":\"agent-profile-v1\",\"authoritySequence\":\"0\",\"bundleDigest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"contentDigest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"graphScopedAuthorSeal\":{\"assertedAtChainId\":\"20430\",\"assertedAtKav10Address\":\"0x4444444444444444444444444444444444444444\",\"assertionFinalizedAt\":\"2026-08-05T11:59:59.000Z\",\"assertionMerkleRoot\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"assertionVersion\":\"1\",\"authorAddress\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"authorAttestationR\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"authorAttestationVS\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"authorSchemeVersion\":\"1\",\"contentScopeVersion\":\"2\",\"kaUal\":\"did:dkg:otp:20430/0x677bb7270e0b03f0a2993a697654fb8ecb6dee91/7\",\"privateMerkleRoot\":null,\"privateTripleCount\":\"0\",\"publicTripleCount\":\"3\",\"reservedKaId\":\"46806809665542465519237074629721481070900809877125630156311884283657903407111\"},\"issuedAt\":\"2026-08-05T12:00:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"agent-profile-head\",\"ownedSubjectCount\":\"1\",\"ownedSubjectTableDigest\":\"0xd3b20a13150e282ad850425126571c262561854e01c0f52266b5852596084187\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"projectionBytes\":\"256\",\"projectionQuads\":\"3\",\"projectionSchemaDigest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rootSubject\":\"did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"state\":\"active\",\"validUntil\":\"2026-08-06T12:00:00Z\",\"version\":\"0\"}",
+      "digest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8"
+    },
+    "tombstone": {
+      "object": {
+        "objectType": "agent-profile-head",
+        "kind": "agents",
+        "state": "tombstone",
+        "networkId": "otp:20430",
+        "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+        "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+        "authoritySequence": "0",
+        "version": "1",
+        "previousHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+        "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "rootSubject": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "projectionSchemaDigest": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "issuedAt": "2026-08-05T12:10:00Z",
+        "ownedSubjectTableDigest": "0xa5d0d8dd0d515e86b3ac7b3f369f207292697946eddfd1c6801cb85e2fde068c",
+        "ownedSubjectCount": "0",
+        "projectionBytes": "0",
+        "projectionQuads": "0"
+      },
+      "canonical": "{\"authoritySequence\":\"0\",\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"issuedAt\":\"2026-08-05T12:10:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"agent-profile-head\",\"ownedSubjectCount\":\"0\",\"ownedSubjectTableDigest\":\"0xa5d0d8dd0d515e86b3ac7b3f369f207292697946eddfd1c6801cb85e2fde068c\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"previousHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"projectionBytes\":\"0\",\"projectionQuads\":\"0\",\"projectionSchemaDigest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rootSubject\":\"did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"state\":\"tombstone\",\"version\":\"1\"}",
+      "digest": "0x22671ae962d0292c4e1d6aca64d6a4d5255fc1cefd40ba9fcd1cbdcd83f49068"
+    },
+    "coSignedTransition": {
+      "object": {
+        "objectType": "authority-transition",
+        "kind": "agents",
+        "networkId": "otp:20430",
+        "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+        "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+        "priorAuthoritySequence": "0",
+        "nextAuthoritySequence": "1",
+        "priorHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+        "priorEvmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "nextEvmIssuer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+        "nextRoot": "did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+        "issuedAt": "2026-08-07T12:00:00Z",
+        "mode": "co-signed"
+      },
+      "canonical": "{\"issuedAt\":\"2026-08-07T12:00:00Z\",\"kind\":\"agents\",\"mode\":\"co-signed\",\"networkId\":\"otp:20430\",\"nextAuthoritySequence\":\"1\",\"nextEvmIssuer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"nextRoot\":\"did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"objectType\":\"authority-transition\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"priorAuthoritySequence\":\"0\",\"priorEvmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"priorHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\"}",
+      "digest": "0xb3b7feb0a81c8dd30035d2a245c457be0866bc9b03a643f84efc8cc362749aa2"
+    },
+    "expiredTransition": {
+      "object": {
+        "objectType": "authority-transition",
+        "kind": "agents",
+        "networkId": "otp:20430",
+        "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+        "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+        "priorAuthoritySequence": "0",
+        "nextAuthoritySequence": "1",
+        "priorHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+        "priorEvmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "nextEvmIssuer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+        "nextRoot": "did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+        "issuedAt": "2026-08-07T12:00:00Z",
+        "mode": "expired-prior",
+        "priorValidUntil": "2026-08-06T12:00:00Z"
+      },
+      "canonical": "{\"issuedAt\":\"2026-08-07T12:00:00Z\",\"kind\":\"agents\",\"mode\":\"expired-prior\",\"networkId\":\"otp:20430\",\"nextAuthoritySequence\":\"1\",\"nextEvmIssuer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"nextRoot\":\"did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"objectType\":\"authority-transition\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"priorAuthoritySequence\":\"0\",\"priorEvmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"priorHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"priorValidUntil\":\"2026-08-06T12:00:00Z\"}",
+      "digest": "0x6e4ca59473ad065b9beb8e8ce3c5d4169a66134902d13f6f3f963795edd8fda3"
+    },
+    "forkV0": {
+      "object": {
+        "objectType": "fork-resolution",
+        "kind": "agents",
+        "networkId": "otp:20430",
+        "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+        "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+        "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "authoritySequence": "0",
+        "forkedVersion": "0",
+        "resolutionVersion": "2",
+        "evidenceHeadDigests": [
+          "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "issuedAt": "2026-08-05T12:05:00Z"
+      },
+      "canonical": "{\"authoritySequence\":\"0\",\"evidenceHeadDigests\":[\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"forkedVersion\":\"0\",\"issuedAt\":\"2026-08-05T12:05:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"fork-resolution\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"resolutionVersion\":\"2\"}",
+      "digest": "0xf61937886fa5dd508fa58dca57a7e21106c9b69322d1f3ef8f8e2e36bddd680b"
+    },
+    "forkV1": {
+      "object": {
+        "objectType": "fork-resolution",
+        "kind": "agents",
+        "networkId": "otp:20430",
+        "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+        "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+        "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+        "authoritySequence": "0",
+        "forkedVersion": "1",
+        "resolutionVersion": "3",
+        "evidenceHeadDigests": [
+          "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "issuedAt": "2026-08-05T12:05:00Z",
+        "forkBaseHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8"
+      },
+      "canonical": "{\"authoritySequence\":\"0\",\"evidenceHeadDigests\":[\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"forkBaseHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"forkedVersion\":\"1\",\"issuedAt\":\"2026-08-05T12:05:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"fork-resolution\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"resolutionVersion\":\"3\"}",
+      "digest": "0x2ed1a4de1b37e7014ea11b8286abe5fe3b6af0df7f32767f8ff5760ba17b297b"
+    }
+  },
+  "signed": {
+    "activeEip191": {
+      "envelope": {
+        "object": {
+          "objectType": "agent-profile-head",
+          "kind": "agents",
+          "state": "active",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "authoritySequence": "0",
+          "version": "0",
+          "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "rootSubject": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "projectionSchemaDigest": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "issuedAt": "2026-08-05T12:00:00Z",
+          "ownedSubjectTableDigest": "0xd3b20a13150e282ad850425126571c262561854e01c0f52266b5852596084187",
+          "ownedSubjectCount": "1",
+          "projectionBytes": "256",
+          "projectionQuads": "3",
+          "validUntil": "2026-08-06T12:00:00Z",
+          "assertionCoordinate": "agent-profile-v1",
+          "graphScopedAuthorSeal": {
+            "assertionMerkleRoot": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "authorAddress": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "authorAttestationR": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "authorAttestationVS": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "authorSchemeVersion": "1",
+            "assertedAtChainId": "20430",
+            "assertedAtKav10Address": "0x4444444444444444444444444444444444444444",
+            "reservedKaId": "46806809665542465519237074629721481070900809877125630156311884283657903407111",
+            "assertionFinalizedAt": "2026-08-05T11:59:59.000Z",
+            "contentScopeVersion": "2",
+            "kaUal": "did:dkg:otp:20430/0x677bb7270e0b03f0a2993a697654fb8ecb6dee91/7",
+            "assertionVersion": "1",
+            "publicTripleCount": "3",
+            "privateTripleCount": "0",
+            "privateMerkleRoot": null
+          },
+          "contentDigest": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bundleDigest": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "objectDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "zP8KK4K3R2owxR45Vd5JnNkP9Pm8GB79eZQkud9aJ3JajOiRwfBqnHo9vgxXA6R_dyd1vaXI8ZUjWRBk2pAuCw"
+          },
+          {
+            "role": "current-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0xb2db36ad50653c5d5d6d378032c630cb02240af76335a2214ae575d5c6928d0a4cb399f5fc2dca9738e36b012dbc6faee95b78887e07927d624f4deebd6dacd31c"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"assertionCoordinate\":\"agent-profile-v1\",\"authoritySequence\":\"0\",\"bundleDigest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"contentDigest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"graphScopedAuthorSeal\":{\"assertedAtChainId\":\"20430\",\"assertedAtKav10Address\":\"0x4444444444444444444444444444444444444444\",\"assertionFinalizedAt\":\"2026-08-05T11:59:59.000Z\",\"assertionMerkleRoot\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"assertionVersion\":\"1\",\"authorAddress\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"authorAttestationR\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"authorAttestationVS\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"authorSchemeVersion\":\"1\",\"contentScopeVersion\":\"2\",\"kaUal\":\"did:dkg:otp:20430/0x677bb7270e0b03f0a2993a697654fb8ecb6dee91/7\",\"privateMerkleRoot\":null,\"privateTripleCount\":\"0\",\"publicTripleCount\":\"3\",\"reservedKaId\":\"46806809665542465519237074629721481070900809877125630156311884283657903407111\"},\"issuedAt\":\"2026-08-05T12:00:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"agent-profile-head\",\"ownedSubjectCount\":\"1\",\"ownedSubjectTableDigest\":\"0xd3b20a13150e282ad850425126571c262561854e01c0f52266b5852596084187\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"projectionBytes\":\"256\",\"projectionQuads\":\"3\",\"projectionSchemaDigest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rootSubject\":\"did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"state\":\"active\",\"validUntil\":\"2026-08-06T12:00:00Z\",\"version\":\"0\"},\"objectDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"zP8KK4K3R2owxR45Vd5JnNkP9Pm8GB79eZQkud9aJ3JajOiRwfBqnHo9vgxXA6R_dyd1vaXI8ZUjWRBk2pAuCw\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"current-evm\",\"signature\":\"0xb2db36ad50653c5d5d6d378032c630cb02240af76335a2214ae575d5c6928d0a4cb399f5fc2dca9738e36b012dbc6faee95b78887e07927d624f4deebd6dacd31c\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip191-personal-sign-digest-v1\"}]}",
+      "envelopeDigest": "0x9aa1b1db771a34b58a0de412214354d8c75153b36c7a6dcd5284ec3006bf6e7d",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b226167656e742d70726f66696c652d68656164222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2230225d",
+        "current-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b226167656e742d70726f66696c652d68656164222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2230222c2263757272656e742d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d"
+      }
+    },
+    "tombstoneEip191": {
+      "envelope": {
+        "object": {
+          "objectType": "agent-profile-head",
+          "kind": "agents",
+          "state": "tombstone",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "authoritySequence": "0",
+          "version": "1",
+          "previousHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+          "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "rootSubject": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "projectionSchemaDigest": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "issuedAt": "2026-08-05T12:10:00Z",
+          "ownedSubjectTableDigest": "0xa5d0d8dd0d515e86b3ac7b3f369f207292697946eddfd1c6801cb85e2fde068c",
+          "ownedSubjectCount": "0",
+          "projectionBytes": "0",
+          "projectionQuads": "0"
+        },
+        "objectDigest": "0x22671ae962d0292c4e1d6aca64d6a4d5255fc1cefd40ba9fcd1cbdcd83f49068",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "LLv6lWof-1A-4STNlp-6J40k0itYC5Cwg0LrxNYhhxOKVIV20z19GVsD2WndW4rK-RdDcWHcdjNpIaiMHASPDg"
+          },
+          {
+            "role": "current-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0x01673df5f422affa9545b8a1188e371703ced1c605180d062a3a1474a1ed7d2b78c4c2b806bd296cae4b79e6114efe1731caca32d3d76e5487c85d3281c86da21b"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"authoritySequence\":\"0\",\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"issuedAt\":\"2026-08-05T12:10:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"agent-profile-head\",\"ownedSubjectCount\":\"0\",\"ownedSubjectTableDigest\":\"0xa5d0d8dd0d515e86b3ac7b3f369f207292697946eddfd1c6801cb85e2fde068c\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"previousHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"projectionBytes\":\"0\",\"projectionQuads\":\"0\",\"projectionSchemaDigest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rootSubject\":\"did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"state\":\"tombstone\",\"version\":\"1\"},\"objectDigest\":\"0x22671ae962d0292c4e1d6aca64d6a4d5255fc1cefd40ba9fcd1cbdcd83f49068\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"LLv6lWof-1A-4STNlp-6J40k0itYC5Cwg0LrxNYhhxOKVIV20z19GVsD2WndW4rK-RdDcWHcdjNpIaiMHASPDg\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"current-evm\",\"signature\":\"0x01673df5f422affa9545b8a1188e371703ced1c605180d062a3a1474a1ed7d2b78c4c2b806bd296cae4b79e6114efe1731caca32d3d76e5487c85d3281c86da21b\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip191-personal-sign-digest-v1\"}]}",
+      "envelopeDigest": "0x680b0f9f1c96b4d5e36a436d63966b31a233e71ed5d8f1ed157c6b3c28fa23b9",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b226167656e742d70726f66696c652d68656164222c22307832323637316165393632643032393263346531643661636136346436613464353235356663316365666434306261396663643163626463643833663439303638222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231225d",
+        "current-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b226167656e742d70726f66696c652d68656164222c22307832323637316165393632643032393263346531643661636136346436613464353235356663316365666434306261396663643163626463643833663439303638222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c2263757272656e742d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d"
+      }
+    },
+    "coSignedTransitionEip191": {
+      "envelope": {
+        "object": {
+          "objectType": "authority-transition",
+          "kind": "agents",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "priorAuthoritySequence": "0",
+          "nextAuthoritySequence": "1",
+          "priorHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+          "priorEvmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "nextEvmIssuer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+          "nextRoot": "did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+          "issuedAt": "2026-08-07T12:00:00Z",
+          "mode": "co-signed"
+        },
+        "objectDigest": "0xb3b7feb0a81c8dd30035d2a245c457be0866bc9b03a643f84efc8cc362749aa2",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "TkX2HPrtyFM_tuIKQ62gOcZ-S2vAtpfLAJwTOrbFIkIs6_coMvukB7veJ9FQUlU4piJ_qYUGYGwEch9422vlAA"
+          },
+          {
+            "role": "prior-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0xc5b16013b5075b219a85fbb733700333ddcd93c9f1a7f80dfc62570cc823d3b87246447822dfb9b6f21876d46faca9909d812e143fbf05a1c49cb876e9d8f5981b"
+          },
+          {
+            "role": "next-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0x3c1389025b614c80fa54d773be022dfc31e139e85a1e2c94eaeb3fb7c542f726778166d79e78aa37269213f760fc0c7f11ead1c20f42145240a342bd46f213681b"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"issuedAt\":\"2026-08-07T12:00:00Z\",\"kind\":\"agents\",\"mode\":\"co-signed\",\"networkId\":\"otp:20430\",\"nextAuthoritySequence\":\"1\",\"nextEvmIssuer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"nextRoot\":\"did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"objectType\":\"authority-transition\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"priorAuthoritySequence\":\"0\",\"priorEvmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"priorHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\"},\"objectDigest\":\"0xb3b7feb0a81c8dd30035d2a245c457be0866bc9b03a643f84efc8cc362749aa2\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"TkX2HPrtyFM_tuIKQ62gOcZ-S2vAtpfLAJwTOrbFIkIs6_coMvukB7veJ9FQUlU4piJ_qYUGYGwEch9422vlAA\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"prior-evm\",\"signature\":\"0xc5b16013b5075b219a85fbb733700333ddcd93c9f1a7f80dfc62570cc823d3b87246447822dfb9b6f21876d46faca9909d812e143fbf05a1c49cb876e9d8f5981b\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip191-personal-sign-digest-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"next-evm\",\"signature\":\"0x3c1389025b614c80fa54d773be022dfc31e139e85a1e2c94eaeb3fb7c542f726778166d79e78aa37269213f760fc0c7f11ead1c20f42145240a342bd46f213681b\",\"signer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"suite\":\"eip191-personal-sign-digest-v1\"}]}",
+      "envelopeDigest": "0xd5f26fd6b6960f9f36c152a2fbde5cd67735e20458716d73cb2e469c53f92b64",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307862336237666562306138316338646433303033356432613234356334353762653038363662633962303361363433663834656663386363333632373439616132222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c2270656572225d",
+        "prior-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307862336237666562306138316338646433303033356432613234356334353762653038363662633962303361363433663834656663386363333632373439616132222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c227072696f722d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d",
+        "next-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307862336237666562306138316338646433303033356432613234356334353762653038363662633962303361363433663834656663386363333632373439616132222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226e6578742d65766d222c22307837336134636465333031376366386436343261653665363337663533323161653566343363393835225d"
+      }
+    },
+    "expiredTransitionEip191": {
+      "envelope": {
+        "object": {
+          "objectType": "authority-transition",
+          "kind": "agents",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "priorAuthoritySequence": "0",
+          "nextAuthoritySequence": "1",
+          "priorHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+          "priorEvmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "nextEvmIssuer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+          "nextRoot": "did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+          "issuedAt": "2026-08-07T12:00:00Z",
+          "mode": "expired-prior",
+          "priorValidUntil": "2026-08-06T12:00:00Z"
+        },
+        "objectDigest": "0x6e4ca59473ad065b9beb8e8ce3c5d4169a66134902d13f6f3f963795edd8fda3",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "aRrTXMjLTWbEc3r_p7fGrMo3bSl-WDJDctK2PXlTzORemjq1TZrM-8Iy2CLUqjizg3KfSAGdSHxt_5fgx-YQBQ"
+          },
+          {
+            "role": "next-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0x665ce0b05b23cdd719d0f76bd41e1a03f7d0f831b63837d16605374cc92b00ee69b0da17b63eb77e2fd496381748d83efee06ec0373e436df8fd4b0f18e84a5a1b"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"issuedAt\":\"2026-08-07T12:00:00Z\",\"kind\":\"agents\",\"mode\":\"expired-prior\",\"networkId\":\"otp:20430\",\"nextAuthoritySequence\":\"1\",\"nextEvmIssuer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"nextRoot\":\"did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"objectType\":\"authority-transition\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"priorAuthoritySequence\":\"0\",\"priorEvmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"priorHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"priorValidUntil\":\"2026-08-06T12:00:00Z\"},\"objectDigest\":\"0x6e4ca59473ad065b9beb8e8ce3c5d4169a66134902d13f6f3f963795edd8fda3\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"aRrTXMjLTWbEc3r_p7fGrMo3bSl-WDJDctK2PXlTzORemjq1TZrM-8Iy2CLUqjizg3KfSAGdSHxt_5fgx-YQBQ\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"next-evm\",\"signature\":\"0x665ce0b05b23cdd719d0f76bd41e1a03f7d0f831b63837d16605374cc92b00ee69b0da17b63eb77e2fd496381748d83efee06ec0373e436df8fd4b0f18e84a5a1b\",\"signer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"suite\":\"eip191-personal-sign-digest-v1\"}]}",
+      "envelopeDigest": "0x0233cfb213ecb78d099456e7f9974a98635202e8b3271bf14af2bf2b3f03aa0f",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307836653463613539343733616430363562396265623865386365336335643431363961363631333439303264313366366633663936333739356564643866646133222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c2270656572225d",
+        "next-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307836653463613539343733616430363562396265623865386365336335643431363961363631333439303264313366366633663936333739356564643866646133222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226e6578742d65766d222c22307837336134636465333031376366386436343261653665363337663533323161653566343363393835225d"
+      }
+    },
+    "forkV0Eip191": {
+      "envelope": {
+        "object": {
+          "objectType": "fork-resolution",
+          "kind": "agents",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "authoritySequence": "0",
+          "forkedVersion": "0",
+          "resolutionVersion": "2",
+          "evidenceHeadDigests": [
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ],
+          "issuedAt": "2026-08-05T12:05:00Z"
+        },
+        "objectDigest": "0xf61937886fa5dd508fa58dca57a7e21106c9b69322d1f3ef8f8e2e36bddd680b",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "rcG2pKkNngKVjuxX4npNKAAwPciGejqQ3betEkE2Ye_C1qbdQEKuaBvenWU-5yD4orEXLNq6v04riTHjGui4BA"
+          },
+          {
+            "role": "current-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0x8dd43cf4910486ad962326f7fbdf3af3f89091692ed3db2b6e1f07f9511882d7086b46f9cb92a6ed53cb6af79cc80478296f819d172fbcc08278df3a637cbea01c"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"authoritySequence\":\"0\",\"evidenceHeadDigests\":[\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"forkedVersion\":\"0\",\"issuedAt\":\"2026-08-05T12:05:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"fork-resolution\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"resolutionVersion\":\"2\"},\"objectDigest\":\"0xf61937886fa5dd508fa58dca57a7e21106c9b69322d1f3ef8f8e2e36bddd680b\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"rcG2pKkNngKVjuxX4npNKAAwPciGejqQ3betEkE2Ye_C1qbdQEKuaBvenWU-5yD4orEXLNq6v04riTHjGui4BA\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"current-evm\",\"signature\":\"0x8dd43cf4910486ad962326f7fbdf3af3f89091692ed3db2b6e1f07f9511882d7086b46f9cb92a6ed53cb6af79cc80478296f819d172fbcc08278df3a637cbea01c\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip191-personal-sign-digest-v1\"}]}",
+      "envelopeDigest": "0x3d42b22cdcc649c4e222165a920c7ba04b6078699159ae55cc4b6a25b87dd207",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b22666f726b2d7265736f6c7574696f6e222c22307866363139333738383666613564643530386661353864636135376137653231313036633962363933323264316633656638663865326533366264646436383062222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2230222c2232222c2270656572225d",
+        "current-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22666f726b2d7265736f6c7574696f6e222c22307866363139333738383666613564643530386661353864636135376137653231313036633962363933323264316633656638663865326533366264646436383062222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2230222c2232222c2263757272656e742d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d"
+      }
+    },
+    "forkV1Eip191": {
+      "envelope": {
+        "object": {
+          "objectType": "fork-resolution",
+          "kind": "agents",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "authoritySequence": "0",
+          "forkedVersion": "1",
+          "resolutionVersion": "3",
+          "evidenceHeadDigests": [
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ],
+          "issuedAt": "2026-08-05T12:05:00Z",
+          "forkBaseHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8"
+        },
+        "objectDigest": "0x2ed1a4de1b37e7014ea11b8286abe5fe3b6af0df7f32767f8ff5760ba17b297b",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "AS63-V73oUOo14LujC6PCN0ftk7OwaUAMBBWQuOJFfQ4TOIjhJNOmg8nfIjkkxF2mJwAU_sSfSH46hWw1ADHCQ"
+          },
+          {
+            "role": "current-evm",
+            "suite": "eip191-personal-sign-digest-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "0x1b03f31a0ed48acc8b03c990643c9444b8d1d1bed47c4b5d57489a17985e3c605f2c3d32cc15bd4bc554ea896a678ed6bddea6ac5594399e8b85700b4757ba981b"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"authoritySequence\":\"0\",\"evidenceHeadDigests\":[\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"forkBaseHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"forkedVersion\":\"1\",\"issuedAt\":\"2026-08-05T12:05:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"fork-resolution\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"resolutionVersion\":\"3\"},\"objectDigest\":\"0x2ed1a4de1b37e7014ea11b8286abe5fe3b6af0df7f32767f8ff5760ba17b297b\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"AS63-V73oUOo14LujC6PCN0ftk7OwaUAMBBWQuOJFfQ4TOIjhJNOmg8nfIjkkxF2mJwAU_sSfSH46hWw1ADHCQ\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"kind\":\"none\"},\"role\":\"current-evm\",\"signature\":\"0x1b03f31a0ed48acc8b03c990643c9444b8d1d1bed47c4b5d57489a17985e3c605f2c3d32cc15bd4bc554ea896a678ed6bddea6ac5594399e8b85700b4757ba981b\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip191-personal-sign-digest-v1\"}]}",
+      "envelopeDigest": "0x0768fb1361d95eead964342da43f73dd5a8d94c28d40662bc9eab62a44d1b509",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b22666f726b2d7265736f6c7574696f6e222c22307832656431613464653162333765373031346561313162383238366162653566653362366166306466376633323736376638666635373630626131376232393762222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c2233222c2270656572225d",
+        "current-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22666f726b2d7265736f6c7574696f6e222c22307832656431613464653162333765373031346561313162383238366162653566653362366166306466376633323736376638666635373630626131376232393762222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c2233222c2263757272656e742d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d"
+      }
+    },
+    "activeEip1271": {
+      "envelope": {
+        "object": {
+          "objectType": "agent-profile-head",
+          "kind": "agents",
+          "state": "active",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "authoritySequence": "0",
+          "version": "0",
+          "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "rootSubject": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "projectionSchemaDigest": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "issuedAt": "2026-08-05T12:00:00Z",
+          "ownedSubjectTableDigest": "0xd3b20a13150e282ad850425126571c262561854e01c0f52266b5852596084187",
+          "ownedSubjectCount": "1",
+          "projectionBytes": "256",
+          "projectionQuads": "3",
+          "validUntil": "2026-08-06T12:00:00Z",
+          "assertionCoordinate": "agent-profile-v1",
+          "graphScopedAuthorSeal": {
+            "assertionMerkleRoot": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "authorAddress": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "authorAttestationR": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "authorAttestationVS": "0x2222222222222222222222222222222222222222222222222222222222222222",
+            "authorSchemeVersion": "1",
+            "assertedAtChainId": "20430",
+            "assertedAtKav10Address": "0x4444444444444444444444444444444444444444",
+            "reservedKaId": "46806809665542465519237074629721481070900809877125630156311884283657903407111",
+            "assertionFinalizedAt": "2026-08-05T11:59:59.000Z",
+            "contentScopeVersion": "2",
+            "kaUal": "did:dkg:otp:20430/0x677bb7270e0b03f0a2993a697654fb8ecb6dee91/7",
+            "assertionVersion": "1",
+            "publicTripleCount": "3",
+            "privateTripleCount": "0",
+            "privateMerkleRoot": null
+          },
+          "contentDigest": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bundleDigest": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "objectDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "zP8KK4K3R2owxR45Vd5JnNkP9Pm8GB79eZQkud9aJ3JajOiRwfBqnHo9vgxXA6R_dyd1vaXI8ZUjWRBk2pAuCw"
+          },
+          {
+            "role": "current-evm",
+            "suite": "eip1271-current-finalized-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "eip1271-current-finalized",
+              "chainId": "20430",
+              "contractAddress": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+              "finalizedBlockNumber": "123456",
+              "finalizedBlockHash": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+            },
+            "signature": "0x1234"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"assertionCoordinate\":\"agent-profile-v1\",\"authoritySequence\":\"0\",\"bundleDigest\":\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"contentDigest\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"graphScopedAuthorSeal\":{\"assertedAtChainId\":\"20430\",\"assertedAtKav10Address\":\"0x4444444444444444444444444444444444444444\",\"assertionFinalizedAt\":\"2026-08-05T11:59:59.000Z\",\"assertionMerkleRoot\":\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"assertionVersion\":\"1\",\"authorAddress\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"authorAttestationR\":\"0x1111111111111111111111111111111111111111111111111111111111111111\",\"authorAttestationVS\":\"0x2222222222222222222222222222222222222222222222222222222222222222\",\"authorSchemeVersion\":\"1\",\"contentScopeVersion\":\"2\",\"kaUal\":\"did:dkg:otp:20430/0x677bb7270e0b03f0a2993a697654fb8ecb6dee91/7\",\"privateMerkleRoot\":null,\"privateTripleCount\":\"0\",\"publicTripleCount\":\"3\",\"reservedKaId\":\"46806809665542465519237074629721481070900809877125630156311884283657903407111\"},\"issuedAt\":\"2026-08-05T12:00:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"agent-profile-head\",\"ownedSubjectCount\":\"1\",\"ownedSubjectTableDigest\":\"0xd3b20a13150e282ad850425126571c262561854e01c0f52266b5852596084187\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"projectionBytes\":\"256\",\"projectionQuads\":\"3\",\"projectionSchemaDigest\":\"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"rootSubject\":\"did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"state\":\"active\",\"validUntil\":\"2026-08-06T12:00:00Z\",\"version\":\"0\"},\"objectDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"zP8KK4K3R2owxR45Vd5JnNkP9Pm8GB79eZQkud9aJ3JajOiRwfBqnHo9vgxXA6R_dyd1vaXI8ZUjWRBk2pAuCw\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"chainId\":\"20430\",\"contractAddress\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"finalizedBlockHash\":\"0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"finalizedBlockNumber\":\"123456\",\"kind\":\"eip1271-current-finalized\"},\"role\":\"current-evm\",\"signature\":\"0x1234\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip1271-current-finalized-v1\"}]}",
+      "envelopeDigest": "0x8cdd2172841f71ae26813b77928b617ecd9aeb7236eda47c0b69265743101bbe",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b226167656e742d70726f66696c652d68656164222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2230225d",
+        "current-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b226167656e742d70726f66696c652d68656164222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2230222c2263757272656e742d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d"
+      }
+    },
+    "coSignedTransitionEip1271": {
+      "envelope": {
+        "object": {
+          "objectType": "authority-transition",
+          "kind": "agents",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "priorAuthoritySequence": "0",
+          "nextAuthoritySequence": "1",
+          "priorHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8",
+          "priorEvmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "nextEvmIssuer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+          "nextRoot": "did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+          "issuedAt": "2026-08-07T12:00:00Z",
+          "mode": "co-signed"
+        },
+        "objectDigest": "0xb3b7feb0a81c8dd30035d2a245c457be0866bc9b03a643f84efc8cc362749aa2",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "TkX2HPrtyFM_tuIKQ62gOcZ-S2vAtpfLAJwTOrbFIkIs6_coMvukB7veJ9FQUlU4piJ_qYUGYGwEch9422vlAA"
+          },
+          {
+            "role": "prior-evm",
+            "suite": "eip1271-current-finalized-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "eip1271-current-finalized",
+              "chainId": "20430",
+              "contractAddress": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+              "finalizedBlockNumber": "123456",
+              "finalizedBlockHash": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+            },
+            "signature": "0x1234"
+          },
+          {
+            "role": "next-evm",
+            "suite": "eip1271-current-finalized-v1",
+            "signer": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+            "evidence": {
+              "kind": "eip1271-current-finalized",
+              "chainId": "20430",
+              "contractAddress": "0x73a4cde3017cf8d642ae6e637f5321ae5f43c985",
+              "finalizedBlockNumber": "123456",
+              "finalizedBlockHash": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+            },
+            "signature": "0x1234"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"issuedAt\":\"2026-08-07T12:00:00Z\",\"kind\":\"agents\",\"mode\":\"co-signed\",\"networkId\":\"otp:20430\",\"nextAuthoritySequence\":\"1\",\"nextEvmIssuer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"nextRoot\":\"did:dkg:agent:0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"objectType\":\"authority-transition\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"priorAuthoritySequence\":\"0\",\"priorEvmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"priorHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\"},\"objectDigest\":\"0xb3b7feb0a81c8dd30035d2a245c457be0866bc9b03a643f84efc8cc362749aa2\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"TkX2HPrtyFM_tuIKQ62gOcZ-S2vAtpfLAJwTOrbFIkIs6_coMvukB7veJ9FQUlU4piJ_qYUGYGwEch9422vlAA\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"chainId\":\"20430\",\"contractAddress\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"finalizedBlockHash\":\"0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"finalizedBlockNumber\":\"123456\",\"kind\":\"eip1271-current-finalized\"},\"role\":\"prior-evm\",\"signature\":\"0x1234\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip1271-current-finalized-v1\"},{\"evidence\":{\"chainId\":\"20430\",\"contractAddress\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"finalizedBlockHash\":\"0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"finalizedBlockNumber\":\"123456\",\"kind\":\"eip1271-current-finalized\"},\"role\":\"next-evm\",\"signature\":\"0x1234\",\"signer\":\"0x73a4cde3017cf8d642ae6e637f5321ae5f43c985\",\"suite\":\"eip1271-current-finalized-v1\"}]}",
+      "envelopeDigest": "0x99ec4e01cb998c0f4b23dd30d6b1c2955a44cd99f3a4f21cb3297defc516283c",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307862336237666562306138316338646433303033356432613234356334353762653038363662633962303361363433663834656663386363333632373439616132222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c2270656572225d",
+        "prior-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307862336237666562306138316338646433303033356432613234356334353762653038363662633962303361363433663834656663386363333632373439616132222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c227072696f722d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d",
+        "next-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22617574686f726974792d7472616e736974696f6e222c22307862336237666562306138316338646433303033356432613234356334353762653038363662633962303361363433663834656663386363333632373439616132222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c22307835353634393334616437646139636166326565643834313131633834306665386166313462343630353131393365663632353664333535653235366233366238222c226e6578742d65766d222c22307837336134636465333031376366386436343261653665363337663533323161653566343363393835225d"
+      }
+    },
+    "forkV1Eip1271": {
+      "envelope": {
+        "object": {
+          "objectType": "fork-resolution",
+          "kind": "agents",
+          "networkId": "otp:20430",
+          "peerId": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+          "peerPublicKey": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+          "evmIssuer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+          "authoritySequence": "0",
+          "forkedVersion": "1",
+          "resolutionVersion": "3",
+          "evidenceHeadDigests": [
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ],
+          "issuedAt": "2026-08-05T12:05:00Z",
+          "forkBaseHeadDigest": "0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8"
+        },
+        "objectDigest": "0x2ed1a4de1b37e7014ea11b8286abe5fe3b6af0df7f32767f8ff5760ba17b297b",
+        "signatures": [
+          {
+            "role": "peer",
+            "suite": "ed25519-v1",
+            "signer": "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf",
+            "evidence": {
+              "kind": "none"
+            },
+            "signature": "AS63-V73oUOo14LujC6PCN0ftk7OwaUAMBBWQuOJFfQ4TOIjhJNOmg8nfIjkkxF2mJwAU_sSfSH46hWw1ADHCQ"
+          },
+          {
+            "role": "current-evm",
+            "suite": "eip1271-current-finalized-v1",
+            "signer": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+            "evidence": {
+              "kind": "eip1271-current-finalized",
+              "chainId": "20430",
+              "contractAddress": "0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+              "finalizedBlockNumber": "123456",
+              "finalizedBlockHash": "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+            },
+            "signature": "0x1234"
+          }
+        ]
+      },
+      "canonical": "{\"object\":{\"authoritySequence\":\"0\",\"evidenceHeadDigests\":[\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],\"evmIssuer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"forkBaseHeadDigest\":\"0x5564934ad7da9caf2eed84111c840fe8af14b46051193ef6256d355e256b36b8\",\"forkedVersion\":\"1\",\"issuedAt\":\"2026-08-05T12:05:00Z\",\"kind\":\"agents\",\"networkId\":\"otp:20430\",\"objectType\":\"fork-resolution\",\"peerId\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"peerPublicKey\":\"ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ\",\"resolutionVersion\":\"3\"},\"objectDigest\":\"0x2ed1a4de1b37e7014ea11b8286abe5fe3b6af0df7f32767f8ff5760ba17b297b\",\"signatures\":[{\"evidence\":{\"kind\":\"none\"},\"role\":\"peer\",\"signature\":\"AS63-V73oUOo14LujC6PCN0ftk7OwaUAMBBWQuOJFfQ4TOIjhJNOmg8nfIjkkxF2mJwAU_sSfSH46hWw1ADHCQ\",\"signer\":\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\",\"suite\":\"ed25519-v1\"},{\"evidence\":{\"chainId\":\"20430\",\"contractAddress\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"finalizedBlockHash\":\"0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"finalizedBlockNumber\":\"123456\",\"kind\":\"eip1271-current-finalized\"},\"role\":\"current-evm\",\"signature\":\"0x1234\",\"signer\":\"0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",\"suite\":\"eip1271-current-finalized-v1\"}]}",
+      "envelopeDigest": "0x013908cce58764f752e46dcd64a94c6dba26f27951b27c75f5919d00aa54f17f",
+      "messages": {
+        "peer": "646b672d73797374656d2d7265636f72642d706565722d7369676e61747572652d76310a5b22666f726b2d7265736f6c7574696f6e222c22307832656431613464653162333765373031346561313162383238366162653566653362366166306466376633323736376638666635373630626131376232393762222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c2233222c2270656572225d",
+        "current-evm": "646b672d73797374656d2d7265636f72642d65766d2d7369676e61747572652d76310a5b22666f726b2d7265736f6c7574696f6e222c22307832656431613464653162333765373031346561313162383238366162653566653362366166306466376633323736376638666635373630626131376232393762222c226f74703a3230343330222c5b226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966225d2c2230222c2231222c2233222c2263757272656e742d65766d222c22307836373762623732373065306230336630613239393361363937363534666238656362366465653931225d"
+      }
+    }
+  },
+  "provider": {
+    "rootDescriptor": {
+      "objectType": "root-descriptor",
+      "kind": "agents",
+      "networkId": "otp:20430",
+      "epoch": "0",
+      "version": "0",
+      "treeRootDigest": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "totalRows": "1"
+    },
+    "rootDigest": "0x9354cb9f4dcedd4166790841b9450dc51fc0edc0117165738a730d5a07757efd",
+    "messageHex": "646b672d73797374656d2d7265636f72642d70726f76696465722d7369676e61747572652d76310a5b226167656e7473222c226f74703a3230343330222c22313244334b6f6f574a315473696a48374835463734686641443558697368517a337378726d41745659333747744e643943715966222c22307839333534636239663464636564643431363637393038343162393435306463353166633065646330313137313635373338613733306435613037373537656664225d",
+    "signature": "o7Y4DQmTyi2mhfqvDC8rsf81bGecRIciiKoVq3HEqSU-2poro12G9QHSn2bD-t-vFBPbHsNA4s1TPAuS8mWGDg"
+  },
+  "rootCollision": {
+    "input": {
+      "networkId": "otp:20430",
+      "root": "did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91",
+      "incumbentRecordKey": [
+        "otp:20430",
+        "12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf"
+      ],
+      "contenderStableKey": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "contenderHeadDigest": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "canonical": "[\"otp:20430\",\"did:dkg:agent:0x677bb7270e0b03f0a2993a697654fb8ecb6dee91\",[\"otp:20430\",\"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf\"],\"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"]",
+    "digest": "0xa4624fbf59b16237dc2501dec06de396411f4329db1efadc8a9e424e007e9cc1"
+  }
+}

@@ -108,8 +108,12 @@ An applied version is identified by:
 ```
 
 `authoritySequence` advances only through a valid wallet transition. `version`
-advances within one authority sequence. Lower sequences or versions never replace
-higher applied state. Two different heads at the current maximal sequence/version are an
+advances within one authority sequence. Lower sequences or ordinary active versions never
+replace higher applied state. Once learned and verified, a tombstone is the exception: it is
+an authority-sequence-wide revocation marker and dominates every active head in that sequence
+regardless of delivery order or version. A bounded active closure cannot prove that an
+otherwise valid but undisclosed signed tombstone does not exist; ordinary version ancestry is
+unbounded and is deliberately not replayed. Two different active heads at the current maximal sequence/version are an
 equivocation and quarantine the record. A valid successor that directly names a canonical
 fork resolution may clear that quarantine; after it applies, unresolved alternative lower-version ordinary
 heads are stale audit input and cannot re-quarantine state. Expiry affects discovery
@@ -118,9 +122,10 @@ V1 accepts authority sequences `0` through `14` only, hence at most 14 transitio
 15 current-plus-historical roots. A further rotation is a typed version-cap refusal that
 leaves the last accepted record available and requires a later protocol version.
 
-An unambiguous tombstone is signed and terminal for its authority sequence; resurrection
-needs a valid authority transition. If a same-tuple active conflict makes that tombstone
-disputed, the record quarantines and a verified fork successor may continue the sequence.
+An authenticated tombstone is signed and terminal for its authority sequence; resurrection
+needs a valid authority transition. Active/tombstone conflicts resolve to the tombstone and
+cannot enter the ordinary fork-resolution path. If multiple valid tombstones are learned for
+one sequence, the lowest version wins and equal versions select the lowest semantic digest.
 Inventory omission has no deletion authority.
 
 ## AgentProfileHeadV1
@@ -152,8 +157,8 @@ version is strictly greater than the resolution version. A resolution object alo
 changes applied state. Historical resolution delivery is discarded after a fixed-enum
 counter/sampled log and cannot change quarantine, closure, sidecar, or capacity.
 
-The `tombstone` variant adds no fields. It requires `previousHeadDigest` to be the exact
-current accepted active head in the same authority sequence, uses the canonical empty
+The `tombstone` variant adds no fields. It requires `previousHeadDigest` to name an exact
+verified active predecessor in the same authority sequence, uses the canonical empty
 subject-table digest, and sets owned-subject/projection counts and bytes to decimal
 `"0"`. It forbids the five active-only fields and cannot be a protocol-history initial
 head. Both variants require peer plus current-EVM signature entries in the exact signed
@@ -167,8 +172,12 @@ fork, previous-head, inventory-row, and applied-state identity use `objectDigest
 not a signed-envelope digest, so alternate valid signature encodings cannot create
 a semantic fork.
 
-Tombstone apply deletes the prior exact projection/subject table and releases their
-aggregate projection accounting in the same transaction. It retains the minimal
+Tombstone apply over a present record deletes that record's exact currently committed
+projection/subject table; cold apply over canonical absent state uses the signed
+predecessor's table as its bounded deletion fallback. Cold noninitial apply accepts only an
+opaque authority summary minted by the complete signature-verified closure builder; a caller-
+authored or structurally cloned summary is rejected. It releases the deleted projection
+accounting in the same transaction and retains the minimal
 terminal applied state, every current/historical root claim and reverse binding, and
 all precharged status/conflict slots. Resurrection still requires a valid next
 authority transition signed by the tombstoning EVM authority; the unavailable-prior-
@@ -288,7 +297,7 @@ applied-head capability:
   root, network, and record key all refer to the same `agents` record; the graph-scoped
   seal author equals current EVM authority; and exact bundle/seal verification precedes
   state advance;
-- for `tombstone`, the exact current accepted active predecessor, same authority/root,
+- for `tombstone`, an exact verified active predecessor, same authority/root,
   empty-table digest/count, zero projection accounting, and forbidden active-only fields
   all validate before deletion. Inventory/provider signatures authenticate availability
   only and cannot authorize either variant.
@@ -297,8 +306,11 @@ An initial active head requires peer and EVM signatures over sequence zero, has 
 head/transition, and satisfies every active equality above. An ordinary active update keeps the
 same network, peer, issuer, authority sequence, and root; its version is strictly
 higher. A valid higher version may fast-forward, while `previousHeadDigest` remains
-fork/audit evidence rather than a retention-dependent gate. Tombstone is the explicit
-exception: it must bind the exact currently accepted active predecessor.
+fork/audit evidence rather than a retention-dependent gate. Consequently the active closure
+does not claim absence of an unseen tombstone; a tombstone takes terminal precedence as soon
+as its own bounded proof is learned. A tombstone instead proves a
+noninitial active predecessor and, once verified, dominates all active versions in that
+authority sequence; it does not depend on which active version is currently local.
 
 The canonical unsigned `AgentProfileAuthorityTransitionV1` fields are exactly
 `(objectType='authority-transition', kind='agents', mode='co-signed'|'expired-prior',
@@ -335,7 +347,7 @@ valid conflict omitted from this bounded list.
 `resolutionVersion` is strictly greater than `forkedVersion`. Peer and current-EVM
 signatures are mandatory. At version zero `forkBaseHeadDigest` is omitted and every
 listed initial head omits `previousHeadDigest`. Above zero it is mandatory, names a
-fully verified lower-version same-authority/root head, and every listed head must
+fully verified lower-version active same-authority/root head, and every listed active head must
 name it as `previousHeadDigest`; otherwise V1 leaves the fork quarantined for a later
 protocol. This order-independent common base replaces the ambiguous notion of a locally
 first accepted head.
@@ -347,10 +359,10 @@ current EVM authority, and has `version > resolutionVersion`. Above version zero
 the common `forkBaseHeadDigest` as `previousHeadDigest`; at version zero it omits
 `previousHeadDigest`. This rule is independent of which conflicting projection arrived
 first and of conflicts omitted from `evidenceHeadDigests`. The resolving successor replaces
-any locally retained quarantined projection atomically. Only after that successor applies
-may an authority transition name it as `priorHeadDigest`; a disputed head/tombstone fork
-cannot transition directly. V1 has no direct terminal fork-resolution mode, and deletion
-occurs only through an unambiguous ordinary tombstone head.
+any locally retained quarantined projection atomically. Tombstones cannot be a common base,
+listed fork evidence, or resolving-successor ancestry. Only after that successor applies
+may an authority transition name it as `priorHeadDigest`. V1 has no terminal fork-resolution
+mode; a verified tombstone bypasses fork resolution and is the terminal sequence marker.
 
 A fork resolution below the current frontier or below an already materialized authority
 descendant is audit-only: the verifier may record a fixed-enum counter/sampled log, then
@@ -497,10 +509,9 @@ current authority bindings, and establishes a resolution version. More than 16 l
 verified frontier conflicts sets bounded overflow diagnostics while the fork is unresolved,
 but cannot invalidate a fresh directly bound resolution/successor; a receiver does not infer
 evidence completeness from the resolution list. A tombstone requires current peer and EVM authority,
-advances the version, and is terminal while unambiguous; a same-tuple active conflict
-quarantines it and requires a verified resolving successor before any later authority
-transition may name that successor. An unambiguous tombstone remains separately eligible
-for ordinary resurrection by authority transition.
+proves an exact active predecessor, and is the authority-sequence-wide terminal marker.
+Same-tuple and cross-version active conflicts do not weaken it or authorize fork resolution.
+A tombstone remains eligible for resurrection only by a valid next-sequence authority transition.
 Expiry changes discovery
 eligibility only and never authorizes rollback. `issuedAt` more than five minutes
 in the future is rejected.
@@ -689,13 +700,19 @@ offsets never cross descriptors.
 Stack B1 freezes a canonical applied-state object before storage work. The exact
 tagged `absent` sentinel and `present` schema cover network/kind, stable key,
 monotonic state revision, status (`active`, `quarantined`, `tombstone`, `dirty`),
-head/conflict-evidence?/projection/owned-subject-table digests and
+head/conflict-evidence?/projection/owned-subject-table digests, the exact contiguous
+`(priorAuthoritySequence,nextAuthoritySequence,transitionDigest)` lineage for each of
+the at-most-14 accepted authority transitions, and
 counts, optional all-or-none conflict-sidecar intent operation/digest/state-revision,
 optional pending-deletion-table digest/count/bytes, current root, at most 14 historical
 roots (15 current-plus-historical roots total), 16 fixed preallocated conflict-digest slots plus one overflow bit,
 materialization epoch, and accounted bytes. Its digest domain is
 `dkg-system-record-applied-state-v1\n` and excludes only the digest field. Global
 capacity state has its own revision, live-record count, and accounted bytes.
+For every present record, `accountedBytes` is canonical and exact:
+`64 KiB fixed state/security precharge + ownedSubjectTableBytes + projectionBytes +
+pendingDeletionTableBytes`. The pending term is zero when omitted; current JSON size is
+validated against the 64-KiB envelope but never reduces the precharge.
 Capacity accounting separates state/table bytes, persistent V1 projection bytes, and
 projection quads.
 `conflictEvidenceDigest` is present only for a fully cached unresolved availability
@@ -829,6 +846,7 @@ recomputes the table digest/count against the verified predecessor head before d
 the exact deletion. Missing/mismatched/reused/cross-session payloads fail before dispatch.
 
 The expected-state CAS covers `(stateRevision, appliedStateDigest, headDigest,
+transitionLineage,
 conflictEvidenceDigest?, ownedSubjectTableDigest,
 conflictSidecarIntentOperation?, conflictSidecarIntentEvidenceDigest?,
 conflictSidecarIntentStateRevision?,
@@ -853,7 +871,11 @@ count, and whole-graph scan are forbidden.
 A fully verified tombstone closure may CAS directly from canonical `absent` local state
 to terminal `tombstone` state. “Cannot be initial” is a protocol-history predicate
 proved by its exact signed active predecessor and deletion-only owned-subject table, not
-a requirement to materialize that predecessor locally first. The one transaction deletes
+a requirement to materialize that predecessor locally first. The closure builder returns an
+in-memory opaque authority summary binding candidate digest, exact contiguous transition
+lineage, ordered unique historical roots, predecessor, and deletion-table digest. Cold apply
+requires that branded summary; serialized or caller-constructed equivalents have no authority.
+The one transaction deletes
 the predecessor table's exact subjects, installs terminal head/state, verified
 current/historical root claims and reverse bindings, empty current table, zero projection,
 and precharged security slots. It never inserts the predecessor projection, and discovery/
@@ -869,8 +891,9 @@ identity before/after crash and cutover.
 
 Fork resolutions never mint a materializer command. They retain quarantine until a
 verified current-frontier resolving successor applies through the ordinary exact
-replacement path. A disputed tombstone therefore cannot delete through a fork resolution;
-only an unambiguous ordinary tombstone head can use the cold deletion command. A fork
+replacement path. A tombstone never enters fork resolution. When it supersedes a present
+active row, the tombstone command deletes the exact currently applied table; only cold
+absent-state apply uses the signed predecessor table. A fork
 resolution below the current frontier performs no projection, root-claim, binding,
 capacity, or closure mutation. Transition equivocation has no V1 resolution command and
 remains quarantined.
@@ -889,8 +912,9 @@ incumbent slot. It never counts or describes the contender as materialized. Both
 `root-collision`; opposite arrival order leaves no record discoverable and never
 overwrites the first projection. V1 has no
 cross-peer root handoff. Expiry and
-tombstone do not release the claim, and each record retains at most 15 current-plus-
-historical root claims across wallet transitions. Exceeding that history requires a later
+tombstone do not release the claim, and each transition must target a root never previously
+claimed by that stable record. Each record retains at most 15 current-plus-historical root
+claims across wallet transitions. Exceeding that history requires a later
 protocol version rather than silent reuse.
 
 Quarantine/tombstone/security status and all 16 conflict slots are precharged inside
@@ -1233,7 +1257,8 @@ index. Its atomic root manifest pins the current descriptor/tree and each row's 
 verification closure. The closure builder traverses a canonical digest-ordered queue,
 deduplicates by digest, and applies these exact rules:
 
-1. add the current signed head and, for active state, the current exact bundle;
+1. add the current signed head and, for active state, the current exact bundle; ordinary
+   same-sequence `previousHeadDigest` ancestry is audit evidence and is not traversed;
 2. if the current head has `forkResolutionDigest`, add that exact fork resolution, every
    listed evidence head, and its optional common fork base; add every authority transition
    referenced by a traversed head;
@@ -1248,9 +1273,11 @@ Only the current active head's bundle is materialization evidence and belongs in
 closure. Historical predecessor/conflict bundles are neither fetched nor retained: their
 signed heads, graph-scoped seals, coordinates, content digests, and authority/control
 chain are sufficient to verify authority, ordering, and equivocation, while their old
-profile RDF is not materialized. A tombstone has no current bundle and at most one
+profile RDF is not materialized. An unseen same-sequence tombstone cannot be disproved by a
+bounded partial history; after it is learned, applied-state ordering makes it terminal without
+requiring ordinary ancestry replay. A tombstone has no current bundle and at most one
 256-KiB deletion table. An active closure with one at-most-1-MiB current bundle and at
-most 31 other at-most-64-KiB objects is algebraically below 3 MiB; a tombstone with one
+most 29 other at-most-64-KiB objects is algebraically below 3 MiB; a tombstone with one
 deletion table and 31 64-KiB objects is below 2.25 MiB. A sequence-zero maximum
 16-conflict fork resolution also fits. Every control object and successor head preflights the resulting
 complete closure before it can become accepted, materialized, or advertised. An ordinary
@@ -1264,9 +1291,10 @@ chain re-quarantines, remains sidecar-backed/row-quarantined, never enters an ad
 active closure, and cannot clear in V1.
 There is no state in which an accepted/advertised head lacks a serveable closure.
 
-The exhaustive edge equations are part of the B1 tests. A resolution-free sequence-14
-active row is `current head + current bundle + 14 * (transition + prior head) = 30
-objects`. Its tombstone is `tombstone head + deletion table + active predecessor + 14 *
+The exhaustive edge equations are part of the B1 tests. A worst-case resolution-free
+sequence-14 active row is `current head + current bundle + 14 *
+(transition + prior head) = 30 objects`. Its tombstone is
+`tombstone head + deletion table + active predecessor + 14 *
 (transition + transition-prior head) = 31 objects`. At authority sequence zero, a first
 maximum 16-conflict fork resolution is at most `current head + current payload +
 resolution + 16 conflicts + optional common base = 20 objects`. Recursive authority
@@ -1286,7 +1314,8 @@ it; resolution arrival without that successor is audit-only and discarded after 
 diagnostics. Opposite `head -> resolution` and `resolution -> head` delivery, restart,
 provider failover, and a previously unseen omitted conflict must produce identical head,
 status, and closure.
-The result is sorted by `(objectKind,digest)` and must contain at most 32 objects and
+The result and every reference list are sorted by semantic digest (with object kind only
+as a collision tie-break) and must contain at most 32 objects and
 3 MiB canonical bytes. No chain is truncated and no checkpoint inferred; missing or
 over-cap closure fails before advertisement and keeps legacy authoritative. Globally,
 advertised closures use at most 25,000 distinct objects/1 GiB and 262,144 row-to-object
@@ -1301,6 +1330,9 @@ signed control objects, hence 17 objects/1,064,960 canonical bytes per row. Aggr
 caps are 1,024 sidecars, 17,408 row-object references, 128 MiB canonical bytes, and
 a 2-MiB metadata subcap inside the combined 24-MiB live/4-MiB activation metadata caps;
 physical objects also count in the existing 50,000-object/2-GiB cache.
+The B1 aggregate helper returns an exact encoded cohort delta only. B2 atomically combines
+that delta with the complete cache baseline, including roots, inventory nodes, staging,
+unreferenced objects, and journal/WAL reserve, before enforcing the physical cache caps.
 It is excluded from active closure service/drain numerators because a sidecar row is
 quarantined, but all disk, wire, token-bucket, and cache accounting includes it. Cap
 refusal never unquarantines locally and never permits an unverified remote quarantine.
@@ -1489,7 +1521,7 @@ Re-enabling requires exact record validation before any equal-head no-op.
   transition conflict set, later heads, restart, and provider failover with identical
   terminal quarantine and zero further materialized-state change; A-to-B-to-C followed by
   old-peer/old-wallet transition/successor attempts with zero lineage or materialized-state change;
-  disputed tombstone fork with zero direct deletion; same-sequence and rotated-authority
+  invalid or incomplete tombstone proof with zero direct deletion; same-sequence and rotated-authority
   successor approval vectors; direct resolution/successor
   delivery orders at version zero and above zero, omitted third-conflict and 16/17-
   conflict orders, sequence-13/14 by 2/16-conflict closure-cap boundaries, liar,
