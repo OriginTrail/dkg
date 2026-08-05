@@ -487,6 +487,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // otherwise abort the whole CG fanout. A parse failure here must degrade to
       // "no materialization this round" — never take down the sync.
       const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
+      // Whether the descriptor map is an AUTHORITATIVE statement about this
+      // round's metadata, i.e. whether "this ref has no descriptor" may be read
+      // as "this ref has nothing to materialize".
+      //
+      // `manifestComplete` cannot answer that. The parse below runs INSIDE a
+      // block whose entry condition is `wsMetaResult.completed`, so on the
+      // failure path `manifestComplete` is guaranteed true exactly where the map
+      // is guaranteed empty-for-the-wrong-reason. Manifest complete AND
+      // descriptors never parsed is a third state, distinct both from a
+      // truncated meta phase and from a genuine entity-share manifest that has
+      // no head rows to describe.
+      let descriptorsAuthoritative = true;
       if (snapshotMaterializer && publicSnapshotStore && wsMetaResult.completed) {
         try {
           for (const descriptor of parseGraphScopedSwmRecoveryDescriptors({
@@ -510,6 +522,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           logWarn(ctx, `SWM sync could not parse graph-scoped snapshot descriptors for "${pid}": `
             + `${err instanceof Error ? err.message : String(err)}`);
           snapshotDescriptorsByRef.clear();
+          // The map is now empty because parsing FAILED, not because there was
+          // nothing to describe. Without this the vacuity rule would read every
+          // manifest ref as "nothing to write" and report the graph fully
+          // materialized while zero assertion graphs were written — and because
+          // the parser builds its whole array before returning, ONE malformed
+          // head discards the descriptors of every valid KA alongside it.
+          descriptorsAuthoritative = false;
         }
       }
       let materializedGraphs = 0;
@@ -609,7 +628,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // descriptors at all — there "no descriptor" means "not known yet", and
         // counting it would inflate coverage for a peer that advertised nothing.
         if (!descriptors?.length) {
-          if (manifestComplete) {
+          // `descriptorsAuthoritative` as well as `manifestComplete`: a parse
+          // failure empties this map while the meta phase reports complete, and
+          // treating that as vacuity reports full coverage on a round that wrote
+          // nothing — wrong in the flattering direction, which is the direction
+          // no downstream reader can detect.
+          if (manifestComplete && descriptorsAuthoritative) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
           }
@@ -852,10 +876,26 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // insert below stamps a graph-scoped head marker for an assertion graph
       // that was never materialized, and every later pass skips it as already
       // present — turning a transient store error into permanent, silent loss.
-      const snapshotPhaseUsable = snapshotSync.completed && materializationFailures === 0;
+      // `descriptorsAuthoritative` belongs in this conjunction for the same
+      // reason `materializationFailures` does: in both cases snapshots were
+      // fetched and verified but the Knowledge Assets behind them were NOT
+      // written. A parse failure produces no `materializationFailures` — nothing
+      // was ever attempted — so without this the phase reads usable, the bulk
+      // `storeInsert(processed.verifiedMeta)` below lands head rows certifying
+      // assertion graphs that hold nothing, and the next round's
+      // `isGraphAssetMaterialized` sees those markers and skips the KAs for
+      // good. That is the same permanent-invisibility failure the G7 repair in
+      // this PR exists to prevent, arrived at from a different direction.
+      const snapshotPhaseUsable = snapshotSync.completed
+        && materializationFailures === 0
+        && descriptorsAuthoritative;
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
           + `not materialized — holding the phase incomplete so metadata cannot certify them`);
+      }
+      if (!descriptorsAuthoritative) {
+        logWarn(ctx, `SWM sync for "${pid}": snapshot descriptors could not be parsed — holding `
+          + `the phase incomplete so metadata cannot certify Knowledge Assets that were never written`);
       }
       if (!snapshotPhaseUsable) {
         // The responder was reachable, but the snapshot phase did not produce

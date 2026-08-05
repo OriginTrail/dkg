@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import {
+  createSharedMemorySnapshotMaterializer,
+  type SharedMemorySnapshotMaterializer,
+} from '../src/sync/requester/swm-snapshot-materializer.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import {
   runDurableSync,
@@ -1954,6 +1957,220 @@ describe('public SWM snapshot coverage (#2050)', () => {
         missingSample: [],
         materializationFailures: 0,
       });
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
+
+  it('does NOT resolve a manifest ref when the descriptors failed to PARSE, so a round that wrote nothing cannot report full coverage', async () => {
+    // THE THIRD STATE, and the one neither row above can see. Both of them
+    // reach the vacuity branch of `materializeReadySnapshot` with an EMPTY
+    // descriptor map under a COMPLETE manifest, and both are right to count the
+    // ref resolved: nothing was described because there was nothing to
+    // describe. A parse FAILURE lands on the same branch with the same two
+    // observables — and there "no descriptor" means the round never learned
+    // what it was supposed to write.
+    //
+    // `manifestComplete` cannot discriminate, and that is the whole defect.
+    // `parseGraphScopedSwmRecoveryDescriptors` is called inside a block whose
+    // entry condition is `wsMetaResult.completed` — the same value that becomes
+    // `manifestComplete` — so on the failure path it is guaranteed TRUE exactly
+    // where the map is guaranteed empty for the wrong reason. With the hook now
+    // wired unconditionally (see the row above, which is what opened this path
+    // to every ref), the consequences compounded: every manifest ref took the
+    // vacuity branch, a round that wrote ZERO Knowledge Assets reported FULL
+    // coverage, `materializationFailures` stayed 0 because nothing was ever
+    // ATTEMPTED, `snapshotPhaseUsable` therefore read true, the bulk
+    // `storeInsert(processed.verifiedMeta)` landed head rows certifying
+    // assertion graphs that hold nothing, the peer was dropped as satisfied,
+    // and the next round's `isGraphAssetMaterialized` sees those markers and
+    // skips the Knowledge Assets for good. Every one of those is wrong in the
+    // FLATTERING direction, which is the direction no downstream reader can
+    // detect — the operator is told the graph is complete.
+    //
+    // THE POISON IS PRODUCTION-REACHABLE, which is why it is this shape and not
+    // an invented malformed row. Two `dkg:assertionVersion` rows on one
+    // `#dkg-swm-head` subject is union-insert residue: what a pass that
+    // replaced a graph and stopped before the metadata swap leaves behind. This
+    // branch's own materializer names and REPAIRS that state
+    // (`storedHead.needsRepair`), so it demonstrably occurs — and any peer
+    // still running the pre-repair code serves it to us verbatim. (A head at a
+    // `contentScopeVersion` above `GRAPH_KA_CONTENT_SCOPE_VERSION`, written by
+    // a newer node, is the other reachable trigger for the same catch and
+    // produces these same numbers by the same path.)
+    //
+    // The residue sits on the SECOND Knowledge Asset deliberately. The first
+    // one's rows are impeccable and it is STILL not written, because the parser
+    // builds its whole array before returning: one malformed head discards the
+    // descriptors of every valid KA alongside it. On the first KA the counters
+    // would come out identical while pinning none of that.
+    const { manifest, metaGraph } = swmFixtures(COVERAGE_CG);
+    const [validKa, residueKa] = manifest(2);
+    const meta: Quad[] = [
+      ...validKa.meta,
+      ...residueKa.meta,
+      {
+        subject: residueKa.headSubject,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: metaGraph,
+      } as Quad,
+    ];
+
+    // Fixture integrity BY MESSAGE and before the sync, because every counter
+    // below is `0` and a fixture that started throwing for an unrelated reason
+    // (a meta-graph URI the parser refuses to visit, a drifted operation
+    // subject) would reproduce all of them while testing nothing — the "a wrong
+    // fixture stops testing rather than failing" trap `swm-descriptor-fixtures`
+    // documents. Called the way production calls it: no `registeredSubGraphNames`,
+    // since both Knowledge Assets are root-lane.
+    expect(() => parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: COVERAGE_CG,
+      metaQuads: meta,
+    })).toThrow(/ambiguous assertionVersion/);
+    // ...and the manifest really carries TWO refs, so `snapshotsTotal: 2` below
+    // is measuring what it claims. `manifest()` gives the two KAs different
+    // payload sizes precisely so their digests cannot collide; a collision
+    // would fold them into one ref and `snapshotsResolved: 0` would go on
+    // passing against a one-ref manifest.
+    expect(collectPublicSnapshotMetadata(meta).map((entry) => entry.ref).sort())
+      .toEqual([validKa.digest, residueKa.digest].sort());
+
+    // Both blobs already cached — the state of a node whose earlier passes
+    // fetched them. Nothing here is missing from the TRANSPORT's point of view,
+    // so the shortfall asserted below can only come from the parse failure.
+    const cached = new Map<string, Quad[]>([
+      [validKa.digest, validKa.payload],
+      [residueKa.digest, residueKa.payload],
+    ]);
+    const snapshotFetches: string[] = [];
+
+    // The real materializer over a real store, as the rows above use it — a
+    // hand-rolled stub that silently writes nothing would reproduce
+    // `resolved: 0` for a NEW reason and look identical to a pass. Wrapped in
+    // an explicitly delegating counter rather than a spread: `withKaWriteLock`
+    // is the gate everything else runs behind, and a wrapper that broke it
+    // would make "nothing was written" true for the wrong reason.
+    const store = new OxigraphStore();
+    const real = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const replacedGraphs: string[] = [];
+    const materializer: SharedMemorySnapshotMaterializer = {
+      withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => (
+        real.withKaWriteLock(contextGraphId, subGraphName, kaUal, fn)
+      ),
+      readStoredHead: (descriptor) => real.readStoredHead(descriptor),
+      isGraphAssetMaterialized: (descriptor) => real.isGraphAssetMaterialized(descriptor),
+      replaceGraph: async (graphUri, quads) => {
+        replacedGraphs.push(graphUri);
+        await real.replaceGraph(graphUri, quads);
+      },
+      replaceHeadMetadata: (contextGraphId, descriptor) => (
+        real.replaceHeadMetadata(contextGraphId, descriptor)
+      ),
+    };
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx,
+        remotePeerId: 'peer-head-residue-7c7c7c7c',
+        contextGraphIds: [COVERAGE_CG],
+        createContextGraphSyncDeadline: () => Date.now() + 60_000,
+        fetchSyncPages: async (
+          _ctx: OperationContext,
+          _peer: string,
+          contextGraphId: string,
+          _includeSharedMemory: boolean,
+          phase: string,
+          _graph: string,
+          _deadline: number,
+          snapshotRef?: string,
+        ) => {
+          if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
+          // Every phase completes cleanly. That is not incidental: it is what
+          // makes `manifestComplete` true, which is the field that turns this
+          // into the third state rather than the truncated-meta one.
+          return pageResult(contextGraphId, phase);
+        },
+        processSharedMemoryBatch: async () => ({
+          ...sharedMemoryProcessResult(),
+          emptyResponses: 0,
+          verifiedMeta: meta,
+          totalFetchedMetaQuads: meta.length,
+        }),
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads: Quad[]) => { await store.insert(quads); },
+        snapshotMaterializer: materializer,
+        publicSnapshotStore: {
+          getSnapshot: async (ref: string) => cached.get(ref) ?? null,
+          putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map(),
+        logInfo: noop,
+        logWarn: noop,
+        logDebug: noop,
+      });
+
+      // Both refs were served from cache, so the snapshot plane completed and
+      // the transport is exonerated: a digest that stopped matching its payload
+      // would turn a cache hit into a fetch and move this row onto the
+      // fetch-shortfall branch that the first coverage row already owns.
+      expect(snapshotFetches).toEqual([]);
+      // THE ANTI-VACUITY WITNESS, and the reason this row cannot pass under an
+      // implementation that writes everything correctly: not one assertion
+      // graph was replaced. Without it, `snapshotsResolved: 0` alone would also
+      // be satisfied by a materializer that ran and wrote all of them, and the
+      // coverage number would have nothing to agree WITH.
+      //
+      // That the builder's descriptors are MATERIALIZABLE at all is the one
+      // property this row cannot self-witness, and it is pinned by T14 below,
+      // which shares this builder and asserts two Knowledge Assets written
+      // against a real store. An empty list here is therefore attributable to
+      // the parse failure rather than to a fixture that could never have
+      // written anything — the `/ambiguous assertionVersion/` guard above
+      // constrains the parser, not the materializer.
+      expect(replacedGraphs).toEqual([]);
+      // Corroboration from the summary's own ledger: `verifiedData` is empty
+      // here, so in-lock materialization is the only possible source of data
+      // triples, and there were none.
+      expect(summary.insertedDataTriples).toBe(0);
+      // Pre-fix this record read `2/2` with `missingCount: 0` for a round that
+      // wrote nothing at all. `manifestComplete: true` is the discriminator and
+      // is pinned deliberately: if it ever came out `false`, these counts would
+      // be right for the FIRST coverage row's reason (a truncated meta phase)
+      // and this row would silently stop testing the flag. `missingSample` is
+      // empty because the sample is only populated on the materialization-
+      // FAILURE path, and here nothing was ever attempted — a known diagnostics
+      // residual, not a disagreement with `missingCount`.
+      expect(summary.swmCoverage).toEqual({
+        contextGraphId: COVERAGE_CG,
+        peerIdSuffix: '7c7c7c7c',
+        snapshotsResolved: 0,
+        snapshotsTotal: 2,
+        manifestComplete: true,
+        missingCount: 2,
+        missingSample: [],
+        materializationFailures: 0,
+      });
+      // The second half of the flag, and an INDEPENDENT one: coverage is what
+      // the continuation loop reads, `failedPhases` is what stops the round
+      // being stamped as caught up. A parse failure produces no
+      // `materializationFailures` — nothing was attempted — so
+      // `snapshotPhaseUsable` needs `descriptorsAuthoritative` in its
+      // conjunction or the phase reads usable on a round that wrote nothing.
+      expect(summary.failedPhases).toBeGreaterThanOrEqual(1);
+      // ...which is what withholds the CERTIFICATION, the durable half of the
+      // harm: the bulk `storeInsert(processed.verifiedMeta)` sits below the
+      // unusable-phase `continue`, so no head row landed claiming an assertion
+      // graph that holds nothing. Had it landed, the next round's
+      // `isGraphAssetMaterialized` would see the marker and skip these
+      // Knowledge Assets permanently.
+      expect(summary.insertedMetaTriples).toBe(0);
     } finally {
       await store.close().catch(() => {});
     }
