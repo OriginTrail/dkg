@@ -1,0 +1,497 @@
+import { sha256 } from '@noble/hashes/sha2.js';
+
+import {
+  assertAssertionCoordinateV1,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
+  assertSubGraphNameV1,
+  type AssertionCoordinateV1,
+  type ContextGraphIdV1,
+  type NetworkIdV1,
+  type SubGraphNameV1,
+} from './author-catalog-codec.js';
+import {
+  canonicalizeJson,
+  parseCanonicalJson,
+  type CanonicalJsonValue,
+  type StrictJsonParseOptions,
+} from './canonical-json.js';
+import {
+  assertCanonicalDeterministicUalV1,
+  type CanonicalDeterministicUalV1,
+} from './canonical-graph-scoped-author-seal.js';
+import {
+  assertSignedControlEnvelope,
+  canonicalizeSignedControlEnvelopeBytes,
+  parseCanonicalSignedControlEnvelope,
+  type SignedControlEnvelopeV1,
+} from './sync-control-object.js';
+import {
+  assertCanonicalChainId,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
+  assertCanonicalTimestampMs,
+  parseCanonicalDecimalU64,
+  type ChainIdV1,
+  type CountV1,
+  type DecimalU64V1,
+  type Digest32V1,
+  type EvmAddressV1,
+  type TimestampMsV1,
+} from './sync-wire-scalars.js';
+import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
+
+export const SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1 =
+  'SwmAuthorInventoryHeadV1' as const;
+export const SWM_AUTHOR_INVENTORY_SCOPE_DIGEST_DOMAIN_V1 =
+  'dkg-swm-author-inventory-scope-v1\n' as const;
+export const SWM_AUTHOR_INVENTORY_ROWS_DIGEST_DOMAIN_V1 =
+  'dkg-swm-author-inventory-rows-v1\n' as const;
+export const MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1 = 4 * 1024;
+export const MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1 = 8 * 1024 * 1024;
+export const MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 = 100_000;
+export const MAX_SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_BYTES_V1 = 256;
+
+const UTF8 = new TextEncoder();
+const SCOPE_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_SCOPE_DIGEST_DOMAIN_V1);
+const ROWS_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_ROWS_DIGEST_DOMAIN_V1);
+
+/**
+ * Exact public-CG lane whose active, author-sealed SWM-only set is attested.
+ * The separate object type and digest domain deliberately prevent this
+ * pre-finalization claim from being mistaken for a finalized-VM catalog.
+ */
+export interface SwmAuthorInventoryScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly governanceChainId: ChainIdV1 | null;
+  readonly governanceContractAddress: EvmAddressV1 | null;
+  readonly ownershipTransitionDigest: Digest32V1 | null;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly authorAddress: EvmAddressV1;
+  readonly era: DecimalU64V1;
+}
+
+/** One active, completely committed SWM assertion. */
+export interface SwmAuthorInventoryRowV1 {
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly assertionVersion: DecimalU64V1;
+  readonly kaUal: CanonicalDeterministicUalV1;
+  readonly shareOperationId: string;
+  readonly projectionDigest: Digest32V1;
+  readonly publicTripleCount: CountV1;
+  readonly privateTripleCount: CountV1;
+  readonly sealDigest: Digest32V1;
+  readonly sharedAt: TimestampMsV1;
+  readonly expiresAt: TimestampMsV1 | null;
+}
+
+/** Constant-size signed exact-set commitment. The rows remain a separate blob. */
+export interface SwmAuthorInventoryHeadV1 extends SwmAuthorInventoryScopeV1 {
+  readonly version: DecimalU64V1;
+  readonly previousHeadDigest: Digest32V1 | null;
+  readonly totalRows: CountV1;
+  readonly rowsDigest: Digest32V1;
+  readonly issuedAt: TimestampMsV1;
+}
+
+export type SignedSwmAuthorInventoryHeadEnvelopeV1 = SignedControlEnvelopeV1 & {
+  readonly objectType: typeof SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1;
+  readonly payload: SwmAuthorInventoryHeadV1;
+};
+
+export interface SwmAuthorInventorySnapshotV1 {
+  readonly head: SignedSwmAuthorInventoryHeadEnvelopeV1;
+  readonly rows: readonly SwmAuthorInventoryRowV1[];
+}
+
+export type SwmAuthorInventoryCodecErrorCodeV1 =
+  | 'swm-inventory-schema'
+  | 'swm-inventory-scalar'
+  | 'swm-inventory-order'
+  | 'swm-inventory-duplicate'
+  | 'swm-inventory-binding'
+  | 'swm-inventory-too-large';
+
+export class SwmAuthorInventoryCodecErrorV1 extends Error {
+  constructor(
+    readonly code: SwmAuthorInventoryCodecErrorCodeV1,
+    message: string,
+    options: ErrorOptions = {},
+  ) {
+    super(`[${code}] ${message}`, options);
+    this.name = 'SwmAuthorInventoryCodecErrorV1';
+  }
+}
+
+export function assertSwmAuthorInventoryScopeV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryScopeV1 {
+  if (!isPlainRecord(value)) fail('swm-inventory-schema', 'scope must be a plain object');
+  assertExactKeysAdapted(value, [
+    'networkId',
+    'contextGraphId',
+    'governanceChainId',
+    'governanceContractAddress',
+    'ownershipTransitionDigest',
+    'subGraphName',
+    'authorAddress',
+    'era',
+  ], 'scope');
+  adaptScalars(() => {
+    assertNetworkIdV1(value.networkId);
+    assertContextGraphIdV1(value.contextGraphId);
+    assertGovernanceTuple(value);
+    if (value.ownershipTransitionDigest !== null) {
+      assertCanonicalDigest(value.ownershipTransitionDigest, 'ownershipTransitionDigest');
+    }
+    if (value.subGraphName !== null) assertSubGraphNameV1(value.subGraphName);
+    assertCanonicalEvmAddress(value.authorAddress, 'authorAddress');
+    parseCanonicalDecimalU64(value.era, 'era');
+  });
+}
+
+export function canonicalizeSwmAuthorInventoryScopeV1(
+  scope: SwmAuthorInventoryScopeV1,
+): string {
+  assertSwmAuthorInventoryScopeV1(scope);
+  return canonicalizeJson(scope as unknown as CanonicalJsonValue, {
+    maxBytes: MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1,
+    maxDepth: 1,
+  });
+}
+
+export function computeSwmAuthorInventoryScopeDigestV1(
+  scope: SwmAuthorInventoryScopeV1,
+): Digest32V1 {
+  return digestWithDomain(
+    SCOPE_DOMAIN_BYTES,
+    UTF8.encode(canonicalizeSwmAuthorInventoryScopeV1(scope)),
+  );
+}
+
+export function assertSwmAuthorInventoryRowV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryRowV1 {
+  if (!isPlainRecord(value)) fail('swm-inventory-schema', 'row must be a plain object');
+  assertExactKeysAdapted(value, [
+    'assertionCoordinate',
+    'assertionVersion',
+    'kaUal',
+    'shareOperationId',
+    'projectionDigest',
+    'publicTripleCount',
+    'privateTripleCount',
+    'sealDigest',
+    'sharedAt',
+    'expiresAt',
+  ], 'row');
+  adaptScalars(() => {
+    assertAssertionCoordinateV1(value.assertionCoordinate);
+    const assertionVersion = parseCanonicalDecimalU64(value.assertionVersion, 'assertionVersion');
+    if (assertionVersion < 1n) throw new Error('assertionVersion must be positive');
+    assertCanonicalDeterministicUalV1(value.kaUal);
+    assertBoundedIdentifier(value.shareOperationId, 'shareOperationId');
+    assertCanonicalDigest(value.projectionDigest, 'projectionDigest');
+    parseCanonicalDecimalU64(value.publicTripleCount, 'publicTripleCount');
+    parseCanonicalDecimalU64(value.privateTripleCount, 'privateTripleCount');
+    assertCanonicalDigest(value.sealDigest, 'sealDigest');
+    assertCanonicalTimestampMs(value.sharedAt, 'sharedAt');
+    if (value.expiresAt !== null) {
+      assertCanonicalTimestampMs(value.expiresAt, 'expiresAt');
+      if (BigInt(value.expiresAt) <= BigInt(value.sharedAt)) {
+        throw new Error('expiresAt must be later than sharedAt');
+      }
+    }
+  });
+}
+
+export function compareSwmAuthorInventoryRowsV1(
+  left: SwmAuthorInventoryRowV1,
+  right: SwmAuthorInventoryRowV1,
+): number {
+  return left.kaUal < right.kaUal ? -1 : left.kaUal > right.kaUal ? 1 : 0;
+}
+
+export function canonicalizeSwmAuthorInventoryRowsBytesV1(
+  rows: readonly SwmAuthorInventoryRowV1[],
+): Uint8Array {
+  assertSwmAuthorInventoryRowsV1(rows);
+  try {
+    return UTF8.encode(canonicalizeJson(rows as unknown as CanonicalJsonValue, {
+      maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+      maxDepth: 2,
+    }));
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
+  }
+}
+
+export function parseCanonicalSwmAuthorInventoryRowsV1(
+  input: string | Uint8Array,
+  options: StrictJsonParseOptions = {},
+): readonly SwmAuthorInventoryRowV1[] {
+  let parsed: CanonicalJsonValue;
+  try {
+    parsed = parseCanonicalJson(input, {
+      ...options,
+      maxBytes: Math.min(
+        options.maxBytes ?? MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+        MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+      ),
+      maxDepth: Math.min(options.maxDepth ?? 2, 2),
+    });
+  } catch (cause) {
+    fail('swm-inventory-schema', 'rows are not strict canonical JSON', cause);
+  }
+  assertSwmAuthorInventoryRowsV1(parsed);
+  return Object.freeze(parsed.map((row) => Object.freeze({ ...row })));
+}
+
+export function computeSwmAuthorInventoryRowsDigestV1(
+  rows: readonly SwmAuthorInventoryRowV1[],
+): Digest32V1 {
+  return digestWithDomain(ROWS_DOMAIN_BYTES, canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+}
+
+export function assertSwmAuthorInventoryHeadV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryHeadV1 {
+  if (!isPlainRecord(value)) fail('swm-inventory-schema', 'head must be a plain object');
+  assertExactKeysAdapted(value, [
+    'networkId',
+    'contextGraphId',
+    'governanceChainId',
+    'governanceContractAddress',
+    'ownershipTransitionDigest',
+    'subGraphName',
+    'authorAddress',
+    'era',
+    'version',
+    'previousHeadDigest',
+    'totalRows',
+    'rowsDigest',
+    'issuedAt',
+  ], 'head');
+  const scope = scopeFromHead(value);
+  assertSwmAuthorInventoryScopeV1(scope);
+  adaptScalars(() => {
+    const version = parseCanonicalDecimalU64(value.version, 'version');
+    if (value.previousHeadDigest !== null) {
+      assertCanonicalDigest(value.previousHeadDigest, 'previousHeadDigest');
+    }
+    if ((version === 0n) !== (value.previousHeadDigest === null)) {
+      throw new Error('only version 0 may have a null previousHeadDigest');
+    }
+    parseCanonicalDecimalU64(value.totalRows, 'totalRows');
+    assertCanonicalDigest(value.rowsDigest, 'rowsDigest');
+    assertCanonicalTimestampMs(value.issuedAt, 'issuedAt');
+  });
+  try {
+    canonicalizeJson(value as unknown as CanonicalJsonValue, {
+      maxBytes: MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1,
+      maxDepth: 1,
+    });
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'head exceeds the canonical v1 byte limit', cause);
+  }
+}
+
+export function deriveSwmAuthorInventoryScopeFromHeadV1(
+  head: SwmAuthorInventoryHeadV1,
+): SwmAuthorInventoryScopeV1 {
+  assertSwmAuthorInventoryHeadV1(head);
+  return Object.freeze(scopeFromHead(head as unknown as Record<string, unknown>));
+}
+
+export function assertSignedSwmAuthorInventoryHeadEnvelopeV1(
+  value: unknown,
+): asserts value is SignedSwmAuthorInventoryHeadEnvelopeV1 {
+  try {
+    assertSignedControlEnvelope(value as SignedControlEnvelopeV1);
+  } catch (cause) {
+    fail('swm-inventory-schema', 'head envelope is not a signed control object', cause);
+  }
+  const envelope = value as SignedControlEnvelopeV1;
+  if (envelope.objectType !== SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1) {
+    fail('swm-inventory-schema', 'head envelope has the wrong objectType');
+  }
+  assertSwmAuthorInventoryHeadV1(envelope.payload);
+  if (envelope.issuer !== envelope.payload.authorAddress) {
+    fail('swm-inventory-binding', 'head issuer must equal the scoped authorAddress');
+  }
+  try {
+    const bytes = canonicalizeSignedControlEnvelopeBytes(envelope);
+    if (bytes.length > MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1) {
+      fail('swm-inventory-too-large', 'signed head exceeds the v1 byte limit');
+    }
+  } catch (cause) {
+    if (cause instanceof SwmAuthorInventoryCodecErrorV1) throw cause;
+    fail('swm-inventory-too-large', 'signed head exceeds control-object bounds', cause);
+  }
+}
+
+export function canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(
+  envelope: SignedSwmAuthorInventoryHeadEnvelopeV1,
+): Uint8Array {
+  assertSignedSwmAuthorInventoryHeadEnvelopeV1(envelope);
+  const bytes = canonicalizeSignedControlEnvelopeBytes(envelope);
+  if (bytes.length > MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1) {
+    fail('swm-inventory-too-large', 'signed head exceeds the v1 byte limit');
+  }
+  return bytes;
+}
+
+export function parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
+  input: string | Uint8Array,
+): SignedSwmAuthorInventoryHeadEnvelopeV1 {
+  let parsed: SignedControlEnvelopeV1;
+  try {
+    parsed = parseCanonicalSignedControlEnvelope(input, {
+      maxBytes: MAX_SWM_AUTHOR_INVENTORY_HEAD_BYTES_V1,
+      maxDepth: 3,
+    });
+  } catch (cause) {
+    fail('swm-inventory-schema', 'signed head is not strict canonical JSON', cause);
+  }
+  assertSignedSwmAuthorInventoryHeadEnvelopeV1(parsed);
+  return parsed;
+}
+
+export function assertSwmAuthorInventorySnapshotBindingV1(
+  snapshot: SwmAuthorInventorySnapshotV1,
+): void {
+  assertSignedSwmAuthorInventoryHeadEnvelopeV1(snapshot.head);
+  assertSwmAuthorInventoryRowsV1(snapshot.rows);
+  const expectedCount = BigInt(snapshot.rows.length);
+  if (BigInt(snapshot.head.payload.totalRows) !== expectedCount) {
+    fail('swm-inventory-binding', 'head totalRows does not equal the exact row set');
+  }
+  const expectedRowsDigest = computeSwmAuthorInventoryRowsDigestV1(snapshot.rows);
+  if (snapshot.head.payload.rowsDigest !== expectedRowsDigest) {
+    fail('swm-inventory-binding', 'head rowsDigest does not commit to the exact row set');
+  }
+  for (const row of snapshot.rows) {
+    const parsedUal = assertCanonicalDeterministicUalV1(row.kaUal);
+    if (parsedUal.agentAddress !== snapshot.head.payload.authorAddress) {
+      fail('swm-inventory-binding', 'row kaUal author does not equal the scoped authorAddress');
+    }
+    if (BigInt(row.sharedAt) > BigInt(snapshot.head.payload.issuedAt)) {
+      fail('swm-inventory-binding', 'row sharedAt must not be later than head issuedAt');
+    }
+  }
+}
+
+function assertSwmAuthorInventoryRowsV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryRowV1[] {
+  if (!Array.isArray(value)) fail('swm-inventory-schema', 'rows must be an array');
+  if (value.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) {
+    fail('swm-inventory-too-large', 'row set exceeds the v1 row limit');
+  }
+  let previous: SwmAuthorInventoryRowV1 | undefined;
+  const coordinates = new Set<string>();
+  const operations = new Set<string>();
+  for (let index = 0; index < value.length; index += 1) {
+    const row = value[index];
+    assertSwmAuthorInventoryRowV1(row);
+    if (previous && compareSwmAuthorInventoryRowsV1(previous, row) >= 0) {
+      fail(
+        previous.kaUal === row.kaUal ? 'swm-inventory-duplicate' : 'swm-inventory-order',
+        `rows must be strictly ordered by canonical kaUal at index ${index}`,
+      );
+    }
+    if (coordinates.has(row.assertionCoordinate)) {
+      fail('swm-inventory-duplicate', 'assertionCoordinate must be unique within a row set');
+    }
+    if (operations.has(row.shareOperationId)) {
+      fail('swm-inventory-duplicate', 'shareOperationId must be unique within a row set');
+    }
+    coordinates.add(row.assertionCoordinate);
+    operations.add(row.shareOperationId);
+    previous = row;
+  }
+}
+
+function assertGovernanceTuple(value: Record<string, unknown>): void {
+  const chain = value.governanceChainId;
+  const contract = value.governanceContractAddress;
+  if ((chain === null) !== (contract === null)) {
+    throw new Error('governanceChainId and governanceContractAddress must both be null or non-null');
+  }
+  if (chain !== null) assertCanonicalChainId(chain, 'governanceChainId');
+  if (contract !== null) assertCanonicalEvmAddress(contract, 'governanceContractAddress');
+}
+
+function assertBoundedIdentifier(value: unknown, label: string): void {
+  if (typeof value !== 'string' || value.length === 0 || value.normalize('NFC') !== value) {
+    throw new Error(`${label} must be a nonempty NFC string`);
+  }
+  const bytes = UTF8.encode(value);
+  if (bytes.length > MAX_SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_BYTES_V1) {
+    throw new Error(`${label} exceeds its v1 byte limit`);
+  }
+  for (const codePoint of value) {
+    const point = codePoint.codePointAt(0)!;
+    if (point <= 0x1f || (point >= 0x7f && point <= 0x9f)) {
+      throw new Error(`${label} contains a forbidden control character`);
+    }
+  }
+}
+
+function scopeFromHead(value: Record<string, unknown>): SwmAuthorInventoryScopeV1 {
+  return {
+    networkId: value.networkId as NetworkIdV1,
+    contextGraphId: value.contextGraphId as ContextGraphIdV1,
+    governanceChainId: value.governanceChainId as ChainIdV1 | null,
+    governanceContractAddress: value.governanceContractAddress as EvmAddressV1 | null,
+    ownershipTransitionDigest: value.ownershipTransitionDigest as Digest32V1 | null,
+    subGraphName: value.subGraphName as SubGraphNameV1 | null,
+    authorAddress: value.authorAddress as EvmAddressV1,
+    era: value.era as DecimalU64V1,
+  };
+}
+
+function adaptScalars(operation: () => void): void {
+  try {
+    operation();
+  } catch (cause) {
+    if (cause instanceof SwmAuthorInventoryCodecErrorV1) throw cause;
+    const detail = cause instanceof Error ? `: ${cause.message}` : '';
+    fail('swm-inventory-scalar', `inventory scalar is not canonical${detail}`, cause);
+  }
+}
+
+function assertExactKeysAdapted(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): void {
+  try {
+    assertExactKeys(value, keys, `SWM author inventory ${label}`);
+  } catch (cause) {
+    fail('swm-inventory-schema', `${label} has unexpected or missing keys`, cause);
+  }
+}
+
+function digestWithDomain(domain: Uint8Array, bytes: Uint8Array): Digest32V1 {
+  const hasher = sha256.create();
+  hasher.update(domain);
+  hasher.update(bytes);
+  return `0x${Array.from(
+    hasher.digest() as Uint8Array,
+    (byte: number) => byte.toString(16).padStart(2, '0'),
+  ).join('')}` as Digest32V1;
+}
+
+function fail(
+  code: SwmAuthorInventoryCodecErrorCodeV1,
+  message: string,
+  cause?: unknown,
+): never {
+  throw new SwmAuthorInventoryCodecErrorV1(
+    code,
+    message,
+    cause === undefined ? {} : { cause },
+  );
+}

@@ -769,7 +769,7 @@ function assertCanonicalIsoUtcMillisV1(
   }
 }
 
-function assertCanonicalDeterministicUalV1(value: unknown): {
+export function assertCanonicalDeterministicUalV1(value: unknown): {
   ual: CanonicalDeterministicUalV1;
   agentAddress: EvmAddressV1;
   kaNumber: string;
