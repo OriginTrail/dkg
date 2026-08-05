@@ -74,6 +74,49 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
+import {
+  computeUnits,
+  costMicroTrac,
+  isExempt,
+  SCHEDULE_VERSION,
+} from "../metering/read-meter.js";
+import {
+  loadMeterConfig,
+  recordReadLeg as ledgerRecordReadLeg,
+  noteFailedRead as ledgerNoteFailedRead,
+} from "../metering/ledger.js";
+
+// Metering helpers bound to this daemon's DKG_HOME. Config is re-read per
+// request so the operator can flip shadow→enforce (or off) without a restart;
+// the read is a cached file stat in practice.
+const meterHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
+const getMeterConfig = () => loadMeterConfig(meterHome());
+const recordReadLeg = async (a: Parameters<typeof ledgerRecordReadLeg>[1]) =>
+  ledgerRecordReadLeg(meterHome(), a);
+const noteFailedRead = (a: Parameters<typeof ledgerNoteFailedRead>[1]) =>
+  ledgerNoteFailedRead(meterHome(), a);
+
+// S(V): the queried view's published quad count. v1 assumption (July §7 Q2):
+// CG metadata, curator-signed, refreshed on write, ±10% staleness priced into
+// asks. Until that field ships we derive it from the local store and cache it.
+const scopeCache = new Map<string, { at: number; quads: number }>();
+async function resolveScopeQuads(contextGraphId?: string, view?: string): Promise<number> {
+  const key = `${contextGraphId ?? "-"}::${view ?? "-"}`;
+  const hit = scopeCache.get(key);
+  if (hit && Date.now() - hit.at < 300_000) return hit.quads;
+  let quads = 0;
+  try {
+    const anyAgent = agent as any;
+    if (typeof anyAgent?.getContextGraphStats === "function") {
+      const st = await anyAgent.getContextGraphStats(contextGraphId);
+      quads = Number(st?.quadCount ?? st?.tripleCount ?? 0);
+    }
+  } catch { /* fall through to the default below */ }
+  if (!quads) quads = Number(process.env.DKG_READ_SCOPE_DEFAULT ?? 26200);
+  scopeCache.set(key, { at: Date.now(), quads });
+  return quads;
+}
+
   loadConfig,
   saveConfig,
   loadNetworkConfig,
@@ -697,9 +740,57 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, "execute");
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
+      // ── V2-B2 read metering (read-schedule/1.0-provisional) ──────────────
+      // D8: the enforcement point is the query route itself. D12: exemption is
+      // decided BEFORE any ledger call, so protocol-internal reads mutate
+      // nothing. C.3: `shadow` mode meters and receipts without debiting.
+      let metering: Record<string, unknown> | undefined;
+      try {
+        const meterCfg = getMeterConfig();
+        if (meterCfg.mode !== "off") {
+          const body = JSON.stringify(result ?? {});
+          const scopeQuads = await resolveScopeQuads(contextGraphId, view);
+          const u = computeUnits({
+            sparql: String(sparql),
+            scopeQuads,
+            responseBytes: Buffer.byteLength(body, "utf8"),
+          });
+          const principal = callerAgentAddress;
+          const exempt = isExempt(principal, meterCfg);
+          metering = {
+            scheduleVersion: SCHEDULE_VERSION,
+            units: u.units,
+            breakdown: u.breakdown,
+            scopeQuads,
+            responseBytes: Buffer.byteLength(body, "utf8"),
+            readAskMicroPer1k: meterCfg.readAskMicroPer1k,
+            costMicroTrac: costMicroTrac(u.units, meterCfg.readAskMicroPer1k),
+            mode: meterCfg.mode,
+            billable: !exempt,
+            principal: principal ?? null,
+          };
+          if (!exempt) {
+            metering.receipt = await recordReadLeg({
+              principal: principal as string,
+              units: u.units,
+              breakdown: u.breakdown,
+              scopeQuads,
+              sparql: String(sparql),
+              responseBody: body,
+              contextGraphId,
+              view,
+              askMicroPer1k: meterCfg.readAskMicroPer1k,
+            });
+          }
+        }
+      } catch (meterErr: any) {
+        // Metering must never break serving (shadow-mode invariant).
+        metering = { error: String(meterErr?.message ?? meterErr).slice(0, 200) };
+      }
       return jsonResponse(res, 200, {
         result,
         phases: { execute: execDur, serverTotal: Date.now() - serverT0 },
+        ...(metering ? { metering } : {}),
       });
     } catch (err: any) {
       if (err?.code === API_QUERY_CALLER_DISCONNECTED) {
@@ -715,6 +806,14 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         return;
       }
       tracker.fail(ctx, err);
+      // D7/July §1.1: a failed query bills the base fee only, receipt marked
+      // error. Shadow mode records it without debiting.
+      try {
+        const meterCfg = getMeterConfig();
+        if (meterCfg.mode !== "off") {
+          void noteFailedRead({ principal: undefined, sparql: String((parsed as any)?.sparql ?? "") });
+        }
+      } catch { /* never let metering mask the original error */ }
       const msg = err?.message ?? "";
       if (
         msg.startsWith("SPARQL rejected:") ||
