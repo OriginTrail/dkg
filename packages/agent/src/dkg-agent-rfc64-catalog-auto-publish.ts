@@ -10,6 +10,7 @@ import {
   assertContextGraphIdV1,
   assertSafeIri,
   assertSubGraphNameV1,
+  assertSwmAuthorInventoryShareOperationIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
@@ -260,6 +261,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         params.assertionCoordinate,
         'SWM inventory assertionCoordinate',
       );
+      const shareOperationId = params.shareOperationId;
+      assertSwmAuthorInventoryShareOperationIdV1(shareOperationId);
       const assertionUri = contextGraphAssertionUri(
         params.contextGraphId,
         params.lifecycleAgentAddress,
@@ -300,7 +303,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       });
       if (
         head === undefined
-        || head.shareOperationId !== params.shareOperationId
+        || head.shareOperationId !== shareOperationId
         || head.assertionVersion !== canonicalSeal.assertionVersion
         || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
         || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)
@@ -316,7 +319,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         store: this.store,
         graphManager,
         contextGraphId: params.contextGraphId,
-        shareOperationId: params.shareOperationId,
+        shareOperationId,
         kaUal: canonicalSeal.kaUal,
         assertionVersion: canonicalSeal.assertionVersion,
         subGraphName: params.subGraphName ?? undefined,
@@ -340,7 +343,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             assertionCoordinate: params.assertionCoordinate,
             assertionVersion: canonicalSeal.assertionVersion,
             kaUal: canonicalSeal.kaUal,
-            shareOperationId: params.shareOperationId,
+            shareOperationId,
             projectionDigest: computeKaProjectionDigestV1(projectionBytes),
             publicTripleCount: canonicalSeal.publicTripleCount,
             privateTripleCount: canonicalSeal.privateTripleCount,
