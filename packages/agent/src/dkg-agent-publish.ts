@@ -669,6 +669,37 @@ export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri
     .map((quad) => ({ ...quad, graph: '' }));
 }
 
+/**
+ * Resolve the detached public-catalog capability for an on-chain V2 publish.
+ *
+ * The encryption callback is produced by the chain-aware curated-policy
+ * resolver. It is therefore the authoritative decision for the same publish
+ * operation. Re-reading only local `_meta` here can disagree on an edge whose
+ * catalog metadata has not converged yet: the payload is encrypted as curated,
+ * while the catalog capability is omitted and cores (which intentionally do
+ * not custody curated ciphertext) can only decline the StorageACK with
+ * `MERKLE_MISMATCH_IN_SWM`.
+ */
+export function resolveCuratedV2CatalogCapability(input: {
+  contextGraphId: string;
+  graphScoped: boolean;
+  onChainContextGraphId?: string | bigint;
+  encryptInlinePayload: PublishOptions['encryptInlinePayload'];
+}): PublishOptions['trustedNonManifestCatalogTriples'] {
+  const hasOnChainContextGraphId = typeof input.onChainContextGraphId === 'bigint'
+    ? input.onChainContextGraphId > 0n
+    : typeof input.onChainContextGraphId === 'string'
+      && input.onChainContextGraphId.trim().length > 0;
+  if (
+    !input.graphScoped
+    || !hasOnChainContextGraphId
+    || typeof input.encryptInlinePayload !== 'function'
+  ) {
+    return undefined;
+  }
+  return generatedPrivateCatalogTripleKeys(input.contextGraphId);
+}
+
 export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
   contextGraphId: string;
   snapshotQuads: readonly Quad[];
@@ -694,7 +725,13 @@ export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
         ? input.resolvedEncryptInlineChunked
         : input.queuedEncryptInlineChunked,
   };
-  if (!input.onChainContextGraphId || !input.resolvedEncryptInlinePayload) {
+  const trustedNonManifestCatalogTriples = resolveCuratedV2CatalogCapability({
+    contextGraphId: input.contextGraphId,
+    graphScoped: true,
+    onChainContextGraphId: input.onChainContextGraphId,
+    encryptInlinePayload: input.resolvedEncryptInlinePayload,
+  });
+  if (!trustedNonManifestCatalogTriples) {
     return { quads: [...input.snapshotQuads], ...encryptionOptions };
   }
 
@@ -704,8 +741,7 @@ export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
     // the publisher; never append it to a queued snapshot.
     quads: [...input.snapshotQuads],
     ...encryptionOptions,
-    trustedNonManifestCatalogTriples:
-      generatedPrivateCatalogTripleKeys(input.contextGraphId),
+    trustedNonManifestCatalogTriples,
   };
 }
 
@@ -1615,10 +1651,6 @@ export class PublishMethods extends DKGAgentBase {
       // WM/SWM/VM graph, so reject it instead of signing ambiguous content.
       assertNoKnowledgeAssetPayloadNamedGraphs(quads, privateQuads ?? []);
     }
-    const trustedNonManifestCatalogTriples = graphScopedDirectPublish
-      && await this.isPrivateContextGraph(contextGraphId)
-      ? generatedPrivateCatalogTripleKeys(contextGraphId)
-      : undefined;
     const publishQuads = quads;
 
     // RFC-001 §9.x — sign-at-creation. The publisher refuses on-chain
@@ -1731,6 +1763,17 @@ export class PublishMethods extends DKGAgentBase {
       explicitPublishPolicyTarget,
       publishBindingOptions,
     );
+    // Use the same chain-aware curated decision that selected encryption.
+    // Local `_meta` can legitimately lag chain registration; consulting it a
+    // second time here used to omit the detached catalog from an otherwise
+    // curated V2 publish, leaving every strip-ciphertext core with zero bytes
+    // to verify for StorageACK.
+    const trustedNonManifestCatalogTriples = resolveCuratedV2CatalogCapability({
+      contextGraphId,
+      graphScoped: graphScopedDirectPublish,
+      onChainContextGraphId: onChainId,
+      encryptInlinePayload,
+    });
 
     const result = await this.publisher.publish({
       contextGraphId,
@@ -6533,11 +6576,11 @@ export class PublishMethods extends DKGAgentBase {
     // derives a detached catalog commitment without altering the exact KA
     // graph or its author seal.
     const graphScopedPublish = options?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
-    const hasGeneratedPrivateCatalog = onChainId != null && (await this.isPrivateContextGraph(contextGraphId));
-    const trustedNonManifestCatalogTriples = hasGeneratedPrivateCatalog
+    const hasLocallyGeneratedPrivateCatalog = onChainId != null && (await this.isPrivateContextGraph(contextGraphId));
+    const localTrustedNonManifestCatalogTriples = hasLocallyGeneratedPrivateCatalog
       ? generatedPrivateCatalogTripleKeys(contextGraphId)
       : undefined;
-    if (hasGeneratedPrivateCatalog && !graphScopedPublish) {
+    if (hasLocallyGeneratedPrivateCatalog && !graphScopedPublish) {
       selection = await this._ensureCuratedCatalogInSwm(
         contextGraphId,
         selection,
@@ -6628,6 +6671,19 @@ export class PublishMethods extends DKGAgentBase {
     if (encryptInlineChunked) {
       this.log.info(ctx, `LU-11: curated CG ${contextGraphId} — chunked path active (per-chunk SWM gossip + V2 ACK)`);
     }
+
+    // V2 curation is decided by the live chain-aware encryption resolver, not
+    // by a second local `_meta` read. Keep the legacy combined-model behavior
+    // unchanged, but make graph-scoped publishes carry the detached catalog
+    // whenever the exact same operation was resolved as curated.
+    const trustedNonManifestCatalogTriples = graphScopedPublish
+      ? resolveCuratedV2CatalogCapability({
+          contextGraphId,
+          graphScoped: true,
+          onChainContextGraphId: onChainId,
+          encryptInlinePayload,
+        })
+      : localTrustedNonManifestCatalogTriples;
 
     const publisher = options?.publisherOverride ?? this.publisher;
     const result = await publisher.publishFromSharedMemory(contextGraphId, selection, {

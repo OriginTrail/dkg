@@ -378,6 +378,69 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
 });
 
 describe('DKGAgent._publish inline encryption routing', () => {
+  it('uses chain-confirmed V2 encryption to attach the catalog when local meta is stale', async () => {
+    const authorAddress = '0x1111111111111111111111111111111111111111';
+    const reservedKaId = (BigInt(authorAddress) << 96n) | 1n;
+    const encryptInlinePayload = async (plaintext: Uint8Array) => plaintext;
+    const encryptInlineChunked = async () => ({
+      ciphertextChunksRoot: new Uint8Array(32),
+      ciphertextChunkCount: 1,
+      totalCiphertextBytes: 1,
+    });
+    const publisherPublish = recorder(async () => ({
+      status: 'tentative',
+      kaId: reservedKaId.toString(),
+    }));
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      subscribedContextGraphs: new Set(['private-cg']),
+      contextGraphExists: recorder(async () => true),
+      createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '4'),
+      isPrivateContextGraph: recorder(async () => false),
+      chain: {
+        chainId: 'base:8453',
+        isV10Ready: () => true,
+        getEvmChainId: async () => 8453n,
+        getKnowledgeAssetsLifecycleAddress: async () =>
+          '0x2222222222222222222222222222222222222222',
+      },
+      peerId: 'peer-1',
+      publisher: { publish: publisherPublish },
+      _buildPrecomputedAttestationForSelection: recorder(async () => ({
+        expectedMerkleRoot: new Uint8Array(32),
+        authorAddress,
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+        schemeVersion: 1,
+        reservedKaId,
+      })),
+      _resolveEncryptInlinePayload: recorder(async () => encryptInlinePayload),
+      _resolveEncryptInlineChunked: recorder(async () => encryptInlineChunked),
+      broadcastPublish: recorder(async () => undefined),
+      emitPublicProjectionAfterPublish: recorder(async () => undefined),
+    } as any;
+
+    await (DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'private-cg',
+      [{ subject: 'urn:test:s', predicate: 'urn:test:p', object: '"value"', graph: '' }],
+    );
+
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
+    expect(publisherPublish.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      contextGraphId: 'private-cg',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      encryptInlinePayload,
+      encryptInlineChunked,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
+    }));
+  });
+
   it('does not trust caller accessPolicy=public to bypass chain-confirmed encryption resolution', async () => {
     const encryptInlinePayload = recorder(async (plaintext: Uint8Array) => plaintext);
     const encryptInlineChunked = recorder(() => undefined);
@@ -755,6 +818,38 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
         onChainContextGraphId: '1',
       }),
     ]);
+  });
+
+  it('uses chain-confirmed V2 encryption to attach the catalog when local meta is stale', async () => {
+    const agentLike = makeSwmPublishAgentLike('4');
+    const encryptInlinePayload = async (plaintext: Uint8Array) => plaintext;
+    const encryptInlineChunked = async () => ({
+      ciphertextChunksRoot: new Uint8Array(32),
+      ciphertextChunkCount: 1,
+      totalCiphertextBytes: 1,
+    });
+    agentLike._resolveEncryptInlinePayload = recorder(async () => encryptInlinePayload);
+    agentLike._resolveEncryptInlineChunked = recorder(async () => encryptInlineChunked);
+
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
+      '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal',
+      'all',
+      { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
+    );
+
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([
+      ['0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal'],
+    ]);
+    const publishOptions = agentLike.publisher.publishFromSharedMemory.calls.at(-1)?.[2];
+    expect(publishOptions).toEqual(expect.objectContaining({
+      onChainContextGraphId: '4',
+      encryptInlinePayload,
+      encryptInlineChunked,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(
+        '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal',
+      ),
+    }));
   });
 });
 
