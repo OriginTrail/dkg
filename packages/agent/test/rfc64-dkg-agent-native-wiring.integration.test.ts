@@ -45,7 +45,7 @@ import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   resolveRfc64PublicCatalogControlsV1,
-  type ResolvedRfc64PublicCatalogActivationConfigV1,
+  type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
@@ -191,7 +191,7 @@ interface NativeAgentStartOptionsV1 {
   }>;
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
-  readonly activation?: ResolvedRfc64PublicCatalogActivationConfigV1;
+  readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
   readonly networkIdentityChainId?: NetworkIdV1;
 }
@@ -519,6 +519,58 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         selectedContextGraphs: ['different-selection'],
       } as never,
     })).rejects.toThrow(/selected graphs differ from the bootstrap manifest/u);
+  });
+
+  it('projects raw selected activation into direct agent durable sync scope', async () => {
+    const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-selected-sync-scope',
+      activation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+            targets: [],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
+  });
+
+  it('keeps direct disabled activation fail-closed even when stale controls are present', async () => {
+    const ignoredPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-disabled-stale-controls',
+      activation: {
+        enabled: false,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(ignoredPolicy),
+            targets: [],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
+    expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeUndefined();
+    expect((agent as any).config.rfc64PublicCatalogAutoPublishPolicy).toBeUndefined();
   });
 
   it('snapshots a bounded public-root bootstrap manifest', () => {

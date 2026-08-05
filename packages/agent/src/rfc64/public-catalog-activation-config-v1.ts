@@ -72,6 +72,10 @@ export interface ResolvedRfc64PublicCatalogActivationConfigV1 {
   readonly bootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
 }
 
+export type Rfc64PublicCatalogActivationInputV1 =
+  | Rfc64PublicCatalogActivationConfigV1
+  | ResolvedRfc64PublicCatalogActivationConfigV1;
+
 export type ResolvedRfc64PublicCatalogAutoPublishPolicyV1 =
   | Readonly<{
     mode: 'all-accepted-public';
@@ -292,6 +296,26 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
     );
   }
   return resolved;
+}
+
+/** Resolve raw operator input, while preserving compatibility with the short-lived resolved input. */
+export function resolveRfc64PublicCatalogActivationInputV1(
+  input: Rfc64PublicCatalogActivationInputV1 | undefined,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentityV1,
+): ResolvedRfc64PublicCatalogActivationConfigV1 {
+  if (
+    input !== undefined
+    && Object.prototype.hasOwnProperty.call(input, 'selectedContextGraphs')
+  ) {
+    return snapshotResolvedRfc64PublicCatalogActivationConfigV1(
+      input as ResolvedRfc64PublicCatalogActivationConfigV1,
+      chainIdentity,
+    )!;
+  }
+  return resolveRfc64PublicCatalogActivationConfigV1(
+    input as Rfc64PublicCatalogActivationConfigV1 | undefined,
+    chainIdentity,
+  );
 }
 
 /**

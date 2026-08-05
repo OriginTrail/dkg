@@ -1753,7 +1753,14 @@ export async function runDaemonInner(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    rfc64PublicCatalogActivation: rfc64PublicCatalog,
+    // The agent owns authoritative activation against the chain adapter it
+    // actually constructed. This daemon-side resolved value is only a
+    // fail-fast/status preview and must not become a second runtime contract.
+    rfc64PublicCatalogActivation: config.rfc64PublicCatalog === undefined
+      ? undefined
+      : rfc64PublicCatalog.enabled
+        ? config.rfc64PublicCatalog
+        : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext

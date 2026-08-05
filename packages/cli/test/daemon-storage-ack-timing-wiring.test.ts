@@ -241,11 +241,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     ]);
     expect(createArg.rfc64PublicCatalogActivation).toMatchObject({
       enabled: true,
-      selectedContextGraphs: ['rfc64-selected-a', 'rfc64-selected-b'],
       deploymentProfile,
       autoPublish: {
         peers: ['12D3KooReceiver'],
-        catalogIssuerDelegationEffectiveAt: '0',
         catalogIssuerDelegationExpiresAt: '1893456000000',
       },
       bootstrap,
@@ -309,11 +307,30 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       rfc64PublicCatalog: { enabled: false },
     });
 
-    expect(createArg.rfc64PublicCatalogActivation).toEqual({
-      enabled: false,
-      selectedContextGraphs: [],
-    });
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
+  it('strips stale controls from an explicitly disabled RFC-64 activation', async () => {
+    const createArg = await captureCreateArg({
+      rfc64PublicCatalog: {
+        enabled: false,
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-ignored-disabled', 'evm:100'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).not.toContain('rfc64-ignored-disabled');
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
   });

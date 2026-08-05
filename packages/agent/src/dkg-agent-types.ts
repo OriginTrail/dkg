@@ -58,7 +58,7 @@ import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
-  ResolvedRfc64PublicCatalogActivationConfigV1,
+  Rfc64PublicCatalogActivationInputV1,
   ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
@@ -1190,7 +1190,7 @@ export interface DKGAgentConfig {
    * deployment, auto-publish, and bootstrap controls; the accepted manifest
    * is its only CG set.
    */
-  rfc64PublicCatalogActivation?: ResolvedRfc64PublicCatalogActivationConfigV1;
+  rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
   /**
    * Legacy all-accepted-public-CG producer configuration. Omission preserves
    * existing publication behavior. New daemons should use the unified

@@ -414,6 +414,7 @@ import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstra
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
   resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationInputV1,
   resolveRfc64PublicCatalogControlsV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
@@ -613,27 +614,6 @@ type StorageAckNormalizedDKGAgentConfig = Omit<
   'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
 > & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
 
-/**
- * Resolve the chain id that agent construction will expose before any durable
- * RFC-64 bootstrap state is opened. This mirrors the adapter construction
- * branch once, so activation validation and the final network identity cannot
- * choose different config sources.
- */
-function resolveConfiguredAgentChainId(config: DKGAgentConfig): string | undefined {
-  if (config.chainAdapter !== undefined) {
-    return config.chainAdapter.chainId === 'none'
-      ? config.networkIdentity?.chainId
-      : config.chainAdapter.chainId;
-  }
-  if (config.chainConfig !== undefined && config.chainConfig.operationalKeys?.length) {
-    // EVMChainAdapter uses the local Hardhat identity when callers omit the
-    // optional chain id. Mirror that construction default here so activation
-    // validation and the final network identity still consume one value.
-    return config.chainConfig.chainId ?? 'evm:31337';
-  }
-  return config.networkIdentity?.chainId;
-}
-
 function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
   const hasLegacyTiming =
@@ -685,6 +665,42 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalized
   };
 }
 
+function constructConfiguredChainAdapter(
+  config: StorageAckNormalizedDKGAgentConfig,
+): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
+  let operationalKeys = config.chainConfig?.operationalKeys;
+  if (config.chainAdapter) {
+    const chain = config.chainAdapter;
+    if (!operationalKeys?.length && typeof (chain as any).getOperationalPrivateKey === 'function') {
+      operationalKeys = [(chain as any).getOperationalPrivateKey()];
+    }
+    return { chain, operationalKeys };
+  }
+  if (config.chainConfig && operationalKeys?.length) {
+    const evmConfigBase = {
+      rpcUrl: config.chainConfig.rpcUrl,
+      rpcUrls: config.chainConfig.rpcUrls,
+      walletRpcUrls: config.chainConfig.walletRpcUrls,
+      privateKey: operationalKeys[0],
+      additionalKeys: operationalKeys.slice(1),
+      hubAddress: config.chainConfig.hubAddress,
+      tokenAddress: config.chainConfig.tokenAddress,
+      chainId: config.chainConfig.chainId,
+      receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
+      approvalPolicy: config.chainConfig.approvalPolicy,
+      cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
+      minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
+      minPublisherTracWei: config.chainConfig.minPublisherTracWei,
+      contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
+    };
+    const chain = config.chainConfig.adminPrivateKey
+      ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
+      : new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
+    return { chain, operationalKeys };
+  }
+  return { chain: new NoChainAdapter(), operationalKeys };
+}
+
 interface ACKReliableMessenger {
   sendRequestOwned(
     peerId: string,
@@ -729,27 +745,56 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    const activationInput = inputConfig.rfc64PublicCatalogActivation;
-    const configuredAgentChainId = resolveConfiguredAgentChainId(inputConfig);
-    const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
-      activation: activationInput,
-      legacyDeploymentProfile: inputConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: inputConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: inputConfig.rfc64PublicCatalogBootstrap,
-    }, resolveRfc64PublicCatalogActivationChainIdentityV1(configuredAgentChainId));
-    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
-    // an impossible ephemeral configuration before constructing a store or
-    // node so start() can never fail after leaving libp2p half-running.
-    if (rfc64PublicCatalogControls.requiresDataDir && !inputConfig.dataDir) {
-      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
-    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
-    const config = normalizeStorageAckConfig({
+    const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
       syncContextGraphPriorities: normalizeSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,
       ),
     });
+    const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(normalizedConfig);
+    const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
+    if (
+      normalizedConfig.networkIdentity?.chainId
+      && adapterChainId
+      && normalizedConfig.networkIdentity.chainId !== adapterChainId
+    ) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.chainId (${normalizedConfig.networkIdentity.chainId}) `
+        + `must match the chain adapter id (${adapterChainId})`,
+      );
+    }
+    const constructedAgentChainId = adapterChainId ?? normalizedConfig.networkIdentity?.chainId;
+    const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
+      constructedAgentChainId,
+    );
+    const activation = normalizedConfig.rfc64PublicCatalogActivation === undefined
+      ? undefined
+      : resolveRfc64PublicCatalogActivationInputV1(
+        normalizedConfig.rfc64PublicCatalogActivation,
+        chainIdentity,
+      );
+    const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
+      activation,
+      legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
+      legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
+      legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
+    }, chainIdentity);
+    const config: StorageAckNormalizedDKGAgentConfig = {
+      ...normalizedConfig,
+      syncContextGraphs: [
+        ...new Set([
+          ...(normalizedConfig.syncContextGraphs ?? []),
+          ...(activation?.selectedContextGraphs ?? []),
+        ]),
+      ],
+    };
+    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
+    // an impossible ephemeral configuration before constructing a store or
+    // node so start() can never fail after leaving libp2p half-running.
+    if (rfc64PublicCatalogControls.requiresDataDir && !config.dataDir) {
+      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
+    }
     const rfc64CatalogDeploymentProfile = rfc64PublicCatalogControls.deploymentProfile;
     const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
       config.rfc64CatalogAccessPolicyAuthority,
@@ -791,39 +836,6 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     const nodeRole = config.nodeRole ?? 'edge';
-    let chain: ChainAdapter;
-    let opKeys = config.chainConfig?.operationalKeys;
-    if (config.chainAdapter) {
-      chain = config.chainAdapter;
-      if (!opKeys?.length && typeof (chain as any).getOperationalPrivateKey === 'function') {
-        opKeys = [(chain as any).getOperationalPrivateKey()];
-      }
-    } else if (config.chainConfig && opKeys?.length) {
-      const evmConfigBase = {
-        rpcUrl: config.chainConfig.rpcUrl,
-        rpcUrls: config.chainConfig.rpcUrls,
-        walletRpcUrls: config.chainConfig.walletRpcUrls,
-        privateKey: opKeys[0],
-        additionalKeys: opKeys.slice(1),
-        hubAddress: config.chainConfig.hubAddress,
-        tokenAddress: config.chainConfig.tokenAddress,
-        chainId: config.chainConfig.chainId,
-        receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
-        approvalPolicy: config.chainConfig.approvalPolicy,
-        cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
-        minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
-        minPublisherTracWei: config.chainConfig.minPublisherTracWei,
-        contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
-      };
-      if (config.chainConfig.adminPrivateKey) {
-        chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
-      } else {
-        chain = new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
-      }
-    } else {
-      chain = new NoChainAdapter();
-    }
-
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
@@ -844,22 +856,11 @@ export class DKGAgent extends DKGAgentBase {
         `must match computeNetworkId(${genesisId}) (${computedNetworkId})`,
       );
     }
-    const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
-    if (config.networkIdentity?.chainId && adapterChainId && config.networkIdentity.chainId !== adapterChainId) {
-      throw new Error(
-        `DKGAgentConfig.networkIdentity.chainId (${config.networkIdentity.chainId}) ` +
-        `must match the chain adapter id (${adapterChainId})`,
-      );
-    }
-    const constructedAgentChainId = adapterChainId ?? config.networkIdentity?.chainId;
-    if (constructedAgentChainId !== configuredAgentChainId) {
-      throw new Error('DKGAgent chain identity changed during construction');
-    }
     const networkIdentity = {
       ...config.networkIdentity,
       genesisId,
       networkId: computedNetworkId,
-      chainId: configuredAgentChainId,
+      chainId: constructedAgentChainId,
     };
     const configWithoutRfc64CatalogControls = { ...config };
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;

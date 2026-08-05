@@ -55,6 +55,26 @@ describe('resolveRfc64PublicCatalogActivation', () => {
       enabled: false,
       selectedContextGraphs: [],
     });
+    expect(resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: false,
+        deploymentProfile: {
+          networkId: 'otp:20430',
+          assertedAtChainId: '20430',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('ignored-disabled-selection')],
+        },
+      },
+    }, chainIdentity)).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
   });
 
   it('derives the exact durable and auto-publish allowlist from the pinned manifest', () => {
