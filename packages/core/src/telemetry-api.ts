@@ -239,6 +239,10 @@ export interface DkgMetrics {
   finalizationRecoveryOldestDueAgeMs: Gauge;
   /** outcome={recovered|invalidated|retry-pending|none} */
   finalizationRecoveryAttemptsTotal: Counter;
+  /** outcome={inserted|existing|deferred|capacity|conflict|closed|write-failure} */
+  finalizationRecoveryAdmissionTotal: Counter;
+  /** durable finalization envelopes waiting for live-inbox capacity */
+  finalizationRecoveryDeferredEntries: Gauge;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -459,6 +463,14 @@ function buildMetrics(): DkgMetrics {
     finalizationRecoveryAttemptsTotal: meter.createCounter(
       'dkg.finalization_recovery.attempts_total',
       { description: 'Autonomous finalization replay attempts by bounded outcome' },
+    ),
+    finalizationRecoveryAdmissionTotal: meter.createCounter(
+      'dkg.finalization_recovery.admission_total',
+      { description: 'Durable finalization admission outcomes by bounded result' },
+    ),
+    finalizationRecoveryDeferredEntries: meter.createGauge(
+      'dkg.finalization_recovery.deferred_entries',
+      { description: 'Durable finalization envelopes waiting for live-inbox capacity' },
     ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
