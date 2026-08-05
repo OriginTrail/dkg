@@ -17,13 +17,21 @@ records. Wallet authority kind is `unknown` unless independently classified from
 finalized chain code. V1 capability is `unsupported` for the baseline because the
 protocol does not exist at the captured commit.
 
-Run:
+Run the protocol-evidence checks enforced by
+`.github/workflows/system-record-protocol.yml`:
 
 ```bash
 pnpm --filter @origintrail-official/dkg-core... build
 pnpm --filter @devnet/issue-2052-system-records typecheck
 pnpm --filter @devnet/issue-2052-system-records test
 pnpm --filter @devnet/issue-2052-system-records characterize
+```
+
+The W1 telemetry smoke command is separate manual comparison evidence because this PR
+changes no agent runtime path and the protocol-evidence workflow does not gate agent
+telemetry code:
+
+```bash
 pnpm bench:w1-sync-telemetry:smoke
 ```
 

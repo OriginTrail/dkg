@@ -12,6 +12,7 @@ import {
   classifyOwnedSubjectV1,
   evaluateLoadEnvelopeV1,
   expectedProfileLinkPredicateV1,
+  loadCaptureDigestV1,
   loadIntervalSampleDigestV1,
   manifestDigestInput,
   parseCharacterizationFixtureV1,
@@ -102,7 +103,8 @@ test('proves the reference B+tree hard and activation ceilings algebraically', (
 });
 
 test('accepts the heartbeat-aware activation load equation with deadline reserve', () => {
-  const ownershipSample = loadIntervals()[0];
+  const baselineIntervals = loadIntervals();
+  const ownershipSample = baselineIntervals[0];
   const changedProvider = {
     ...ownershipSample,
     providerExactRequests: ownershipSample.providerExactRequests + 1,
@@ -144,11 +146,38 @@ test('accepts the heartbeat-aware activation load equation with deadline reserve
     activeBundleBytes: 128 * 1024 * 1024,
     activeVerificationClosureBytes: 256 * 1024 * 1024,
     inventoryLeaves: 4,
-    ...loadMeasurement(loadIntervals()),
+    ...loadMeasurement(baselineIntervals),
   }, LOAD_CAPTURE_EXPECTATION);
   assert.equal(verdict.eligible, true);
   assert.ok(verdict.recordDrainMinutes !== null && verdict.recordDrainMinutes < 18);
   assert.equal(verdict.closureDrainMinutes, 16);
+
+  const reorderedKeys = baselineIntervals.map((interval) => ({
+    backlogDeltaRecords: interval.backlogDeltaRecords,
+    providerExactRequests: interval.providerExactRequests,
+    requesterExactRequests: interval.requesterExactRequests,
+    arrivedClosureBytes: interval.arrivedClosureBytes,
+    arrivedRecords: interval.arrivedRecords,
+    servicedClosureBytes: interval.servicedClosureBytes,
+    servicedRecords: interval.servicedRecords,
+    cacheState: interval.cacheState,
+    providerSampleDigest: interval.providerSampleDigest,
+    requesterSampleDigest: interval.requesterSampleDigest,
+    endedAt: interval.endedAt,
+    startedAt: interval.startedAt,
+    ordinal: interval.ordinal,
+  }));
+  const reorderedMeasurement = {
+    ...loadMeasurement(baselineIntervals),
+    pairedIntervals: reorderedKeys,
+  };
+  assert.equal(evaluateLoadEnvelopeV1({
+    activeRecords: 512,
+    activeBundleBytes: 128 * 1024 * 1024,
+    activeVerificationClosureBytes: 256 * 1024 * 1024,
+    inventoryLeaves: 4,
+    ...reorderedMeasurement,
+  }, LOAD_CAPTURE_EXPECTATION).eligible, true);
 });
 
 test('blocks activation when arrivals saturate service or measurements are absent', () => {
@@ -256,8 +285,8 @@ test('blocks activation when arrivals saturate service or measurements are absen
   const gap = loadIntervals();
   gap[1] = {
     ...gap[1],
-    startedAt: '2026-08-04T20:02:00.000Z',
-    endedAt: '2026-08-04T20:03:00.000Z',
+    startedAt: '2026-08-04T20:02:00Z',
+    endedAt: '2026-08-04T20:03:00Z',
   };
   assert.throws(() => evaluateLoadEnvelopeV1({
     activeRecords: 1,
@@ -299,8 +328,35 @@ test('blocks activation when arrivals saturate service or measurements are absen
     activeVerificationClosureBytes: 1,
     inventoryLeaves: 1,
     ...loadMeasurement(loadIntervals()),
-  }, { ...LOAD_CAPTURE_EXPECTATION, startedAt: '2026-08-04T19:59:00.000Z' }),
+  }, { ...LOAD_CAPTURE_EXPECTATION, startedAt: '2026-08-04T19:59:00Z' }),
   /do not cover the trusted activation window/);
+
+  for (const invalidStartedAt of [
+    '2026-08-04T20:00:00.000Z',
+    '2026-08-04T20:00:00+00:00',
+  ]) {
+    assert.throws(() => evaluateLoadEnvelopeV1({
+      activeRecords: 1,
+      activeBundleBytes: 1,
+      activeVerificationClosureBytes: 1,
+      inventoryLeaves: 1,
+      ...loadMeasurement(loadIntervals()),
+    }, { ...LOAD_CAPTURE_EXPECTATION, startedAt: invalidStartedAt }),
+    /canonical V1 second-precision timestamp/);
+
+    const timestampIntervals = loadIntervals();
+    timestampIntervals[0] = resignLoadInterval({
+      ...timestampIntervals[0],
+      startedAt: invalidStartedAt,
+    });
+    assert.throws(() => evaluateLoadEnvelopeV1({
+      activeRecords: 1,
+      activeBundleBytes: 1,
+      activeVerificationClosureBytes: 1,
+      inventoryLeaves: 1,
+      ...loadMeasurement(timestampIntervals),
+    }, LOAD_CAPTURE_EXPECTATION), /canonical V1 second-precision timestamp/);
+  }
 
   const fullIntervals = loadIntervals();
   const trimmed = fullIntervals.slice(1).map((interval, ordinal) => resignLoadInterval({
@@ -1006,15 +1062,15 @@ function loadIntervals(
     backlogDeltaRecords: -1,
     ...overrides,
   };
-  const startedAt = Date.parse('2026-08-04T20:00:00.000Z');
+  const startedAt = Date.parse('2026-08-04T20:00:00Z');
   return Array.from(
     { length: SYSTEM_RECORD_LIMITS_V1.minimumLoadIntervals },
     (_, ordinal) => {
       const sample = {
         ...interval,
         ordinal,
-        startedAt: new Date(startedAt + ordinal * 60_000).toISOString(),
-        endedAt: new Date(startedAt + (ordinal + 1) * 60_000).toISOString(),
+        startedAt: new Date(startedAt + ordinal * 60_000).toISOString().replace('.000Z', 'Z'),
+        endedAt: new Date(startedAt + (ordinal + 1) * 60_000).toISOString().replace('.000Z', 'Z'),
       };
       return {
         ...sample,
@@ -1055,7 +1111,7 @@ function loadMeasurement(
     intervalSeconds: 60 as const,
     pairedIntervals,
   };
-  return { ...capture, captureDigest: sha256Canonical(capture) };
+  return { ...capture, captureDigest: loadCaptureDigestV1(capture) };
 }
 
 function loadCaptureExpectation(

@@ -730,6 +730,36 @@ export function loadIntervalSampleDigestV1(
   });
 }
 
+export function loadCaptureDigestV1(input: {
+  readonly captureId: string;
+  readonly requesterSource: string;
+  readonly providerSource: string;
+  readonly intervalSeconds: 60;
+  readonly pairedIntervals: readonly PairedLoadIntervalV1[];
+}): string {
+  return sha256Canonical({
+    captureId: input.captureId,
+    requesterSource: input.requesterSource,
+    providerSource: input.providerSource,
+    intervalSeconds: input.intervalSeconds,
+    pairedIntervals: input.pairedIntervals.map((interval) => ({
+      ordinal: interval.ordinal,
+      startedAt: interval.startedAt,
+      endedAt: interval.endedAt,
+      requesterSampleDigest: interval.requesterSampleDigest,
+      providerSampleDigest: interval.providerSampleDigest,
+      cacheState: interval.cacheState,
+      servicedRecords: interval.servicedRecords,
+      servicedClosureBytes: interval.servicedClosureBytes,
+      arrivedRecords: interval.arrivedRecords,
+      arrivedClosureBytes: interval.arrivedClosureBytes,
+      requesterExactRequests: interval.requesterExactRequests,
+      providerExactRequests: interval.providerExactRequests,
+      backlogDeltaRecords: interval.backlogDeltaRecords,
+    })),
+  });
+}
+
 function assertLoadInterval(interval: PairedLoadIntervalV1, index: number): void {
   if (!isRecord(interval)) throw new TypeError(`pairedIntervals[${index}] must be an object`);
   assertExactKeys(interval, [
@@ -809,14 +839,16 @@ function assertLoadCapture(input: {
     ) {
       throw new TypeError('capture identity does not match the trusted activation manifest');
     }
-    const expectedStartedAt = parseTimestamp(expected.startedAt, 'expected capture start');
-    const expectedEndedAt = parseTimestamp(expected.endedAt, 'expected capture end');
-    if (
-      expected.startedAt !== new Date(expectedStartedAt).toISOString()
-      || expected.endedAt !== new Date(expectedEndedAt).toISOString()
-      || expectedEndedAt <= expectedStartedAt
-    ) {
-      throw new TypeError('expected capture bounds must be canonical and increasing');
+    const expectedStartedAt = parseCanonicalV1Timestamp(
+      expected.startedAt,
+      'expected capture start',
+    );
+    const expectedEndedAt = parseCanonicalV1Timestamp(
+      expected.endedAt,
+      'expected capture end',
+    );
+    if (expectedEndedAt <= expectedStartedAt) {
+      throw new TypeError('expected capture bounds must be increasing');
     }
     if (input.pairedIntervals.length === 0) {
       throw new TypeError('pairedIntervals cannot satisfy a non-empty expected capture');
@@ -835,12 +867,14 @@ function assertLoadCapture(input: {
     if (interval.ordinal !== index) {
       throw new TypeError('pairedIntervals must have contiguous zero-based ordinals');
     }
-    const startedAt = parseTimestamp(interval.startedAt, `pairedIntervals[${index}].startedAt`);
-    const endedAt = parseTimestamp(interval.endedAt, `pairedIntervals[${index}].endedAt`);
-    if (interval.startedAt !== new Date(startedAt).toISOString()
-      || interval.endedAt !== new Date(endedAt).toISOString()) {
-      throw new TypeError('pairedIntervals timestamps must be canonical ISO timestamps');
-    }
+    const startedAt = parseCanonicalV1Timestamp(
+      interval.startedAt,
+      `pairedIntervals[${index}].startedAt`,
+    );
+    const endedAt = parseCanonicalV1Timestamp(
+      interval.endedAt,
+      `pairedIntervals[${index}].endedAt`,
+    );
     if (endedAt - startedAt !== input.intervalSeconds * 1000) {
       throw new TypeError('pairedIntervals must use exact one-minute windows');
     }
@@ -900,7 +934,7 @@ function assertLoadCapture(input: {
   )) {
     throw new TypeError('pairedIntervals do not cover the trusted activation window');
   }
-  const expectedDigest = sha256Canonical({
+  const expectedDigest = loadCaptureDigestV1({
     captureId: input.captureId,
     requesterSource: input.requesterSource,
     providerSource: input.providerSource,
@@ -1556,6 +1590,17 @@ function parseTimestamp(value: string, label: string): number {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) throw new TypeError(`${label} must be an ISO timestamp`);
   return timestamp;
+}
+
+function parseCanonicalV1Timestamp(value: string, label: string): number {
+  if (!/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$/.test(value)) {
+    throw new TypeError(`${label} must be a canonical V1 second-precision timestamp`);
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().replace('.000Z', 'Z') !== value) {
+    throw new TypeError(`${label} must be a valid canonical V1 timestamp`);
+  }
+  return parsed;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
