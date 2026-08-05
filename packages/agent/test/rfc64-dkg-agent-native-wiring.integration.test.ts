@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
+  ASSERTION_SEAL_PREDICATES,
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MemoryLayer,
@@ -585,6 +586,25 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       timestamp: new Date('2026-07-19T12:35:00.000Z'),
     });
 
+    const conflictingAuthorQuad: Quad = {
+      subject: assertionUri,
+      predicate: ASSERTION_SEAL_PREDICATES.AUTHOR_ADDRESS,
+      object: '"0x9999999999999999999999999999999999999999"',
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+    };
+    await author.store.insert([conflictingAuthorQuad]);
+    await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+    })).resolves.toMatchObject({ status: 'failed', action: 'upsert', attempts: 0 });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    await author.store.deleteByPattern(conflictingAuthorQuad);
+
     const first = await author.recordRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
@@ -606,10 +626,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       shareOperationId,
     })).resolves.toMatchObject({ status: 'existing', attempts: 1 });
     expect(author.rfc64SwmAuthorInventoryShadowStatusV1()).toMatchObject({
-      attemptedUpserts: 2,
+      attemptedUpserts: 3,
       appliedUpserts: 1,
       existingUpserts: 1,
-      failed: 0,
+      failed: 1,
     });
 
     await author.stop();

@@ -17,7 +17,7 @@ import {
   contextGraphMetaUri,
   createOperationContext,
   encodeCanonicalCgSharedPublicRootProjectionV1,
-  parseAssertionSealQuads,
+  parseGraphScopedAssertionSealCandidate,
   type AssertionCoordinateV1,
   type AssertionSeal,
   type AuthorCatalogScopeV1,
@@ -36,7 +36,7 @@ import {
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import {
   resolveKnowledgeAssetOperationPublicQuads,
-  resolveKnowledgeAssetWorkspaceHead,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -169,31 +169,46 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (subGraphName !== null) {
         assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
       }
-      await this.recordConfirmedRfc64PublicCatalogAssetV1({
-        contextGraphId,
-        subGraphName,
-        assertionCoordinate,
-        publicQuads: params.publicQuads,
-        seal: params.seal,
-      });
     } catch (cause) {
       this.log.warn(
         params.ctx,
-        `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 catalog advancement failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 post-confirmation observer input was invalid: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
+      return;
     }
-    try {
-      await this.removeRfc64SwmAuthorInventoryShadowV1({
-        contextGraphId: params.contextGraphId,
-        subGraphName: params.subGraphName,
-        seal: params.seal,
-      });
-    } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-    }
+    const runObserver = async (
+      failureMessage: string,
+      observer: () => Promise<unknown>,
+    ): Promise<void> => {
+      try {
+        await observer();
+      } catch (cause) {
+        this.log.warn(
+          params.ctx,
+          `${failureMessage}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+    };
+    await Promise.all([
+      runObserver(
+        `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 catalog advancement failed`,
+        () => this.recordConfirmedRfc64PublicCatalogAssetV1({
+          contextGraphId,
+          subGraphName,
+          assertionCoordinate,
+          publicQuads: params.publicQuads,
+          seal: params.seal,
+        }),
+      ),
+      runObserver(
+        `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary`,
+        () => this.removeRfc64SwmAuthorInventoryShadowV1({
+          contextGraphId,
+          subGraphName,
+          seal: params.seal,
+        }),
+      ),
+    ]);
   }
 
   readRfc64SwmAuthorInventorySnapshotV1(
@@ -254,14 +269,27 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         `CONSTRUCT { <${assertSafeIri(assertionUri)}> ?p ?o } WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(assertionUri)}> ?p ?o } }`,
         { source: 'agent.rfc64.swmInventory.seal' },
       );
-      const seal = parseAssertionSealQuads(
+      const candidate = parseGraphScopedAssertionSealCandidate(
         sealResult.type === 'quads' ? sealResult.quads : [],
         assertionUri,
       );
-      if (seal === undefined) throw new Error('durable SWM assertion has no author seal');
-      const canonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(seal);
+      if (candidate === undefined) {
+        throw new Error('durable SWM assertion has no strict graph-scoped author seal');
+      }
+      const expectedScope = params.subGraphName
+        ? `${params.contextGraphId}/${params.subGraphName}`
+        : params.contextGraphId;
+      if (
+        candidate.coordinate.scope !== expectedScope
+        || candidate.coordinate.agentAddress.toLowerCase()
+          !== params.lifecycleAgentAddress.toLowerCase()
+        || candidate.coordinate.name !== params.assertionCoordinate
+      ) {
+        throw new Error('durable SWM author seal coordinate differs from the committed share');
+      }
+      const canonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
       const graphManager = new GraphManager(this.store);
-      const head = await resolveKnowledgeAssetWorkspaceHead({
+      const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
         store: this.store,
         graphManager,
         contextGraphId: params.contextGraphId,
@@ -293,9 +321,6 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         publicSnapshotStore: this.publicSnapshotStore,
       });
       const sharedAt = head.publishedAt;
-      if (sharedAt === undefined) {
-        throw new Error('durable SWM share has no canonical publishedAt timestamp');
-      }
       const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(snapshot.quads);
       const scope: SwmAuthorInventoryScopeV1 = Object.freeze({
         ...lane.scopeBase,

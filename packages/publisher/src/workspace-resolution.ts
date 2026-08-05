@@ -93,18 +93,26 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly allowedPeers: string[];
 }
 
+export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWorkspaceHead {
+  readonly publishedAt: TimestampMsV1;
+}
+
+export interface ResolveKnowledgeAssetWorkspaceHeadParams {
+  readonly store: TripleStore;
+  readonly graphManager: GraphManager;
+  readonly contextGraphId: string;
+  readonly kaUal: string;
+  readonly subGraphName?: string;
+}
+
 /**
  * Resolve the latest complete graph-scoped assertion accepted into SWM.
  * Missing means this node has not accepted this KA yet; malformed rows fail
  * closed so a corrupt head cannot allow an older assertion to overwrite data.
  */
-export async function resolveKnowledgeAssetWorkspaceHead(params: {
-  store: TripleStore;
-  graphManager: GraphManager;
-  contextGraphId: string;
-  kaUal: string;
-  subGraphName?: string;
-}): Promise<KnowledgeAssetWorkspaceHead | undefined> {
+export async function resolveKnowledgeAssetWorkspaceHead(
+  params: ResolveKnowledgeAssetWorkspaceHeadParams,
+): Promise<KnowledgeAssetWorkspaceHead | undefined> {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, 1);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
   const metaGraph = params.graphManager.sharedMemoryMetaUri(
@@ -201,10 +209,6 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   const publishedAtMs = publishedAtLexical === undefined
     ? undefined
     : Date.parse(publishedAtLexical);
-  const canonicalPublishedAt = publishedAtMs !== undefined
-    && Number.isSafeInteger(publishedAtMs) && publishedAtMs >= 0
-    ? new Date(publishedAtMs).toISOString()
-    : '';
   const rawAccessPolicy = stripLiteral(row?.['accessPolicy'])?.trim();
   const accessPolicy = rawAccessPolicy === 'public'
     || rawAccessPolicy === 'ownerOnly'
@@ -241,10 +245,6 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     (publishedAtLexical !== undefined && (
       !Number.isSafeInteger(publishedAtMs)
       || publishedAtMs! < 0
-      || (
-        canonicalPublishedAt !== publishedAtLexical
-        && canonicalPublishedAt.replace(/\.000Z$/u, 'Z') !== publishedAtLexical
-      )
     )) ||
     row?.['operation'] !== expectedOperationSubject ||
     operationUal !== actualScope.ual ||
@@ -293,6 +293,20 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     ...(accessPolicy ? { accessPolicy } : {}),
     allowedPeers,
   };
+}
+
+/** Resolve an inventory-ready SWM head with its canonical operation timestamp. */
+export async function resolvePublishedKnowledgeAssetWorkspaceHead(
+  params: ResolveKnowledgeAssetWorkspaceHeadParams,
+): Promise<PublishedKnowledgeAssetWorkspaceHead | undefined> {
+  const head = await resolveKnowledgeAssetWorkspaceHead(params);
+  if (head === undefined) return undefined;
+  if (head.publishedAt === undefined) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${head.kaUal}: missing canonical publishedAt`,
+    );
+  }
+  return Object.freeze({ ...head, publishedAt: head.publishedAt });
 }
 
 /** Replace the durable current-assertion pointer after data and snapshot land. */

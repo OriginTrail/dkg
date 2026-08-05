@@ -5,7 +5,7 @@
  * daemon cannot read chain truth for one of them, publishing must fail
  * closed instead of falling back to plaintext.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -939,6 +939,52 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       String(call[1]).includes('RFC-64 catalog advancement failed')
       && String(call[1]).includes('simulated RFC-64 catalog failure')
     ))).toBe(true);
+  });
+
+  it('starts independent confirmed-VM observers without serial catalog blocking', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-parallel-observers',
+      ual: 'did:dkg:local/queued-parallel-observers',
+      publishStatus: 'confirmed',
+    });
+    let releaseCatalog!: () => void;
+    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = recorder(
+      async () => catalogGate,
+    );
+    const removal = recorder(async () => ({
+      status: 'absent',
+      action: 'remove',
+      attempts: 1,
+      headObjectDigest: null,
+      error: null,
+    }));
+    agentLike.removeRfc64SwmAuthorInventoryShadowV1 = removal;
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-parallel-observers',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-parallel-observers-ka',
+      shareOperationId: 'share-op-parallel-observers',
+      intentByte: 'af',
+      quads: snapshotQuads,
+    });
+
+    const pending = (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+    await vi.waitFor(() => {
+      expect(agentLike.recordConfirmedRfc64PublicCatalogAssetV1.calls).toHaveLength(1);
+      expect(removal.calls).toHaveLength(1);
+    });
+    releaseCatalog();
+    await expect(pending).resolves.toMatchObject({ status: 'confirmed' });
   });
 
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {

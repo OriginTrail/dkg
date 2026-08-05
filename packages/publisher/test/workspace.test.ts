@@ -22,6 +22,7 @@ import {
   SharedMemoryHandler,
   StaleWriteError,
   resolveKnowledgeAssetWorkspaceHead,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   type ShareOptions,
   type ConditionalShareOptions,
 } from '../src/index.js';
@@ -1201,7 +1202,9 @@ describe('SharedMemoryHandler', () => {
   it('persists one durable KA-level transport owner across assertion versions', async () => {
     const peerId = '12D3KooWOwner';
     const firstPublishedAt = 1_700_000_000_000;
-    const secondPublishedAt = 1_700_000_000_123;
+    // Oxigraph canonicalizes the valid xsd:dateTime fraction `.120Z` to `.12Z`.
+    // The resolver must validate the value semantically and normalize it to ms.
+    const secondPublishedAt = 1_700_000_000_120;
 
     const msg1 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,
@@ -1222,6 +1225,31 @@ describe('SharedMemoryHandler', () => {
     });
     expect(afterFirst?.publisherPeerId).toBe(peerId);
     expect(afterFirst?.publishedAt).toBe(firstPublishedAt.toString());
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).resolves.toMatchObject({ publishedAt: firstPublishedAt.toString() });
+
+    await store.deleteByPattern({
+      graph: gm.sharedMemoryMetaUri(CONTEXT_GRAPH),
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:ws-own-1`,
+      predicate: 'http://dkg.io/ontology/publishedAt',
+    });
+    const legacyHeadWithoutPublishedAt = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    });
+    expect(legacyHeadWithoutPublishedAt?.publishedAt).toBeUndefined();
+    await expect(resolvePublishedKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: gm,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: firstRequest.kaUal ?? '',
+    })).rejects.toThrow(/missing canonical publishedAt/u);
 
     const msg2 = encodeRootlessWorkspaceRequest({
       contextGraphId: CONTEXT_GRAPH,

@@ -30,6 +30,7 @@ import { ethers } from 'ethers';
 import {
   InventoryV1CandidateError,
   type Rfc64InventoryV1OperationsV1,
+  type SwmAuthorInventoryCasResultV1,
 } from './inventory-v1/index.js';
 import { applySwmAuthorInventoryMutationV1 } from './inventory-v1/swm-author-inventory-mutation.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './author-catalog-producer.js';
@@ -102,18 +103,43 @@ export async function maintainRfc64SwmAuthorInventoryV1(
   input: MaintainRfc64SwmAuthorInventoryInputV1,
 ): Promise<MaintainRfc64SwmAuthorInventoryResultV1> {
   const prepared = prepareInput(input);
-  return mutateRfc64SwmAuthorInventoryV1(inventory, prepared, 'upsert', (current) => {
-    const mutation = Object.freeze({ kind: 'upsert' as const, row: prepared.row });
-    const transition = applySwmAuthorInventoryMutationV1(current?.rows ?? [], mutation);
-    if (transition.status === 'existing') {
-      return Object.freeze({ kind: 'noop' as const, status: 'existing' as const });
-    }
-    return Object.freeze({
-      kind: 'commit' as const,
-      rows: transition.rows,
-      mutation,
-    });
-  }, (status) => status) as Promise<MaintainRfc64SwmAuthorInventoryResultV1>;
+  return mutateRfc64SwmAuthorInventoryV1<MaintainRfc64SwmAuthorInventoryResultV1>(
+    inventory,
+    prepared,
+    {
+      operation: 'upsert',
+      plan: (current, attempt) => {
+        const mutation = Object.freeze({ kind: 'upsert' as const, row: prepared.row });
+        const transition = applySwmAuthorInventoryMutationV1(current?.rows ?? [], mutation);
+        if (transition.status === 'existing') {
+          if (current === null) {
+            throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+              'swm-inventory-producer-history',
+              'an existing SWM inventory row requires a current signed snapshot',
+            );
+          }
+          return Object.freeze({
+            kind: 'return' as const,
+            result: Object.freeze({
+              status: 'existing' as const,
+              attempts: attempt,
+              snapshot: current,
+            }),
+          });
+        }
+        return Object.freeze({
+          kind: 'commit' as const,
+          rows: transition.rows,
+          mutation,
+        });
+      },
+      mapCommitted: (committed, attempt) => Object.freeze({
+        status: committed.status,
+        attempts: attempt,
+        snapshot: committed.snapshot,
+      }),
+    },
+  );
 }
 
 /** Remove one KA after it leaves the active SWM-only set (normally VM confirmation). */
@@ -125,36 +151,61 @@ export async function removeRfc64SwmAuthorInventoryRowV1(
   input: RemoveRfc64SwmAuthorInventoryInputV1,
 ): Promise<RemoveRfc64SwmAuthorInventoryResultV1> {
   const prepared = prepareRemovalInput(input);
-  return mutateRfc64SwmAuthorInventoryV1(inventory, prepared, 'removal', (current) => {
-    const currentRow = current?.rows.find(
-      ({ kaUal }) => kaUal === prepared.expectedRow.kaUal,
-    );
-    if (
-      currentRow === undefined
-      || currentRow.assertionVersion !== prepared.expectedRow.assertionVersion
-      || currentRow.sealDigest !== prepared.expectedRow.sealDigest
-    ) {
-      return Object.freeze({ kind: 'noop' as const, status: 'absent' as const });
-    }
-    const mutation = Object.freeze({
-      kind: 'remove' as const,
-      kaUal: prepared.expectedRow.kaUal,
-    });
-    const transition = applySwmAuthorInventoryMutationV1(current!.rows, mutation);
-    if (transition.status !== 'applied') {
-      throw new Rfc64SwmAuthorInventoryProducerErrorV1(
-        'swm-inventory-producer-history',
-        'exact removal target disappeared while planning its mutation',
-      );
-    }
-    return Object.freeze({
-      kind: 'commit' as const,
-      rows: transition.rows,
-      mutation,
-    });
-  // A durable exact-CAS replay means this removal already committed; expose
-  // that as `applied`, never the persistence layer's generic `existing`.
-  }, () => 'applied') as Promise<RemoveRfc64SwmAuthorInventoryResultV1>;
+  return mutateRfc64SwmAuthorInventoryV1<RemoveRfc64SwmAuthorInventoryResultV1>(
+    inventory,
+    prepared,
+    {
+      operation: 'removal',
+      plan: (current, attempt) => {
+        const currentRow = current?.rows.find(
+          ({ kaUal }) => kaUal === prepared.expectedRow.kaUal,
+        );
+        if (
+          currentRow === undefined
+          || currentRow.assertionVersion !== prepared.expectedRow.assertionVersion
+          || currentRow.sealDigest !== prepared.expectedRow.sealDigest
+        ) {
+          return Object.freeze({
+            kind: 'return' as const,
+            result: Object.freeze({
+              status: 'absent' as const,
+              attempts: attempt,
+              snapshot: current,
+            }),
+          });
+        }
+        const mutation = Object.freeze({
+          kind: 'remove' as const,
+          kaUal: prepared.expectedRow.kaUal,
+        });
+        if (current === null) {
+          throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+            'swm-inventory-producer-history',
+            'an exact SWM inventory removal requires a current signed snapshot',
+          );
+        }
+        const transition = applySwmAuthorInventoryMutationV1(current.rows, mutation);
+        if (transition.status !== 'applied') {
+          throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+            'swm-inventory-producer-history',
+            'exact removal target disappeared while planning its mutation',
+          );
+        }
+        return Object.freeze({
+          kind: 'commit' as const,
+          rows: transition.rows,
+          mutation,
+        });
+      },
+      // A durable exact-CAS replay means this removal already committed; expose
+      // that as `applied`, never the persistence layer's generic `existing`.
+      mapCommitted: (committed, attempt) => Object.freeze({
+        status: 'applied' as const,
+        attempts: attempt,
+        snapshot: committed.snapshot,
+      }),
+    },
+  );
 }
 
 type PreparedMutationInputV1 = Readonly<{
@@ -164,8 +215,8 @@ type PreparedMutationInputV1 = Readonly<{
   maxCasAttempts: number;
 }>;
 
-type PlannedMutationV1<TNoopStatus extends 'existing' | 'absent'> =
-  | Readonly<{ kind: 'noop'; status: TNoopStatus }>
+type PlannedMutationV1<TResult> =
+  | Readonly<{ kind: 'return'; result: TResult }>
   | Readonly<{
       kind: 'commit';
       rows: readonly SwmAuthorInventoryRowV1[];
@@ -174,24 +225,26 @@ type PlannedMutationV1<TNoopStatus extends 'existing' | 'absent'> =
         | Readonly<{ kind: 'remove'; kaUal: SwmAuthorInventoryRowV1['kaUal'] }>;
     }>;
 
-async function mutateRfc64SwmAuthorInventoryV1<TNoopStatus extends 'existing' | 'absent'>(
+interface SwmAuthorInventoryMutationPolicyV1<TResult> {
+  readonly operation: 'upsert' | 'removal';
+  readonly plan: (
+    current: SwmAuthorInventorySnapshotV1 | null,
+    attempt: number,
+  ) => PlannedMutationV1<TResult>;
+  readonly mapCommitted: (
+    committed: SwmAuthorInventoryCasResultV1,
+    attempt: number,
+  ) => TResult;
+}
+
+async function mutateRfc64SwmAuthorInventoryV1<TResult>(
   inventory: Pick<
     Rfc64InventoryV1OperationsV1,
     'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
   >,
   prepared: PreparedMutationInputV1,
-  operation: 'upsert' | 'removal',
-  plan: (
-    current: SwmAuthorInventorySnapshotV1 | null,
-  ) => PlannedMutationV1<TNoopStatus>,
-  normalizeCommittedStatus: (
-    status: 'applied' | 'existing',
-  ) => 'applied' | 'existing',
-): Promise<Readonly<{
-  status: 'applied' | 'existing' | 'absent';
-  attempts: number;
-  snapshot: SwmAuthorInventorySnapshotV1 | null;
-}>> {
+  policy: SwmAuthorInventoryMutationPolicyV1<TResult>,
+): Promise<TResult> {
   const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
   for (let attempt = 1; attempt <= prepared.maxCasAttempts; attempt += 1) {
     const current = inventory.readSwmAuthorInventorySnapshotV1(
@@ -199,10 +252,8 @@ async function mutateRfc64SwmAuthorInventoryV1<TNoopStatus extends 'existing' | 
       prepared.scope.authorAddress,
     );
     if (current !== null) await verifyCurrentHistory(current, prepared.scope);
-    const next = plan(current);
-    if (next.kind === 'noop') {
-      return Object.freeze({ status: next.status, attempts: attempt, snapshot: current });
-    }
+    const next = policy.plan(current, attempt);
+    if (next.kind === 'return') return next.result;
     const head = await signHead({
       scope: prepared.scope,
       rows: next.rows,
@@ -217,11 +268,7 @@ async function mutateRfc64SwmAuthorInventoryV1<TNoopStatus extends 'existing' | 
         expectedCurrentHeadDigest:
           (current?.head.objectDigest as Digest32V1 | undefined) ?? null,
       });
-      return Object.freeze({
-        status: normalizeCommittedStatus(committed.status),
-        attempts: attempt,
-        snapshot: committed.snapshot,
-      });
+      return policy.mapCommitted(committed, attempt);
     } catch (cause) {
       if (
         cause instanceof InventoryV1CandidateError
@@ -232,7 +279,7 @@ async function mutateRfc64SwmAuthorInventoryV1<TNoopStatus extends 'existing' | 
         && cause.code === 'swm-inventory-cas-conflict') {
         throw new Rfc64SwmAuthorInventoryProducerErrorV1(
           'swm-inventory-producer-conflict',
-          `SWM inventory ${operation} did not converge after ${attempt} CAS attempts`,
+          `SWM inventory ${policy.operation} did not converge after ${attempt} CAS attempts`,
           { cause },
         );
       }
@@ -241,7 +288,7 @@ async function mutateRfc64SwmAuthorInventoryV1<TNoopStatus extends 'existing' | 
   }
   throw new Rfc64SwmAuthorInventoryProducerErrorV1(
     'swm-inventory-producer-conflict',
-    `SWM inventory ${operation} CAS attempt bound was exhausted`,
+    `SWM inventory ${policy.operation} CAS attempt bound was exhausted`,
   );
 }
 
