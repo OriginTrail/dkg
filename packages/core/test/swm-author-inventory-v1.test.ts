@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
   MAX_SWM_AUTHOR_INVENTORY_ROWS_V1,
   SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
   SwmAuthorInventoryCodecErrorV1,
   assertSignedSwmAuthorInventoryHeadEnvelopeV1,
+  assertSwmAuthorInventoryShareOperationIdV1,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
@@ -18,6 +19,7 @@ import {
   type SwmAuthorInventoryHeadV1,
   type SwmAuthorInventoryRowV1,
   type SwmAuthorInventoryScopeV1,
+  type SwmAuthorInventoryShareOperationIdV1,
   type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
 } from '../src/swm-author-inventory-v1.js';
 import {
@@ -98,6 +100,15 @@ function signedHead(
 }
 
 describe('SWM author inventory v1', () => {
+  it('brands only canonical bounded share operation ids', () => {
+    const candidate: unknown = 'swm-operation-typed';
+    assertSwmAuthorInventoryShareOperationIdV1(candidate);
+    expectTypeOf(candidate).toEqualTypeOf<SwmAuthorInventoryShareOperationIdV1>();
+    expect(candidate).toBe('swm-operation-typed');
+    expect(() => assertSwmAuthorInventoryShareOperationIdV1('bad\u0000operation'))
+      .toThrow(/forbidden control character/);
+  });
+
   it('commits a domain-separated signed head to one canonical exact row set', () => {
     const rows = Object.freeze([ROW_A, ROW_B]);
     const head = signedHead(rows);

@@ -53,6 +53,13 @@ export const MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1 = 8 * 1024 * 1024;
 export const MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 = 100_000;
 export const MAX_SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_BYTES_V1 = 256;
 
+declare const SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_V1_BRAND: unique symbol;
+
+/** Canonical publisher-minted operation identity committed by an SWM inventory row. */
+export type SwmAuthorInventoryShareOperationIdV1 = string & {
+  readonly [SWM_AUTHOR_INVENTORY_SHARE_OPERATION_ID_V1_BRAND]: true;
+};
+
 const UTF8 = new TextEncoder();
 const SCOPE_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_SCOPE_DIGEST_DOMAIN_V1);
 const ROWS_DOMAIN_BYTES = UTF8.encode(SWM_AUTHOR_INVENTORY_ROWS_DIGEST_DOMAIN_V1);
@@ -81,7 +88,7 @@ export interface SwmAuthorInventoryRowV1 {
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly assertionVersion: DecimalU64V1;
   readonly kaUal: CanonicalDeterministicUalV1;
-  readonly shareOperationId: string;
+  readonly shareOperationId: SwmAuthorInventoryShareOperationIdV1;
   readonly projectionDigest: Digest32V1;
   readonly publicTripleCount: CountV1;
   readonly privateTripleCount: CountV1;
@@ -181,7 +188,7 @@ export function assertSwmAuthorInventoryRowV1(
     const assertionVersion = parseCanonicalDecimalU64(value.assertionVersion, 'assertionVersion');
     if (assertionVersion < 1n) throw new Error('assertionVersion must be positive');
     assertCanonicalDeterministicUalV1(value.kaUal);
-    assertBoundedIdentifier(value.shareOperationId, 'shareOperationId');
+    assertSwmAuthorInventoryShareOperationIdV1(value.shareOperationId);
     assertCanonicalDigest(value.projectionDigest, 'projectionDigest');
     const publicTripleCount = parseCanonicalDecimalU64(
       value.publicTripleCount,
@@ -209,6 +216,12 @@ export function assertSwmAuthorInventoryRowV1(
       }
     }
   });
+}
+
+export function assertSwmAuthorInventoryShareOperationIdV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryShareOperationIdV1 {
+  assertBoundedIdentifier(value, 'shareOperationId');
 }
 
 export function compareSwmAuthorInventoryRowsV1(

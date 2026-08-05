@@ -14,10 +14,16 @@ import {
 } from './sync-wire-identifiers.js';
 
 declare const CANONICAL_DETERMINISTIC_UAL_V1_BRAND: unique symbol;
+declare const CANONICAL_KNOWLEDGE_ASSET_NUMBER_V1_BRAND: unique symbol;
 
 /** A deterministic KA UAL that has already passed the canonical wire check. */
 export type CanonicalDeterministicUalV1 = string & {
   readonly [CANONICAL_DETERMINISTIC_UAL_V1_BRAND]: true;
+};
+
+/** Canonical base-10 uint96 KA number extracted from a deterministic UAL. */
+export type CanonicalKnowledgeAssetNumberV1 = string & {
+  readonly [CANONICAL_KNOWLEDGE_ASSET_NUMBER_V1_BRAND]: true;
 };
 
 /** Existing V10 KAs may be resolved through the quarantined read-only path. */
@@ -76,10 +82,11 @@ export interface DeterministicKnowledgeAssetUalParts {
 }
 
 /** Complete canonical identity returned to every seal/catalog/inventory consumer. */
-export interface CanonicalDeterministicKnowledgeAssetUalPartsV1
-  extends Omit<DeterministicKnowledgeAssetUalParts, 'ual' | 'agentAddress'> {
+export interface CanonicalDeterministicKnowledgeAssetUalPartsV1 {
   readonly ual: CanonicalDeterministicUalV1;
+  readonly chainId: NetworkIdV1;
   readonly agentAddress: EvmAddressV1;
+  readonly kaNumber: CanonicalKnowledgeAssetNumberV1;
 }
 
 export interface DeterministicRootlessKnowledgeAssetIdentity
@@ -157,6 +164,7 @@ export function assertCanonicalDeterministicUalV1(
     throw new Error('kaUal must be a string');
   }
   const parsed = parseDeterministicKnowledgeAssetUal(value);
+  assertNetworkIdV1(parsed.chainId, 'kaUal network');
   assertCanonicalEvmAddress(parsed.agentAddress, 'kaUal author');
   if (parsed.ual !== value) {
     throw new Error('kaUal must already be in canonical form');
@@ -165,7 +173,7 @@ export function assertCanonicalDeterministicUalV1(
     ual: parsed.ual as CanonicalDeterministicUalV1,
     chainId: parsed.chainId,
     agentAddress: parsed.agentAddress as EvmAddressV1,
-    kaNumber: parsed.kaNumber,
+    kaNumber: parsed.kaNumber as CanonicalKnowledgeAssetNumberV1,
   });
 }
 

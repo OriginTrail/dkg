@@ -42,7 +42,11 @@ import {
   type EvmAddressV1,
   type KaIdV1,
 } from './sync-wire-scalars.js';
-import { assertExactKeys, isPlainRecord } from './sync-wire-objects.js';
+import {
+  assertExactKeys,
+  isPlainRecord,
+  snapshotExactDataRecord,
+} from './sync-wire-objects.js';
 
 declare const HEX_32_V1_BRAND: unique symbol;
 declare const POSITIVE_DECIMAL_U64_V1_BRAND: unique symbol;
@@ -249,7 +253,7 @@ export function assertCanonicalGraphScopedAuthorSealV1(
   if (!isPlainRecord(payload)) {
     fail('canonical-seal-schema', 'canonical author seal must be a plain JSON object');
   }
-  assertClosedKeys(payload, [
+  const sealedPayload = snapshotClosedKeys(payload, [
     'assertedAtChainId',
     'assertedAtKav10Address',
     'assertionFinalizedAt',
@@ -267,37 +271,51 @@ export function assertCanonicalGraphScopedAuthorSealV1(
     'reservedKaId',
   ], 'canonical graph-scoped author seal');
 
+  // Preserve the outer wire-envelope limit as the first failure for hostile
+  // oversized scalar input. The snapshot above guarantees this scan cannot
+  // invoke accessors or observe a field twice.
+  rejectOversizedPayloadScalars(sealedPayload);
+
   assertSealScalar(() => assertCanonicalDigest(
-    payload.assertionMerkleRoot,
+    sealedPayload.assertionMerkleRoot,
     'assertionMerkleRoot',
   ));
-  assertSealScalar(() => assertCanonicalEvmAddress(payload.authorAddress, 'authorAddress'));
-  assertHex32V1(payload.authorAttestationR, 'authorAttestationR');
-  assertHex32V1(payload.authorAttestationVS, 'authorAttestationVS');
-  if (payload.authorSchemeVersion !== '1') {
+  assertSealScalar(() => assertCanonicalEvmAddress(sealedPayload.authorAddress, 'authorAddress'));
+  assertHex32V1(sealedPayload.authorAttestationR, 'authorAttestationR');
+  assertHex32V1(sealedPayload.authorAttestationVS, 'authorAttestationVS');
+  if (sealedPayload.authorSchemeVersion !== '1') {
     fail('canonical-seal-schema', 'authorSchemeVersion must be the exact string "1"');
   }
-  assertSealScalar(() => assertCanonicalChainId(payload.assertedAtChainId, 'assertedAtChainId'));
+  assertSealScalar(() => assertCanonicalChainId(
+    sealedPayload.assertedAtChainId,
+    'assertedAtChainId',
+  ));
   assertSealScalar(() => assertCanonicalEvmAddress(
-    payload.assertedAtKav10Address,
+    sealedPayload.assertedAtKav10Address,
     'assertedAtKav10Address',
   ));
-  const reservedKaId = assertSealU256(payload.reservedKaId, 'reservedKaId');
-  assertCanonicalIsoUtcMillisV1(payload.assertionFinalizedAt);
-  if (payload.contentScopeVersion !== '2') {
+  const reservedKaId = assertSealU256(sealedPayload.reservedKaId, 'reservedKaId');
+  assertCanonicalIsoUtcMillisV1(sealedPayload.assertionFinalizedAt);
+  if (sealedPayload.contentScopeVersion !== '2') {
     fail('canonical-seal-schema', 'contentScopeVersion must be the exact string "2"');
   }
-  const ual = assertCanonicalSealDeterministicUalV1(payload.kaUal);
-  const assertionVersion = assertSealU64(payload.assertionVersion, 'assertionVersion');
+  const ual = assertCanonicalSealDeterministicUalV1(sealedPayload.kaUal);
+  const assertionVersion = assertSealU64(sealedPayload.assertionVersion, 'assertionVersion');
   if (assertionVersion < 1n) {
     fail('canonical-seal-scalar', 'assertionVersion must be in 1..2^64-1');
   }
-  const publicCount = assertSealTripleCountV1(payload.publicTripleCount, 'publicTripleCount');
-  const privateCount = assertSealTripleCountV1(payload.privateTripleCount, 'privateTripleCount');
+  const publicCount = assertSealTripleCountV1(
+    sealedPayload.publicTripleCount,
+    'publicTripleCount',
+  );
+  const privateCount = assertSealTripleCountV1(
+    sealedPayload.privateTripleCount,
+    'privateTripleCount',
+  );
   if (publicCount + privateCount < 1n) {
     fail('canonical-seal-count', 'publicTripleCount + privateTripleCount must be positive');
   }
-  if (payload.privateMerkleRoot === null) {
+  if (sealedPayload.privateMerkleRoot === null) {
     if (privateCount !== 0n) {
       fail(
         'canonical-seal-private-root',
@@ -305,7 +323,10 @@ export function assertCanonicalGraphScopedAuthorSealV1(
       );
     }
   } else {
-    assertSealScalar(() => assertCanonicalDigest(payload.privateMerkleRoot, 'privateMerkleRoot'));
+    assertSealScalar(() => assertCanonicalDigest(
+      sealedPayload.privateMerkleRoot,
+      'privateMerkleRoot',
+    ));
     if (privateCount === 0n) {
       fail(
         'canonical-seal-private-root',
@@ -314,7 +335,7 @@ export function assertCanonicalGraphScopedAuthorSealV1(
     }
   }
 
-  if (ual.agentAddress !== payload.authorAddress) {
+  if (ual.agentAddress !== sealedPayload.authorAddress) {
     fail('canonical-seal-binding', 'kaUal author must equal authorAddress');
   }
   const packedKaId = (BigInt(ual.agentAddress) << 96n) | BigInt(ual.kaNumber);
@@ -324,7 +345,9 @@ export function assertCanonicalGraphScopedAuthorSealV1(
 
   // The structural domain is intentionally capped even though the frozen field
   // widths currently keep every valid payload well below it.
-  canonicalizePayloadAfterValidation(payload as unknown as CanonicalGraphScopedAuthorSealV1);
+  canonicalizePayloadAfterValidation(
+    sealedPayload as unknown as CanonicalGraphScopedAuthorSealV1,
+  );
 }
 
 export function canonicalizeCanonicalGraphScopedAuthorSealV1(
@@ -821,15 +844,26 @@ function assertSealScalar(operation: () => void): void {
   }
 }
 
-function assertClosedKeys(
+function snapshotClosedKeys<const Keys extends readonly string[]>(
   record: Record<string, unknown>,
-  keys: readonly string[],
+  keys: Keys,
   label: string,
-): void {
+): Readonly<Record<Keys[number], unknown>> {
   try {
-    assertExactKeys(record, keys, label);
+    return snapshotExactDataRecord(record, keys, label);
   } catch (cause) {
     fail('canonical-seal-schema', `${label} has an invalid field set`, cause);
+  }
+}
+
+function rejectOversizedPayloadScalars(record: Readonly<Record<string, unknown>>): void {
+  let scalarBytes = 0;
+  for (const value of Object.values(record)) {
+    if (typeof value !== 'string') continue;
+    scalarBytes += UTF8.encode(value).byteLength;
+    if (scalarBytes > MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1) {
+      fail('canonical-seal-too-large', 'canonical author-seal payload exceeds its v1 bounds');
+    }
   }
 }
 

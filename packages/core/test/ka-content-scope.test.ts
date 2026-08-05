@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { NetworkIdV1 } from '../src/index.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -36,13 +36,18 @@ describe('KA content scope', () => {
   });
 
   it('asserts one canonical deterministic UAL and returns every identity part', () => {
-    expect(assertCanonicalDeterministicUalV1(CANONICAL_UAL)).toEqual({
+    const parts = assertCanonicalDeterministicUalV1(CANONICAL_UAL);
+    expect(parts).toEqual({
       ual: CANONICAL_UAL,
       chainId: 'base:8453',
       agentAddress: '0x70997970c51812dc3a010c7d01b50e0d17dc79c8',
       kaNumber: '7',
     });
+    expectTypeOf(parts.chainId).toEqualTypeOf<NetworkIdV1>();
     expect(() => assertCanonicalDeterministicUalV1(UAL)).toThrow(/canonical form/);
+    expect(() => assertCanonicalDeterministicUalV1(
+      'did:dkg:base%2F8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/7',
+    )).toThrow(/networkId grammar/);
   });
 
   it('rejects KA numbers outside the uint96 on-chain identity domain', () => {
