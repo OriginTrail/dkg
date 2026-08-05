@@ -2975,6 +2975,10 @@ export async function runDaemonInner(
       // (ADR-002/A3 layers a MEMBERSHIP-GATED, remote-only `assertion_activity`
       // emitter on top of this handler as the legitimate scoped replacement.)
       if (data.contextGraphId) {
+        // Set ONLY on gossipsub-received publishes by publish-handler.ts; the
+        // LOCAL publisher emit (dkg-publisher KC_PUBLISHED) carries no `from`.
+        const remotePublisherPeer =
+          typeof data.from === "string" && data.from.length > 0 ? data.from : undefined;
         emitMemoryGraphChanged({
           contextGraphId: data.contextGraphId,
           layers: ["vm"],
@@ -2985,11 +2989,12 @@ export async function runDaemonInner(
             triples: typeof data.tripleCount === "number" ? data.tripleCount : undefined,
           },
         });
-        // dRAG warm on remote publishes is MEMBERSHIP-GATED: KC_PUBLISHED fires
-        // for ANY CG overheard on gossip, and a foreign CG must not trigger
-        // embedder/index work on this node (gossip spam would amplify into
-        // model calls). Local mutation paths warm via onMemoryGraphChanged.
-        if (localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
+        // dRAG warm: a LOCAL publish (no `from`) always warms — this handler is
+        // that path's only warm trigger. A REMOTE publish is MEMBERSHIP-GATED:
+        // KC_PUBLISHED fires for ANY CG overheard on gossip, and a foreign CG
+        // must not trigger embedder/index work (gossip spam would amplify into
+        // model calls).
+        if (!remotePublisherPeer || localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
           void warmDragIndexIfAllowed(
             agent,
             data.contextGraphId,
@@ -2997,15 +3002,11 @@ export async function runDaemonInner(
           );
         }
         // ADR-002 / CR-2: cross-node `published` activity for a collaborator's
-        // publish. REMOTE-ONLY — gate on `data.from` (the gossip payload's
-        // sender peer id, set ONLY on gossipsub-received publishes by
-        // publish-handler.ts; the LOCAL publisher emit carries no `from`).
-        // This prevents double-counting: a local publish is recorded by
-        // routes/memory.ts, a remote one here. Membership-gated so we only
-        // record activity for CGs this node is actually involved in (not
-        // every CG overheard on gossip — the dominant noise ADR-001 removed).
-        const remotePublisherPeer =
-          typeof data.from === "string" && data.from.length > 0 ? data.from : undefined;
+        // publish. REMOTE-ONLY — gate on `remotePublisherPeer`. This prevents
+        // double-counting: a local publish is recorded by routes/memory.ts, a
+        // remote one here. Membership-gated so we only record activity for CGs
+        // this node is actually involved in (not every CG overheard on gossip —
+        // the dominant noise ADR-001 removed).
         if (remotePublisherPeer && localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
           recordAssertionActivity(dashDb, {
             contextGraphId: data.contextGraphId,

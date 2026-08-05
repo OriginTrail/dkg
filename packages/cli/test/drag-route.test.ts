@@ -354,28 +354,56 @@ describe('POST /api/answer authorization and validation', () => {
     expect(result.body.reasoning.note).toMatch(/no rules found/);
   });
 
-  it('does not let a later publisher overwrite an allow-listed author\'s rule body', async () => {
-    const agent = reasoningAgent([
-      ruleFact('urn:rule:trusted', RULE_N3, 'ka-trusted', '0xAbCdef0000000000000000000000000000000001'),
-      // Subject-squat: attacker re-publishes the same rule subject with their own
-      // body; the impostor body would then be dropped by the allowlist, silently
-      // suppressing the trusted rule.
-      ruleFact('urn:rule:trusted', '{ ?s ?p ?o } => { ?o ?p ?s } .', 'ka-squatter', '0x9999990000000000000000000000000000000002'),
-    ]);
+  it('does not let a squatter suppress an allow-listed author\'s rule, regardless of enumeration order', async () => {
+    const trusted = ruleFact('urn:rule:trusted', RULE_N3, 'ka-trusted', '0xAbCdef0000000000000000000000000000000001');
+    // Subject-squat: attacker re-publishes the same rule subject with their own
+    // body. Store enumeration order is implementation-defined, so the squatter
+    // must lose whether seen before OR after the trusted body.
+    const squatter = ruleFact('urn:rule:trusted', '{ ?s ?p ?o } => { ?o ?p ?s } .', 'ka-squatter', '0x9999990000000000000000000000000000000002');
+    const config = {
+      drag: { reasoning: true, reasoningRuleAuthors: ['0xabcdef0000000000000000000000000000000001'] },
+    };
 
-    const result = await postAnswer(
-      { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
-      {
-        agent,
-        config: {
-          drag: { reasoning: true, reasoningRuleAuthors: ['0xabcdef0000000000000000000000000000000001'] },
-        },
-      },
-    );
+    for (const facts of [[trusted, squatter], [squatter, trusted]]) {
+      const result = await postAnswer(
+        { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+        { agent: reasoningAgent(facts), config },
+      );
+      expect(result.status).toBe(200);
+      const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
+      expect(applied.map((c) => c.kaId)).toEqual(['ka-trusted']);
+    }
+  });
 
-    expect(result.status).toBe(200);
-    const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
-    expect(applied.map((c) => c.kaId)).toEqual(['ka-trusted']);
+  it('drops a contested subject (bodies from two authors, no allowlist) in either enumeration order', async () => {
+    const a = ruleFact('urn:rule:contested', RULE_N3, 'ka-author-a', '0xaaa0000000000000000000000000000000000001');
+    const b = ruleFact('urn:rule:contested', '{ ?s ?p ?o } => { ?o ?p ?s } .', 'ka-author-b', '0xbbb0000000000000000000000000000000000002');
+
+    for (const facts of [[a, b], [b, a]]) {
+      const result = await postAnswer(
+        { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+        { agent: reasoningAgent(facts), config: { drag: { reasoning: true } } },
+      );
+      expect(result.status).toBe(200);
+      // No enumeration-order winner: the contested rule is deterministically absent.
+      expect(result.body.reasoning.derived).toEqual([]);
+      expect(result.body.reasoning.note).toMatch(/no rules found/);
+    }
+  });
+
+  it('resolves multiple bodies from the SAME author to their newest rule KA', async () => {
+    const v1 = ruleFact('urn:rule:versioned', RULE_N3, '100', '0xaaa');
+    const v2 = ruleFact('urn:rule:versioned', '{ ?s ?p ?o } => { ?s ?p ?o } . # v2', '200', '0xaaa');
+
+    for (const facts of [[v1, v2], [v2, v1]]) {
+      const result = await postAnswer(
+        { question: 'Which suppliers violated policy?', contextGraphId: CONTEXT_GRAPH_ID, reason: true },
+        { agent: reasoningAgent(facts), config: { drag: { reasoning: true } } },
+      );
+      expect(result.status).toBe(200);
+      const applied = (result.body.reasoning.rules ?? []) as Array<{ kaId: string }>;
+      expect(applied.map((c) => c.kaId)).toEqual(['200']);
+    }
   });
 
   it('trusts only allow-listed rule authors when reasoningRuleAuthors is set (case-insensitive)', async () => {

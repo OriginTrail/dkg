@@ -76,11 +76,20 @@ function unquoteLiteral(o: string): string | null {
  * Resolve the N3 rules to apply, from VERIFIABLE rule-KAs in the CG (a rule is a
  * verified fact `<rule> drag:ruleN3 "<n3>"`, typically published into a `rules`
  * sub-graph) — so the rules are themselves chain-proven — then append any
- * request-supplied `rules`. Rules are MANAGED: a rule whose `drag:ruleStatus` is
- * `"disabled"` is skipped, and (governance) when `ruleAuthors` is set, only rules
- * whose on-chain author is allow-listed are trusted. A `disabled` status is only
- * honored from the rule's own on-chain author or an allow-listed author — an
- * arbitrary publisher cannot disable (or subject-squat) someone else's rule.
+ * request-supplied `rules`. Rules are MANAGED and resolution is ORDER-INDEPENDENT
+ * (facts arrive in implementation-defined store-enumeration order, which differs
+ * across nodes and restarts — nothing here may depend on it):
+ * - (governance) when `ruleAuthors` is set, bodies from non-allow-listed authors
+ *   never compete; a rule body without a provable on-chain author never fires.
+ * - A subject carrying bodies from more than one distinct (surviving) author is
+ *   CONTESTED and dropped entirely — deterministic on every node, and with an
+ *   allowlist a squatter cannot contest a trusted author's rule (they are
+ *   filtered before the contest check). Without an allowlist a contested rule
+ *   is silently absent; on public CGs set `reasoningRuleAuthors`.
+ * - Within one author, the highest kaId (their newest rule KA) wins.
+ * - A `drag:ruleStatus "disabled"` fact only counts from the resolved rule's own
+ *   author or an allow-listed author — an arbitrary publisher cannot switch off
+ *   someone else's rule.
  */
 const MAX_RULES = 50;
 const MAX_RULES_BYTES = 64 * 1024;
@@ -92,28 +101,44 @@ function resolveRules(
   const allow = ruleAuthors && ruleAuthors.length ? new Set(ruleAuthors.map((a) => a.toLowerCase())) : null;
   const authorOf = (c: VerifiableCitation): string => String(c.onChain?.author ?? '').toLowerCase();
   const isAllowListed = (c: VerifiableCitation): boolean => allow !== null && allow.has(authorOf(c));
-  // Index by rule subject so a rule's body, status and author travel together.
-  const bodies = new Map<string, { n3: string; citation: VerifiableCitation }>();
+  const kaNumOf = (c: VerifiableCitation): bigint => {
+    try { return BigInt(String(c.kaId ?? '')); } catch { return -1n; }
+  };
+  // Collect every surviving candidate body per subject; the resolution below
+  // must stay order-independent (see docstring).
+  const candidates = new Map<string, Array<{ n3: string; citation: VerifiableCitation }>>();
   const statusFacts: Array<{ subject: string; citation: VerifiableCitation }> = [];
   for (const f of facts) {
     if (f.triple.predicate === DRAG_RULE_PREDICATE) {
       const n3 = unquoteLiteral(f.triple.object);
       if (!n3) continue;
-      // First writer wins, except governance upgrades trust: on a public CG any
-      // publisher can reuse a rule's subject IRI, and letting a later fact
-      // overwrite an allow-listed author's body would suppress the trusted rule
-      // (the impostor body is then dropped by the allowlist check below).
-      const existing = bodies.get(f.triple.subject);
-      if (existing && !(isAllowListed(f.citation) && !isAllowListed(existing.citation))) continue;
-      bodies.set(f.triple.subject, { n3, citation: f.citation });
+      if (authorOf(f.citation) === '') continue; // ungovernable: no provable author
+      if (allow && !isAllowListed(f.citation)) continue; // governance: never competes
+      const list = candidates.get(f.triple.subject);
+      if (list) list.push({ n3, citation: f.citation });
+      else candidates.set(f.triple.subject, [{ n3, citation: f.citation }]);
     } else if (f.triple.predicate === DRAG_RULE_STATUS && unquoteLiteral(f.triple.object) === 'disabled') {
       statusFacts.push({ subject: f.triple.subject, citation: f.citation });
     }
   }
-  // Status facts are themselves governed: only the rule's own author — or, when
-  // an allowlist is configured, an allow-listed author — can disable a rule.
-  // Anyone else's `drag:ruleStatus "disabled"` fact about the subject is ignored
-  // (otherwise any public-CG publisher could switch off trusted rules).
+  // One body per subject: contested subjects (bodies from >1 distinct surviving
+  // author) are dropped; within one author the newest KA wins, with the
+  // lexicographically greatest n3 as a total-order tiebreak for equal kaIds.
+  const bodies = new Map<string, { n3: string; citation: VerifiableCitation }>();
+  for (const [subject, list] of candidates) {
+    const authors = new Set(list.map((b) => authorOf(b.citation)));
+    if (authors.size > 1) continue; // contested — no enumeration-order winner
+    let winner = list[0];
+    for (const b of list.slice(1)) {
+      const d = kaNumOf(b.citation) - kaNumOf(winner.citation);
+      if (d > 0n || (d === 0n && b.n3 > winner.n3)) winner = b;
+    }
+    bodies.set(subject, winner);
+  }
+  // Status facts are themselves governed: only the resolved rule's own author —
+  // or, when an allowlist is configured, an allow-listed author — can disable a
+  // rule. Anyone else's `drag:ruleStatus "disabled"` fact is ignored (otherwise
+  // any public-CG publisher could switch off trusted rules).
   const disabled = new Set<string>();
   for (const s of statusFacts) {
     const statusAuthor = authorOf(s.citation);
@@ -128,10 +153,12 @@ function resolveRules(
   const parts: string[] = [];
   const ruleCitations: VerifiableCitation[] = [];
   let bytes = 0;
-  for (const [subject, { n3, citation }] of bodies) {
+  // Sorted subjects so the caps cut the same rules on every node (allowlist
+  // filtering already happened at intake).
+  for (const subject of [...bodies.keys()].sort()) {
+    const { n3, citation } = bodies.get(subject)!;
     if (parts.length >= MAX_RULES || bytes >= MAX_RULES_BYTES) break;
     if (disabled.has(subject)) continue; // managed: a disabled rule never fires
-    if (allow && !allow.has(String(citation.onChain?.author ?? '').toLowerCase())) continue; // governance
     const room = MAX_RULES_BYTES - bytes;
     if (room <= 0) break;
     const bounded = n3.slice(0, room);

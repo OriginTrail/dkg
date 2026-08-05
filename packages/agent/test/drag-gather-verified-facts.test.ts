@@ -8,8 +8,10 @@
  * `complete` is what makes EYE reasoning sound (closed-world negation over a
  * partial fact set derives wrong conclusions), so every way it can drop to
  * false is pinned here against the method that actually computes it:
- * un-decodable VM graphs, un-anchored KAs, failed trust gates, graph caps and
- * triple caps.
+ * locally-unextractable KAs, failed chain reads, un-decodable legacy VM graph
+ * names, the checks.verified trust gate itself (zero-address author), graph
+ * caps and triple caps — plus the documented sub-graph invisibility gap, pinned
+ * so it fails loudly when sub-graph-aware extraction lands.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -35,13 +37,11 @@ const CG_ID = 77n;
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const KA_NUMBER = 9n;
 const KA_ID = (BigInt(AUTHOR) << 96n) | KA_NUMBER;
-const UAL = `did:dkg:otp:20430/${AUTHOR}/${KA_NUMBER}`;
 const CHAIN_ID = 31337n;
 
 const CG_URI = `did:dkg:context-graph:${CG_NAME}`;
 const META_GRAPH = contextGraphMetaUri(CG_NAME, CG_ID.toString());
 const DATA_GRAPH = contextGraphDataUri(CG_NAME, CG_ID.toString());
-const VM_GRAPH = `${CG_URI}/_verifiable_memory/${AUTHOR}/${KA_NUMBER}`;
 
 const TRIPLES = [
   { subject: 'urn:gvf:supplier', predicate: 'http://schema.org/name', object: '"Northwind Components"' },
@@ -49,24 +49,48 @@ const TRIPLES = [
   { subject: 'urn:gvf:supplier', predicate: 'http://schema.org/incidents', object: '"3"' },
 ];
 
+async function seedOneKC(
+  store: OxigraphStore,
+  args: {
+    author: string;
+    number: bigint;
+    rootEntity: string;
+    triples: Array<{ subject: string; predicate: string; object: string }>;
+  },
+): Promise<void> {
+  const kaId = (BigInt(args.author) << 96n) | args.number;
+  const ual = `did:dkg:otp:20430/${args.author}/${args.number}`;
+  const metaQuads: Quad[] = [
+    { subject: ual, predicate: `${RDF}type`, object: `${DKG}KnowledgeCollection`, graph: META_GRAPH },
+    { subject: ual, predicate: `${DKG}batchId`, object: `"${kaId}"^^<${XSD}integer>`, graph: META_GRAPH },
+    { subject: `${ual}/1`, predicate: `${RDF}type`, object: `${DKG}KnowledgeAsset`, graph: META_GRAPH },
+    { subject: `${ual}/1`, predicate: `${DKG}partOf`, object: ual, graph: META_GRAPH },
+    { subject: `${ual}/1`, predicate: `${DKG}rootEntity`, object: args.rootEntity, graph: META_GRAPH },
+  ];
+  await store.insert(metaQuads);
+  await store.insert(args.triples.map((t) => ({ ...t, graph: DATA_GRAPH })));
+  // The VM graph's CONTENT is irrelevant to gatherVerifiedFacts — it only
+  // discovers KA ids from the graph NAME; extraction reads meta + data graphs.
+  await store.insert([
+    {
+      subject: ual,
+      predicate: `${DKG}promotedAt`,
+      object: '"seed"',
+      graph: `${CG_URI}/_verifiable_memory/${args.author}/${args.number}`,
+    },
+  ]);
+}
+
 async function seedKC(store: OxigraphStore): Promise<void> {
   await store.insert([
     { subject: CG_URI, predicate: CONTEXT_GRAPH_ON_CHAIN_ID, object: `"${CG_ID}"`, graph: ONTOLOGY_GRAPH },
   ]);
-  const metaQuads: Quad[] = [
-    { subject: UAL, predicate: `${RDF}type`, object: `${DKG}KnowledgeCollection`, graph: META_GRAPH },
-    { subject: UAL, predicate: `${DKG}batchId`, object: `"${KA_ID}"^^<${XSD}integer>`, graph: META_GRAPH },
-    { subject: `${UAL}/1`, predicate: `${RDF}type`, object: `${DKG}KnowledgeAsset`, graph: META_GRAPH },
-    { subject: `${UAL}/1`, predicate: `${DKG}partOf`, object: UAL, graph: META_GRAPH },
-    { subject: `${UAL}/1`, predicate: `${DKG}rootEntity`, object: 'urn:gvf:supplier', graph: META_GRAPH },
-  ];
-  await store.insert(metaQuads);
-  await store.insert(TRIPLES.map((t) => ({ ...t, graph: DATA_GRAPH })));
-  // The VM graph's CONTENT is irrelevant to gatherVerifiedFacts — it only
-  // discovers KA ids from the graph NAME; extraction reads meta + data graphs.
-  await store.insert([
-    { subject: UAL, predicate: `${DKG}promotedAt`, object: '"seed"', graph: VM_GRAPH },
-  ]);
+  await seedOneKC(store, {
+    author: AUTHOR,
+    number: KA_NUMBER,
+    rootEntity: 'urn:gvf:supplier',
+    triples: TRIPLES,
+  });
 }
 
 /** The on-chain root the seeded KA truthfully commits to. */
@@ -132,7 +156,7 @@ describe('gatherVerifiedFacts — real-method completeness gate', () => {
     }
   });
 
-  it('drops complete when a discovered KA is not anchored on chain', async () => {
+  it('drops complete when a discovered KA cannot be extracted locally (VM graph without meta)', async () => {
     const otherAuthor = '0x2222222222222222222222222222222222222222';
     await store.insert([
       {
@@ -149,13 +173,30 @@ describe('gatherVerifiedFacts — real-method completeness gate', () => {
     expect(res.facts).toHaveLength(TRIPLES.length);
   });
 
-  it('drops complete when a VM graph name cannot be decoded (sub-graph-scoped KA)', async () => {
+  it('drops complete when the chain read fails for a locally extractable KA (not anchored)', async () => {
+    // Fully synced second KA — extraction succeeds, then the chain read throws
+    // (the chain stub only anchors KA_ID). Pins that chain-read failures are
+    // skipped, never swallowed into a locally-computed root.
+    const otherAuthor = '0x2222222222222222222222222222222222222222';
+    await seedOneKC(store, {
+      author: otherAuthor,
+      number: 1n,
+      rootEntity: 'urn:gvf:other',
+      triples: [{ subject: 'urn:gvf:other', predicate: 'http://schema.org/name', object: '"Other Corp"' }],
+    });
+    const res = await gather(agentWith(store, chain), CG_NAME);
+    expect(res.complete).toBe(false);
+    expect(res.graphsSkipped).toBe(1);
+    expect(res.facts).toHaveLength(TRIPLES.length);
+  });
+
+  it('drops complete when a discovered VM graph name cannot be decoded (legacy vmId-keyed graph)', async () => {
     await store.insert([
       {
-        subject: 'urn:gvf:subgraph',
+        subject: 'urn:gvf:legacy',
         predicate: `${DKG}promotedAt`,
         object: '"seed"',
-        graph: `${CG_URI}/_verifiable_memory/rules/${AUTHOR}/1`,
+        graph: `${CG_URI}/_verifiable_memory/legacy-vm-id`,
       },
     ]);
     const res = await gather(agentWith(store, chain), CG_NAME);
@@ -163,8 +204,42 @@ describe('gatherVerifiedFacts — real-method completeness gate', () => {
     expect(res.graphsSkipped).toBe(1);
   });
 
-  it('drops complete when the chain root disagrees with the stored content (trust gate)', async () => {
+  it('silently omits sub-graph-scoped KAs: not discovered, complete stays true (documented follow-up)', async () => {
+    // Real sub-graph VM layout puts the sub-graph name BEFORE the layer slug
+    // (`{cg}/rules/_verifiable_memory/{author}/{n}`), which fails the root-scoped
+    // vmPrefix STRSTARTS — the KA is never seen, so its facts are absent while
+    // complete remains true. This is the known closed-world soundness gap the
+    // method's docstring documents; when sub-graph-aware extraction lands and
+    // these graphs become visible, this test fails loudly and must be updated.
+    await store.insert([
+      {
+        subject: 'urn:gvf:subgraph',
+        predicate: `${DKG}promotedAt`,
+        object: '"seed"',
+        graph: `${CG_URI}/rules/_verifiable_memory/${AUTHOR}/1`,
+      },
+    ]);
+    const res = await gather(agentWith(store, chain), CG_NAME);
+    expect(res.graphsSeen).toBe(1);
+    expect(res.graphsSkipped).toBe(0);
+    expect(res.complete).toBe(true);
+    expect(res.facts).toHaveLength(TRIPLES.length);
+  });
+
+  it('drops complete when the chain root disagrees with the stored content (proof construction fails)', async () => {
     chain.getLatestMerkleRoot = async () => keccak256(new TextEncoder().encode('tampered'));
+    const res = await gather(agentWith(store, chain), CG_NAME);
+    expect(res.complete).toBe(false);
+    expect(res.facts).toHaveLength(0);
+    expect(res.graphsSkipped).toBeGreaterThan(0);
+  });
+
+  it('drops complete when the on-chain author is the zero address (trust gate: unverified citation)', async () => {
+    // Root and leaf count agree, so citeTriple SUCCEEDS but the citation cannot
+    // be author-verified (zero address, no seal) — verified:false. This is the
+    // only path that exercises the `!citation.checks.verified` trust gate
+    // itself, as opposed to the throw-paths above.
+    chain.getLatestMerkleRootAuthor = async () => `0x${'0'.repeat(40)}`;
     const res = await gather(agentWith(store, chain), CG_NAME);
     expect(res.complete).toBe(false);
     expect(res.facts).toHaveLength(0);
