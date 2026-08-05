@@ -65,10 +65,10 @@ import {
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
 import {
-  SwmAuthorInventoryPersistenceV1,
   encodeSwmAuthorInventoryKeyV1,
   prepareSwmAuthorInventoryCommitV1,
-} from './swm-author-inventory-persistence.js';
+} from './swm-author-inventory-commit-plan.js';
+import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
 import type {
   CompareAndSwapSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,

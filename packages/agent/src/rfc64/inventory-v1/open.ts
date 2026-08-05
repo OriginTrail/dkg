@@ -1095,17 +1095,14 @@ function assertExistingTargetHeader(databasePath: string): void {
       'database header has a foreign application_id and will not be opened or modified',
     );
   }
-  if (identity.userVersion > INVENTORY_V1_USER_VERSION) {
+  const versionClass = classifyInventoryUserVersionV1(identity.userVersion);
+  if (versionClass === 'newer') {
     throw new InventoryV1OpenError(
       'newer-schema',
       `inventory user_version ${identity.userVersion} is newer than supported version ${INVENTORY_V1_USER_VERSION}`,
     );
   }
-  if (
-    identity.userVersion !== INVENTORY_V1_LEGACY_USER_VERSION
-    && identity.userVersion !== INVENTORY_V1_V2_USER_VERSION
-    && identity.userVersion !== INVENTORY_V1_USER_VERSION
-  ) {
+  if (versionClass === 'unsupported') {
     throw new InventoryV1OpenError(
       'ambiguous-database',
       `inventory application_id is DK64 but user_version ${identity.userVersion} is unsupported`,
@@ -1116,11 +1113,7 @@ function assertExistingTargetHeader(databasePath: string): void {
 function assertCommittedTargetIdentity(identity: DatabaseIdentityV1): void {
   if (
     identity.applicationId !== INVENTORY_V1_APPLICATION_ID
-    || (
-      identity.userVersion !== INVENTORY_V1_LEGACY_USER_VERSION
-      && identity.userVersion !== INVENTORY_V1_V2_USER_VERSION
-      && identity.userVersion !== INVENTORY_V1_USER_VERSION
-    )
+    || !isSupportedInventoryUserVersionV1(identity.userVersion)
   ) {
     throw new InventoryV1OpenError(
       'ambiguous-database',
@@ -1195,6 +1188,25 @@ const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Ob
     sql: INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
   }),
 ]);
+
+type InventorySchemaVersionClassV1 =
+  | 'current'
+  | 'migratable'
+  | 'unsupported'
+  | 'newer';
+
+function classifyInventoryUserVersionV1(userVersion: number): InventorySchemaVersionClassV1 {
+  if (userVersion === INVENTORY_V1_USER_VERSION) return 'current';
+  if (userVersion > INVENTORY_V1_USER_VERSION) return 'newer';
+  return INVENTORY_SCHEMA_MIGRATIONS_V1.some(
+    (migration) => migration.fromVersion === userVersion,
+  ) ? 'migratable' : 'unsupported';
+}
+
+function isSupportedInventoryUserVersionV1(userVersion: number): boolean {
+  const classification = classifyInventoryUserVersionV1(userVersion);
+  return classification === 'current' || classification === 'migratable';
+}
 
 function migrateInventorySchemaToCurrent(
   database: DatabaseSyncV1,
@@ -2296,12 +2308,10 @@ function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabase
   const identity = readValidSqliteHeaderIdentity(databasePath);
   if (identity === null || identity.applicationId === 0) return 'ambiguous';
   if (identity.applicationId !== INVENTORY_V1_APPLICATION_ID) return 'foreign';
-  if (identity.userVersion > INVENTORY_V1_USER_VERSION) return 'newer';
-  return identity.userVersion === INVENTORY_V1_LEGACY_USER_VERSION
-    || identity.userVersion === INVENTORY_V1_V2_USER_VERSION
-    || identity.userVersion === INVENTORY_V1_USER_VERSION
-    ? 'owned'
-    : 'ambiguous';
+  const versionClass = classifyInventoryUserVersionV1(identity.userVersion);
+  if (versionClass === 'newer') return 'newer';
+  return versionClass === 'current' || versionClass === 'migratable'
+    ? 'owned' : 'ambiguous';
 }
 
 function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdentityV1 | null {
