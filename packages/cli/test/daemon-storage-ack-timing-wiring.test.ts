@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -205,6 +206,133 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       'shared-default-cg',
       'network-default-cg',
     ]);
+  });
+
+  it('activates only manifest-selected RFC-64 public CGs and forwards the exact controls', async () => {
+    const deploymentProfile = {
+      networkId: 'evm:100',
+      assertedAtChainId: '100',
+      assertedAtKav10Address: `0x${'11'.repeat(20)}`,
+    };
+    const bootstrap = {
+      acceptedPublicPolicies: [
+        rfc64PublicCatalogPolicy('rfc64-selected-a', 'evm:100'),
+        rfc64PublicCatalogPolicy('rfc64-selected-b', 'evm:100'),
+      ],
+      retryIntervalMs: 30_000,
+    };
+    const createArg = await captureCreateArg({
+      contextGraphs: ['ordinary-selection'],
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile,
+        autoPublish: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap,
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toEqual([
+      'ordinary-selection',
+      'rfc64-selected-a',
+      'rfc64-selected-b',
+    ]);
+    expect(createArg.rfc64PublicCatalogActivation).toMatchObject({
+      enabled: true,
+      deploymentProfile,
+      autoPublish: {
+        peers: ['12D3KooReceiver'],
+        catalogIssuerDelegationExpiresAt: '1893456000000',
+      },
+      bootstrap,
+    });
+    expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
+  it('keeps receiver-only RFC-64 bootstrap active without enabling auto-publish', async () => {
+    const createArg = await captureCreateArg({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-receiver-only', 'evm:100'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).toContain('rfc64-receiver-only');
+    expect(createArg.rfc64PublicCatalogActivation.autoPublish).toBeUndefined();
+    expect(
+      createArg.rfc64PublicCatalogActivation.bootstrap.acceptedPublicPolicies[0]
+        .policyEnvelope.payload.contextGraphId,
+    ).toBe('rfc64-receiver-only');
+  });
+
+  it('rejects a cross-network RFC-64 manifest before DKGAgent.create', async () => {
+    await expect(runDaemonInner(true, {
+      name: 'storage-ack-timing-core-test',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      nodeRole: 'core',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-wrong-network', 'base:84532'),
+          ],
+        },
+      },
+    } as any, Date.now())).rejects.toThrow(/policy network differs/u);
+
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(mocks.chainResetWipe).not.toHaveBeenCalled();
+    expect(mocks.loadOpWallets).not.toHaveBeenCalled();
+    expect(mocks.startPublisherRuntimeWithOutcome).not.toHaveBeenCalled();
+    expect(mocks.createServer).not.toHaveBeenCalled();
+  });
+
+  it('keeps RFC-64 activation fully absent from agent inputs when disabled', async () => {
+    const createArg = await captureCreateArg({
+      rfc64PublicCatalog: { enabled: false },
+    });
+
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
+  });
+
+  it('strips stale controls from an explicitly disabled RFC-64 activation', async () => {
+    const createArg = await captureCreateArg({
+      rfc64PublicCatalog: {
+        enabled: false,
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [
+            rfc64PublicCatalogPolicy('rfc64-ignored-disabled', 'evm:100'),
+          ],
+        },
+      },
+    });
+
+    expect(createArg.syncContextGraphs).not.toContain('rfc64-ignored-disabled');
+    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
+    expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
   });
 
   it('passes configured StorageACK timing into DKGAgent.create', async () => {

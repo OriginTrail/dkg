@@ -16,6 +16,10 @@ const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
     operatorActionRequired: true,
   },
 };
+const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
+  enabled: false,
+  selectedContextGraphs: [],
+};
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -55,6 +59,7 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
           options: { url: 'http://127.0.0.1:9/query' },
         },
       },
+      rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-store-quads-test',

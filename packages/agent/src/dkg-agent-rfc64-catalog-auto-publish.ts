@@ -52,8 +52,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: RecordConfirmedRfc64PublicCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
-    const autoPublish = this.config.rfc64PublicCatalogAutoPublish;
-    if (autoPublish === undefined) return null;
+    const autoPublishPolicy = this.config.rfc64PublicCatalogAutoPublishPolicy;
+    if (autoPublishPolicy === undefined) return null;
+    if (
+      autoPublishPolicy.mode === 'selected-public'
+      && !autoPublishPolicy.selectedContextGraphs.includes(params.contextGraphId)
+    ) return null;
     if (params.subGraphName !== undefined && params.subGraphName !== null) return null;
     const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     // V1 deliberately catalogs public-only KA projections. Private-bearing
@@ -107,11 +111,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       author: this.createRfc64CatalogAuthorSignerV1(seal.authorAddress),
       asset,
       deployment: await this.resolveRfc64AutoPublishDeploymentProfileV1(networkId),
-      peers: autoPublish.peers,
+      peers: autoPublishPolicy.config.peers,
       catalogIssuerDelegationEffectiveAt:
-        autoPublish.catalogIssuerDelegationEffectiveAt ?? ('0' as TimestampMsV1),
+        autoPublishPolicy.config.catalogIssuerDelegationEffectiveAt
+        ?? ('0' as TimestampMsV1),
       catalogIssuerDelegationExpiresAt:
-        autoPublish.catalogIssuerDelegationExpiresAt,
+        autoPublishPolicy.config.catalogIssuerDelegationExpiresAt,
     });
   }
 

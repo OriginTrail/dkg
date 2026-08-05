@@ -128,6 +128,8 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
+  resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveSharedMemoryTtlMs,
   resolveStorageAckTiming,
   repoDir,
@@ -1303,10 +1305,19 @@ export async function runDaemonInner(
     for (const message of genesisValidation.messages) log(message);
     process.exit(1);
   }
+  // Resolve the effective chain before activating RFC-64 so a stale/cross-
+  // network manifest fails before subscriptions, stores, wallets, or agent
+  // runtime construction begin. The same immutable chainBase is reused below.
+  const chainBase = resolveChainConfig(config, network);
+  const rfc64PublicCatalog = resolveRfc64PublicCatalogActivation(
+    config,
+    resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
+  );
   const syncContextGraphs = [
     ...new Set([
       ...resolveContextGraphs(config),
       ...resolveNetworkDefaultContextGraphs(network),
+      ...rfc64PublicCatalog.selectedContextGraphs,
     ]),
   ];
 
@@ -1523,7 +1534,6 @@ export async function runDaemonInner(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const chainBase = resolveChainConfig(config, network);
   const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
@@ -1743,6 +1753,14 @@ export async function runDaemonInner(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
+    // The agent owns authoritative activation against the chain adapter it
+    // actually constructed. This daemon-side resolved value is only a
+    // fail-fast/status preview and must not become a second runtime contract.
+    rfc64PublicCatalogActivation: config.rfc64PublicCatalog === undefined
+      ? undefined
+      : rfc64PublicCatalog.enabled
+        ? config.rfc64PublicCatalog
+        : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
@@ -3653,6 +3671,7 @@ export async function runDaemonInner(
         publisherControl,
         publisherState,
         config,
+        rfc64PublicCatalog,
         startedAt,
         dashDb,
         opWallets,

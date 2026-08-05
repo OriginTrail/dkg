@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
+const publicCatalogActivation = await import(
+  '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const expectedRfc64PolicyCells = [
@@ -70,6 +73,18 @@ if (
 if (packageManifest.name !== '@origintrail-official/dkg-agent') {
   throw new Error('historical package.json subpath no longer resolves');
 }
+if (typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationConfigV1 !== 'function') {
+  throw new Error('public RFC-64 activation subpath did not expose the complete resolver');
+}
+if (
+  typeof publicCatalogActivation.resolveRfc64PublicCatalogActivationChainIdentityV1
+  !== 'function'
+) {
+  throw new Error('public RFC-64 activation subpath did not expose the chain-identity resolver');
+}
+if (typeof publicCatalogActivation.resolveRfc64PublicCatalogControlsV1 !== 'function') {
+  throw new Error('public RFC-64 activation subpath did not expose catalog-control normalization');
+}
 
 const digestAuthor = '0x1111111111111111111111111111111111111111';
 const digestRows = [10, 2].map((number) => ({
@@ -97,6 +112,7 @@ const publicRfc64Modules = [
   'inventory-v1/scalars.js',
   'inventory-v1/sql.js',
   'inventory-v1/statements.js',
+  'public-catalog-activation-config-v1.js',
 ];
 const blockedRfc64Modules = [
   'catalog-access-policy-v1.js',

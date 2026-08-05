@@ -58,6 +58,10 @@ import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import type {
+  Rfc64PublicCatalogActivationInputV1,
+  ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
+import type {
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
@@ -1180,7 +1184,18 @@ export interface DKGAgentConfig {
    * RFC-64 catalog policy. Omission preserves the legacy open-only lane.
    */
   rfc64CatalogAccessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1;
-  /** Omission preserves the existing publication and synchronization behavior. */
+  /**
+   * Canonical selected-public activation resolved through the versioned,
+   * side-effect-free activation surface. Mutually exclusive with the legacy
+   * deployment, auto-publish, and bootstrap controls; the accepted manifest
+   * is its only CG set.
+   */
+  rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
+  /**
+   * Legacy all-accepted-public-CG producer configuration. Omission preserves
+   * existing publication behavior. New daemons should use the unified
+   * selected-public activation above.
+   */
   rfc64PublicCatalogAutoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   /** Omission preserves manual RFC-64 current-head discovery. */
   rfc64PublicCatalogBootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
@@ -1590,6 +1605,18 @@ export interface DKGAgentACKTransportOptions {
 }
 
 export type ResolvedDKGAgentConfig =
-  Omit<DKGAgentConfig, 'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'> & {
+  Omit<
+    DKGAgentConfig,
+    | 'storageAckTiming'
+    | 'ackHandlerDeadlineMs'
+    | 'ackSendTimeoutMs'
+    | 'rfc64PublicCatalogActivation'
+    | 'rfc64PublicCatalogAutoPublish'
+    | 'rfc64PublicCatalogBootstrap'
+    | 'rfc64CatalogDeploymentProfile'
+  > & {
     storageAckTiming: StorageAckTiming;
+    rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
+    rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
+    rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };

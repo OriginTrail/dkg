@@ -11,6 +11,7 @@ import {
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   computeContextGraphPolicyObjectDigestV1,
+  computeNetworkId,
   contextGraphLayerUri,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
@@ -40,6 +41,12 @@ import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
+import {
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationConfigV1,
+  resolveRfc64PublicCatalogControlsV1,
+  type Rfc64PublicCatalogActivationInputV1,
+} from '../src/rfc64/public-catalog-activation-config-v1.js';
 import type {
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
@@ -184,7 +191,9 @@ interface NativeAgentStartOptionsV1 {
   }>;
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
+  readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
+  readonly networkIdentityChainId?: NetworkIdV1;
 }
 
 async function startNativeAgentWithOptions(
@@ -198,7 +207,9 @@ async function startNativeAgentWithOptions(
     finalizedRuntime,
     autoPublish,
     bootstrap,
+    activation,
     persistentStorePath,
+    networkIdentityChainId = activation === undefined ? undefined : deployment.networkId,
   } = options;
   const dataDir = existingDataDir
     ?? await mkdtemp(join(tmpdir(), `dkg-rfc64-native-${name}-`));
@@ -216,10 +227,20 @@ async function startNativeAgentWithOptions(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    rfc64CatalogDeploymentProfile: deployment,
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
-    rfc64PublicCatalogAutoPublish: autoPublish,
-    rfc64PublicCatalogBootstrap: bootstrap,
+    ...(networkIdentityChainId === undefined ? {} : {
+      networkIdentity: {
+        networkId: await computeNetworkId(),
+        chainId: networkIdentityChainId,
+      },
+    }),
+    ...(activation === undefined ? {
+      rfc64CatalogDeploymentProfile: deployment,
+      rfc64PublicCatalogAutoPublish: autoPublish,
+      rfc64PublicCatalogBootstrap: bootstrap,
+    } : {
+      rfc64PublicCatalogActivation: activation,
+    }),
     ...(finalizedRuntime === undefined ? {} : {
       chainAdapter: finalizedRuntime.chainAdapter,
       chainConfig: {
@@ -357,6 +378,30 @@ function privateCatalogRoster(
 }
 
 ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring', () => {
+  it('preserves the EVM default chain identity for a no-admin chain config', async () => {
+    const operational = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'rfc64-no-admin-default-chain',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:0',
+        hubAddress: ethers.ZeroAddress,
+        operationalKeys: [operational.privateKey],
+      },
+      nodeRole: 'core',
+    });
+    agents.push(agent);
+
+    expect(agent).toBeInstanceOf(DKGAgent);
+    const internals = agent as unknown as {
+      chain: { chainId: string };
+      config: { networkIdentity?: { chainId?: string } };
+    };
+    expect(internals.chain.chainId).toBe('evm:31337');
+    expect(internals.config.networkIdentity?.chainId).toBe('evm:31337');
+  });
+
   it('snapshots and canonicalizes the deterministic local deployment override', () => {
     const callerOwned = {
       networkId: NETWORK_ID,
@@ -393,6 +438,145 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: ['duplicate', 'duplicate'],
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     })).toThrow(/duplicated/u);
+  });
+
+  it('keeps direct legacy agent auto-publish configuration source-compatible', async () => {
+    const agent = await startNativeAgent(
+      'legacy-direct-agent-config',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      undefined,
+      {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    expect(agent).toBeInstanceOf(DKGAgent);
+  });
+
+  it('normalizes legacy and selected auto-publish into one internal policy', () => {
+    const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID);
+    const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const activation = resolveRfc64PublicCatalogActivationConfigV1({
+      enabled: true,
+      autoPublish: {
+        peers: ['12D3KooSelected'],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+          targets: [],
+        }],
+      },
+    }, chainIdentity);
+
+    expect(resolveRfc64PublicCatalogControlsV1({ activation }, chainIdentity))
+      .toMatchObject({
+        autoPublishPolicy: {
+          mode: 'selected-public',
+          selectedContextGraphs: [CONTEXT_GRAPH_ID],
+          config: { peers: ['12D3KooSelected'] },
+        },
+        requiresDataDir: true,
+      });
+    expect(resolveRfc64PublicCatalogControlsV1({
+      legacyAutoPublish: {
+        peers: ['12D3KooLegacy'],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined)))
+      .toMatchObject({
+        autoPublishPolicy: {
+          mode: 'all-accepted-public',
+          config: { peers: ['12D3KooLegacy'] },
+        },
+        requiresDataDir: false,
+      });
+  });
+
+  it('rejects a direct resolved activation whose selection differs from its manifest', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const activation = resolveRfc64PublicCatalogActivationConfigV1({
+      enabled: true,
+      deploymentProfile: NATIVE_DEPLOYMENT,
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+        }],
+      },
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID));
+
+    await expect(DKGAgent.create({
+      name: 'split-selected-agent-config',
+      networkIdentity: { networkId: 'rfc64-test', chainId: NETWORK_ID },
+      rfc64PublicCatalogActivation: {
+        ...activation,
+        selectedContextGraphs: ['different-selection'],
+      } as never,
+    })).rejects.toThrow(/selected graphs differ from the bootstrap manifest/u);
+  });
+
+  it('projects raw selected activation into direct agent durable sync scope', async () => {
+    const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-selected-sync-scope',
+      activation: {
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+            targets: [],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
+  });
+
+  it('keeps direct disabled activation fail-closed even when stale controls are present', async () => {
+    const ignoredPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-disabled-stale-controls',
+      activation: {
+        enabled: false,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(ignoredPolicy),
+            targets: [],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).not.toContain(CONTEXT_GRAPH_ID);
+    expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeUndefined();
+    expect((agent as any).config.rfc64PublicCatalogAutoPublishPolicy).toBeUndefined();
   });
 
   it('snapshots a bounded public-root bootstrap manifest', () => {
@@ -446,19 +630,109 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).rejects.toThrow(/rfc64PublicCatalogBootstrap requires dataDir/u);
   });
 
-  it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
-    const receiver = await startNativeAgent('auto-publish-receiver');
-    const author = await startNativeAgent(
-      'auto-publish-author',
-      NATIVE_DEPLOYMENT,
-      undefined,
-      undefined,
-      undefined,
-      {
-        peers: [receiver.peerId],
+  it('rejects selected activation bootstrap without persistence before node startup', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const activation = resolveRfc64PublicCatalogActivationConfigV1({
+      enabled: true,
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+        }],
+      },
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID));
+    await expect(DKGAgent.create({
+      name: 'ephemeral-selected-activation-is-invalid',
+      networkIdentity: { networkId: 'rfc64-test', chainId: NETWORK_ID },
+      rfc64PublicCatalogActivation: activation,
+    })).rejects.toThrow(/rfc64PublicCatalogBootstrap requires dataDir/u);
+  });
+
+  it('rejects selected activation mixed with a legacy catalog control', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const activation = resolveRfc64PublicCatalogActivationConfigV1({
+      enabled: true,
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+        }],
+      },
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID));
+    await expect(DKGAgent.create({
+      name: 'mixed-selected-and-legacy-controls',
+      networkIdentity: { networkId: 'rfc64-test', chainId: NETWORK_ID },
+      rfc64PublicCatalogActivation: activation,
+      rfc64PublicCatalogAutoPublish: {
+        peers: [],
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
-    );
+    })).rejects.toThrow(/mutually exclusive/u);
+  });
+
+  it('does not let an activation deployment profile supply its own chain identity', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const activation = resolveRfc64PublicCatalogActivationConfigV1({
+      enabled: true,
+      deploymentProfile: NATIVE_DEPLOYMENT,
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+        }],
+      },
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID));
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-self-bound-chain-'));
+    tempDirs.push(dataDir);
+    await expect(DKGAgent.create({
+      name: 'self-bound-deployment-is-invalid',
+      dataDir,
+      rfc64PublicCatalogActivation: activation,
+    })).rejects.toThrow(/requires an effective network id/u);
+  });
+
+  it('turns one confirmed public KA into the provider current head and one cold receiver apply', async () => {
+    const acceptedButUnselectedContextGraphId = (
+      '0x1111111111111111111111111111111111111111/accepted-not-selected'
+    ) as ContextGraphIdV1;
+    const receiver = await startNativeAgentWithOptions({
+      name: 'auto-publish-receiver',
+      networkIdentityChainId: NETWORK_ID,
+    });
+    const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const author = await startNativeAgentWithOptions({
+      name: 'auto-publish-author',
+      activation: resolveRfc64PublicCatalogActivationConfigV1({
+        enabled: true,
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        autoPublish: {
+          peers: [receiver.peerId],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+            targets: [],
+          }],
+        },
+      }, resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID)),
+    });
     vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
     for (const agent of [author, receiver]) {
       agent.acceptOpenContextGraphPolicyV1({
@@ -467,9 +741,54 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         ownerAddress: AUTHOR,
       });
     }
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: acceptedButUnselectedContextGraphId,
+      ownerAddress: AUTHOR,
+    });
     await connectBothWays(author, receiver);
 
     const seal = assertionSealFromCanonical(await authorSeal(11n));
+    const ignored = await author.recordConfirmedRfc64PublicCatalogAssetV1({
+      contextGraphId: acceptedButUnselectedContextGraphId,
+      assertionCoordinate: 'ordinary-confirmed-publication-other-cg' as never,
+      publicQuads: [
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/name',
+          object: '"Alice"',
+          graph: '',
+        },
+        {
+          subject: 'https://example.org/alice',
+          predicate: 'https://schema.org/age',
+          object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          graph: '',
+        },
+      ],
+      seal,
+    });
+    expect(ignored).toBeNull();
+    const acceptedButUnselectedScopeDigest = computeAuthorCatalogScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: acceptedButUnselectedContextGraphId,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0' as never,
+      bucketCount: '1' as never,
+    });
+    expect(author.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: acceptedButUnselectedScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: acceptedButUnselectedScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+
     const first = await author.recordConfirmedRfc64PublicCatalogAssetV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'ordinary-confirmed-publication' as never,
