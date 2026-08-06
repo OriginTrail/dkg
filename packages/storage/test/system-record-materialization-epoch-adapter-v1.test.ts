@@ -1,0 +1,111 @@
+import { createServer, type Server } from 'node:http';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
+import {
+  attachManagedOxigraphLeaseV1,
+  createManagedOxigraphOwnershipControllerV1,
+} from '../src/managed-oxigraph-ownership-v1-internal.js';
+import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
+
+let server: Server;
+let queryEndpoint: string;
+let updateEndpoint: string;
+let epoch: string | null;
+let requests: Array<{ path: string; body: string }>;
+
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      requests.push({ path: req.url ?? '', body });
+      if (req.url === '/query') {
+        res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+        res.end(JSON.stringify({
+          head: { vars: ['epoch'] },
+          results: {
+            bindings: epoch === null ? [] : [{ epoch: { type: 'literal', value: epoch } }],
+          },
+        }));
+        return;
+      }
+      const inserted = /INSERT[\s\S]*?materialization-epoch> "([0-9]+)"/u.exec(body)?.[1];
+      if (inserted === undefined) {
+        res.writeHead(400);
+        res.end('missing epoch');
+        return;
+      }
+      epoch = inserted;
+      res.writeHead(204);
+      res.end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('test server has no port');
+  queryEndpoint = `http://127.0.0.1:${address.port}/query`;
+  updateEndpoint = `http://127.0.0.1:${address.port}/update`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+beforeEach(() => {
+  __resetSystemRecordControllerRegistrationForTests();
+  epoch = null;
+  requests = [];
+});
+
+afterEach(() => {
+  __resetSystemRecordControllerRegistrationForTests();
+});
+
+describe('sparql-http managed epoch handoff', () => {
+  it('rotates through the generation-owned client inside the control barrier', async () => {
+    const ownership = createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint);
+    ownership.bindReadyGeneration();
+    const options = attachManagedOxigraphLeaseV1(
+      { queryEndpoint, updateEndpoint },
+      ownership.lease,
+      {
+        stopAndProveOwnedChildDead: async () => undefined,
+        startAndProveCleanGeneration: async () => undefined,
+      },
+    );
+    const store = new SparqlHttpStore(options);
+    const controller = store.getSystemRecordLaneControllerV1();
+    expect(controller).toBeDefined();
+
+    const first = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    expect(epoch).toBe('1');
+    await first.close('disable');
+    expect(epoch).toBe('2');
+    const second = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    expect(epoch).toBe('3');
+    expect(requests.map((request) => request.path)).toEqual([
+      '/query', '/update', '/query',
+      '/query', '/update', '/query',
+      '/query', '/update', '/query',
+    ]);
+    expect(requests.filter((request) => request.path === '/query'))
+      .toSatisfy((queries: Array<{ body: string }>) =>
+        queries.every((query) => query.body.endsWith('LIMIT 2')),
+      );
+
+    const beforeForgedApply = requests.length;
+    // Production composition now reaches the atomic executor's private
+    // registry consumer. A caller-authored object is rejected there before a
+    // reserved-state query or update; the former validation-mismatch stub is
+    // no longer the production bound path.
+    await expect(second.applyVerified(Object.freeze({}))).resolves.toEqual({
+      outcome: 'capability-lost',
+    });
+    expect(requests).toHaveLength(beforeForgedApply);
+
+    await second.close('shutdown');
+    await store.close();
+  });
+});

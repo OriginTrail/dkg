@@ -67,6 +67,15 @@ const TERMINAL_REASONS: ReadonlySet<ManagedOxigraphOwnershipInvalidationV1> =
 export interface ManagedOxigraphOwnershipSnapshotV1 {
   /** Canonical decimal u64, matching the system-record scalar codec. */
   readonly childGeneration: string;
+  /**
+   * Exact supervisor-proven listener identities for this generation.
+   *
+   * Optional only for the B2-compatible diagnostic controller constructed
+   * without endpoints. Such a lease can report lifecycle state but can never
+   * satisfy the B3 endpoint-bound materialization capability.
+   */
+  readonly queryEndpoint?: string;
+  readonly updateEndpoint?: string;
   /** True only while the supervisor-owned child is the proven ready listener. */
   readonly ready: boolean;
   /** Once terminal, no generation can ever be bound again on this lease. */
@@ -76,6 +85,8 @@ export interface ManagedOxigraphOwnershipSnapshotV1 {
 
 interface LeaseState {
   generation: bigint;
+  readonly queryEndpoint?: string;
+  readonly updateEndpoint?: string;
   ready: boolean;
   terminal: boolean;
   lastInvalidation?: ManagedOxigraphOwnershipInvalidationV1;
@@ -104,14 +115,110 @@ export interface ManagedOxigraphOwnershipControllerV1 {
   snapshot(): ManagedOxigraphOwnershipSnapshotV1;
 }
 
-export function createManagedOxigraphOwnershipControllerV1(): ManagedOxigraphOwnershipControllerV1 {
+export interface ManagedOxigraphEndpointIdentityV1 {
+  readonly queryEndpoint: string;
+  readonly updateEndpoint: string;
+}
+
+const canonicalManagedEndpoint = (
+  value: unknown,
+  path: '/query' | '/update',
+  label: string,
+): string => {
+  if (typeof value !== 'string') {
+    throw new Error(`${label} must be a canonical loopback HTTP URL`);
+  }
+  const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})(\/query|\/update)$/.exec(value);
+  const portText = match?.[1];
+  const port = portText === undefined ? 0 : Number(portText);
+  const canonical = `http://127.0.0.1:${portText ?? ''}${path}`;
+  if (
+    !match ||
+    match[2] !== path ||
+    !Number.isSafeInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    String(port) !== portText ||
+    value !== canonical
+  ) {
+    throw new Error(
+      `${label} must be exactly http://127.0.0.1:<port>${path} with no credentials, query, or fragment`,
+    );
+  }
+  return canonical;
+};
+
+export function canonicalizeManagedOxigraphEndpointIdentityV1(
+  queryEndpoint: unknown,
+  updateEndpoint: unknown,
+): ManagedOxigraphEndpointIdentityV1 {
+  const identity = Object.freeze({
+    queryEndpoint: canonicalManagedEndpoint(queryEndpoint, '/query', 'managed Oxigraph query endpoint'),
+    updateEndpoint: canonicalManagedEndpoint(updateEndpoint, '/update', 'managed Oxigraph update endpoint'),
+  });
+  if (new URL(identity.queryEndpoint).port !== new URL(identity.updateEndpoint).port) {
+    throw new Error('managed Oxigraph query and update endpoints must identify the same listener port');
+  }
+  return identity;
+}
+
+export function managedOxigraphOwnershipEndpointsMatchV1(
+  snapshot: ManagedOxigraphOwnershipSnapshotV1,
+  queryEndpoint: unknown,
+  updateEndpoint: unknown,
+): boolean {
+  try {
+    const candidate = canonicalizeManagedOxigraphEndpointIdentityV1(queryEndpoint, updateEndpoint);
+    return candidate.queryEndpoint === snapshot.queryEndpoint &&
+      candidate.updateEndpoint === snapshot.updateEndpoint;
+  } catch {
+    return false;
+  }
+}
+
+const snapshotLeaseState = (current: LeaseState): ManagedOxigraphOwnershipSnapshotV1 =>
+  Object.freeze({
+    childGeneration: current.generation.toString(10),
+    ...(current.queryEndpoint === undefined
+      ? {}
+      : {
+          queryEndpoint: current.queryEndpoint,
+          updateEndpoint: current.updateEndpoint,
+        }),
+    ready: current.ready,
+    terminal: current.terminal,
+    ...(current.lastInvalidation === undefined
+      ? {}
+      : { lastInvalidation: current.lastInvalidation }),
+  });
+
+export function createManagedOxigraphOwnershipControllerV1(): ManagedOxigraphOwnershipControllerV1;
+export function createManagedOxigraphOwnershipControllerV1(
+  queryEndpoint: string,
+  updateEndpoint: string,
+): ManagedOxigraphOwnershipControllerV1;
+export function createManagedOxigraphOwnershipControllerV1(
+  queryEndpoint?: string,
+  updateEndpoint?: string,
+): ManagedOxigraphOwnershipControllerV1 {
+  if ((queryEndpoint === undefined) !== (updateEndpoint === undefined)) {
+    throw new Error('managed Oxigraph ownership endpoints must be supplied together');
+  }
+  const endpoints = queryEndpoint === undefined
+    ? undefined
+    : canonicalizeManagedOxigraphEndpointIdentityV1(queryEndpoint, updateEndpoint);
   // A bare object with no own properties: nothing to read, nothing to copy that
   // would carry meaning, and `JSON.stringify(lease)` is `"{}"`.
   const lease = Object.freeze(
     Object.create(null) as object,
   ) as ManagedOxigraphOwnershipLeaseV1;
 
-  LEASE_STATE.set(lease, { generation: 0n, ready: false, terminal: false });
+  LEASE_STATE.set(lease, {
+    generation: 0n,
+    ...(endpoints === undefined ? {} : endpoints),
+    ready: false,
+    terminal: false,
+  });
 
   const state = (): LeaseState => {
     const current = LEASE_STATE.get(lease);
@@ -145,15 +252,7 @@ export function createManagedOxigraphOwnershipControllerV1(): ManagedOxigraphOwn
     },
 
     snapshot(): ManagedOxigraphOwnershipSnapshotV1 {
-      const current = state();
-      return Object.freeze({
-        childGeneration: current.generation.toString(10),
-        ready: current.ready,
-        terminal: current.terminal,
-        ...(current.lastInvalidation === undefined
-          ? {}
-          : { lastInvalidation: current.lastInvalidation }),
-      });
+      return snapshotLeaseState(state());
     },
   });
 }
@@ -168,8 +267,8 @@ export function createManagedOxigraphOwnershipControllerV1(): ManagedOxigraphOwn
  * advertise the lane at all rather than advertise one that can never open.
  */
 export interface ManagedOxigraphSupervisorHandoffV1 {
-  stopAndProveOwnedChildDead(): Promise<void>;
-  startAndProveCleanGeneration(): Promise<void>;
+  stopAndProveOwnedChildDead(absoluteDeadlineMs?: number): Promise<void>;
+  startAndProveCleanGeneration(absoluteDeadlineMs?: number): Promise<void>;
 }
 
 const MANAGED_OXIGRAPH_HANDOFF_OPTION_KEY: unique symbol = Symbol(
@@ -256,12 +355,5 @@ export function readManagedOxigraphOwnershipSnapshotV1(
   const current = LEASE_STATE.get(lease);
   /* c8 ignore next -- guarded by isManagedOxigraphOwnershipLeaseV1 above */
   if (!current) return null;
-  return Object.freeze({
-    childGeneration: current.generation.toString(10),
-    ready: current.ready,
-    terminal: current.terminal,
-    ...(current.lastInvalidation === undefined
-      ? {}
-      : { lastInvalidation: current.lastInvalidation }),
-  });
+  return snapshotLeaseState(current);
 }

@@ -58,6 +58,14 @@ export interface DecodedOpaqueKaBundleV1 {
   readonly blobDigest: Digest32V1;
 }
 
+/** Compute the frozen projection digest without allocating a synthetic bundle. */
+export function computeKaBundleProjectionDigestV1(
+  projectionBytes: Uint8Array,
+): Digest32V1 {
+  assertUint8Array(projectionBytes, 'projectionBytes');
+  return digestToLowerHex(PROJECTION_DIGEST_DOMAIN_BYTES, projectionBytes);
+}
+
 /**
  * Validate the exact v1 component-length arithmetic without allocating a bundle.
  * Inputs are bigint so no candidate u64 ever passes through binary floating point.
@@ -141,10 +149,7 @@ export function encodeOpaqueKaBundleV1(
 
   return {
     bundleBytes,
-    projectionDigest: digestToLowerHex(
-      PROJECTION_DIGEST_DOMAIN_BYTES,
-      finalizedProjectionBytes,
-    ),
+    projectionDigest: computeKaBundleProjectionDigestV1(finalizedProjectionBytes),
     blobDigest: digestToLowerHex(BLOB_DIGEST_DOMAIN_BYTES, bundleBytes),
   };
 }
@@ -193,7 +198,7 @@ export function decodeOpaqueKaBundleV1(bundleBytes: Uint8Array): DecodedOpaqueKa
   return {
     projectionBytes,
     sealBytes,
-    projectionDigest: digestToLowerHex(PROJECTION_DIGEST_DOMAIN_BYTES, projectionBytes),
+    projectionDigest: computeKaBundleProjectionDigestV1(projectionBytes),
     blobDigest: digestToLowerHex(BLOB_DIGEST_DOMAIN_BYTES, bundleBytes),
   };
 }

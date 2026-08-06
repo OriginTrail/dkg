@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Adapter registration is a side effect of importing the module (see
 // `system-record-capability-discovery-v1.test.ts`).
@@ -16,7 +17,10 @@ import {
 } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
-const ENDPOINT = 'http://oxigraph-barrier.test/query';
+let QUERY_ENDPOINT: string;
+let UPDATE_ENDPOINT: string;
+let managedServer: Server;
+let epoch: string | null;
 
 const ACTIVATION: SystemRecordLaneActivationV1 = {
   networkId: 'testnet',
@@ -61,12 +65,15 @@ class GatedFetch {
 /** Records whether — and when — the supervisor was asked to touch the child. */
 class RecordingSupervisor implements ManagedOxigraphSupervisorHandoffV1 {
   readonly calls: string[] = [];
+  failAt: 'stop' | 'start' | null = null;
   stopAndProveOwnedChildDead = async (): Promise<void> => {
     this.calls.push('stop');
+    if (this.failAt === 'stop') throw new Error('supervisor stop failed');
   };
 
   startAndProveCleanGeneration = async (): Promise<void> => {
     this.calls.push('start');
+    if (this.failAt === 'start') throw new Error('supervisor start failed');
   };
 }
 
@@ -96,19 +103,57 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
   let gated: GatedFetch;
   let store: TripleStore;
 
+  beforeAll(async () => {
+    managedServer = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        if (req.url === '/query') {
+          res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+          res.end(JSON.stringify({
+            head: { vars: ['epoch'] },
+            results: {
+              bindings: epoch === null ? [] : [{ epoch: { type: 'literal', value: epoch } }],
+            },
+          }));
+          return;
+        }
+        epoch = /INSERT[\s\S]*?materialization-epoch> "([0-9]+)"/u.exec(body)?.[1] ?? null;
+        res.writeHead(epoch === null ? 400 : 204);
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => managedServer.listen(0, '127.0.0.1', resolve));
+    const address = managedServer.address();
+    if (address === null || typeof address === 'string') throw new Error('test server has no port');
+    QUERY_ENDPOINT = `http://127.0.0.1:${address.port}/query`;
+    UPDATE_ENDPOINT = `http://127.0.0.1:${address.port}/update`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => managedServer.close(() => resolve()));
+  });
+
   beforeEach(async () => {
     __resetSystemRecordControllerRegistrationForTests();
-    ownership = createManagedOxigraphOwnershipControllerV1();
+    ownership = createManagedOxigraphOwnershipControllerV1(QUERY_ENDPOINT, UPDATE_ENDPOINT);
     ownership.bindReadyGeneration();
     supervisor = new RecordingSupervisor();
     gated = new GatedFetch();
+    epoch = null;
     store = await createTripleStore({
       backend: 'sparql-http',
       options: attachManagedOxigraphLeaseV1(
         // A long transport timeout: the point of the held request is that it is
         // still in flight when the transition asks for the store, so it must not
         // be cut short by the adapter's own deadline.
-        { queryEndpoint: ENDPOINT, managedByDkg: true, timeout: 60_000 },
+        {
+          queryEndpoint: QUERY_ENDPOINT,
+          updateEndpoint: UPDATE_ENDPOINT,
+          managedByDkg: true,
+          timeout: 60_000,
+        },
         ownership.lease,
         supervisor,
       ) as unknown as Record<string, unknown>,
@@ -181,5 +226,43 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
 
     await expect(queuedDuringSection).resolves.toBeDefined();
     expect(supervisor.calls).toEqual(['stop', 'start']);
+  });
+
+  it('permanently fails ordinary managed mutations closed after a transition fault', async () => {
+    const controller = store.getSystemRecordLaneControllerV1?.();
+    supervisor.failAt = 'start';
+
+    await expect(controller!.open(ACTIVATION)).rejects.toThrow(/supervisor start failed/);
+    await expect(store.insert([{
+      subject: 'urn:test:s',
+      predicate: 'urn:test:p',
+      object: '"o"',
+      graph: 'urn:test:g',
+    }])).rejects.toMatchObject({
+      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+    });
+  });
+
+  it('disposes an opened controller on store close and releases registration once', async () => {
+    const controller = store.getSystemRecordLaneControllerV1?.();
+    await controller!.open(ACTIVATION);
+    supervisor.calls.length = 0;
+
+    await store.close();
+    expect(supervisor.calls).toEqual(['stop']);
+
+    // The active controller, not just a passive capability probe, released the
+    // process-global slot. The fake supervisor keeps the lease ready so this
+    // assertion isolates registration disposal from real process teardown.
+    store = await createTripleStore({
+      backend: 'sparql-http',
+      options: attachManagedOxigraphLeaseV1({
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
+        managedByDkg: true,
+      }, ownership.lease, supervisor) as unknown as Record<string, unknown>,
+      graphSetIndex: false,
+    });
+    expect(store.getSystemRecordLaneControllerV1?.()).toBeDefined();
   });
 });

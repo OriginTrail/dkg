@@ -888,6 +888,7 @@ describe('system-record owned subjects and verification closure', () => {
       candidateHeadDigest: computeAgentProfileHeadObjectDigestV1(tombstone),
       deletionTableDigest: middle.ownedSubjectTableDigest,
       historicalRoots: [initial.rootSubject],
+      lastAuthorityTransitionPriorHeadDigest: transition.priorHeadDigest,
     });
   });
 

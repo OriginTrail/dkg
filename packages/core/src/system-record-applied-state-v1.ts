@@ -8,6 +8,7 @@ import {
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   type AgentProfileAppliedTransitionV1,
 } from './system-record-objects-v1.js';
+import { KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1 } from './ka-bundle-v1.js';
 import {
   assertCanonicalSystemRecordPeerIdV1,
   digestSystemRecordBytesV1,
@@ -122,6 +123,12 @@ const ABSENT: SystemRecordAppliedStateAbsentV1 = Object.freeze({
   objectType: 'system-record-applied-state',
   state: 'absent',
 });
+
+/** Projection digest committed by every terminal state with zero projection bytes. */
+export const SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1 = digestSystemRecordBytesV1(
+  KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1,
+  new Uint8Array(),
+);
 
 export function systemRecordAppliedStateAbsentV1(): SystemRecordAppliedStateAbsentV1 {
   return ABSENT;
@@ -303,11 +310,13 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     throw new Error('accountedBytes must equal the fixed state precharge plus exact persistent bytes');
   }
   if (state.status === 'tombstone' && (projectionBytes !== 0n || projectionQuads !== 0n
+    || state.projectionDigest !== SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1
     || ownedCount !== 0n || state.ownedSubjectTableBytes !== '0'
     || state.ownedSubjectTableDigest !== EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1)) {
     throw new Error('tombstone applied state must commit the canonical empty projection/table');
   }
   if (state.status === 'active' && (projectionBytes === 0n || projectionQuads === 0n || ownedCount === 0n
+    || state.projectionDigest === SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1
     || state.ownedSubjectTableDigest === EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1)) {
     throw new Error('active applied state must commit a nonempty projection/table');
   }

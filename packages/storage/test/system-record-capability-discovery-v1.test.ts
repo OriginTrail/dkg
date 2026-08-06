@@ -14,7 +14,8 @@ import {
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
-const ENDPOINT = 'http://127.0.0.1:1/query';
+const QUERY_ENDPOINT = 'http://127.0.0.1:1/query';
+const UPDATE_ENDPOINT = 'http://127.0.0.1:1/update';
 
 const noopHandoff: ManagedOxigraphSupervisorHandoffV1 = {
   stopAndProveOwnedChildDead: async () => undefined,
@@ -26,7 +27,11 @@ describe('system-record V1 capability discovery', () => {
 
   const managedOptions = (opts: { handoff?: boolean } = {}) =>
     attachManagedOxigraphLeaseV1(
-      { queryEndpoint: ENDPOINT, managedByDkg: true },
+      {
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
+        managedByDkg: true,
+      },
       ownership.lease,
       opts.handoff === false ? undefined : noopHandoff,
     );
@@ -44,7 +49,7 @@ describe('system-record V1 capability discovery', () => {
 
   beforeEach(() => {
     __resetSystemRecordControllerRegistrationForTests();
-    ownership = createManagedOxigraphOwnershipControllerV1();
+    ownership = createManagedOxigraphOwnershipControllerV1(QUERY_ENDPOINT, UPDATE_ENDPOINT);
     ownership.bindReadyGeneration();
   });
 
@@ -54,14 +59,14 @@ describe('system-record V1 capability discovery', () => {
 
   describe('fail-closed preconditions', () => {
     it('is absent on an ordinary operator-configured endpoint', async () => {
-      const store = await build({ queryEndpoint: ENDPOINT });
+      const store = await build({ queryEndpoint: QUERY_ENDPOINT });
       expect(store.getSystemRecordLaneControllerV1?.()).toBeUndefined();
       await store.close().catch(() => undefined);
     });
 
     it('is absent for config booleans alone, however generous', async () => {
       const store = await build({
-        queryEndpoint: ENDPOINT,
+        queryEndpoint: QUERY_ENDPOINT,
         managedByDkg: true,
         atomicUpdates: true,
       });
@@ -89,6 +94,31 @@ describe('system-record V1 capability discovery', () => {
       expect(store.getSystemRecordLaneControllerV1?.()).toBeDefined();
       await store.close().catch(() => undefined);
     });
+
+    it.each([
+      ['wrong query path', UPDATE_ENDPOINT, UPDATE_ENDPOINT, undefined],
+      ['wrong update path', QUERY_ENDPOINT, QUERY_ENDPOINT, undefined],
+      ['different port', QUERY_ENDPOINT, 'http://127.0.0.1:2/update', undefined],
+      ['localhost alias', 'http://localhost:1/query', UPDATE_ENDPOINT, undefined],
+      ['credentials in URL', 'http://user:pass@127.0.0.1:1/query', UPDATE_ENDPOINT, undefined],
+      ['query string', `${QUERY_ENDPOINT}?x=1`, UPDATE_ENDPOINT, undefined],
+      ['fragment', `${QUERY_ENDPOINT}#x`, UPDATE_ENDPOINT, undefined],
+      ['trailing slash', `${QUERY_ENDPOINT}/`, UPDATE_ENDPOINT, undefined],
+      ['authorization option', QUERY_ENDPOINT, UPDATE_ENDPOINT, 'Bearer secret'],
+    ])('is absent when adapter identity has %s', async (_label, queryEndpoint, updateEndpoint, auth) => {
+      const options = attachManagedOxigraphLeaseV1(
+        {
+          queryEndpoint,
+          updateEndpoint,
+          ...(auth === undefined ? {} : { auth }),
+        },
+        ownership.lease,
+        noopHandoff,
+      );
+      const store = await build(options);
+      expect(store.getSystemRecordLaneControllerV1?.()).toBeUndefined();
+      await store.close().catch(() => undefined);
+    });
   });
 
   describe('through the production decorator stack', () => {
@@ -113,6 +143,30 @@ describe('system-record V1 capability discovery', () => {
       const second = store.getSystemRecordLaneControllerV1?.();
       expect(first).toBe(second);
       await store.close().catch(() => undefined);
+    });
+
+    it('releases a passively discovered controller when its store closes', async () => {
+      const firstStore = await build(managedOptions());
+      const retired = firstStore.getSystemRecordLaneControllerV1?.();
+      expect(retired).toBeDefined();
+      await firstStore.close();
+
+      // SparqlHttpStore.close rotates a reusable lifecycle generation. The
+      // passive controller must follow that contract rather than leaving this
+      // same store memoized to the terminal object it just released.
+      const reprobed = firstStore.getSystemRecordLaneControllerV1?.();
+      expect(reprobed).toBeDefined();
+      expect(reprobed).not.toBe(retired);
+      await firstStore.close();
+
+      const replacementStore = await build(managedOptions());
+      expect(replacementStore.getSystemRecordLaneControllerV1?.()).toBeDefined();
+      await expect(retired!.open({
+        networkId: 'testnet',
+        kinds: ['agents'],
+        mode: 'shadow',
+      })).rejects.toThrow(/terminal/);
+      await replacementStore.close();
     });
 
     it('is DENIED by an enabled changelog', async () => {

@@ -9,3 +9,5 @@ export * from './system-record-objects-v1.js';
 export * from './system-record-applied-state-v1.js';
 export * from './system-record-inventory-v1.js';
 export * from './system-record-wire-v1.js';
+export { assertNetworkIdV1, type NetworkIdV1 } from './sync-wire-identifiers.js';
+export { assertCanonicalDigest, type Digest32V1 } from './sync-wire-scalars.js';

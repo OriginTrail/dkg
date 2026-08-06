@@ -32,6 +32,14 @@ describe('frozen system-record V1 limits', () => {
     expect(limits.SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES).toBe(64 * 1024);
     expect(limits.SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES).toBe(512 * 1024 * 1024);
     expect(limits.SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_QUADS).toBe(5_000_000);
+    expect(limits.SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES).toBe(4 * 1024 * 1024);
+    expect(limits.SYSTEM_RECORD_MAX_ATOMIC_INSPECTION_RESPONSE_BYTES).toBe(4 * 1024 * 1024);
+    expect(limits.SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES).toBe(1024 * 1024);
+    expect(limits.SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES).toBe(8 * 1024 * 1024);
+    expect(limits.SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES).toBe(12 * 1024 * 1024);
+    expect(limits.SYSTEM_RECORD_APPLY_TIMEOUT_MS).toBe(1_000);
+    expect(limits.SYSTEM_RECORD_INSPECTION_TIMEOUT_MS).toBe(1_000);
+    expect(limits.SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS).toBe(1_500);
   });
 
   it('pins aggregate cache, activation, runtime, continuation, and journal ceilings', () => {

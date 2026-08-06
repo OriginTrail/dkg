@@ -6,8 +6,14 @@ import {
   createManagedOxigraphOwnershipControllerV1,
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLeaseV1,
+  managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
+
+const QUERY_ENDPOINT = 'http://127.0.0.1:7878/query';
+const UPDATE_ENDPOINT = 'http://127.0.0.1:7878/update';
+const createOwnership = () =>
+  createManagedOxigraphOwnershipControllerV1(QUERY_ENDPOINT, UPDATE_ENDPOINT);
 
 /**
  * Reproduces `resolveAdapterOptions()` in `triple-store.ts`, which is the exact
@@ -54,7 +60,7 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('cannot survive JSON persistence', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       controller.bindReadyGeneration();
       const options = attachManagedOxigraphLeaseV1(
         { queryEndpoint: 'http://127.0.0.1:7878/query', managedByDkg: true },
@@ -70,7 +76,7 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('cannot be reconstructed by copying, freezing or cloning the handle', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       controller.bindReadyGeneration();
       const { lease } = controller;
 
@@ -101,7 +107,7 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('does not let a lease holder assert liveness', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       controller.bindReadyGeneration();
 
       // The lease exposes no mutator; authority lives only on the controller,
@@ -113,9 +119,66 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
   });
 
+  describe('supervisor-proven endpoint identity', () => {
+    it('preserves the B2 zero-argument diagnostic controller without granting B3 endpoint authority', () => {
+      const controller = createManagedOxigraphOwnershipControllerV1();
+      controller.bindReadyGeneration();
+      expect(controller.snapshot()).toEqual({
+        childGeneration: '1',
+        ready: true,
+        terminal: false,
+      });
+      expect(managedOxigraphOwnershipEndpointsMatchV1(
+        controller.snapshot(),
+        QUERY_ENDPOINT,
+        UPDATE_ENDPOINT,
+      )).toBe(false);
+    });
+
+    it('captures one immutable canonical loopback identity for every generation', () => {
+      const controller = createOwnership();
+      const before = controller.snapshot();
+      expect(before).toMatchObject({
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
+      });
+      expect(Object.isFrozen(before)).toBe(true);
+
+      controller.bindReadyGeneration();
+      controller.invalidate('child-exit');
+      controller.bindReadyGeneration();
+      expect(controller.snapshot()).toMatchObject({
+        childGeneration: '2',
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
+        ready: true,
+      });
+    });
+
+    it.each([
+      ['credentials', 'http://user:pass@127.0.0.1:7878/query', UPDATE_ENDPOINT],
+      ['non-loopback host', 'http://192.0.2.1:7878/query', UPDATE_ENDPOINT],
+      ['localhost alias', 'http://localhost:7878/query', UPDATE_ENDPOINT],
+      ['IPv6 alias', 'http://[::1]:7878/query', UPDATE_ENDPOINT],
+      ['query string', `${QUERY_ENDPOINT}?token=x`, UPDATE_ENDPOINT],
+      ['fragment', `${QUERY_ENDPOINT}#x`, UPDATE_ENDPOINT],
+      ['trailing path', `${QUERY_ENDPOINT}/`, UPDATE_ENDPOINT],
+      ['wrong query path', UPDATE_ENDPOINT, UPDATE_ENDPOINT],
+      ['wrong update path', QUERY_ENDPOINT, QUERY_ENDPOINT],
+      ['different port', QUERY_ENDPOINT, 'http://127.0.0.1:7879/update'],
+      ['non-canonical port', 'http://127.0.0.1:07878/query', UPDATE_ENDPOINT],
+      ['out-of-range port', 'http://127.0.0.1:65536/query', UPDATE_ENDPOINT],
+      ['TLS endpoint', 'https://127.0.0.1:7878/query', UPDATE_ENDPOINT],
+    ])('rejects %s before a lease can be minted', (_label, query, update) => {
+      expect(() => createManagedOxigraphOwnershipControllerV1(query, update)).toThrow(
+        /managed Oxigraph|same listener port/,
+      );
+    });
+  });
+
   describe('transport through the adapter factory', () => {
     it('survives the options spread that erases managedByDkg', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       const generation = controller.bindReadyGeneration();
 
       const daemonOptions = attachManagedOxigraphLeaseV1(
@@ -132,13 +195,15 @@ describe('managed Oxigraph ownership lease V1', () => {
       expect(recovered).toBe(controller.lease);
       expect(readManagedOxigraphOwnershipSnapshotV1(recovered)).toEqual({
         childGeneration: generation,
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
         ready: true,
         terminal: false,
       });
     });
 
     it('does not mutate the caller-supplied config object', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       const original = { queryEndpoint: 'http://127.0.0.1:7878/query' };
       const attached = attachManagedOxigraphLeaseV1(original, controller.lease);
 
@@ -156,17 +221,19 @@ describe('managed Oxigraph ownership lease V1', () => {
 
   describe('generation lifecycle', () => {
     it('starts not-ready at generation zero', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       // A spawned-but-unproven child must never satisfy a capability check.
       expect(controller.snapshot()).toEqual({
         childGeneration: '0',
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
         ready: false,
         terminal: false,
       });
     });
 
     it('increments monotonically on every proven-ready bind', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       expect(controller.bindReadyGeneration()).toBe('1');
       controller.invalidate('child-exit');
       expect(controller.bindReadyGeneration()).toBe('2');
@@ -177,7 +244,7 @@ describe('managed Oxigraph ownership lease V1', () => {
 
     it('drops liveness immediately on every recoverable invalidation', () => {
       for (const reason of ['child-exit', 'child-revive', 'stop', 'listener-ownership-lost'] as const) {
-        const controller = createManagedOxigraphOwnershipControllerV1();
+        const controller = createOwnership();
         controller.bindReadyGeneration();
         expect(controller.snapshot().ready).toBe(true);
 
@@ -194,7 +261,7 @@ describe('managed Oxigraph ownership lease V1', () => {
 
     it('latches terminal and refuses to bind a replacement', () => {
       for (const reason of ['shutdown', 'port-release-unproven'] as const) {
-        const controller = createManagedOxigraphOwnershipControllerV1();
+        const controller = createOwnership();
         controller.bindReadyGeneration();
         controller.invalidate(reason);
 
@@ -209,7 +276,7 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('keeps a terminal latch through a later recoverable invalidation', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       controller.bindReadyGeneration();
       controller.invalidate('shutdown');
       controller.invalidate('child-exit');
@@ -219,7 +286,7 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('shares one live view between the controller and every lease reader', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       const options = resolveAdapterOptionsLike(
         attachManagedOxigraphLeaseV1({}, controller.lease),
       );
@@ -232,6 +299,8 @@ describe('managed Oxigraph ownership lease V1', () => {
       controller.invalidate('listener-ownership-lost');
       expect(readManagedOxigraphOwnershipSnapshotV1(held)).toEqual({
         childGeneration: '1',
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
         ready: false,
         terminal: false,
         lastInvalidation: 'listener-ownership-lost',
@@ -239,8 +308,8 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('isolates leases from different supervisors', () => {
-      const a = createManagedOxigraphOwnershipControllerV1();
-      const b = createManagedOxigraphOwnershipControllerV1();
+      const a = createOwnership();
+      const b = createOwnership();
       a.bindReadyGeneration();
 
       expect(a.lease).not.toBe(b.lease);
@@ -249,7 +318,7 @@ describe('managed Oxigraph ownership lease V1', () => {
     });
 
     it('returns frozen snapshots that cannot be edited into liveness', () => {
-      const controller = createManagedOxigraphOwnershipControllerV1();
+      const controller = createOwnership();
       const snapshot = controller.snapshot();
       expect(Object.isFrozen(snapshot)).toBe(true);
       expect(() => {

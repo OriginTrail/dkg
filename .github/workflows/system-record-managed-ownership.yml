@@ -19,7 +19,10 @@ name: System-record managed ownership evidence
 #
 # What it does NOT prove: predecessor entries run against the CURRENT binary,
 # not against each pinned commit — no predecessor is checked out or built. The
-# full-state CAS has not landed, so no verified apply is dispatched here.
+# B3 active-replacement CAS exists, but this ownership artifact still does
+# not dispatch a verified apply. Atomic apply, lost-response recovery, and
+# maximum-size p99/RSS remain separate activation gates; this workflow must not
+# be cited as evidence for them.
 
 on:
   push:
@@ -119,9 +122,19 @@ jobs:
             test/internal-graph-policy.test.ts \
             test/managed-oxigraph-ownership-v1.test.ts \
             test/reserved-internal-graph-mutation-guard.test.ts \
+            test/system-record-apply-command-v1.test.ts \
+            test/system-record-atomic-apply-executor-v1.test.ts \
             test/system-record-materializer-lifecycle-v1.test.ts \
             test/system-record-control-barrier-integration-v1.test.ts \
             test/system-record-capability-discovery-v1.test.ts \
+            test/system-record-inspection-v1.test.ts \
+            test/system-record-managed-mutation-admission-v1.test.ts \
+            test/system-record-materialization-epoch-v1.test.ts \
+            test/system-record-next-state-v1.test.ts \
+            test/system-record-rdf-schema-v1.test.ts \
+            test/system-record-state-snapshot-v1.test.ts \
+            test/system-record-utf8-order-v1.test.ts \
+            test/system-record-verified-replacement-v1.test.ts \
             test/store-scheduler-system-record-admission.test.ts
 
       - name: Run live managed-ownership gate

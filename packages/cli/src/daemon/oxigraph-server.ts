@@ -69,6 +69,7 @@
  * crash-restart, ownership loss, and shutdown without launching a real binary.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import {
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipLeaseV1,
@@ -252,11 +253,30 @@ const DEFAULT_RESTART_MAX_MS = 30_000;
  * line rather than the store.
  */
 const PORT_RELEASE_PROBE_ATTEMPTS = 5;
+/** Upper bound of the ss/lsof/fuser ownership lookup used by this module. */
+const LISTENER_OWNERSHIP_PROBE_BUDGET_MS = 6_500;
 /** Sentinel for "no generation has ever been bound on this lease". */
 const UNBOUND_GENERATION = '0';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+function remainingMonotonicMs(absoluteDeadlineMs: number | undefined): number | undefined {
+  return absoluteDeadlineMs === undefined
+    ? undefined
+    : Math.max(0, absoluteDeadlineMs - performance.now());
+}
+
+function boundedPhaseDelayMs(
+  wantedMs: number,
+  absoluteDeadlineMs: number | undefined,
+): number {
+  const remaining = remainingMonotonicMs(absoluteDeadlineMs);
+  if (remaining !== undefined && remaining <= 0) {
+    throw new Error('Managed Oxigraph clean-generation recovery deadline expired');
+  }
+  return Math.max(1, Math.ceil(Math.min(wantedMs, remaining ?? wantedMs)));
 }
 
 function normalizePositiveInteger(value: number | undefined): number | undefined {
@@ -331,7 +351,14 @@ export async function startOxigraphServer(
    * out: consumers get {@link OxigraphServerOwnershipV1}, which can read the
    * lease but not mint one.
    */
-  const ownership = createManagedOxigraphOwnershipControllerV1();
+  // Only the exact production listener spelling may mint the endpoint-bound
+  // B3 capability. `host` remains overridable for tests and compatible local
+  // callers; those servers retain the B2 diagnostic lifecycle lease, but that
+  // endpoint-less lease can never satisfy the atomic materializer's endpoint
+  // identity check.
+  const ownership = host === DEFAULT_HOST
+    ? createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint)
+    : createManagedOxigraphOwnershipControllerV1();
 
   let state: OxigraphLifecycleState = 'starting';
   /**
@@ -366,6 +393,8 @@ export async function startOxigraphServer(
   // childAlive() wrongly report it alive. Track them so childAlive() and the
   // ready/revive loops treat a spawn error as a dead child.
   const erroredChildren = new WeakSet<ChildProcess>();
+  /** Children intentionally signalled by a clean-generation handoff. */
+  const handoffRetiringChildren = new WeakSet<ChildProcess>();
   const oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
 
   // ---------------------------------------------------------------------
@@ -524,7 +553,7 @@ export async function startOxigraphServer(
       // The child we own is gone. Record it before the phase check below so
       // the lease stays honest even for a startup-phase or revive-window
       // death, where nothing was ever bound to lose.
-      ownership.invalidate('child-exit');
+      if (!handoffRetiringChildren.delete(c)) ownership.invalidate('child-exit');
       // Two cases land here outside the `ready` phase and must NOT (re)start:
       //   1. Startup-phase exit — usually a bind failure (the port is taken
       //      by another local SPARQL server). The ready loop observes the
@@ -609,8 +638,11 @@ export async function startOxigraphServer(
     return walk(error);
   };
 
-  const probeBind = async (): Promise<BindProbeResultV1> => {
+  const probeBind = async (
+    absoluteDeadlineMs?: number,
+  ): Promise<BindProbeResultV1> => {
     try {
+      const timeoutMs = boundedPhaseDelayMs(readyIntervalMs + 1_000, absoluteDeadlineMs);
       const res = await io.fetch(queryEndpoint, {
         method: 'POST',
         headers: {
@@ -618,7 +650,7 @@ export async function startOxigraphServer(
           Accept: 'application/sparql-results+json',
         },
         body: 'ASK { ?s ?p ?o }',
-        signal: AbortSignal.timeout(readyIntervalMs + 1_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       // Even a non-2xx answer proves something is listening — which is exactly
       // what the release proof must not mistake for a free port.
@@ -637,8 +669,9 @@ export async function startOxigraphServer(
    * The cheap first half of the readiness probe; anything short of a usable
    * answer is a no.
    */
-  const endpointAnswers = async (): Promise<boolean> => {
+  const endpointAnswers = async (absoluteDeadlineMs?: number): Promise<boolean> => {
     try {
+      const timeoutMs = boundedPhaseDelayMs(readyIntervalMs + 1_000, absoluteDeadlineMs);
       const res = await io.fetch(queryEndpoint, {
         method: 'POST',
         headers: {
@@ -646,7 +679,7 @@ export async function startOxigraphServer(
           Accept: 'application/sparql-results+json',
         },
         body: 'ASK { ?s ?p ?o }',
-        signal: AbortSignal.timeout(readyIntervalMs + 1_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       return res.ok;
     } catch {
@@ -667,11 +700,17 @@ export async function startOxigraphServer(
     }
   };
 
-  const probeReady = async (): Promise<number | null> => {
+  const probeReady = async (absoluteDeadlineMs?: number): Promise<number | null> => {
     const c = child;
     if (!c || !childAlive()) return null;
-    if (!(await endpointAnswers())) return null;
+    if (!(await endpointAnswers(absoluteDeadlineMs))) return null;
+    boundedPhaseDelayMs(1, absoluteDeadlineMs);
+    const remaining = remainingMonotonicMs(absoluteDeadlineMs);
+    if (remaining !== undefined && remaining < LISTENER_OWNERSHIP_PROBE_BUDGET_MS) {
+      return null;
+    }
     const listenerPid = await resolveListenOwner(c);
+    boundedPhaseDelayMs(1, absoluteDeadlineMs);
     return listenerPid !== null && childAlive() ? listenerPid : null;
   };
 
@@ -907,17 +946,26 @@ export async function startOxigraphServer(
    * We only ever PROBE here. No pid observed on the port is ever signalled —
    * every kill in this module goes through the tracked `ChildProcess`.
    */
-  const proveManagedPortRelease = async (exited: ChildProcess | null): Promise<boolean> => {
+  const proveManagedPortRelease = async (
+    exited: ChildProcess | null,
+    absoluteDeadlineMs?: number,
+  ): Promise<boolean> => {
     const interval = Math.max(1, Math.floor(stopGraceMs / PORT_RELEASE_PROBE_ATTEMPTS));
     let last: BindProbeResultV1 = 'inconclusive';
     for (let attempt = 1; attempt <= PORT_RELEASE_PROBE_ATTEMPTS; attempt += 1) {
-      last = await probeBind();
+      if ((remainingMonotonicMs(absoluteDeadlineMs) ?? 1) <= 0) break;
+      last = await probeBind(absoluteDeadlineMs);
       // The socket is gone, positively: the OS refused the connection.
       if (last === 'refused') return true;
       if (attempt === PORT_RELEASE_PROBE_ATTEMPTS) break;
-      await sleep(interval);
+      await sleep(boundedPhaseDelayMs(interval, absoluteDeadlineMs));
     }
-    const owner = exited === null ? null : await resolveListenOwner(exited);
+    // Listener ownership here is diagnostic only; release proof came from the
+    // refused-connection probes above. Do not spend a non-cancellable command
+    // fallback after a recovery deadline has been supplied.
+    const owner = exited === null || absoluteDeadlineMs !== undefined
+      ? null
+      : await resolveListenOwner(exited);
     log(
       `[oxigraph] ${bind} release could not be proven after the managed child exited ` +
         `(last probe: ${last}).`,
@@ -934,13 +982,22 @@ export async function startOxigraphServer(
   };
 
   /** SIGTERM, escalating to SIGKILL after `stopGraceMs`, resolving on exit. */
-  const awaitChildExit = async (c: ChildProcess): Promise<void> => {
-    await new Promise<void>((resolve) => {
+  const awaitChildExit = async (
+    c: ChildProcess,
+    absoluteDeadlineMs?: number,
+  ): Promise<void> => {
+    const killDelayMs = boundedPhaseDelayMs(stopGraceMs, absoluteDeadlineMs);
+    const deadlineDelayMs = absoluteDeadlineMs === undefined
+      ? undefined
+      : boundedPhaseDelayMs(Number.MAX_SAFE_INTEGER, absoluteDeadlineMs);
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const done = () => {
         if (settled) return;
         settled = true;
         clearTimeout(killTimer);
+        if (deadlineTimer) clearTimeout(deadlineTimer);
         resolve();
       };
       c.once('exit', done);
@@ -950,8 +1007,19 @@ export async function startOxigraphServer(
           log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
           c.kill('SIGKILL');
         }
-      }, stopGraceMs);
+      }, killDelayMs);
       killTimer.unref?.();
+      if (deadlineDelayMs !== undefined) {
+        deadlineTimer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(killTimer);
+          c.removeListener('exit', done);
+          try { c.kill('SIGKILL'); } catch { /* best effort */ }
+          reject(new Error('Managed Oxigraph child did not exit before the recovery deadline'));
+        }, deadlineDelayMs);
+        deadlineTimer.unref?.();
+      }
     });
   };
 
@@ -1032,7 +1100,8 @@ export async function startOxigraphServer(
    * exists to prevent. Resolving quietly would let the lane proceed against a
    * foreign server.
    */
-  const retireOwnedChildLocked = async (): Promise<void> => {
+  const retireOwnedChildLocked = async (absoluteDeadlineMs?: number): Promise<void> => {
+    boundedPhaseDelayMs(1, absoluteDeadlineMs);
     if (terminating || state === 'closed') {
       throw new Error(
         'Managed Oxigraph supervisor is shutting down; the owned child cannot be retired',
@@ -1053,13 +1122,16 @@ export async function startOxigraphServer(
     ownership.invalidate('stop');
     markStoreDown();
     const c = child;
-    // Detach FIRST so the exit we are about to cause cannot be read as a crash
-    // and schedule a restart behind us.
-    child = null;
+    // Keep the process TRACKED until exit is proven. `state === 'recovering'`
+    // already prevents its exit handler from scheduling a revive, while
+    // clearing `child` before a recovery deadline would orphan a late SIGKILL
+    // exit from every subsequent stop/retry path.
     if (c && c.exitCode === null && c.signalCode === null) {
-      await awaitChildExit(c);
+      handoffRetiringChildren.add(c);
+      await awaitChildExit(c, absoluteDeadlineMs);
     }
-    if (!(await proveManagedPortRelease(c))) {
+    if (child === c) child = null;
+    if (!(await proveManagedPortRelease(c, absoluteDeadlineMs))) {
       // We have no child and cannot account for whatever is still on the bind.
       // Leaving the supervisor merely "open and childless" would keep it in a
       // state where a later path could still spawn against that listener, so
@@ -1098,7 +1170,8 @@ export async function startOxigraphServer(
    * would be starting a child over a socket whose previous owner is unaccounted
    * for, which is the one thing the whole handoff exists to rule out.
    */
-  const startCleanGenerationLocked = async (): Promise<void> => {
+  const startCleanGenerationLocked = async (absoluteDeadlineMs?: number): Promise<void> => {
+    boundedPhaseDelayMs(1, absoluteDeadlineMs);
     if (terminating || state === 'closed') {
       throw new Error(
         'Managed Oxigraph supervisor is shutting down; no clean generation can be bound',
@@ -1130,11 +1203,14 @@ export async function startOxigraphServer(
     // well (terminal lease), which is the same class.
     try {
       child = spawnChild();
-      const deadline = Date.now() + readyTimeoutMs;
-      while (Date.now() < deadline) {
+      const deadline = Math.min(
+        performance.now() + readyTimeoutMs,
+        absoluteDeadlineMs ?? Number.POSITIVE_INFINITY,
+      );
+      while (performance.now() < deadline) {
         if (terminating) break;
         if (!childAlive()) break;
-        const listenerPid = await probeReady();
+        const listenerPid = await probeReady(absoluteDeadlineMs);
         if (listenerPid !== null && childAlive()) {
           // Bind FIRST: clearing the phase before a call that can throw would
           // leave the supervisor claiming a completed handoff it never made.
@@ -1143,11 +1219,11 @@ export async function startOxigraphServer(
           log(`[oxigraph] clean child generation ${generation} bound on ${bind}.`);
           return;
         }
-        await sleep(readyIntervalMs);
+        await sleep(boundedPhaseDelayMs(readyIntervalMs, deadline));
       }
       throw new Error(
         `Managed Oxigraph could not prove a clean child generation on ${bind} ` +
-          `within ${readyTimeoutMs}ms`,
+          'before the clean-generation recovery deadline',
       );
     } catch (err) {
       // The lane's replacement could not be proven. Reap the unproven child and
@@ -1172,8 +1248,10 @@ export async function startOxigraphServer(
    * from config.
    */
   const supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 = Object.freeze({
-    stopAndProveOwnedChildDead: () => runExclusive(retireOwnedChildLocked),
-    startAndProveCleanGeneration: () => runExclusive(startCleanGenerationLocked),
+    stopAndProveOwnedChildDead: (absoluteDeadlineMs?: number) =>
+      runExclusive(() => retireOwnedChildLocked(absoluteDeadlineMs)),
+    startAndProveCleanGeneration: (absoluteDeadlineMs?: number) =>
+      runExclusive(() => startCleanGenerationLocked(absoluteDeadlineMs)),
   });
 
   // ---------------------------------------------------------------------
