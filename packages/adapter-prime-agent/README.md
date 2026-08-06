@@ -28,6 +28,14 @@ speaking the contract the DKG daemon already speaks for Hermes:
 | `POST /send` | injects via `pi.sendUserMessage`, returns `{ text, correlationId, sessionId }` |
 | `POST /stream` | SSE, `data: <json>\n\n` frames of `delta` then `final` |
 
+**`final` is terminal, and it is a contract.** The turn ends on that frame, not
+on socket EOF — the bridge may keep its connection open afterwards, and it does.
+Both the daemon proxy and the Node UI reader close on the frame; a client that
+waits for EOF will spin forever over an answer it has already rendered. The
+daemon also declares `Content-Type: text/event-stream; charset=utf-8` before the
+first byte, without which the browser misclassifies the body and fails with
+"The string did not match the expected pattern".
+
 All three require `x-dkg-bridge-token` and bind `127.0.0.1` only.
 
 Because the extension lives inside the session, a message from the Node UI lands

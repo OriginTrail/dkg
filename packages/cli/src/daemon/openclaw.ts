@@ -604,6 +604,34 @@ export async function writeOpenClawStreamChunk(
   });
 }
 
+/**
+ * Largest SSE frame we will buffer while looking for the terminator. A frame is
+ * `data: ...\n\n`, so this only bounds a single event; past it we stop scanning
+ * for `final` rather than growing without limit. Bytes are still forwarded.
+ */
+const SSE_FRAME_SCAN_LIMIT = 1_000_000;
+
+/**
+ * True when `frame` is a complete SSE event whose JSON payload declares itself
+ * terminal. Malformed or non-JSON frames are simply not terminal — this must
+ * never throw, because a parse failure is not a reason to cut a live stream.
+ */
+function isTerminalSseFrame(frame: string): boolean {
+  for (const line of frame.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data) continue;
+    try {
+      const parsed = JSON.parse(data) as { type?: unknown };
+      if (parsed?.type === "final") return true;
+    } catch {
+      /* not a JSON event frame */
+    }
+  }
+  return false;
+}
+
 export async function pipeOpenClawStream(
   req: OpenClawStreamRequest,
   res: OpenClawStreamResponse,
@@ -622,6 +650,37 @@ export async function pipeOpenClawStream(
   });
   res.on("error", cancelUpstream);
 
+  // `final` is the terminal SEMANTIC event; upstream EOF is a TRANSPORT event,
+  // and the two do not have to coincide. An agent bridge that keeps its socket
+  // open for reuse (Prime Agent does) would otherwise hold this proxy — and the
+  // browser's spinner — open long after the answer was delivered. So we end the
+  // turn on the frame, not on the socket.
+  const decoder = new TextDecoder();
+  let frameBuffer = "";
+  let scanning = true;
+
+  const sawTerminalFrame = (chunk: Uint8Array): boolean => {
+    if (!scanning) return false;
+    frameBuffer += decoder.decode(chunk, { stream: true });
+    let done = false;
+    // Frames are separated by a blank line; tolerate CRLF from proxies.
+    const separator = /\r?\n\r?\n/;
+    let match = separator.exec(frameBuffer);
+    while (match) {
+      const frame = frameBuffer.slice(0, match.index);
+      frameBuffer = frameBuffer.slice(match.index + match[0].length);
+      if (isTerminalSseFrame(frame)) done = true;
+      match = separator.exec(frameBuffer);
+    }
+    if (frameBuffer.length > SSE_FRAME_SCAN_LIMIT) {
+      // A single event larger than the cap: give up on detection rather than
+      // buffer without bound. The stream still completes on upstream EOF.
+      scanning = false;
+      frameBuffer = "";
+    }
+    return done;
+  };
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -629,6 +688,11 @@ export async function pipeOpenClawStream(
       if (value !== undefined) {
         await writeOpenClawStreamChunk(res, value);
         if (clientGone) break;
+        if (sawTerminalFrame(value)) {
+          if (!res.writableEnded) res.end();
+          cancelUpstream();
+          break;
+        }
       }
     }
   } finally {

@@ -15,7 +15,14 @@
  */
 
 import type { RequestContext } from './context.js';
-import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
+import {
+  corsHeaders,
+  jsonResponse,
+  readBody,
+  resolveCorsOrigin,
+  SMALL_BODY_BYTES,
+} from '../http-utils.js';
+import { daemonState } from '../state.js';
 import { hasConfiguredLocalAgentChat } from '../local-agents.js';
 import {
   PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS,
@@ -241,9 +248,21 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         });
       }
 
-      // Same pump Hermes and OpenClaw use — backpressure handling lives in one
-      // place on purpose.
+      // Declare SSE before the first byte. Without this the browser sees an
+      // untyped body, EventSource-style parsing does not engage, and the client
+      // fails with "The string did not match the expected pattern" instead of
+      // reading frames.
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
+      });
+
+      // Same pump Hermes and OpenClaw use — backpressure handling and
+      // terminal-frame detection live in one place on purpose.
       await pipeOpenClawStream(req, res, (transportRes.body as any).getReader());
+      if (!res.writableEnded) res.end();
       return;
     } catch (err) {
       if (res.writableEnded || res.headersSent) {

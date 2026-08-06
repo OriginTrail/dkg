@@ -1985,6 +1985,14 @@ export async function streamOpenClawLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2112,6 +2120,14 @@ async function streamDeltaFrameLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);

@@ -88,8 +88,9 @@ function makeJsonResponse() {
     res.headers = headers;
     res.headersSent = true;
   };
-  res.write = (chunk: string | Buffer) => {
-    res.body += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+  res.write = (chunk: string | Uint8Array) => {
+    // The stream pump forwards raw Uint8Array chunks, not Node Buffers.
+    res.body += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
     return true;
   };
   res.end = (chunk?: string | Buffer) => {
@@ -109,6 +110,8 @@ async function startStubBridge(opts: {
   sendStatus?: number;
   sendBody?: unknown;
   healthSessionId?: string;
+  /** SSE frames served from `/stream`, verbatim. */
+  streamFrames?: string[];
 } ): Promise<{ url: string; seen: { headers: Record<string, string | undefined>; body: any } | null }> {
   const seen: { headers: Record<string, string | undefined>; body: any } | null = null as any;
   const state = { value: seen };
@@ -126,6 +129,16 @@ async function startStubBridge(opts: {
         return;
       }
       state.value = { headers: req.headers as any, body: raw ? JSON.parse(raw) : null };
+      if (req.url === '/stream' && opts.streamFrames) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        });
+        for (const frame of opts.streamFrames) res.write(frame);
+        // Deliberately NOT ending: the real extension bridge holds the socket
+        // open after the final frame, which is the condition under test.
+        return;
+      }
       const status = opts.sendStatus ?? 200;
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(opts.sendBody ?? { text: 'pong', correlationId: 'c1' }));
@@ -311,6 +324,42 @@ describe('/api/prime-agent-channel/send', () => {
 
     expect(res.statusCode).toBe(429);
     expect(JSON.parse(res.body).code).toBe('PRIME_AGENT_SESSION_BUSY');
+  });
+});
+
+describe('/api/prime-agent-channel/stream', () => {
+  it('declares text/event-stream before the first byte and closes on the final frame', async () => {
+    // Both halves of the browser-side bug in one test: without the header the
+    // client misclassifies the body and throws "The string did not match the
+    // expected pattern"; without terminal-frame handling the response never
+    // closes, because this stub bridge — like the real one — keeps its socket
+    // open after the final frame.
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      streamFrames: [
+        'data: {"type":"delta","text":"Hel"}\n\n',
+        'data: {"type":"delta","text":"lo!"}\n\n',
+        'data: {"type":"final","text":"Hello!","correlationId":"c1"}\n\n',
+      ],
+    });
+    writeDescriptor('s1', bridge.url);
+
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/stream', { text: 'hi', correlationId: 'c1' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/stream',
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['Content-Type']).toBe('text/event-stream; charset=utf-8');
+    expect(res.headers['Cache-Control']).toBe('no-cache, no-transform');
+    expect(res.headers.Connection).toBe('keep-alive');
+    expect(res.writableEnded).toBe(true);
+    expect(res.body).toContain('"type":"final"');
+    expect(res.body).toContain('Hello!');
   });
 });
 
