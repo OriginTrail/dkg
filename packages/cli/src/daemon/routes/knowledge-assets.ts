@@ -258,6 +258,19 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     });
     return;
   }
+  // GH#1759 — the draft has no sealable content (no quads at all, or only
+  // reserved-namespace subjects that are filtered out before SWM). That is a
+  // client precondition the caller can fix by writing a quad, not a server
+  // fault, so it gets the same actionable 409 the rest of this route family
+  // uses rather than an opaque 500. Code-keyed, so the mapping does not drift
+  // when the engine's wording changes.
+  if (e?.code === "ASSERTION_EMPTY") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "ASSERTION_EMPTY",
+    });
+    return;
+  }
   // KA-number-floor reconcile couldn't reach the chain (e.g. a rate-limited RPC
   // 429'd the one-time-per-author read) -> retryable 503, not 500.
   if (respondIfReconcileUnavailable(res, e)) return;
