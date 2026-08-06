@@ -123,29 +123,34 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
 }): SharedMemorySnapshotMaterializer {
-  // #2079 — whether the memo can pay on THIS store, resolved in two stages.
+  // #2079 operator override, default ON. Blank is UNSET, not false:
+  // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for
+  // "not configured", and reading it as false would silently disable the memo
+  // for a fleet that never asked. Read inside the factory rather than at module
+  // scope so it takes effect on the next sync round after a restart.
   //
-  // Static probe: a store with no `replaceSubject` can never hold a witness, so
-  // every ASK on it is pure added cost forever. `sparql-http` with
-  // `atomicUpdates:false` is exactly that shape. Knowing it before the first
-  // query costs nothing and takes that config from "permanent regression" to
-  // "byte-identical to pre-#2079".
+  // There is deliberately NO capability probe here. An earlier revision tested
+  // `typeof deps.store.replaceSubject !== 'function'`, on the theory that
+  // `sparql-http` with `atomicUpdates:false` could never hold a witness and
+  // would otherwise pay the ASK forever. BOTH halves were false:
   //
-  // Runtime latch: `tryReplaceSubjectAtomically` also returns false when a
-  // DECORATOR refuses at preflight. That refusal may be conditional, so it is
-  // deliberately NOT latched — one such refusal costs one miss, whereas
-  // latching it would disable the memo for the process on a transient event.
-  // Only the statically-permanent case below sets this.
-  const witnessUnsupported = typeof deps.store.replaceSubject !== 'function';
-  // Operator override, default ON. Blank is UNSET, not false: `DKG_SWM_...=`
-  // is the normal compose/.env shape for "not configured", and reading it as
-  // false would silently disable the memo for a fleet that never asked.
-  const witnessEnabled = (() => {
+  //   - every adapter and all three decorators DEFINE `replaceSubject` and
+  //     throw `UnsupportedTripleStoreCapabilityError` INSIDE it, so the typeof
+  //     is always "function" — the probe could never fire;
+  //   - that config gates `replaceGraph` on the same `atomicUpdates` flag, so
+  //     no writer can populate a SWM assertion graph at all. The graph stays
+  //     empty, the count gate returns first, and the ASK is never reached.
+  //     There was no cost to avoid.
+  //
+  // A latch on the first `false` from the write is the shape that WOULD work,
+  // but not as currently wired: that call is `.catch(() => false)`, so a
+  // transient endpoint error is indistinguishable from a capability refusal and
+  // would disable the memo process-wide on a blip.
+  const witnessUsable = (() => {
     const raw = process.env['DKG_SWM_MATERIALIZATION_WITNESS']?.trim();
     if (!raw) return true;
     return raw !== '0' && raw.toLowerCase() !== 'false';
   })();
-  const witnessUsable = witnessEnabled && !witnessUnsupported;
 
   return {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>

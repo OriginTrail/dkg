@@ -919,6 +919,12 @@ export class StorageACKHandler {
           normalized,
           ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
         );
+        if (!replaced) {
+          throw Object.assign(
+            new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
+            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
+          );
+        }
         // #2079: a REPLACE, not a drop — invisible to the catch-up lane's count
         // gate, so the witness must be dropped explicitly. The head write and
         // two other store calls follow, any of which can throw and leave content
@@ -928,12 +934,6 @@ export class StorageACKHandler {
           swmGraphUri,
           ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
         ).catch(() => {});
-        if (!replaced) {
-          throw Object.assign(
-            new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
-            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
-          );
-        }
       }
       await this.store.deleteByPattern(
         { graph: metaGraph, subject: operationSubject },

@@ -80,15 +80,6 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(await graphCount(store, swmGraph)).toBe(1_000);
     expect(await graphCount(store, graphManager.sharedMemoryUri(CONTEXT_GRAPH))).toBe(0);
 
-    // #2079: a gossip apply REPLACES this graph, under the same
-    // `swmKaWriteLockKey` the catch-up materializer uses. The catch-up count
-    // gate cannot see a replace, so this path must drop the memo itself —
-    // otherwise a TORN apply (graph replaced, head write throws) leaves
-    // catch-up certifying the OLD digest against NEW content.
-    //
-    // Seeded after the apply and re-applied, rather than building a torn-apply
-    // rig: the property under test is simply "the apply path invalidates", and
-    // deleting that call must fail this.
 
     const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
     const meta = await store.query(

@@ -350,7 +350,7 @@ export async function recoverContextGraphSwm(
       // `isPrivateContextGraph`), but the ungated `recover-shared-memory` route
       // reaches it for any graph — and it exists to repair a corrupt local copy,
       // which is the worst possible moment to leave a stale memo standing.
-      await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph).catch(() => {});
+      await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {});
       await deps.replaceMetaForGraphAssets?.([descriptor]);
       if (verifiedAssetMeta.length > 0) {
         await deps.store.insert([...verifiedAssetMeta]);
@@ -480,7 +480,7 @@ export async function recoverContextGraphSwm(
       publicSnapshotStore: deps.publicSnapshotStore,
     });
     await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
-    await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph).catch(() => {}); // #2079: REPLACE, invisible to the count gate
+    await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {}); // #2079: REPLACE, invisible to the count gate
     replacedGraphs += 1;
     insertedGraphQuads += asset.quads.length;
   }
