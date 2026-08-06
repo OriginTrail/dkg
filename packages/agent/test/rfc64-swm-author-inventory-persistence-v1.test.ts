@@ -405,6 +405,56 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
   });
 
+  it('persists a verified EIP-1271 head and reads it back after restart', async () => {
+    const directory = temporaryDirectory();
+    let inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    const valid = snapshot([ROW_A]);
+    const unsigned = Object.freeze({
+      issuer: AUTHOR,
+      objectType: SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+      payload: valid.head.payload,
+      signatureEvidence: Object.freeze({
+        kind: 'eip1271-current-finalized',
+        chainId: '20430',
+        contractAddress: AUTHOR,
+      }),
+      signatureSuite: 'eip1271-current-finalized-v1',
+    }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
+    const head = Object.freeze({
+      ...unsigned,
+      objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(unsigned),
+      signature: '0x1234',
+    }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
+    const issuerSignature = await verifyControlEnvelopeIssuerSignatureV1(head, {
+      callEvmAtCurrentFinalized: async () => Object.freeze({
+        chainId: '20430',
+        blockNumber: '123',
+        blockHash: `0x${'55'.repeat(32)}`,
+        returnData: EIP1271_CANONICAL_ABI_RETURN_V1,
+      }),
+    });
+    const eip1271Snapshot = Object.freeze({
+      head,
+      rows: Object.freeze([ROW_A]),
+    }) as SwmAuthorInventorySnapshotV1;
+
+    expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: eip1271Snapshot,
+      mutation: { kind: 'upsert', row: ROW_A },
+      issuerSignature,
+      expectedCurrentHeadDigest: null,
+    })).toEqual({ status: 'applied', snapshot: eip1271Snapshot });
+
+    inventory.close();
+    foundations.splice(foundations.indexOf(inventory), 1);
+    inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(
+      eip1271Snapshot,
+    );
+  });
+
   it('rejects a row from another DKG network before writing either head or rows', async () => {
     const inventory = await openInventoryV1(temporaryDirectory());
     foundations.push(inventory);

@@ -11,6 +11,12 @@ export type SwmAuthorInventoryErrorCodeV1 =
   | 'swm-inventory-cas-conflict'
   | 'swm-inventory-database-corrupt';
 
+export type SwmAuthorInventoryErrorFactoryV1 = (
+  code: SwmAuthorInventoryErrorCodeV1,
+  message: string,
+  options?: ErrorOptions,
+) => Error;
+
 const SWM_AUTHOR_INVENTORY_ERROR_CODES_V1 = new Set<SwmAuthorInventoryErrorCodeV1>([
   'swm-inventory-input',
   'swm-inventory-cas-conflict',

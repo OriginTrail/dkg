@@ -64,6 +64,7 @@ import {
   sqlBlobsEqualV1,
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
+import { prepareVerifiedSwmAuthorInventoryCommitInputV1 } from './swm-author-inventory-auth-v1.js';
 import {
   encodeSwmAuthorInventoryKeyV1,
   prepareSwmAuthorInventoryCommitV1,
@@ -683,7 +684,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   ): SwmAuthorInventoryCasResultV1 {
     this.assertOpen();
     const persistence = this.swmAuthorInventoryPersistenceV1();
-    const prepared = prepareSwmAuthorInventoryCommitV1(input, swmAuthorInventoryErrorV1);
+    const verified = prepareVerifiedSwmAuthorInventoryCommitInputV1(
+      input,
+      swmAuthorInventoryErrorV1,
+    );
+    const prepared = prepareSwmAuthorInventoryCommitV1(
+      verified,
+      swmAuthorInventoryErrorV1,
+    );
     try {
       return this.writeTransaction(
         'compare-and-swap SWM author inventory',

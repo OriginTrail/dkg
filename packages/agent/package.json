@@ -38,6 +38,7 @@
     "./dist/rfc64/catalog-transport-wire-v1-internal.js": null,
     "./dist/rfc64/durable-file-store-v1.js": null,
     "./dist/rfc64/inventory-v1/exact-record.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-auth-v1.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-commit-plan.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-mutation.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-persistence.js": null,
