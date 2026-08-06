@@ -8,6 +8,9 @@
 import type { RequestContext } from "./context.js";
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from "../http-utils.js";
 import { handleMetering } from "../metering/http-core.js";
+import { ethers } from "ethers";
+import { resolveRpcUrls } from "@origintrail-official/dkg-chain";
+import { resolveChainConfig } from "../../config.js";
 
 const meterHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
 
@@ -29,13 +32,42 @@ function providerAddress(ctx: RequestContext): string | null {
   return addr;
 }
 
-/** Observed head. Null when the chain is unreachable — never a guess. */
+/**
+ * The chain's SAFE head — deliberately not `latest`.
+ *
+ * D10 fixes confirmations at 12 *from the safe head* because a reorg past a
+ * latest-block deposit would credit a tab against a transfer that no longer
+ * exists. Ethers exposes this as the `safe` block tag, so this asks the chain
+ * for its own notion of safety instead of subtracting a guess from `latest`.
+ *
+ * Returns null — never a guess, never `latest` as a stand-in — when the chain
+ * is unreachable or the network has no safe tag. Downstream, a null head means
+ * no deposit can satisfy the confirmation rule, which is the correct failure.
+ *
+ * Cached briefly: a quote is a read, and hammering the RPC per request would be
+ * both slow and rude to the endpoint.
+ */
+let headCache: { at: number; value: number | null } | null = null;
+const HEAD_TTL_MS = 5_000;
+
 async function safeHead(ctx: RequestContext): Promise<number | null> {
+  if (headCache && Date.now() - headCache.at < HEAD_TTL_MS) return headCache.value;
+  let value: number | null = null;
   try {
-    const p = (ctx.agent as unknown as { provider?: { getBlockNumber?: () => Promise<number> } }).provider;
-    if (!p?.getBlockNumber) return null;
-    return await p.getBlockNumber();
-  } catch { return null; }
+    const chainConf = resolveChainConfig(ctx.config, ctx.network) as { rpcUrl?: string; rpcUrls?: string[] } | undefined;
+    if (chainConf?.rpcUrl) {
+      const urls = resolveRpcUrls(chainConf.rpcUrl, chainConf.rpcUrls);
+      const provider = new ethers.JsonRpcProvider(urls[0], undefined, { cacheTimeout: -1 });
+      const block = await Promise.race([
+        provider.getBlock("safe"),
+        new Promise<null>((r) => setTimeout(() => r(null), 3_000)),
+      ]);
+      value = block?.number ?? null;
+      provider.destroy?.();
+    }
+  } catch { value = null; }
+  headCache = { at: Date.now(), value };
+  return value;
 }
 
 export async function handleMeteringRoutes(ctx: RequestContext): Promise<void> {
