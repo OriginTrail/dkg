@@ -8,11 +8,12 @@ export type SchedulerPressureOutcome = 'completed' | 'failed' | 'cancelled' | 'r
  *
  * `partitioned` (the default): every lane owns a private allocation, declared
  * in `lanes`, and fills independently of its neighbours —
- * `StorePriorityScheduler`. The scheduler-level `queueLimit` is an independent
- * rollup ceiling, **not** a derived sum: nothing validates the two against each
- * other, and a scheduler may legitimately cap its total below what its lanes
- * could hold between them. Read a lane's own limit for lane pressure and the
- * scheduler's for the rollup; do not compute either from the other.
+ * `StorePriorityScheduler`. Nothing validates the scheduler-level `queueLimit`
+ * against the lane allocations: a scheduler may publish their sum (the store
+ * scheduler does), or cap its total below what its lanes could hold between
+ * them, and `sumLaneLimits` falls back to the sum when no scheduler ceiling is
+ * published at all. So read a lane's own limit for lane pressure and the
+ * scheduler's for the rollup, and derive neither from the other.
  *
  * `shared`: every lane draws on ONE pool bounded by the scheduler-level
  * `queueLimit`/`inflightLimit`. There is no private allocation to declare, so a
@@ -107,11 +108,16 @@ export interface BackpressureLaneSnapshot {
   /** This lane's own admitted work. The attribution signal, like `queued`. */
   inflight: number;
   /**
-   * The admitted count that goes with `inflightLimit`, on the same rule as
-   * `pressureQueued`: this lane's own under a private allocation, the pool's
-   * under a shared one. Without it a shared row pairs a lane-local `inflight`
-   * with the pool's ceiling and reads as idle concurrency while the pool is
-   * fully occupied. Absent means `inflight`.
+   * The admitted count that goes with `inflightLimit`: this lane's own under a
+   * private allocation, and on a shared row **the pool's occupancy, always** —
+   * unlike `pressureQueued`, which falls back to the lane's own backlog where
+   * no depth was classified (an idle lane, or a pool with no ceiling). The
+   * asymmetry is deliberate: `pressureQueued` must equal the classifier's
+   * numerator or a row contradicts its own state, while no branch reads
+   * `inflight` or `inflightLimit` — this pair is reported, never judged — so on
+   * a shared row the ratio is a pool ratio by construction. Gating it on queued
+   * work would make the series step 0 -> N on an unrelated enqueue with no
+   * change in real concurrency. Absent means `inflight`.
    */
   pressureInflight?: number;
   inflightLimit: number | null;

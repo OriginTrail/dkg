@@ -188,9 +188,15 @@ describe('SchedulerPressureTracker', () => {
       capacity: { queueLimit: 4, inflightLimit: 2, capacityModel: 'shared' },
     });
 
-    // The concentrated shape from the issue: one lane holds the whole queue.
+    // The issue's literal acceptance criterion: one lane holds the whole queue.
     // Nothing has been rejected yet — the rejection comes on the NEXT
     // admission — and the queue has been full for zero milliseconds.
+    //
+    // Its kill set is deliberately a subset of the spread test's: with
+    // `this.queued.size === laneQueued` the pool-vs-lane distinction is
+    // invisible here, which is the point — this is the case where the two
+    // denominators AGREE, so it guards that the fix did not break the shape a
+    // naive per-lane denominator would also have caught.
     for (let i = 0; i < 4; i += 1) {
       tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
     }
@@ -288,10 +294,12 @@ describe('SchedulerPressureTracker', () => {
     tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
 
     expect(tracker.snapshot()).toMatchObject({
-      // `inflightLimit` is asserted, not merely exercised: a shared pool's
-      // ceiling must never become a summand. Relax `sumLaneLimits` to skip
-      // nulls and sum the rest — a plausible future "improvement" — and this
-      // reads 2x the pool while every other assertion stays green.
+      // `inflightLimit` is asserted rather than merely exercised, so the
+      // rollup's own value is pinned here too. The mutant that matters for
+      // `sumLaneLimits` — relaxing it to skip nulls and sum the rest — cannot
+      // be killed by THIS test: both ceilings are non-null, so `normalizeLimit`
+      // short-circuits and the fallback is never reached. It is killed by the
+      // unbounded-pool test above, where `totals.queueLimit: null` becomes 0.
       totals: { queued: 3, queueLimit: 4, inflightLimit: 2 },
       lanes: [
         // 3/4 of the pool is the documented 75% early-warning band.
@@ -661,6 +669,92 @@ describe('BackpressureMonitor', () => {
       ackEmitted.find((e) => e.metric === metric && e.lane === 'ack')?.value;
     expect(ackValue('dkg.backpressure.queue_depth')).toBe(1);
     expect(ackValue('dkg.backpressure.pressure_depth')).toBe(1);
+  });
+
+  it('pairs a shared row concurrency count with the ceiling that bounds it', () => {
+    // The inflight half of the pressure pair had no coverage anywhere: reverting
+    // it to `active.length` left both suites green, which is how a review
+    // finding comes back silently. Needs its own tracker — the monitor test
+    // above starts nothing, so `active.size` is 0 there and the omit-when-equal
+    // rule suppresses the field on every record.
+    const now = 1_000;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global',
+      now: () => now,
+      capacity: { queueLimit: 2, inflightLimit: 2, capacityModel: 'shared' },
+    });
+    for (const lane of ['durable', 'changelog']) {
+      tracker.start(tracker.enqueue({ lane, operation: `${lane}:reconcile` }));
+      tracker.enqueue({ lane, operation: `${lane}:reconcile` });
+    }
+
+    const snapshot = tracker.snapshot();
+    expect(snapshot).toMatchObject({
+      totals: { inflight: 2, inflightLimit: 2 },
+      lanes: [
+        // One admission running in each lane, against a pool of two. `inflight`
+        // stays the lane's own — the attribution signal — while the count that
+        // belongs with the pool's ceiling is the pool's. Publishing `1` beside
+        // `inflightLimit: 2` would read as half-idle concurrency at the moment
+        // the pool is full and is the reason nothing drains.
+        { lane: 'changelog', inflight: 1, pressureInflight: 2, inflightLimit: 2 },
+        { lane: 'durable', inflight: 1, pressureInflight: 2, inflightLimit: 2 },
+      ],
+    });
+
+    // …on the log line, under the omit-when-equal rule…
+    const registry = new BackpressureRegistry();
+    registry.register({ backpressureId: 'sync-global', getBackpressureSnapshot: () => snapshot });
+    const messages: string[] = [];
+    new BackpressureMonitor({
+      registry, now: () => now, emit: (_level, message) => messages.push(message),
+    }).sample();
+    expect(messages.find((m) => m.includes('"lane":"durable"'))).toContain('"inflight":1,"pressureInflight":2');
+
+    // …and on the metric, by name, so a misspelt gauge is caught too.
+    const emitted = captureMetrics(() => recordBackpressureSnapshotMetrics(snapshot));
+    const at = (metric: string, lane: string) =>
+      emitted.find((e) => e.metric === metric && e.lane === lane)?.value;
+    expect(at('dkg.backpressure.inflight', 'durable')).toBe(1);
+    expect(at('dkg.backpressure.pressure_inflight', 'durable')).toBe(2);
+
+    // A private allocation reports one number under both names.
+    const partitioned = new SchedulerPressureTracker({
+      scheduler: 'store',
+      now: () => now,
+      capacity: { lanes: { ack: { inflightLimit: 2 } } },
+    });
+    partitioned.start(partitioned.enqueue({ lane: 'ack', operation: 'store.ack' }));
+    expect(partitioned.snapshot().lanes).toMatchObject([
+      { lane: 'ack', inflight: 1, pressureInflight: 1, inflightLimit: 2 },
+    ]);
+  });
+
+  it('applies the empty-lane guard only where a pool is shared', () => {
+    // `degradedQueueUtilization` is caller-supplied public API and appears in no
+    // other test in the repo, so the scoping that keeps a private allocation
+    // byte-identical to base rested on reading alone. At a zero threshold the
+    // old branch read `0 / limit >= 0` as degraded on an idle lane; that must
+    // still happen for `partitioned`, and must not for `shared`.
+    const now = 1_000;
+    const idleLane = (capacity: Parameters<typeof SchedulerPressureTracker>[0]['capacity']) => {
+      const tracker = new SchedulerPressureTracker({
+        scheduler: 'probe',
+        now: () => now,
+        capacity,
+        thresholds: { degradedQueueUtilization: 0 },
+      });
+      // Give the lane a runtime without queueing or rejecting anything.
+      tracker.cancelQueued(tracker.enqueue({ lane: 'interactive', operation: 'probe' }));
+      return tracker.snapshot().lanes[0];
+    };
+
+    expect(idleLane({ lanes: { interactive: { queueLimit: 4 } } })).toMatchObject({
+      lane: 'interactive', capacityModel: 'partitioned', queued: 0, state: 'degraded',
+    });
+    expect(idleLane({ queueLimit: 4, capacityModel: 'shared' })).toMatchObject({
+      lane: 'interactive', capacityModel: 'shared', queued: 0, state: 'healthy',
+    });
   });
 
   it('contains logger failures', () => {

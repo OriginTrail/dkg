@@ -1358,6 +1358,29 @@ describe('sync global backpressure', () => {
     }
   });
 
+  it('declares the shared pool from registration, before any admission', async () => {
+    // Every other snapshot in this file is taken post-acquire, so the model
+    // declared in the constructor was pinned by nothing: deleting it left the
+    // whole suite green while a freshly booted daemon advertised `partitioned`
+    // on the field documented as authoritative — permanently so with
+    // DKG_SYNC_GLOBAL_MAX_INFLIGHT=0, where no acquire ever runs.
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => true,
+      onStart: () => () => {},
+      observability: {
+        scheduler: 'test-pre-acquire',
+        operation: (entry) => entry.payload,
+      },
+    });
+
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'shared',
+      // …and no ceiling is fabricated ahead of the first acquire, which is what
+      // actually carries the limits.
+      totals: { queueLimit: null, inflightLimit: null },
+    });
+  });
+
   it('publishes the shared-pool capacity model from the production sync-global queue', async () => {
     // The seam the core classifier cannot see. `sync-global` is a module
     // singleton built in `backpressure.ts`, and the capacity IT publishes is
