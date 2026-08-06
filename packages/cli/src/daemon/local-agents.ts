@@ -61,6 +61,11 @@ import {
   transportPatchFromHermesTarget,
 } from './hermes.js';
 import {
+  probePrimeAgentChannelHealth,
+  targetFromDescriptor,
+  transportPatchFromPrimeAgentTarget,
+} from './prime-agent.js';
+import {
   type PendingAttachJob,
   scheduleAttachJob,
   isCancelled as isAttachJobCancelled,
@@ -453,7 +458,30 @@ export type LocalAgentUiAttachDeps = OpenClawUiAttachDeps & {
   };
   /** Test injection: stub the Hermes UI setup entrypoint. */
   runHermesSetup?: (signal?: AbortSignal) => Promise<HermesSetupResult>;
+  /** Test injection: stub the Prime Agent UI setup entrypoint. */
+  runPrimeAgentSetup?: () => Promise<{ ok: boolean; errors: string[]; warnings: string[] }>;
 };
+
+/**
+ * Install the adapter extension into the operator's Prime Agent profile. Loaded
+ * lazily so the daemon does not pull the adapter runtime in on every start, and
+ * so a node built without the package still boots.
+ */
+async function runPrimeAgentUiSetup(
+  deps: LocalAgentUiAttachDeps,
+): Promise<{ ok: boolean; errors: string[]; warnings: string[] }> {
+  if (deps.runPrimeAgentSetup) return deps.runPrimeAgentSetup();
+  try {
+    const { runPrimeAgentSetup } = await import('@origintrail-official/dkg-adapter-prime-agent');
+    const result = await runPrimeAgentSetup({ verify: false });
+    // `verify: false` on purpose: verification asserts a live session, and at
+    // connect time there usually is not one yet. Whether a session is live is
+    // answered by the health probe that follows, which treats "none" as idle.
+    return { ok: result.ok, errors: result.errors ?? [], warnings: result.warnings ?? [] };
+  } catch (err: any) {
+    return { ok: false, errors: [`Prime Agent setup unavailable: ${err?.message ?? String(err)}`], warnings: [] };
+  }
+}
 
 async function addHermesProfileMetadataForUiConnect(
   config: DkgConfig,
@@ -530,6 +558,69 @@ export async function connectLocalAgentIntegrationFromUi(
       lastError: null,
     },
   });
+  if (requested.id === 'prime-agent') {
+    // Prime Agent differs from Hermes in one way that matters here: there is no
+    // durable endpoint to connect to. Bridges exist only while a session is
+    // live, and each live session publishes its own. So "connect" resolves the
+    // discovery directory rather than dialling a configured URL, and "installed
+    // but no session running" is a first-class NON-error state — reporting it as
+    // an error would train operators to ignore a red badge that is usually
+    // nothing more than "you have not opened a session yet".
+    // Install first, exactly as the Hermes branch does. Without this, "Connect"
+    // would only look for bridges that the agent has no extension to publish,
+    // and the panel would sit at "start a session" forever. The setup verb is
+    // idempotent — a second run finds our entry already in settings.json and
+    // makes no write.
+    const setup = await runPrimeAgentUiSetup(deps);
+    if (!setup.ok) {
+      const integration = updateLocalAgentIntegration(config, requested.id, {
+        runtime: {
+          status: 'error',
+          ready: false,
+          lastError: setup.errors.join('; ') || 'Prime Agent setup failed',
+        },
+      });
+      return {
+        integration,
+        notice: `${integration.name} setup failed: ${setup.errors.join('; ') || 'unknown error'}`,
+      };
+    }
+
+    const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
+    const live = health.sessions.find((s) => s.sessionId === health.target) ?? health.sessions[0];
+
+    if (health.ok && live) {
+      const integration = updateLocalAgentIntegration(config, requested.id, {
+        transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
+        runtime: { status: 'ready', ready: true, lastError: null },
+        metadata: { sessionCount: health.sessionCount, activeSessionId: live.sessionId },
+      });
+      return {
+        integration,
+        notice:
+          health.sessionCount > 1
+            ? `${integration.name} is connected to session ${live.sessionId} (${health.sessionCount} sessions live).`
+            : `${integration.name} is connected and chat-ready.`,
+      };
+    }
+
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      runtime: {
+        status: 'degraded',
+        ready: false,
+        lastError: health.error ?? 'no live Prime Agent session',
+      },
+      metadata: { sessionCount: health.sessionCount },
+    });
+    return {
+      integration,
+      notice:
+        health.sessionCount === 0
+          ? `${integration.name} is registered. Start a Prime Agent session and refresh — the extension publishes its bridge on session start.`
+          : `${integration.name} has ${health.sessionCount} session(s) but none answered a health probe: ${health.error ?? 'unknown error'}`,
+    };
+  }
+
   if (requested.id === 'hermes') {
     const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
     const runSetup = deps.runHermesSetup ?? runHermesUiSetup;

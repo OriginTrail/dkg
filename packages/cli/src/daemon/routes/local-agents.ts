@@ -317,9 +317,41 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import { readPrimeAgentSessions } from '../prime-agent.js';
 
 import type { RequestContext } from './context.js';
 
+/**
+ * Prime Agent is the one integration whose "is it there" answer is not derivable
+ * from config: a bridge exists per live session, so the count changes without
+ * anything in the node changing. The listing therefore reads the discovery
+ * directory (a sync readdir over a handful of small files, already the hot path
+ * for the chat routes) so the UI can distinguish "installed but idle" from
+ * "not installed" without a second round trip.
+ */
+function withPrimeAgentSessionCounts<T extends { id: string; metadata?: Record<string, unknown> }>(
+  integrations: T[],
+): T[] {
+  return integrations.map((integration) => {
+    if (integration.id !== 'prime-agent') return integration;
+    let sessions: ReturnType<typeof readPrimeAgentSessions>;
+    try {
+      sessions = readPrimeAgentSessions();
+    } catch {
+      // Discovery is best-effort: an unreadable directory must not take down
+      // the whole integrations listing.
+      return integration;
+    }
+    return {
+      ...integration,
+      metadata: {
+        ...(integration.metadata ?? {}),
+        sessionCount: sessions.length,
+        ...(sessions[0] ? { activeSessionId: sessions[0].sessionId } : {}),
+      },
+    };
+  });
+}
 
 export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -357,7 +389,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
   // GET /api/local-agent-integrations — generic local agent registry/status surface
   if (req.method === 'GET' && path === '/api/local-agent-integrations') {
     return jsonResponse(res, 200, {
-      integrations: listLocalAgentIntegrations(config),
+      integrations: withPrimeAgentSessionCounts(listLocalAgentIntegrations(config)),
     });
   }
 
@@ -446,6 +478,31 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, integration });
         }
+      }
+
+      if (explicitDisconnect && normalizedId === 'prime-agent') {
+        // Reverse setup removes our entry from settings.json.extensions. A
+        // restore failure must NOT be reported as a failed disconnect: the
+        // integration really is disconnected either way, and surfacing it as
+        // `error` would leave the operator unable to clear the state. Same
+        // posture as the Hermes branch below — warn, do not fail.
+        let restoreError: string | undefined;
+        try {
+          const { restorePrimeAgentProfile } = await import('@origintrail-official/dkg-adapter-prime-agent');
+          const result = await restorePrimeAgentProfile({});
+          if (!result?.ok) restoreError = result?.restoreError ?? 'restore reported failure';
+        } catch (err: any) {
+          restoreError = `Prime Agent restore failed: ${err?.message ?? 'unknown error'}`;
+        }
+        const integration = updateLocalAgentIntegration(config, id, {
+          runtime: {
+            status: 'disconnected',
+            ready: false,
+            lastError: restoreError ?? null,
+          },
+        });
+        await saveConfig(config);
+        return jsonResponse(res, 200, { ok: true, integration });
       }
 
       if (explicitDisconnect && normalizedId === 'hermes') {

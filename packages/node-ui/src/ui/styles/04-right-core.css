@@ -418,9 +418,27 @@
   gap: 12px;
 }
 .v10-local-agent-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
   font-weight: 700;
   color: var(--text-primary);
+}
+/* Vendor mark, painted as a mask so one asset tracks the active theme. The
+   mask-image itself is set inline from the agent's data URI. */
+.v10-local-agent-logo {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  background-color: currentColor;
+  opacity: 0.72;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
 }
 .v10-local-agent-subtitle {
   margin-top: 4px;

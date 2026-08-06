@@ -115,10 +115,10 @@ Refs: `OriginTrail/dkg@843f5213`, `PrimeIntellect-ai/prime-agent@0e0d2339`.
 
 | Hermes | Prime Agent | Scope | Risk |
 | --- | --- | --- | --- |
-| Connected Agents row, connect/refresh/disconnect | one installation-level row | **v1** | Low |
-| — | live-session count + session selector | **v1** | Med — new UX, unreviewed |
-| chat attachments (`capabilities.chatAttachments`) | supported (daemon-side pipeline reused) | **v1** | Med |
-| e2e `hermes-connect.spec.ts` | `prime-agent-connect.spec.ts` | **v1** | Low |
+| Connected Agents row, connect/refresh/disconnect | one installation-level row — **shipped** | **v1** | Low |
+| — | live-session count — **shipped**; session **selector** deferred (needs a stable per-session label the descriptor does not carry) | v1 partial | Med — new UX, unreviewed |
+| chat attachments (`capabilities.chatAttachments`) | **not** advertised: the daemon route omits the attachment-provenance pipeline, so the capability would promise more than the channel delivers | v2 | Low |
+| e2e `hermes-connect.spec.ts` | `prime-agent-connect.spec.ts` — **shipped**, plus a zero-session case | **v1** | Low |
 
 ## Troubleshooting cases
 

@@ -114,12 +114,38 @@ That last clause is the real proof: it demonstrates *attach*, not *spawn*.
   entries are never published as shared; disconnect removes the hooks and
   restores `settings.json` surgically.
 
-## Stage 5 — Node UI
+## Stage 5 — Node UI — **DONE**
 
-- `ConnectedAgentsTab.tsx` gains a Prime Agent row + live-session count and
-  selector; `hooks/useAgents.ts` and `ui/api.ts` extended.
-- e2e `packages/node-ui/e2e/specs/prime-agent-connect.spec.ts`, mirroring
-  `hermes-connect.spec.ts`, plus a case for "installed, no live session".
+Shipped:
+
+- **Daemon channel routes.** `packages/cli/src/daemon/routes/prime-agent.ts`
+  serves `/api/prime-agent-channel/{send,stream,health}` and is dispatched from
+  `handle-request.ts`. Health is always `200`: `ok: false` with
+  `sessionCount: 0` is the idle state, not a fault.
+- **Session counts in the listing.** `GET /api/local-agent-integrations` now
+  reads the discovery directory for the `prime-agent` record, so the panel can
+  distinguish "installed but idle" from "not installed" before connecting.
+- **Panel.** `ConnectedAgentsTab.tsx` renders a Prime Agent block with
+  per-session copy, a session-count line, and a Connect button;
+  `LocalAgentIntegration` carries `sessionCount` / `activeSessionId`.
+- **UI transport.** `ui/api.ts` registers a `prime-agent` surface
+  (`connectSupported`, `chatSupported`, health + stream). The Hermes SSE reader
+  was generalised into `streamDeltaFrameLocalChat` and both channels share it.
+- **Agent marks.** `agentLogos.ts` inlines the three vendor marks as alpha
+  masks, painted with `currentColor` so one asset serves both themes.
+- **Tests.** `packages/cli/test/daemon-prime-agent.test.ts` (15) covers routing,
+  the loopback guard, descriptor pruning, the recycled-port check, the
+  busy/429 mapping, and the no-silent-reroute property.
+  `packages/node-ui/e2e/specs/prime-agent-connect.spec.ts` mirrors
+  `hermes-connect.spec.ts` and adds the "installed, no live session" case.
+
+Deliberately **not** in Stage 5:
+
+- No session **selector** yet — the daemon routes to the newest live session and
+  an explicit `sessionId` is honoured, but the panel does not offer a picker.
+  It needs a stable per-session label, which the descriptor does not yet carry.
+- No default session id, so chat history for a session opened outside the UI is
+  not back-filled.
 
 ## Stage 6 (v2 candidates, each its own ADR)
 

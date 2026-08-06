@@ -99,7 +99,8 @@ unauthenticated bridge would let anything on loopback drive the agent.
 - Memory election hooks (`before_agent_start`, `turn_end`) are **not yet wired**;
   the capability flag is advertised but the hook set lands in Stage 4.
 - No Python kernel skill yet (Stage 3), so there is no model-facing `dkg` API.
-- Node UI still shows the integration without a session selector (Stage 5).
+- The Node UI panel is live (Stage 5) but has **no session picker**: the node
+  routes to the newest live session unless a `sessionId` is supplied.
 - One turn at a time per session: a concurrent `/send` gets `429`.
 
 ## Tests
