@@ -16,6 +16,7 @@
 // request's key is ignored entirely rather than compared, so there is no path
 // where caller-supplied material decides its own validity.
 import { existsSync, readFileSync } from "node:fs";
+import { verifyBinding, ed25519Fingerprint, type BindingProof } from "./evm-binding.js";
 
 export interface RegisteredBuyer {
   label: string;
@@ -66,7 +67,34 @@ export type AnchorResult =
  * compare rather than fall back. Returning the registered key makes the unsafe
  * version unrepresentable.
  */
-export function anchorWalletKey(home: string, tabPrincipal: string): AnchorResult {
+export function anchorWalletKey(
+  home: string,
+  tabPrincipal: string,
+  /**
+   * Optional self-proving binding. When present and valid it takes precedence
+   * over the registry: a signature from the address itself is strictly better
+   * evidence than the operator's word, so there is no reason to prefer the
+   * weaker source when the stronger one is available. (Buyer-recommended.)
+   */
+  binding?: { proof?: BindingProof; chainId: number; now?: number },
+): AnchorResult {
+  if (binding?.proof) {
+    const v = verifyBinding(binding.proof, { chainId: binding.chainId, now: binding.now });
+    if (!v.ok) {
+      // A PRESENTED-but-invalid proof is a hard failure, never a silent
+      // downgrade to the registry: falling back would let an attacker strip a
+      // proof they cannot forge and land on the weaker check instead.
+      return { ok: false, code: "E_PRINCIPAL_NOT_REGISTERED", detail: `binding proof rejected: ${v.code}${v.detail ? " — " + v.detail : ""}` };
+    }
+    if (v.principal.toLowerCase() !== norm(tabPrincipal)) {
+      return { ok: false, code: "E_PRINCIPAL_NOT_REGISTERED", detail: "binding proof is for a different principal than the delegation claims" };
+    }
+    return { ok: true, walletPublicKeyPem: binding.proof.walletPublicKeyPem, label: `self-proved:${v.principal}` };
+  }
+  return anchorFromRegistry(home, tabPrincipal);
+}
+
+function anchorFromRegistry(home: string, tabPrincipal: string): AnchorResult {
   const reg = loadBuyerRegistry(home);
   const entry = reg.principals[norm(tabPrincipal)];
   if (!entry) {

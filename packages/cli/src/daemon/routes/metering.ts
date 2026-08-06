@@ -14,6 +14,14 @@ import { resolveChainConfig } from "../../config.js";
 
 const meterHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
 
+/** Base mainnet unless the node says otherwise. Never guessed silently. */
+function chainIdOf(ctx: RequestContext): number {
+  try {
+    const c = resolveChainConfig(ctx.config, ctx.network) as { chainId?: number } | undefined;
+    return Number(c?.chainId ?? 8453);
+  } catch { return 8453; }
+}
+
 /**
  * The provider wallet a buyer deposits TRAC to. Read-only; never a key.
  *
@@ -82,6 +90,7 @@ export async function handleMeteringRoutes(ctx: RequestContext): Promise<void> {
       requestAgentAddress: ctx.requestAgentAddress,
       safeHeadBlock: await safeHead(ctx),
       home: meterHome(),
+      chainId: chainIdOf(ctx),
     },
     {
       json: (status, body) => jsonResponse(res, status, body as Record<string, unknown>),

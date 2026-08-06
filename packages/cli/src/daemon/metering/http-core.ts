@@ -44,6 +44,8 @@ export interface MeteringRequest {
   safeHeadBlock: number | null;
   /** Metering home (DKG_HOME). */
   home: string;
+  /** EVM chain id, so a testnet binding proof cannot authorise mainnet. */
+  chainId: number;
 }
 
 /**
@@ -97,7 +99,7 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
     }
     // The key is resolved from operator-approved config, NOT from the request.
     // A caller cannot supply the evidence that validates its own claim.
-    const anchor = anchorWalletKey(home, delegation.tabPrincipal);
+    const anchor = anchorWalletKey(home, delegation.tabPrincipal, { proof: body.bindingProof, chainId: req.chainId });
     if (!anchor.ok) {
       io.json(200, {
         preflight: "zero-value", estimatedMicroTrac: 0, verdict: anchor.code,
@@ -128,7 +130,7 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
       io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "refundAddress", "request"] });
       return true;
     }
-    const openAnchor = anchorWalletKey(home, b.delegation.tabPrincipal);
+    const openAnchor = anchorWalletKey(home, b.delegation.tabPrincipal, { proof: b.bindingProof, chainId: req.chainId });
     if (!openAnchor.ok) {
       io.json(403, { opened: false, code: openAnchor.code, detail: openAnchor.detail });
       return true;
