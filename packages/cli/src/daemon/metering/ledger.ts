@@ -279,3 +279,57 @@ export function refundOnExpiry(home: string, principal: string, refundAddress: s
   t.balance = 0;
   return { alreadyRefunded: false, refundedMicroTrac: amount, at: new Date().toISOString() };
 }
+
+/**
+ * Shadow observation journal (D11 calibration corpus).
+ *
+ * Operator-found, 2026-08-06: the 48-hour shadow window was reported as
+ * "producing the calibration corpus" while `shadow` mode persisted NOTHING —
+ * it computed a metering block, attached it to the HTTP response, and dropped
+ * it. Only non-exempt principals ever reached `recordReadLeg`, and there were
+ * none, so `~/.dkg-mainnet/metering/` held nothing but a config file. A window
+ * that stores no observations is not a window.
+ *
+ * What is retained is deliberately narrow: the structural features calibration
+ * actually needs, plus wall time to test the request-derived-units argument.
+ * The query TEXT is never written — only its digest — so a long-running window
+ * on a production node does not accumulate a log of what was asked.
+ */
+export function recordShadowObservation(home: string, obs: {
+  units: number;
+  breakdown: Record<string, unknown>;
+  scopeQuads: number;
+  responseBytes: number;
+  sparql: string;
+  askMicroPer1k: number;
+  costMicroTrac: number;
+  mode: string;
+  billable: boolean;
+  wallMs?: number;
+  contextGraphId?: string;
+  view?: string;
+}): void {
+  try {
+    const dir = `${home}/metering`;
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const rec = {
+      at: new Date().toISOString(),
+      scheduleVersion: SCHEDULE_VERSION,
+      // digest, never the text
+      queryDigest: "sha256:" + createHash("sha256").update(obs.sparql).digest("hex"),
+      queryChars: obs.sparql.length,
+      units: obs.units,
+      breakdown: obs.breakdown,
+      scopeQuads: obs.scopeQuads,
+      responseBytes: obs.responseBytes,
+      askMicroPer1k: obs.askMicroPer1k,
+      costMicroTrac: obs.costMicroTrac,
+      mode: obs.mode,
+      billable: obs.billable,
+      wallMs: obs.wallMs ?? null,
+      contextGraphId: obs.contextGraphId ?? null,
+      view: obs.view ?? null,
+    };
+    appendFileSync(`${dir}/shadow-observations.jsonl`, JSON.stringify(rec) + "\n");
+  } catch { /* observation must never break serving */ }
+}

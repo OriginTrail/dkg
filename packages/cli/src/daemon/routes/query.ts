@@ -117,6 +117,7 @@ import {
   loadMeterConfig,
   recordReadLeg as ledgerRecordReadLeg,
   noteFailedRead as ledgerNoteFailedRead,
+  recordShadowObservation,
 } from "../metering/ledger.js";
 
 // Metering helpers bound to this daemon's DKG_HOME. Config is re-read per
@@ -767,6 +768,22 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
             billable: !exempt,
             principal: principal ?? null,
           };
+          // Persist the observation regardless of exemption: the calibration
+          // corpus needs every read, and exempt reads are still measurements.
+          recordShadowObservation(process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`, {
+            units: u.units,
+            breakdown: u.breakdown as unknown as Record<string, unknown>,
+            scopeQuads,
+            responseBytes: Buffer.byteLength(body, "utf8"),
+            sparql: String(sparql),
+            askMicroPer1k: meterCfg.readAskMicroPer1k,
+            costMicroTrac: costMicroTrac(u.units, meterCfg.readAskMicroPer1k),
+            mode: meterCfg.mode,
+            billable: !exempt,
+            wallMs: Date.now() - serverT0,
+            contextGraphId,
+            view,
+          });
           if (!exempt) {
             metering.receipt = await recordReadLeg({
               principal: principal as string,

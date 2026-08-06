@@ -79,7 +79,7 @@ t('velocity window rolls over', () =>
   assert.equal(V({ state: { window: { since: NOW - 120000, spentMicroTrac: 999999 } } }).code, 'OK'));
 
 // settlement admissibility
-const leg = { legType: 'read', pricing: { costMicroTrac: 50 }, meter: { units: 6.5 } };
+const leg = { legType: 'read', pricing: { costMicroTrac: 50 }, meter: { unitsTenths: 65 } };
 const digest = 'sha256:' + createHash('sha256').update(canonicalize(leg)).digest('hex');
 const countersign = (obj, key) => edSign(null, Buffer.concat([Buffer.from('odysseus-dkg:capability:v1\n'), Buffer.from(obj)]), createPrivateKey(pem(key,'priv'))).toString('base64');
 

@@ -25,7 +25,7 @@ t('read leg debits atomically and signs', () => {
     contextGraphId: 'odysseus', view: 'shared-working-memory', askMicroPer1k: 100,
   });
   assert.equal(leg1.legType, 'read');
-  assert.equal(leg1.schemaVersion, 'receipt-v0.2');
+  assert.equal(leg1.schemaVersion, 'receipt-v0.3');
   assert.equal(leg1.pricing.costMicroTrac, 1);      // ceil(6.5*100/1000)
   assert.equal(leg1.tab.before, 100000);
   assert.equal(leg1.tab.after, 99999);
@@ -82,7 +82,10 @@ t('journal replays to identical state (crash-restart)', () => {
 
 t('canonicalization is deterministic and key-order independent', () => {
   assert.equal(L.canonicalize({ b: 1, a: [2, 'x'] }), '{"a":[2,"x"],"b":1}');
-  assert.equal(L.canonicalize({ u: 6.5 }), '{"u":6.5}');
+  // v0.3: signed material is integer-only. A float must be REFUSED, not
+  // silently serialized — two conforming impls disagreed on 3.0 vs 3 (Bo).
+  assert.throws(() => L.canonicalize({ u: 6.5 }), /E_CANON_NON_INTEGER/);
+  assert.equal(L.canonicalize({ unitsTenths: 65 }), '{"unitsTenths":65}');
 });
 
 t('failed read records base fee, no debit', () => {
