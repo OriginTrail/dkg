@@ -589,7 +589,15 @@ export async function connectLocalAgentIntegrationFromUi(
       const integration = updateLocalAgentIntegration(config, requested.id, {
         transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
         runtime: { status: 'ready', ready: true, lastError: null },
-        metadata: { sessionCount: health.sessionCount, activeSessionId: live.sessionId },
+        // activeSessionId must be the ELECTION HEAD (sessions[0], most recently
+        // active), not `live`: node-ui pins chat to this id, and routing takes
+        // the head unconditionally, so a probe-survivor stamp would silently
+        // deliver operator chat into a different session than unaddressed
+        // sends. `live` (the probe survivor) is only the transport target.
+        metadata: {
+          sessionCount: health.sessionCount,
+          activeSessionId: health.sessions[0].sessionId,
+        },
       });
       return {
         integration,

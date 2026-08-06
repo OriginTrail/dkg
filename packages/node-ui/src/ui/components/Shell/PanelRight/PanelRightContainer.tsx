@@ -86,6 +86,13 @@ export function PanelRight() {
   // abort the wrong request. Codex CIV4a / CIcaM / CIlg0.
   const localAbortRef = useRef<Map<string, AbortController>>(new Map());
   const autoFocusedLocalAgentRef = useRef(false);
+  // Session ids whose explicit sends came back PRIME_AGENT_NO_SESSION: the
+  // daemon never falls back on an explicit id, so these can only 409 forever.
+  // The selection is deliberately NOT cleared when one is detected — that
+  // would flip the visible stateKey and vanish the thread (and the failure
+  // bubble explaining the heal). Instead, the next send re-homes the
+  // conversation onto the refreshed pin.
+  const deadLocalAgentSessionsRef = useRef<Set<string>>(new Set());
   const localChatEndRef = useRef<HTMLDivElement>(null);
   const memorySessionsRef = useRef<MemorySession[]>([]);
   const localMessagesByConversationRef = useRef<Record<string, LocalAgentMessage[]>>({});
@@ -189,6 +196,36 @@ export function PanelRight() {
       ...prev,
       [conversationKey]: value,
     }));
+  }, []);
+
+  // Re-homes a conversation's visible state under a successor stateKey so a
+  // session heal never makes the on-screen thread disappear: messages (the
+  // prior turns plus the failure bubble), composer input, and queued
+  // attachment drafts all follow the user to the live session.
+  const migrateLocalConversationState = useCallback((fromKey: string, toKey: string) => {
+    if (fromKey === toKey) return;
+    setLocalMessagesByConversation((prev) => {
+      const moved = prev[fromKey];
+      if (!moved || moved.length === 0) return prev;
+      // Append: the migrated thread ends with the just-failed turn, which is
+      // the newest content whenever the successor key already has messages.
+      const next = { ...prev, [toKey]: [...(prev[toKey] ?? []), ...moved] };
+      delete next[fromKey];
+      return next;
+    });
+    setLocalInputByConversation((prev) => {
+      if (prev[fromKey] === undefined) return prev;
+      const next = { ...prev, [toKey]: prev[toKey] || prev[fromKey] };
+      delete next[fromKey];
+      return next;
+    });
+    setAttachmentDraftsByConversation((prev) => {
+      const moved = prev[fromKey];
+      if (!moved || moved.length === 0) return prev;
+      const next = { ...prev, [toKey]: [...moved, ...(prev[toKey] ?? [])] };
+      delete next[fromKey];
+      return next;
+    });
   }, []);
 
   const updateAttachmentDrafts = useCallback((
@@ -471,12 +508,35 @@ export function PanelRight() {
 
   const sendLocalMessage = useCallback(async () => {
     const integration = selectedIntegration;
-    const conversation = selectedConversation;
+    let conversation = selectedConversation;
     const text = localInput.trim();
     const drafts = selectedAttachmentDrafts;
     const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);
     if (!integration?.chatSupported || !integration.chatReady || localSending || !conversation || (!text && !hasSendableDrafts)) return;
     const integrationId = integration.id;
+    // A send aimed at a session known to be dead re-homes the conversation
+    // onto the refreshed pin BEFORE any state key is derived, carrying the
+    // visible thread along. Without a live successor pin the send stays aimed
+    // at the dead session and fails visibly again — never silently rehomed.
+    const deadSessions = deadLocalAgentSessionsRef.current;
+    if (conversation.sessionId && deadSessions.has(conversation.sessionId)) {
+      const successorPin =
+        integration.defaultSessionId && !deadSessions.has(integration.defaultSessionId)
+          ? integration.defaultSessionId
+          : null;
+      if (successorPin) {
+        const successor = resolveLocalAgentConversation({ integrationId, sessionId: successorPin });
+        // Decline the heal while the successor conversation is mid-stream:
+        // two concurrent sends under one key would collide on the abort
+        // registry and the sending flag. The send below then fails visibly
+        // against the dead session instead of silently rehoming.
+        if (!localSendingByConversation[successor.stateKey]) {
+          migrateLocalConversationState(conversation.stateKey, successor.stateKey);
+          setSelectedSessionId(successorPin);
+          conversation = successor;
+        }
+      }
+    }
     const conversationKey = conversation.stateKey;
     setLocalSendingForConversation(conversationKey, true);
     setConnectError(null);
@@ -654,6 +714,15 @@ export function PanelRight() {
           return { ...prev, [conversationKey]: [...restored, ...current] };
         });
       }
+      // A pinned session that is no longer live can never succeed again — the
+      // daemon 409s explicit ids without fallback, and nothing else resets the
+      // sticky selection for a persistentChat integration. Mark it dead; the
+      // selection is left alone so this thread and its failure bubble stay on
+      // screen, and the NEXT send re-homes the conversation onto the pin the
+      // refresh below fetches.
+      if (!isUserAbort && err?.code === 'PRIME_AGENT_NO_SESSION' && conversation.sessionId) {
+        deadLocalAgentSessionsRef.current.add(conversation.sessionId);
+      }
       void refreshLocalIntegrations();
     } finally {
       setLocalSendingForConversation(conversationKey, false);
@@ -673,6 +742,8 @@ export function PanelRight() {
     loadSessions,
     localInput,
     localSending,
+    localSendingByConversation,
+    migrateLocalConversationState,
     prepareAttachmentDraftsForSend,
     selectedAttachmentDrafts,
     refreshLocalIntegrations,

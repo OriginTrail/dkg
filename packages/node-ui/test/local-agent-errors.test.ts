@@ -27,4 +27,17 @@ describe('Prime Agent terminal error messages', () => {
       'Prime Agent turn exceeded its maximum run time.',
     );
   });
+
+  it('renders a dead pinned session as an actionable message, not the raw daemon 409', () => {
+    const error = new LocalAgentApiError('No live Prime Agent session 019f-dead-uuid', {
+      code: 'PRIME_AGENT_NO_SESSION',
+      source: 'prime-agent-channel',
+    });
+
+    const message = formatLocalAgentErrorMessage(primeAgent, error);
+    expect(message).toBe(
+      'Prime Agent session is no longer live. Send again to reach the current session, or start one if none is running.',
+    );
+    expect(message).not.toContain('019f-dead-uuid');
+  });
 });

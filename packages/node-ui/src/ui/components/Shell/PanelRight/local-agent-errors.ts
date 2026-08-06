@@ -21,6 +21,9 @@ export function formatLocalAgentErrorMessage(
     if (err.code === 'PRIME_AGENT_SESSION_BUSY') {
       return `${integration.name} session is busy — try again in a moment.`;
     }
+    if (err.code === 'PRIME_AGENT_NO_SESSION') {
+      return `${integration.name} session is no longer live. Send again to reach the current session, or start one if none is running.`;
+    }
     if (err.code === 'PRIME_AGENT_PROVIDER_UNAUTHORIZED') {
       return `${integration.name} provider authentication failed. Check its provider credentials and try again.`;
     }

@@ -2391,7 +2391,7 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     // node must not synthesise one. The integrations endpoint already elects a
     // live session; pin the UI conversation to that exact id instead of asking
     // the daemon to run a second most-recently-active election on every turn.
-    defaultSessionId: ({ record }) => firstTrimmedString(record?.metadata?.activeSessionId),
+    defaultSessionId: ({ record }) => firstTrimmedString(record?.metadata?.activeSessionId) ?? undefined,
     resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,

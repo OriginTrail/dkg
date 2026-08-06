@@ -488,6 +488,56 @@ describe('/stream', () => {
     expect(remainder.join('')).toContain('visible');
   });
 
+  it('prunes an aborted subscriber, keeps the turn settling, and admits the next turn', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(
+      stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never,
+      'sess-keepalive-abort',
+      { sseKeepaliveIntervalMs: 20 },
+    );
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const controller = new AbortController();
+    const res = await fetch(`${base}/stream`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'work silently', correlationId: 'c-keepalive-abort' }),
+      signal: controller.signal,
+    });
+    const reader = res.body!.getReader();
+    await reader.read();
+    controller.abort();
+
+    // Several keepalive intervals with the subscriber gone: detach must have
+    // pruned the aborted response, and writes to it must never crash the
+    // bridge process (the exact regression an unref'd leaked interval hides).
+    await new Promise((r) => setTimeout(r, 70));
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'unseen tail' } });
+    bridge.onAgentEnd();
+
+    // The turn settled and released admission: a fresh turn runs end-to-end.
+    const next = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'after abort', correlationId: 'c-after-abort' }),
+    });
+    // Bounded poll rather than a fixed sleep: the loopback dispatch plus the
+    // bridge's admission can exceed a fixed budget on a loaded CI worker.
+    const deliveryDeadline = Date.now() + 2_000;
+    while (sent.length < 2 && Date.now() < deliveryDeadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(sent).toEqual(['work silently', 'after abort']);
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
+    bridge.onAgentEnd();
+    const recovered = await next;
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toMatchObject({ text: 'accepted', correlationId: 'c-after-abort' });
+  });
+
   it('emits data: <json> frames of delta then final', async () => {
     const res = await fetch(`${base}/stream`, {
       method: 'POST',
