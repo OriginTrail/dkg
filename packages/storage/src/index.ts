@@ -33,6 +33,45 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+// System-record V1 (#2052 Stack B2). Default-unused: these modules perform no
+// work until the daemon supervisor supplies a live ownership lease.
+export {
+  RESERVED_INTERNAL_GRAPHS_V1,
+  ReservedInternalGraphWriteError,
+  SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
+  SYSTEM_RECORD_V1_STATE_GRAPH,
+  assertNotReservedInternalGraphV1,
+  excludeInternalGraphsV1,
+  isEphemeralInternalStagingGraphUriV1,
+  isInternalGraphUriV1,
+  isReservedInternalGraphUriV1,
+} from './internal-graph-policy.js';
+export {
+  MANAGED_OXIGRAPH_LEASE_OPTION_KEY,
+  attachManagedOxigraphLeaseV1,
+  createManagedOxigraphOwnershipControllerV1,
+  extractManagedOxigraphLeaseV1,
+  isManagedOxigraphOwnershipLeaseV1,
+  readManagedOxigraphOwnershipSnapshotV1,
+  type ManagedOxigraphOwnershipControllerV1,
+  type ManagedOxigraphOwnershipInvalidationV1,
+  type ManagedOxigraphOwnershipLeaseV1,
+  type ManagedOxigraphOwnershipSnapshotV1,
+} from './managed-oxigraph-ownership-v1-internal.js';
+export {
+  SystemRecordControllerRegistrationError,
+  SystemRecordLaneActivationConflictError,
+  createSystemRecordLaneControllerV1,
+  type SystemRecordApplyOutcomeV1,
+  type SystemRecordChildHandoffV1,
+  type SystemRecordDeferralReasonV1,
+  type SystemRecordLaneActivationV1,
+  type SystemRecordLaneControllerDepsV1,
+  type SystemRecordLaneControllerV1,
+  type SystemRecordLaneSessionV1,
+  type SystemRecordLaneStateV1,
+  type SystemRecordTransactionExecutorV1,
+} from './system-record-materializer-v1.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,

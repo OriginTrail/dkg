@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { SYSTEM_RECORD_KIND_V1 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../src/atomic-graph-replace.js';
+import {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  isAtomicGraphReplaceStagingGraph,
+} from '../src/atomic-graph-replace.js';
 import {
   RESERVED_INTERNAL_GRAPHS_V1,
   ReservedInternalGraphWriteError,
@@ -24,6 +27,17 @@ describe('internal graph policy V1', () => {
     for (const graph of RESERVED_INTERNAL_GRAPHS_V1) {
       expect(graph.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX)).toBe(true);
       expect(isInternalGraphUriV1(graph)).toBe(true);
+    }
+  });
+
+  it('is hidden by the predicate the existing enumeration filters actually call', () => {
+    // The 9 pre-existing filter sites (three adapters, GraphSetIndexStore x6,
+    // ChangelogStore.isReservedGraph) all call THIS function, not the policy's.
+    // Pinning it here is what makes "reserved state never enumerates" true on
+    // every predecessor binary as well as this one -- asserting only on
+    // isInternalGraphUriV1 would prove a fact about a function nothing calls yet.
+    for (const graph of RESERVED_INTERNAL_GRAPHS_V1) {
+      expect(isAtomicGraphReplaceStagingGraph(graph)).toBe(true);
     }
   });
 
