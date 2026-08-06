@@ -146,16 +146,46 @@ export class OwnedManagedHttpClient {
   }
 
   /**
-   * Destroy this generation's pool and await every request issued against it.
+   * Destroy this generation's pool, await every request issued against it, and
+   * PROVE the sockets are actually gone.
    *
    * Settlement is awaited rather than merely requested: an outstanding promise
    * that has not settled is precisely the state in which a late response could
    * still be attributed to the wrong child. Rejections are absorbed because a
    * destroyed socket makes its request fail by design.
+   *
+   * The socket poll is not defensive padding — it is the difference between
+   * "destroy was called" and "no socket from this generation can carry a byte".
+   * `Agent.destroy()` tears sockets down ASYNCHRONOUSLY: they leave the agent's
+   * `sockets`/`freeSockets` maps on their `close` event, one turn of the loop
+   * later at the earliest. The live conformance gate caught exactly this,
+   * reporting one live socket immediately after destroy. Returning there would
+   * have let a replacement child bind while a retired keep-alive socket was
+   * still open, which is the precise stale-generation window the whole design
+   * exists to close.
+   *
+   * Failure to reach zero within the bound is TERMINAL rather than retried: if
+   * a socket will not close we cannot assert the old writer is gone, and the
+   * caller must fail closed instead of binding a replacement.
    */
-  async destroyAndSettle(): Promise<void> {
+  async destroyAndSettle(timeoutMs = 5_000): Promise<void> {
     this.destroyed = true;
-    this.agent.destroy();
     await Promise.allSettled([...this.inflight]);
+    this.agent.destroy();
+
+    const deadline = Date.now() + timeoutMs;
+    while (this.openSocketCount > 0) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `managed HTTP client for child generation ${this.generation} still holds ` +
+            `${this.openSocketCount} socket(s) ${timeoutMs}ms after destroy; ` +
+            'the retired generation cannot be proven dead',
+        );
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      // Re-destroy is idempotent and reaps sockets that became free after the
+      // first call (a response that completed while we were waiting).
+      this.agent.destroy();
+    }
   }
 }
