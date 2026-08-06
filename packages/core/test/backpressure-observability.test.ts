@@ -101,7 +101,7 @@ describe('SchedulerPressureTracker', () => {
     const tracker = new SchedulerPressureTracker({
       scheduler: 'sync-global',
       now: () => now,
-      capacity: { queueLimit: 4, inflightLimit: 2, laneCapacity: 'shared' },
+      capacity: { queueLimit: 4, inflightLimit: 2, capacityModel: 'shared' },
     });
 
     // Four queued entries fill a pool of four, but no single lane holds more
@@ -142,7 +142,7 @@ describe('SchedulerPressureTracker', () => {
     const tracker = new SchedulerPressureTracker({
       scheduler: 'sync-global',
       now: () => now,
-      capacity: { queueLimit: 4, inflightLimit: 2, laneCapacity: 'shared' },
+      capacity: { queueLimit: 4, inflightLimit: 2, capacityModel: 'shared' },
     });
 
     // The concentrated shape from the issue: one lane holds the whole queue.
@@ -171,7 +171,7 @@ describe('SchedulerPressureTracker', () => {
     const tracker = new SchedulerPressureTracker({
       scheduler: 'sync-global',
       now: () => now,
-      capacity: { queueLimit: 4, inflightLimit: 2, laneCapacity: 'shared' },
+      capacity: { queueLimit: 4, inflightLimit: 2, capacityModel: 'shared' },
     });
 
     // `swm_recovery` is a known lane — it has run work — but has nothing queued

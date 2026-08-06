@@ -26,12 +26,12 @@ interface SchedulerPressureCapacityLimits {
 /**
  * The two models are mutually exclusive at the type level rather than by
  * convention: a shared pool has no private allocations, so it cannot carry
- * `lanes`. Omitting `laneCapacity` keeps the pre-existing `partitioned` shape,
+ * `lanes`. Omitting `capacityModel` keeps the pre-existing `partitioned` shape,
  * so every current caller is unaffected.
  */
 export type SchedulerPressureCapacity =
   | (SchedulerPressureCapacityLimits & {
-    laneCapacity?: 'partitioned';
+    capacityModel?: 'partitioned';
     /** Private per-lane allocations. These sum to the scheduler's ceiling. */
     lanes?: Record<string, {
       queueLimit?: number | null;
@@ -39,7 +39,7 @@ export type SchedulerPressureCapacity =
     }>;
   })
   | (SchedulerPressureCapacityLimits & {
-    laneCapacity: 'shared';
+    capacityModel: 'shared';
     /** A shared pool has no private allocation to declare. */
     lanes?: never;
   });
@@ -411,7 +411,7 @@ export class SchedulerPressureTracker {
     const runtime = this.runtimeFor(lane);
     const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
     const active = [...this.active.values()].filter((entry) => entry.lane === lane);
-    const shared = this.capacity.laneCapacity === 'shared';
+    const shared = this.capacity.capacityModel === 'shared';
     const queueLimit = shared
       ? normalizeLimit(this.capacity.queueLimit)
       : normalizeLimit(this.capacity.lanes?.[lane]?.queueLimit);

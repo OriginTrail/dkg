@@ -184,7 +184,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
         // from queue depth at all — without it the depth branches see a null
         // ceiling, and only queue age or an already-taken rejection can move a
         // lane off `healthy`.
-        laneCapacity: 'shared',
+        capacityModel: 'shared',
       });
     }
 
