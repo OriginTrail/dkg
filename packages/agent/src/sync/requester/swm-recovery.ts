@@ -1,4 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { invalidateSwmMaterializationWitness } from '@origintrail-official/dkg-storage';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import {
   contextGraphWorkspaceGraphUri,
@@ -343,6 +344,13 @@ export async function recoverContextGraphSwm(
       // A crash between the two therefore retries idempotently; it can never
       // advertise a head whose graph was only partially transferred.
       await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+      // #2079: a REPLACE, so the public lane's count gate cannot see it. This
+      // lane is lane-disjoint from the public one in automatic operation
+      // (`planSharedMemorySyncContextGraphs` partitions on
+      // `isPrivateContextGraph`), but the ungated `recover-shared-memory` route
+      // reaches it for any graph — and it exists to repair a corrupt local copy,
+      // which is the worst possible moment to leave a stale memo standing.
+      await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph).catch(() => {});
       await deps.replaceMetaForGraphAssets?.([descriptor]);
       if (verifiedAssetMeta.length > 0) {
         await deps.store.insert([...verifiedAssetMeta]);
@@ -472,6 +480,7 @@ export async function recoverContextGraphSwm(
       publicSnapshotStore: deps.publicSnapshotStore,
     });
     await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
+    await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph).catch(() => {}); // #2079: REPLACE, invisible to the count gate
     replacedGraphs += 1;
     insertedGraphQuads += asset.quads.length;
   }

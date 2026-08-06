@@ -121,6 +121,7 @@ import {
   type TripleStoreConfig,
   type Quad,
   type LargeLiteralStorageConfig,
+  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -2082,6 +2083,15 @@ export class PublishMethods extends DKGAgentBase {
       canonicalSwmGraph,
       canonicalParts.publicQuads.map((quad) => ({ ...quad, graph: canonicalSwmGraph })),
     );
+    // #2079: a REPLACE, not a drop — the catch-up lane's count gate cannot see
+    // it, so the witness must be dropped explicitly. The head is persisted only
+    // after this point, so a tear in between leaves content ahead of the head;
+    // without this, a witness for the OLD digest would still certify it.
+    // Best-effort, like every other invalidate: never fail a write that has
+    // already committed in order to drop a memo.
+    await invalidateSwmMaterializationWitness(this.store, canonicalSwmGraph, {
+      source: 'agent.publish.graphScopedUpdate.witnessInvalidate',
+    }).catch(() => {});
     if (!replacedSwm) {
       throw Object.assign(
         new Error(

@@ -187,6 +187,81 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     expect(await mat.isGraphAssetMaterialized(d2)).toBe(false);
   });
 
+  it('degrades to a miss when the witness ASK itself fails', async () => {
+    // The ASK is a pure optimisation, so a transient store error must fall
+    // through to the real read-back rather than fail a check that would
+    // otherwise have succeeded. Making the read rethrow currently survives the
+    // whole agent suite, so this pins the containment.
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+
+    let failAsks = false;
+    const store = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async (sparql: string, options?: unknown) => {
+            if (failAsks && sparql.trimStart().startsWith('ASK')) {
+              throw new Error('store unavailable');
+            }
+            return (target as TripleStore).query(sparql, options as never);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    const mat = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d = descriptorFor(quads);
+
+    // Warm the memo, then break only the ASK.
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    failAsks = true;
+
+    // Still correct — it recomputed instead of throwing.
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+  });
+
+  it('issues NO witness ASK when the store cannot hold a witness', async () => {
+    // `sparql-http` with `atomicUpdates:false` has no `replaceSubject`, so a
+    // witness can never be stored and every ASK would be permanent added cost
+    // for a hit rate of zero. The static probe must skip the read entirely —
+    // that config should be byte-identical to pre-#2079.
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+
+    let asks = 0;
+    const store = new Proxy(inner, {
+      get(target, prop, receiver) {
+        // Present the store as lacking atomic subject replace.
+        if (prop === 'replaceSubject') return undefined;
+        if (prop === 'query') {
+          return async (sparql: string, options?: unknown) => {
+            if (sparql.trimStart().startsWith('ASK')) asks += 1;
+            return (target as TripleStore).query(sparql, options as never);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    const mat = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d = descriptorFor(quads);
+
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    expect(asks).toBe(0);
+  });
+
   it('does not certify v2 from a v1 witness when the quad COUNT is unchanged', async () => {
     // The one case the count cannot catch, so the digest binding must.
     const store = newStore();

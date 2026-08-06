@@ -23,25 +23,43 @@
  *
  * ## The witness is NOT sufficient on its own — callers must keep a count gate
  *
- * A witness records that the content WAS correct, not that it still IS. Three
- * paths remove an assertion graph without any lock this module can participate
- * in:
+ * A witness records that the content WAS correct, not that it still IS. What
+ * happens to the content splits into two classes, and the distinction is the
+ * whole safety argument — do NOT collapse them into one list of "paths that
+ * change the graph".
+ *
+ * **REMOVALS — covered by the caller's count gate, no invalidation needed.**
+ * These leave an empty or absent graph, so `COUNT` returns 0 ≠ expected and the
+ * witness is never consulted:
  *
  *   - the shared-memory TTL sweep (`cleanupExpiredSharedMemory`), on a timer;
- *   - VM promotion / publish / update (`dropGraph(swmGraph)`), under a
- *     DIFFERENT lock map than the sync materializer's;
  *   - the chain-reset wipe, whose scoped delete filters on the context-graph,
  *     publisher and changelog prefixes only — so a `urn:dkg:local:*` witness
  *     SURVIVES a wipe that deletes every context-graph triple.
  *
- * All three leave an empty or absent graph, which a `COUNT` catches for free.
- * **Callers must therefore treat a witness hit as valid only after a count gate
- * has already matched.** Do not "optimize" that count away: without it, the
- * three paths above become permanent silent divergence certified as parity.
+ * **REPLACES — NOT covered by the count gate. Every one MUST invalidate.**
+ * A replace can leave the quad count unchanged while the content differs, which
+ * is exactly the case `COUNT` cannot see. Known sites, all on the byte-identical
+ * assertion-graph URI:
  *
- * What the count does NOT catch is an equal-count replace (v1 → v2, same quad
- * count, different digest). That is why the digest is part of the read, and why
- * the write must EVICT any prior row for the graph rather than accumulate.
+ *   - the sync materializer's own `replaceGraph`;
+ *   - live gossip apply (`workspace-handler`);
+ *   - the graph-scoped VM update path (`dkg-agent-publish`);
+ *   - storage-ack persistence (`storage-ack-handler`);
+ *   - the private SWM recovery lane (`swm-recovery`), lane-disjoint in automatic
+ *     operation but reachable via the `recover-shared-memory` route.
+ *
+ * This list is a snapshot, not a closed set. **A new `tryReplaceGraphAtomically`
+ * against a SWM assertion graph is a new obligation here** — treat adding one
+ * without an invalidate as a defect.
+ *
+ * **Callers must treat a witness hit as valid only after a count gate has
+ * already matched.** Do not "optimize" that count away: without it the removal
+ * paths above become permanent silent divergence certified as parity.
+ *
+ * The digest is part of the READ for the same reason the replace list exists: a
+ * standing v1 row cannot satisfy an ASK bound to v2's digest, which bounds the
+ * damage when an invalidate is missed or its best-effort call fails.
  */
 import { assertSafeIri, sparqlString } from '@origintrail-official/dkg-core';
 import type { QueryOptions, Quad, TripleStore } from './triple-store.js';
@@ -147,7 +165,12 @@ export async function writeSwmMaterializationWitness(
  * here, and pretending otherwise would be worse than leaving them to the count.
  */
 export async function invalidateSwmMaterializationWitness(
-  store: TripleStore,
+  // Narrower than `TripleStore` on purpose: invalidation needs exactly one
+  // capability, and every replace path that must call it is an obligation
+  // regardless of how rich its store handle is. The private recovery lane holds
+  // a `SwmRecoveryStore`, which is not a full `TripleStore` — requiring one here
+  // would have made that site uncallable and quietly left it out of the set.
+  store: { deleteByPattern(pattern: { graph: string; subject: string }, options?: QueryOptions): Promise<unknown> },
   assertionGraph: string,
   options: QueryOptions = {},
 ): Promise<void> {
