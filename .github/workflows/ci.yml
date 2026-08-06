@@ -305,10 +305,17 @@ jobs:
           set -euo pipefail
           # Collect every emitted output: tsc dist/, optional Vite dist-ui/,
           # and the generated network/ dir the CLI copies during build.
+          # adapter-prime-agent's extension bundle lives one level deeper
+          # (extension/dist) and the host-integration tests hard-require it,
+          # so it is added explicitly rather than widening the whole scan.
           mapfile -t PATHS < <(
-            find packages -maxdepth 2 -type d \
-              \( -name dist -o -name dist-ui -o -name network \) \
-              2>/dev/null | sort -u
+            {
+              find packages -maxdepth 2 -type d \
+                \( -name dist -o -name dist-ui -o -name network \) \
+                2>/dev/null
+              find packages -maxdepth 3 -type d -path '*/extension/dist' \
+                2>/dev/null
+            } | sort -u
           )
           echo "Packing ${#PATHS[@]} output dirs…"
           tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
