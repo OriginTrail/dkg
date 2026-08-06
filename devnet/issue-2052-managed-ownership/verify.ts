@@ -14,6 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION,
   MANAGED_OWNERSHIP_VERDICT_SCHEMA_VERSION,
   evaluateManagedOwnership,
   type ManagedOwnershipRawResultV1,
@@ -37,6 +38,25 @@ async function main(): Promise<void> {
   const rawBytes = await readFile(RAW_ARTIFACT);
   const rawArtifactSha256 = `0x${createHash('sha256').update(rawBytes).digest('hex')}`;
   const raw = JSON.parse(rawBytes.toString('utf8')) as ManagedOwnershipRawResultV1;
+
+  // BIND the artifact to this schema and this commit before believing a word of
+  // it. Neither was checked: the parsed JSON was cast straight to the result
+  // type, and `sourceCommit` was stamped from the CURRENT HEAD regardless of
+  // which commit produced the bytes. Running the verify script alone — or a CI
+  // cache that restored `artifacts/` — would re-certify old measurements against
+  // whatever HEAD happens to be now.
+  if (raw.schemaVersion !== MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION) {
+    throw new Error(
+      `raw artifact schema mismatch: expected ${MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION}, ` +
+        `found ${String(raw.schemaVersion)}`,
+    );
+  }
+  if (raw.sourceCommit !== sourceCommit) {
+    throw new Error(
+      `raw artifact was generated at ${String(raw.sourceCommit)} but HEAD is ${sourceCommit}; ` +
+        're-run the generator rather than certifying stale measurements',
+    );
+  }
 
   const checks = evaluateManagedOwnership(raw);
   const failed = checks.filter((check) => !check.pass);

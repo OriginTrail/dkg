@@ -16,10 +16,19 @@ export interface PredecessorEntryResultV1 {
   readonly id: string;
   readonly commit: string;
   readonly nodeVersion: string;
+  /**
+   * What the row was actually measured against.
+   *
+   * Always `current-binary`: no predecessor is checked out, built or executed.
+   * The field exists because the ARTIFACT is what gets uploaded as evidence, and
+   * it previously recorded `<commit>: pass` for a binary that never ran — the
+   * caveat lived only in prose the evidence does not carry. The manifest's role
+   * is to pin WHICH commits must keep the property, not to claim they were run.
+   */
+  readonly executedAgainst: 'current-binary';
   readonly enumeratedReservedGraphs: readonly string[];
   readonly servedReservedGraphs: readonly string[];
   readonly deletedReservedGraphsOnCleanup: readonly string[];
-  readonly advertisedSystemRecordLane: boolean;
   readonly seededQuadCount: number;
   readonly expectedQuadCount: number;
   readonly pass: boolean;
@@ -81,9 +90,48 @@ export interface LiveHandoffMeasurementV1 {
   readonly quadsWrittenBeforeHandoff: number;
   /** An ordinary request issued AFTER the handoff succeeded against the replacement. */
   readonly servedAfterHandoff: boolean;
+
+  /* ---- Terminal lifecycle, driven against the real supervisor. ----
+   *
+   * The gate used to call `close('shutdown')` with `.catch(() => undefined)` and
+   * capture `laneState` BEFORE it, so the artifact recorded `enabled` and never
+   * `shutdown`. Shutdown is the operation carrying every invariant this stack
+   * exists for, and BOTH review rounds found their blocker in it — so the only
+   * harness that drives the real supervisor asserted nothing about the one thing
+   * that mattered.
+   */
+  /** Lane state after `close('shutdown')` returned. Must be `shutdown`. */
+  readonly laneStateAfterShutdown: string;
+  /** Shutdown must complete cleanly here: the store is quiesced and the lane owns the child. */
+  readonly shutdownFailure: string | null;
+  /** Child stops attributable to the shutdown. Exactly one — each signals a child and asserts a port fact. */
+  readonly stopsDuringShutdown: number;
+  /** Still exactly one after a SECOND `close('shutdown')`: idempotence, measured. */
+  readonly stopsAfterSecondShutdown: number;
+  /** A dispatch on a terminal lane. Must be `capability-lost`. */
+  readonly applyAfterShutdown: string;
+  /** Re-opening a terminal lane must be refused. */
+  readonly reopenRefused: boolean;
+  /**
+   * Children spawned after shutdown committed, from the real `spawn`.
+   *
+   * This is the process fact behind `reopenRefused`: the round-2 blocker ended
+   * with a revived lane starting a REPLACEMENT CHILD after shutdown had proved
+   * the old one dead and asserted its port released. A state string can be
+   * wrong; a spawned PID cannot.
+   */
+  readonly childrenSpawnedAfterShutdown: number;
 }
 export interface ManagedOwnershipRawResultV1 {
   readonly schemaVersion: typeof MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION;
+  /**
+   * The commit these measurements were TAKEN at, recorded by the generator.
+   *
+   * `verify.ts` refuses an artifact whose commit is not the current HEAD. Without
+   * it, running verify alone — or a CI cache that restored `artifacts/` — would
+   * stamp the current commit onto measurements from an older one.
+   */
+  readonly sourceCommit: string;
   readonly oxigraphVersion: string;
   readonly oxigraphBinarySha256: string;
   readonly platform: string;
@@ -202,6 +250,43 @@ export function evaluateManagedOwnership(
       name: 'storeResumedAgainstTheReplacement',
       pass: live.servedAfterHandoff,
       detail: live.servedAfterHandoff ? undefined : 'a post-handoff request did not succeed',
+    },
+
+    // ---- Terminal lifecycle. Both review rounds found their blocker here. ----
+    {
+      name: 'laneIsTerminalAfterShutdown',
+      pass: live.laneStateAfterShutdown === 'shutdown',
+      detail: live.laneStateAfterShutdown,
+    },
+    {
+      name: 'shutdownCompletedCleanly',
+      pass: live.shutdownFailure === null,
+      detail: live.shutdownFailure ?? undefined,
+    },
+    {
+      name: 'shutdownRanExactlyOneTeardown',
+      pass: live.stopsDuringShutdown === 1,
+      detail: `${live.stopsDuringShutdown} child stop(s)`,
+    },
+    {
+      name: 'secondShutdownRanNoSecondTeardown',
+      pass: live.stopsAfterSecondShutdown === 1,
+      detail: `${live.stopsAfterSecondShutdown} child stop(s) across both calls`,
+    },
+    {
+      name: 'dispatchRefusedOnTerminalLane',
+      pass: live.applyAfterShutdown === 'capability-lost',
+      detail: live.applyAfterShutdown,
+    },
+    {
+      name: 'reopenRefusedOnTerminalLane',
+      pass: live.reopenRefused,
+      detail: live.reopenRefused ? undefined : 'a terminal lane reopened',
+    },
+    {
+      name: 'noChildStartedAfterShutdown',
+      pass: live.childrenSpawnedAfterShutdown === 0,
+      detail: `${live.childrenSpawnedAfterShutdown} child process(es) spawned after shutdown`,
     },
 
 
