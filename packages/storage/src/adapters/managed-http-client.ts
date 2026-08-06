@@ -100,6 +100,50 @@ export class OwnedManagedHttpClient {
   ): Promise<ManagedHttpResponse> {
     return new Promise<ManagedHttpResponse>((resolve, reject) => {
       const payload = Buffer.from(body, 'utf8');
+
+      /**
+       * Wall-clock deadline over the WHOLE call, armed before the request is
+       * even created.
+       *
+       * `req.setTimeout()` alone is not sufficient and quietly under-enforces:
+       * it bounds socket-ACTIVE time, so a request queued behind a busy socket
+       * is not counted at all. With `maxSockets: 1` that is not a corner case —
+       * a second concurrent call waits for the first to finish. Measured before
+       * this guard existed: a call with a 500 ms timeout resolved SUCCESSFULLY
+       * after 3822 ms.
+       *
+       * That is the dangerous shape of the bug. It does not fail loudly, it
+       * silently returns success far outside the deadline the caller was
+       * promised — blowing the 1,000 ms apply bound and the three-second slice
+       * while looking healthy. The system-record lane treats its apply timeout
+       * as a SAFETY bound, so it has to cover queue wait too.
+       */
+      let request: ReturnType<typeof httpRequest> | undefined;
+      let settled = false;
+      const deadline = setTimeout(() => {
+        const expiry = new Error(`managed SPARQL request exceeded ${timeoutMs}ms`);
+        // Settle FIRST, then tear down. Destroying a request that has not yet
+        // been assigned a socket does not emit `error` until one arrives, so
+        // relying on the teardown to reject leaves the caller blocked long past
+        // its deadline: measured 3825 ms for a 500 ms timeout, with the right
+        // error message and the wrong latency. The deadline must bound when the
+        // CALLER is released, not merely when we start cleaning up.
+        fail(expiry);
+        request?.destroy(expiry);
+      }, timeoutMs);
+      const succeed = (value: ManagedHttpResponse) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve(value);
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        reject(error);
+      };
+
       const req = httpRequest(
         url,
         {
@@ -114,22 +158,26 @@ export class OwnedManagedHttpClient {
           const chunks: Buffer[] = [];
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
           res.on('end', () => {
-            resolve({
+            succeed({
               status: res.statusCode ?? 0,
               body: Buffer.concat(chunks).toString('utf8'),
             });
           });
-          res.on('error', reject);
+          res.on('error', fail);
         },
       );
+      request = req;
 
-      // A hard deadline on the whole exchange. `destroy()` here tears down this
-      // request's socket only, which is what makes a timed-out write
+      // Socket-level idle timeout, kept ALONGSIDE the wall-clock deadline
+      // above rather than instead of it: this one detects a connection that
+      // has gone quiet mid-exchange, while the deadline bounds the total call
+      // including time spent waiting for a socket. `destroy()` tears down only
+      // this request's socket, which is what makes a timed-out write
       // indeterminate rather than silently retryable on a live connection.
       req.setTimeout(timeoutMs, () => {
         req.destroy(new Error(`managed SPARQL request exceeded ${timeoutMs}ms`));
       });
-      req.on('error', reject);
+      req.on('error', fail);
 
       const onAbort = () => req.destroy(new Error('managed SPARQL request aborted'));
       if (signal) {
