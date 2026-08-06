@@ -222,9 +222,27 @@ const DEFAULT_STOP_GRACE_MS = 5_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_RESTART_MAX_MS = 30_000;
 /**
- * Bounded re-probes of the bind after the child exits. Kept small and spread
- * across `stopGraceMs` so `stop()` stays a bounded operation: the common case
- * (port genuinely free) costs one refused connection and no sleeping at all.
+ * Bounded re-probes of the bind after the child exits.
+ *
+ * The common case — the port is genuinely free — costs one refused connection
+ * and no sleeping at all.
+ *
+ * The worst case is NOT `stopGraceMs`, and it is worth stating honestly because
+ * `stopGraceMs` is what an operator would reach for when tuning a shutdown
+ * timeout. Each probe may take up to `readyIntervalMs + 1000` = 1.5 s and they
+ * are separated by `floor(stopGraceMs / attempts)`, so five attempts is up to
+ * ~11.5 s, on top of `stopGraceMs` for the SIGTERM/SIGKILL wait and the bounded
+ * `resolveListenOwner` lookup (~6 s on Unix across the ss/lsof/fuser fallbacks,
+ * ~3 s on Windows). Worst case is therefore ~22-25 s, inside the teardown step.
+ *
+ * That time is only ever spent while something is STILL SERVING our bind after
+ * our own child exited — precisely the leaked-descendant or foreign-listener
+ * case where guessing "released" would be worse than waiting. A cheaper probe
+ * would buy speed by producing more false "released" verdicts, which is the
+ * wrong trade for something whose whole job is to be a proof. There is no
+ * durability exposure: probing begins only after the child has exited, so
+ * RocksDB is already closed and a hard kill at an outer deadline costs a log
+ * line rather than the store.
  */
 const PORT_RELEASE_PROBE_ATTEMPTS = 5;
 /** Sentinel for "no generation has ever been bound on this lease". */
