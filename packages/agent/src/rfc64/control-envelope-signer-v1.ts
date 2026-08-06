@@ -4,7 +4,10 @@ import type {
   SignedControlEnvelopeV1,
   UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  verifyControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 
 /** EOA signer shared by RFC-64 control-object producers. */
@@ -24,15 +27,17 @@ export class Rfc64ControlEnvelopeSigningErrorV1 extends Error {
   }
 }
 
+export interface SignedAndVerifiedRfc64ControlEnvelopeV1 {
+  readonly envelope: SignedControlEnvelopeV1;
+  readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
+}
+
 /** Sign one prepared control object and recover its declared issuer before use. */
-export async function signAndVerifyRfc64ControlEnvelopeV1<
-  TSigned extends SignedControlEnvelopeV1 = SignedControlEnvelopeV1,
->(
+export async function signAndVerifyRfc64ControlEnvelopeV1(
   unsigned: UnsignedControlEnvelopeV1,
   objectDigest: Digest32V1,
   signer: Rfc64ControlEnvelopeEip191SignerV1,
-  assertSpecific: (value: SignedControlEnvelopeV1) => void,
-): Promise<TSigned> {
+): Promise<SignedAndVerifiedRfc64ControlEnvelopeV1> {
   let signature: string;
   try {
     signature = await signer.signDigest(ethers.getBytes(objectDigest));
@@ -45,8 +50,8 @@ export async function signAndVerifyRfc64ControlEnvelopeV1<
   }
   const signed = { ...unsigned, objectDigest, signature } as SignedControlEnvelopeV1;
   try {
-    assertSpecific(signed);
-    await verifyControlEnvelopeIssuerSignatureV1(signed);
+    const issuerSignature = await verifyControlEnvelopeIssuerSignatureV1(signed);
+    return Object.freeze({ envelope: signed, issuerSignature });
   } catch (cause) {
     throw new Rfc64ControlEnvelopeSigningErrorV1(
       'verification',
@@ -54,5 +59,4 @@ export async function signAndVerifyRfc64ControlEnvelopeV1<
       { cause },
     );
   }
-  return signed as TSigned;
 }

@@ -42,19 +42,32 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     lastError: null as string | null,
   };
   readonly #inFlight = new Set<Promise<void>>();
+  readonly #assetTails = new Map<string, Promise<void>>();
+  readonly #vmConfirmedVersions = new Map<string, Set<string>>();
 
-  schedule(observer: () => Promise<void>): boolean {
+  schedule(assetKey: string, observer: () => Promise<void>): boolean {
     if (this.#inFlight.size >= RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1) {
       return false;
     }
-    const pending = observer();
-    let tracked: Promise<void>;
-    tracked = pending.finally(() => {
-      this.#inFlight.delete(tracked);
-    });
-    this.#inFlight.add(tracked);
-    void tracked.catch(() => undefined);
+    this.enqueue(assetKey, observer);
     return true;
+  }
+
+  runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
+    return this.enqueue(assetKey, observer);
+  }
+
+  markVmConfirmed(assetKey: string, assertionVersion: string): void {
+    let versions = this.#vmConfirmedVersions.get(assetKey);
+    if (versions === undefined) {
+      versions = new Set<string>();
+      this.#vmConfirmedVersions.set(assetKey, versions);
+    }
+    versions.add(assertionVersion);
+  }
+
+  isVmConfirmed(assetKey: string, assertionVersion: string): boolean {
+    return this.#vmConfirmedVersions.get(assetKey)?.has(assertionVersion) ?? false;
   }
 
   async drain(): Promise<void> {
@@ -94,5 +107,31 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     stats.lastKaUal = kaUal;
     if (result.status !== 'failed') stats.lastHeadDigest = result.headObjectDigest;
     stats.lastError = result.error;
+  }
+
+  private enqueue(assetKey: string, observer: () => Promise<void>): Promise<void> {
+    const predecessor = this.#assetTails.get(assetKey);
+    let pending: Promise<void>;
+    if (predecessor === undefined) {
+      try {
+        pending = observer();
+      } catch (cause) {
+        pending = Promise.reject(cause);
+      }
+    } else {
+      pending = predecessor.catch(() => undefined).then(observer);
+    }
+    let tracked!: Promise<void>;
+    tracked = pending.finally(() => {
+      this.#inFlight.delete(tracked);
+      if (this.#assetTails.get(assetKey) === tracked) {
+        this.#assetTails.delete(assetKey);
+        this.#vmConfirmedVersions.delete(assetKey);
+      }
+    });
+    this.#assetTails.set(assetKey, tracked);
+    this.#inFlight.add(tracked);
+    void tracked.catch(() => undefined);
+    return tracked;
   }
 }

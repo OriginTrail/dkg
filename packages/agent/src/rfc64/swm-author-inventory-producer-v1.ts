@@ -24,7 +24,10 @@ import {
   type TimestampMsV1,
   type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  verifyControlEnvelopeIssuerSignatureV1,
+  type VerifiedControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 
 import {
   Rfc64ControlEnvelopeSigningErrorV1,
@@ -253,7 +256,7 @@ async function mutateRfc64SwmAuthorInventoryV1<TResult>(
       current,
       next.rows,
     );
-    const head = await signHead({
+    const signedHead = await signHead({
       scope: prepared.scope,
       rows: next.rows,
       issuedAt,
@@ -262,8 +265,9 @@ async function mutateRfc64SwmAuthorInventoryV1<TResult>(
     });
     try {
       const committed = inventory.compareAndSwapSwmAuthorInventoryV1({
-        snapshot: Object.freeze({ head, rows: next.rows }),
+        snapshot: Object.freeze({ head: signedHead.head, rows: next.rows }),
         mutation: next.mutation,
+        issuerSignature: signedHead.issuerSignature,
         expectedCurrentHeadDigest:
           (current?.head.objectDigest as Digest32V1 | undefined) ?? null,
       });
@@ -430,7 +434,10 @@ async function signHead(input: Readonly<{
   issuedAt: TimestampMsV1;
   previous: SignedSwmAuthorInventoryHeadEnvelopeV1 | null;
   signer: Rfc64ControlEnvelopeEip191SignerV1;
-}>): Promise<SignedSwmAuthorInventoryHeadEnvelopeV1> {
+}>): Promise<Readonly<{
+  head: SignedSwmAuthorInventoryHeadEnvelopeV1;
+  issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;
+}>> {
   const previousVersion = input.previous === null
     ? -1n
     : BigInt(input.previous.payload.version);
@@ -458,17 +465,18 @@ async function signHead(input: Readonly<{
   }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
   const objectDigest = computeSwmAuthorInventoryHeadObjectDigestV1(unsigned);
   try {
-    const candidate = await signAndVerifyRfc64ControlEnvelopeV1<
-      SignedSwmAuthorInventoryHeadEnvelopeV1
-    >(
+    const candidate = await signAndVerifyRfc64ControlEnvelopeV1(
       unsigned,
       objectDigest,
       input.signer,
-      assertSignedSwmAuthorInventoryHeadEnvelopeV1,
     );
-    return parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
-      canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(candidate),
-    );
+    assertSignedSwmAuthorInventoryHeadEnvelopeV1(candidate.envelope);
+    return Object.freeze({
+      head: parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
+        canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(candidate.envelope),
+      ),
+      issuerSignature: candidate.issuerSignature,
+    });
   } catch (cause) {
     throw new Rfc64SwmAuthorInventoryProducerErrorV1(
       'swm-inventory-producer-signer',

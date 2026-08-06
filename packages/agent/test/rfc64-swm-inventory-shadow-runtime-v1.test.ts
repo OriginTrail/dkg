@@ -13,12 +13,12 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     let observerCalls = 0;
 
     for (let index = 0; index < RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1; index += 1) {
-      expect(runtime.schedule(() => {
+      expect(runtime.schedule(`asset-${index}`, () => {
         observerCalls += 1;
         return blocked;
       })).toBe(true);
     }
-    expect(runtime.schedule(() => {
+    expect(runtime.schedule('overflow', () => {
       observerCalls += 1;
       return blocked;
     })).toBe(false);
@@ -29,5 +29,33 @@ describe('RFC-64 SWM inventory shadow runtime', () => {
     release();
     await drain;
     expect(runtime.inFlightCount).toBe(0);
+  });
+
+  it('serializes one asset and lets a VM tombstone suppress a delayed SWM upsert', async () => {
+    const runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    const assetKey = 'public-cg\0author\0assertion';
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const durableRows = new Set<string>();
+
+    expect(runtime.schedule(assetKey, async () => {
+      entered();
+      await gate;
+      if (!runtime.isVmConfirmed(assetKey, '1')) durableRows.add('ka-v1');
+    })).toBe(true);
+    await started;
+    runtime.markVmConfirmed(assetKey, '1');
+    const removal = runtime.runExclusive(assetKey, async () => {
+      durableRows.delete('ka-v1');
+    });
+    release();
+    await removal;
+    await runtime.drain();
+
+    expect(durableRows).toEqual(new Set());
+    expect(runtime.inFlightCount).toBe(0);
+    expect(runtime.isVmConfirmed(assetKey, '1')).toBe(false);
   });
 });

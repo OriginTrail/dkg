@@ -17,6 +17,7 @@ import {
   computeKaProjectionDigestV1,
   computeNetworkId,
   computeSwmAuthorInventoryScopeDigestV1,
+  createOperationContext,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphLayerUri,
@@ -691,6 +692,48 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       absentRemovals: 1,
       failed: 0,
     });
+
+    const originalRecord = restarted.recordRfc64SwmAuthorInventoryShadowV1.bind(restarted);
+    let releaseDelayedUpsert!: () => void;
+    let markDelayedUpsertEntered!: () => void;
+    const delayedUpsertGate = new Promise<void>((resolve) => {
+      releaseDelayedUpsert = resolve;
+    });
+    const delayedUpsertEntered = new Promise<void>((resolve) => {
+      markDelayedUpsertEntered = resolve;
+    });
+    const recordSpy = vi.spyOn(restarted, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockImplementation(async (params) => {
+        markDelayedUpsertEntered();
+        await delayedUpsertGate;
+        return originalRecord(params);
+      });
+    const ctx = createOperationContext('share');
+    await restarted.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx,
+    });
+    await delayedUpsertEntered;
+    const confirmed = restarted.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      publicQuads,
+      seal,
+      assertionUri,
+      ctx,
+      publicationLabel: 'publish',
+    });
+    releaseDelayedUpsert();
+    await confirmed;
+    await restarted.awaitInFlightRfc64SwmInventoryObserversV1();
+    recordSpy.mockRestore();
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual([]);
   }, 60_000);
 
   it('normalizes legacy and selected auto-publish into one internal policy', () => {

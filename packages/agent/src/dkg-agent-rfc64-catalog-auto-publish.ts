@@ -84,6 +84,20 @@ function rfc64SwmInventoryShadowRuntimeV1(
   return runtime;
 }
 
+function rfc64SwmInventoryAssetKeyV1(input: Readonly<{
+  contextGraphId: string;
+  subGraphName?: string | null;
+  authorAddress: string;
+  assertionCoordinate: string;
+}>): string {
+  return JSON.stringify([
+    input.contextGraphId,
+    input.subGraphName ?? null,
+    input.authorAddress.toLowerCase(),
+    input.assertionCoordinate,
+  ]);
+}
+
 /** Internal normal-publication handoff after VM confirmation is durable locally. */
 export interface RecordConfirmedRfc64PublicCatalogAssetParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
@@ -200,7 +214,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): void {
+    const assetKey = rfc64SwmInventoryAssetKeyV1({
+      contextGraphId: params.contextGraphId,
+      subGraphName: params.subGraphName,
+      authorAddress: params.lifecycleAgentAddress,
+      assertionCoordinate: params.assertionCoordinate,
+    });
     const admitted = rfc64SwmInventoryShadowRuntimeV1(this).schedule(
+      assetKey,
       () => this.observeRfc64DurableSwmPromotionV1(params),
     );
     if (!admitted) {
@@ -219,6 +240,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     const subGraphName = params.subGraphName ?? null;
     const contextGraphId = params.contextGraphId;
     const assertionCoordinate = params.assertionCoordinate;
+    let confirmedSeal: ReturnType<typeof canonicalGraphScopedAuthorSealFromAssertionSealV1>;
     try {
       assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
       assertAssertionCoordinateV1(
@@ -228,6 +250,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (subGraphName !== null) {
         assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
       }
+      confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
     } catch (cause) {
       this.log.warn(
         params.ctx,
@@ -235,6 +258,14 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       return;
     }
+    const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
+    const assetKey = rfc64SwmInventoryAssetKeyV1({
+      contextGraphId,
+      subGraphName,
+      authorAddress: confirmedSeal.authorAddress,
+      assertionCoordinate,
+    });
+    shadowRuntime.markVmConfirmed(assetKey, confirmedSeal.assertionVersion);
     const runObserver = async (
       failureMessage: string,
       observer: () => Promise<unknown>,
@@ -261,11 +292,16 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       ),
       runObserver(
         `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary`,
-        () => this.removeRfc64SwmAuthorInventoryShadowV1({
-          contextGraphId,
-          subGraphName,
-          seal: params.seal,
-        }),
+        () => shadowRuntime.runExclusive(
+          assetKey,
+          async () => {
+            await this.removeRfc64SwmAuthorInventoryShadowV1({
+              contextGraphId,
+              subGraphName,
+              seal: params.seal,
+            });
+          },
+        ),
       ),
     ]);
   }
@@ -350,6 +386,18 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       }
       const canonicalSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
       kaUal = canonicalSeal.kaUal;
+      const assetKey = rfc64SwmInventoryAssetKeyV1({
+        contextGraphId: params.contextGraphId,
+        subGraphName: params.subGraphName,
+        authorAddress: canonicalSeal.authorAddress,
+        assertionCoordinate: params.assertionCoordinate,
+      });
+      if (rfc64SwmInventoryShadowRuntimeV1(this).isVmConfirmed(
+        assetKey,
+        canonicalSeal.assertionVersion,
+      )) {
+        return shadowResult('dormant', 'upsert', 0, null, null);
+      }
       const graphManager = new GraphManager(this.store);
       const head = await resolvePublishedKnowledgeAssetWorkspaceHead({
         store: this.store,

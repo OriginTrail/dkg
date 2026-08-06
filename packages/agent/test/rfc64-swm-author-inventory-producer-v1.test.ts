@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 
 import {
@@ -259,8 +259,7 @@ describe('RFC-64 SWM author inventory producer', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
   });
 
-  it('refuses to extend persisted history whose signature does not recover to the author', async () => {
-    const inventory = await createInventory();
+  it('refuses to extend supplied history whose signature does not recover to the author', async () => {
     const payload = Object.freeze({
       ...SCOPE,
       version: '0',
@@ -279,18 +278,25 @@ describe('RFC-64 SWM author inventory producer', () => {
     const invalidHead = Object.freeze({
       ...unsigned,
       objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(unsigned),
-      signature: `0x${'77'.repeat(65)}`,
+      signature: await otherWallet.signMessage(
+        ethers.getBytes(computeSwmAuthorInventoryHeadObjectDigestV1(unsigned)),
+      ),
     }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
-    inventory.compareAndSwapSwmAuthorInventoryV1({
-      snapshot: Object.freeze({ head: invalidHead, rows: Object.freeze([ROW_A]) }),
-      mutation: { kind: 'upsert', row: ROW_A },
-      expectedCurrentHeadDigest: null,
-    });
+    const compare = vi.fn();
+    const suppliedHistory: Pick<
+      Rfc64InventoryV1OperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
+    > = {
+      readSwmAuthorInventorySnapshotV1: () => Object.freeze({
+        head: invalidHead,
+        rows: Object.freeze([ROW_A]),
+      }),
+      compareAndSwapSwmAuthorInventoryV1: compare,
+    };
 
-    await expect(maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_B)))
+    await expect(maintainRfc64SwmAuthorInventoryV1(suppliedHistory, input(ROW_B)))
       .rejects.toMatchObject({ code: 'swm-inventory-producer-history' });
-    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)?.rows)
-      .toEqual([ROW_A]);
+    expect(compare).not.toHaveBeenCalled();
   });
 });
 

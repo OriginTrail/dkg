@@ -607,12 +607,13 @@ async function signEnvelope(
   assertSpecific: (value: SignedControlEnvelopeV1) => void,
 ): Promise<SignedControlEnvelopeV1> {
   try {
-    return await signAndVerifyRfc64ControlEnvelopeV1(
+    const signed = await signAndVerifyRfc64ControlEnvelopeV1(
       unsigned,
       objectDigest,
       signer,
-      assertSpecific,
     );
+    assertSpecific(signed.envelope);
+    return signed.envelope;
   } catch (cause) {
     if (
       cause instanceof Rfc64ControlEnvelopeSigningErrorV1
