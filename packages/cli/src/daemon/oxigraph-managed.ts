@@ -322,9 +322,18 @@ export async function startManagedOxigraph(
     queryEndpoint: handle.queryEndpoint,
     updateEndpoint: handle.updateEndpoint,
   };
+  // The lease ALONE is valid but deliberately does not advertise the lane:
+  // without a handoff nothing could prove the retired child dead before a
+  // replacement binds. Passing the supervisor handoff is what makes the
+  // composition live — the adapter owns the connection pool, but only the
+  // supervisor holds the `ChildProcess` and can assert process facts.
   const storeConfig: ManagedOxigraphResult['storeConfig'] = {
     backend: 'sparql-http',
-    options: attachManagedOxigraphLeaseV1(rewrittenOptions, handle.ownership.lease),
+    options: attachManagedOxigraphLeaseV1(
+      rewrittenOptions,
+      handle.ownership.lease,
+      handle.supervisorHandoff,
+    ),
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
     storeConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;

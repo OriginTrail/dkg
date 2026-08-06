@@ -17,7 +17,12 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
-import { extractManagedOxigraphLeaseV1 } from '@origintrail-official/dkg-storage';
+import {
+  SparqlHttpStore,
+  extractManagedOxigraphHandoffV1,
+  extractManagedOxigraphLeaseV1,
+  type SparqlHttpStoreOptions,
+} from '@origintrail-official/dkg-storage';
 
 import {
   planManagedOxigraph,
@@ -573,21 +578,41 @@ describe('startManagedOxigraph (real download + real server)', () => {
         // against the storage package's private table — not a look-alike.
         expect(extractManagedOxigraphLeaseV1(result!.storeConfig.options))
           .toBe(result!.ownership.lease);
+        // The supervisor handoff rides along too. Without it the store would
+        // hold a valid lease and still refuse to advertise the lane, because
+        // nothing could prove the retired child dead before a replacement binds.
+        expect(extractManagedOxigraphHandoffV1(result!.storeConfig.options))
+          .toBe(result!.handle.supervisorHandoff);
 
         // `resolveAdapterOptions` rewrites options with an object spread;
-        // spread copies own enumerable symbol keys, so capability survives it.
+        // spread copies own enumerable symbol keys, so BOTH survive it.
         expect(extractManagedOxigraphLeaseV1({ ...result!.storeConfig.options }))
           .toBe(result!.ownership.lease);
+        expect(extractManagedOxigraphHandoffV1({ ...result!.storeConfig.options }))
+          .toBe(result!.handle.supervisorHandoff);
+
+        // The real composed options advertise the lane end to end — the whole
+        // point of attaching the handoff rather than the lease alone.
+        expect(
+          new SparqlHttpStore(result!.storeConfig.options as unknown as SparqlHttpStoreOptions)
+            .getSystemRecordLaneControllerV1(),
+        ).toBeDefined();
 
         // A JSON round trip — what persisting `config.json` does — destroys
-        // it. A lease that could be written to disk and replayed on a later
-        // boot would prove nothing about who owns the process today.
+        // both. A lease or handoff that could be written to disk and replayed
+        // on a later boot would prove nothing about who owns the process today.
         const persisted = JSON.parse(JSON.stringify(result!.storeConfig)) as {
           backend: string;
           options: Record<string, unknown>;
         };
         expect(Object.getOwnPropertySymbols(persisted.options)).toEqual([]);
         expect(extractManagedOxigraphLeaseV1(persisted.options)).toBeNull();
+        expect(extractManagedOxigraphHandoffV1(persisted.options)).toBeNull();
+        // A store rebuilt from the persisted config is therefore inert.
+        expect(
+          new SparqlHttpStore(persisted.options as unknown as SparqlHttpStoreOptions)
+            .getSystemRecordLaneControllerV1(),
+        ).toBeUndefined();
         // ...and the string-keyed config an operator would see is unchanged.
         expect(persisted).toEqual({
           backend: 'sparql-http',
@@ -601,6 +626,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
         // structuredClone drops symbol keys too (and could not carry identity
         // even if it kept them).
         expect(extractManagedOxigraphLeaseV1(structuredClone(persisted.options))).toBeNull();
+        expect(extractManagedOxigraphHandoffV1(structuredClone(persisted.options))).toBeNull();
       } finally {
         await result?.handle.stop();
         await rm(dataDir, { recursive: true, force: true });

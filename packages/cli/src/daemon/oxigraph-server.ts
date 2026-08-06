@@ -73,6 +73,7 @@ import {
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphOwnershipSnapshotV1,
+  type ManagedOxigraphSupervisorHandoffV1,
 } from '@origintrail-official/dkg-storage';
 import { findListenOwnerPid } from './oxigraph-listen-port.js';
 import {
@@ -174,6 +175,16 @@ export interface OxigraphServerHandle {
   readonly updateEndpoint: string;
   /** Live ownership view for capability gating (#2052 B2). */
   readonly ownership: OxigraphServerOwnershipV1;
+  /**
+   * The supervisor's half of the system-record lane's clean-generation handoff
+   * (#2052 B2): retire the owned child with a PROVEN port release, then bind a
+   * replacement generation.
+   *
+   * Kept off {@link OxigraphServerOwnershipV1} on purpose — that view is
+   * read-only, whereas this can kill and replace the child. Only the managed
+   * store composition receives it.
+   */
+  readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1;
   /** Stop the server and prevent further restarts. Idempotent. */
   stop(): Promise<void>;
   /**
@@ -303,6 +314,17 @@ export async function startOxigraphServer(
    * awaits the exit and escalates to SIGKILL.
    */
   let terminating = false;
+  /**
+   * `none` — ordinary supervision. `retired` — a lane handoff has proven the
+   * owned child dead and is expected to bind the replacement itself.
+   *
+   * While `retired`, NOTHING else may create a child: the automatic backoff
+   * stays disarmed and `recoverGeneration()` refuses. Otherwise a revive could
+   * slip into the window BETWEEN the handoff's two halves (the mutex is
+   * released there) and bind a generation the lane never asked for, over a port
+   * the lane still believes is free.
+   */
+  let handoffPhase: 'none' | 'retired' = 'none';
   let child: ChildProcess | null = null;
   let restarts = 0;
   // Tail of the child's stderr, surfaced in the startup error so a bind
@@ -546,8 +568,9 @@ export async function startOxigraphServer(
    * port) never pegs the CPU.
    */
   const scheduleRevive = (reason: string): void => {
-    // Never arm a restart once shutdown has begun.
-    if (terminating || state === 'closed') return;
+    // Never arm a restart once shutdown has begun, or while a lane handoff owns
+    // the replacement.
+    if (terminating || state === 'closed' || handoffPhase === 'retired') return;
     restarts += 1;
     const delay = Math.min(restartMax, restartBase * 2 ** (restarts - 1));
     log(`[oxigraph] ${reason}; restart #${restarts} in ${delay}ms`);
@@ -647,6 +670,15 @@ export async function startOxigraphServer(
     if (before.childGeneration !== expectedGeneration || before.ready) {
       return before.childGeneration;
     }
+    // A lane handoff retired the child and owns the replacement. Reviving here
+    // would bind a generation the lane did not ask for, over the port it is
+    // about to start into — refuse rather than race it.
+    if (handoffPhase === 'retired') {
+      throw new Error(
+        `Managed Oxigraph is mid clean-generation handoff; generation ` +
+          `${expectedGeneration} cannot be recovered until the replacement binds`,
+      );
+    }
     state = 'recovering';
     // Take over from any armed backoff: the restart happens now, and the
     // superseded timer is disarmed so it cannot spawn a second child behind us.
@@ -726,11 +758,11 @@ export async function startOxigraphServer(
    * We only ever PROBE here. No pid observed on the port is ever signalled —
    * every kill in this module goes through the tracked `ChildProcess`.
    */
-  const proveManagedPortRelease = async (exited: ChildProcess | null): Promise<void> => {
+  const proveManagedPortRelease = async (exited: ChildProcess | null): Promise<boolean> => {
     const interval = Math.max(1, Math.floor(stopGraceMs / PORT_RELEASE_PROBE_ATTEMPTS));
     for (let attempt = 1; attempt <= PORT_RELEASE_PROBE_ATTEMPTS; attempt += 1) {
       // Nothing serves SPARQL on our bind any more: released, proven.
-      if (!(await endpointAnswers())) return;
+      if (!(await endpointAnswers())) return true;
       if (attempt === PORT_RELEASE_PROBE_ATTEMPTS) break;
       await sleep(interval);
     }
@@ -743,6 +775,29 @@ export async function startOxigraphServer(
         'Port release could not be proven; managed-store ownership is now terminal.',
     );
     ownership.invalidate('port-release-unproven');
+    return false;
+  };
+
+  /** SIGTERM, escalating to SIGKILL after `stopGraceMs`, resolving on exit. */
+  const awaitChildExit = async (c: ChildProcess): Promise<void> => {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(killTimer);
+        resolve();
+      };
+      c.once('exit', done);
+      c.kill('SIGTERM');
+      const killTimer = setTimeout(() => {
+        if (c.exitCode === null && c.signalCode === null) {
+          log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
+          c.kill('SIGKILL');
+        }
+      }, stopGraceMs);
+      killTimer.unref?.();
+    });
   };
 
   /**
@@ -768,26 +823,13 @@ export async function startOxigraphServer(
     // charging it `stopGraceMs` of probing would just slow every failed boot.
     const provedOwnership = ownership.snapshot().childGeneration !== UNBOUND_GENERATION;
     if (c && c.exitCode === null && c.signalCode === null) {
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        const done = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(killTimer);
-          resolve();
-        };
-        c.once('exit', done);
-        c.kill('SIGTERM');
-        const killTimer = setTimeout(() => {
-          if (c.exitCode === null && c.signalCode === null) {
-            log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
-            c.kill('SIGKILL');
-          }
-        }, stopGraceMs);
-        killTimer.unref?.();
-      });
+      await awaitChildExit(c);
       log('[oxigraph] server stopped');
     }
+    // Unlike the lane handoff below, `stop()` does not THROW on an unproven
+    // release. It is called from `finally` blocks and process teardown, where a
+    // rejection would mask the original error; the terminal lease and the log
+    // above are the signal. Nothing can bind a replacement after close anyway.
     if (provedOwnership) await proveManagedPortRelease(c);
     // `shutdown` must not paper over a more specific terminal reason:
     // `port-release-unproven` is the one an operator needs to see, and both
@@ -818,6 +860,126 @@ export async function startOxigraphServer(
     if (!ownership.snapshot().terminal) ownership.invalidate('stop');
     signalTrackedChild('SIGTERM');
   };
+
+  // ---------------------------------------------------------------------
+  // Clean-generation handoff for the system-record lane (#2052 B2)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Retire the owned child so a replacement can be bound cleanly.
+   *
+   * This is NOT `stop()`. `stop()` closes the supervisor for good; this leaves
+   * it open and expects `startCleanGenerationLocked()` to follow. The critical
+   * difference is the failure mode: an unproven port release here REJECTS,
+   * because the caller is about to bind a replacement and doing that over a
+   * listener we cannot account for is exactly the adoption hazard the lease
+   * exists to prevent. Resolving quietly would let the lane proceed against a
+   * foreign server.
+   */
+  const retireOwnedChildLocked = async (): Promise<void> => {
+    if (terminating || state === 'closed') {
+      throw new Error(
+        'Managed Oxigraph supervisor is shutting down; the owned child cannot be retired',
+      );
+    }
+    const before = ownership.snapshot();
+    if (before.terminal) {
+      throw new Error(
+        `Managed Oxigraph ownership is terminal (${before.lastInvalidation}); ` +
+          'the owned child cannot be retired for a clean generation',
+      );
+    }
+    state = 'recovering';
+    // Disarm automatic supervision for the WHOLE handoff window. The lane owns
+    // the replacement; a backoff firing between the two halves would bind a
+    // generation nobody asked for, against a port the lane believes is free.
+    clearReviveTimer();
+    ownership.invalidate('stop');
+    markStoreDown();
+    const c = child;
+    // Detach FIRST so the exit we are about to cause cannot be read as a crash
+    // and schedule a restart behind us.
+    child = null;
+    if (c && c.exitCode === null && c.signalCode === null) {
+      await awaitChildExit(c);
+    }
+    if (!(await proveManagedPortRelease(c))) {
+      throw new Error(
+        `Managed Oxigraph could not prove ${bind} was released after retiring the child; ` +
+          'managed-store capability is now terminal',
+      );
+    }
+    handoffPhase = 'retired';
+  };
+
+  /**
+   * Bind a replacement generation after a proven-dead predecessor.
+   *
+   * Refuses unless a retire actually completed: without that proof the lane
+   * would be starting a child over a socket whose previous owner is unaccounted
+   * for, which is the one thing the whole handoff exists to rule out.
+   */
+  const startCleanGenerationLocked = async (): Promise<void> => {
+    if (terminating || state === 'closed') {
+      throw new Error(
+        'Managed Oxigraph supervisor is shutting down; no clean generation can be bound',
+      );
+    }
+    const before = ownership.snapshot();
+    if (before.terminal) {
+      throw new Error(
+        `Managed Oxigraph ownership is terminal (${before.lastInvalidation}); ` +
+          'no clean generation can be bound',
+      );
+    }
+    if (handoffPhase !== 'retired') {
+      throw new Error(
+        'Managed Oxigraph clean-generation start requires a proven-dead predecessor; ' +
+          'stopAndProveOwnedChildDead() has not completed',
+      );
+    }
+    state = 'recovering';
+    child = spawnChild();
+    const deadline = Date.now() + readyTimeoutMs;
+    while (Date.now() < deadline) {
+      if (terminating) break;
+      if (!childAlive()) break;
+      const listenerPid = await probeReady();
+      if (listenerPid !== null && childAlive()) {
+        handoffPhase = 'none';
+        const generation = bindProvenGeneration(child!, listenerPid);
+        log(`[oxigraph] clean child generation ${generation} bound on ${bind}.`);
+        return;
+      }
+      await sleep(readyIntervalMs);
+    }
+    // The lane's replacement could not be proven. Reap the unproven child and
+    // hand the node back to ORDINARY supervision: a lane that abandons the
+    // handoff here must not leave the store permanently childless. The backoff
+    // may later bind a generation of its own, which the lane observes as the
+    // ordinary stale-generation case.
+    signalTrackedChild('SIGKILL');
+    handoffPhase = 'none';
+    scheduleRevive(`clean-generation start did not become ready on ${bind}`);
+    throw new Error(
+      `Managed Oxigraph could not prove a clean child generation on ${bind} ` +
+        `within ${readyTimeoutMs}ms`,
+    );
+  };
+
+  /**
+   * The supervisor's half of the lane handoff.
+   *
+   * Deliberately NOT part of {@link OxigraphServerOwnershipV1}: that view is
+   * read-only by design, while this can kill and replace the child. It is handed
+   * to exactly one consumer — the managed store composition — and travels to the
+   * adapter under a symbol key, so it can never be persisted or reconstructed
+   * from config.
+   */
+  const supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 = Object.freeze({
+    stopAndProveOwnedChildDead: () => runExclusive(retireOwnedChildLocked),
+    startAndProveCleanGeneration: () => runExclusive(startCleanGenerationLocked),
+  });
 
   // ---------------------------------------------------------------------
   // Startup
@@ -896,6 +1058,7 @@ export async function startOxigraphServer(
     queryEndpoint,
     updateEndpoint,
     ownership: ownershipView,
+    supervisorHandoff,
     stop,
     killSync,
   };
