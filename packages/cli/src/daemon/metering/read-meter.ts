@@ -28,6 +28,24 @@ export interface MeterConfig {
   enforcedPrincipals: Set<string>;
 }
 
+/**
+ * D12 v1.1: the CANONICAL (signed) form of the coefficient table is fully
+ * integer — every value is scaled by SCALE. The decimal COEFFICIENTS below
+ * remain for computation and human display, but only this object is ever
+ * canonicalized/hashed, so `coefficientsDigest` can never depend on float
+ * serialization. (Buyer-found: Hermes/Bo.)
+ */
+export const COEFFICIENTS_CANONICAL = Object.freeze({
+  scale: 100,
+  scheduleVersion: SCHEDULE_VERSION,
+  F_base: 100,          // 1.00
+  w_out: 25,            // 0.25 per KiB
+  S0: 10000,
+  markers: Object.freeze({ scan: 100, aggregate: 150, text: 150, path: 200, cartesian: 20000 }),
+  roundUpToTenths: 1,   // ceil to 0.1 == 1 tenth
+  epsilon: 1000000000,  // 1e-9 expressed as 1/1e9 — the normative guard
+});
+
 export const COEFFICIENTS = Object.freeze({
   F_base: 1,
   w_out: 0.25,

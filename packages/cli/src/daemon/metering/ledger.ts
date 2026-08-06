@@ -16,9 +16,9 @@
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as edSign } from "node:crypto";
 import { dirname, join } from "node:path";
-import { COEFFICIENTS, SCHEDULE_VERSION, costMicroTrac, type MeterConfig, type MeterMode } from "./read-meter.js";
+import { COEFFICIENTS_CANONICAL, SCHEDULE_VERSION, costMicroTrac, type MeterConfig, type MeterMode } from "./read-meter.js";
 
-export const LEG_DOMAIN = "odysseus-dkg:read-leg:v0.2";
+export const LEG_DOMAIN = "odysseus-dkg:read-leg:v0.3";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -26,14 +26,28 @@ const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("he
 export function canonicalize(value: unknown): string {
   if (value === null || typeof value === "boolean") return JSON.stringify(value);
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("non-finite number in canonical payload");
-    // U carries one decimal place by construction; scale to integer tenths.
-    if (!Number.isInteger(value)) return String(Math.round(value * 10) / 10);
+    // D12 v1.1 (buyer-found, Hermes/Bo 2026-08-06): NO floats in signed
+    // material — not even "one decimal place". `Math.round(u*10)/10` followed
+    // by JSON serialization does not preserve a trailing ".0" (U=3.0 emits
+    // `3`), so two conforming implementations could produce DIFFERENT
+    // canonical bytes for the same charge. U is therefore signed as
+    // `unitsTenths`, an integer number of tenths. Any non-integer here is a
+    // bug in the caller, and throwing is the only safe response.
+    if (!Number.isInteger(value)) throw new Error(`E_CANON_NON_INTEGER: ${value} (use integer tenths for U)`);
+    if (!Number.isSafeInteger(value)) throw new Error("E_CANON_UNSAFE_INTEGER");
     return String(value);
   }
   if (typeof value === "string") return JSON.stringify(value);
   if (Array.isArray(value)) return "[" + value.map(canonicalize).join(",") + "]";
   if (typeof value === "object") {
+    // D12 v1.1 (found by the canonicalization fixture): only PLAIN objects may
+    // be canonicalized. A Date/Map/Set/class instance has no own enumerable
+    // keys, so it would silently serialize as `{}` — data loss inside signed
+    // material. Reject rather than coerce.
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      throw new Error(`E_CANON_NON_PLAIN_OBJECT: ${value?.constructor?.name ?? "unknown"} (serialize it explicitly first)`);
+    }
     const o = value as Record<string, unknown>;
     return "{" + Object.keys(o).sort().map((k) => JSON.stringify(k) + ":" + canonicalize(o[k])).join(",") + "}";
   }
@@ -165,7 +179,7 @@ export function recordReadLeg(home: string, args: {
 
   const leg = {
     legType: "read" as const,
-    schemaVersion: "receipt-v0.2",
+    schemaVersion: "receipt-v0.3",
     domain: LEG_DOMAIN,
     legId: sha256(`${args.principal}:${t.sequence + 1}:${sha256(args.sparql)}:${Date.now()}`).slice(0, 32),
     sequence: t.sequence + 1,
@@ -174,10 +188,12 @@ export function recordReadLeg(home: string, args: {
     requester: { principal: args.principal, keyRef: args.requesterKeyRef ?? null },
     meter: {
       scheduleVersion: SCHEDULE_VERSION,
-      units: args.units,
+      // D12 v1.1: integer tenths is the SIGNED representation. A decimal
+      // `units` may be shown to humans but never enters the preimage.
+      unitsTenths: Math.round(args.units * 10),
       breakdown: args.breakdown,
       scopeQuads: args.scopeQuads,
-      coefficientsDigest: sha256(canonicalize(COEFFICIENTS)),
+      coefficientsDigest: sha256(canonicalize(COEFFICIENTS_CANONICAL as unknown as Record<string, unknown>)),
     },
     evidence: {
       queryDigest: "sha256:" + sha256(args.sparql),
@@ -209,7 +225,7 @@ export function noteFailedRead(home: string, args: { principal?: string; sparql:
     kind: "failed-read",
     principal: args.principal,
     queryDigest: "sha256:" + sha256(args.sparql),
-    units: COEFFICIENTS.F_base,
+    units: COEFFICIENTS_CANONICAL.F_base / COEFFICIENTS_CANONICAL.scale,
     at: new Date().toISOString(),
   });
 }
