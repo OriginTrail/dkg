@@ -239,7 +239,18 @@ export class InventoryV1CandidateError extends Error {
   }
 }
 
-export interface Rfc64InventoryV1CandidateApi {
+export interface Rfc64SwmAuthorInventoryOperationsV1 {
+  readSwmAuthorInventorySnapshotV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): SwmAuthorInventorySnapshotV1 | null;
+  compareAndSwapSwmAuthorInventoryV1(
+    input: CompareAndSwapSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1;
+}
+
+export interface Rfc64InventoryV1CandidateApi
+  extends Rfc64SwmAuthorInventoryOperationsV1 {
   purgeNextStartupStaleCandidateBatch(): CandidateSessionGcBatchResultV1;
   createCandidateSession(): CandidateSessionV1;
   putVerifiedCandidateBucket(load: VerifiedCandidateBucketLoadV1): CandidateBucketPutResultV1;
@@ -291,13 +302,6 @@ export interface Rfc64InventoryV1CandidateApi {
   compareAndSwapAppliedCatalogHeadV1(
     input: CompareAndSwapAppliedCatalogHeadInputV1,
   ): AppliedCatalogHeadCasResultV1;
-  readSwmAuthorInventorySnapshotV1(
-    inventoryScopeDigest: Digest32V1,
-    authorAddress: EvmAddressV1,
-  ): SwmAuthorInventorySnapshotV1 | null;
-  compareAndSwapSwmAuthorInventoryV1(
-    input: CompareAndSwapSwmAuthorInventoryInputV1,
-  ): SwmAuthorInventoryCasResultV1;
 }
 
 /** Candidate operations safe to share without inventory lifecycle ownership. */
@@ -318,8 +322,6 @@ export type Rfc64InventoryV1OperationsV1 = Pick<
   | 'deleteCandidateBucket'
   | 'readAppliedCatalogHeadV1'
   | 'compareAndSwapAppliedCatalogHeadV1'
-  | 'readSwmAuthorInventorySnapshotV1'
-  | 'compareAndSwapSwmAuthorInventoryV1'
 >;
 
 /**
@@ -333,13 +335,7 @@ export function createRfc64InventoryOperationsViewV1(
   inventory: Rfc64InventoryV1CandidateApi,
   requireOwnerOpen: () => void,
 ): Rfc64InventoryV1OperationsV1 {
-  const fence = <TArguments extends unknown[], TResult>(
-    operation: (...arguments_: TArguments) => TResult,
-  ): ((...arguments_: TArguments) => TResult) =>
-    (...arguments_: TArguments): TResult => {
-      requireOwnerOpen();
-      return operation(...arguments_);
-    };
+  const fence = createInventoryOperationFenceV1(requireOwnerOpen);
   return Object.freeze({
     createCandidateSession: fence(inventory.createCandidateSession.bind(inventory)),
     putVerifiedCandidateBucket: fence(inventory.putVerifiedCandidateBucket.bind(inventory)),
@@ -368,6 +364,16 @@ export function createRfc64InventoryOperationsViewV1(
     compareAndSwapAppliedCatalogHeadV1: fence(
       inventory.compareAndSwapAppliedCatalogHeadV1.bind(inventory),
     ),
+  });
+}
+
+/** Build the feature-owned non-owning SWM author-inventory capability. */
+export function createRfc64SwmAuthorInventoryOperationsViewV1(
+  inventory: Rfc64SwmAuthorInventoryOperationsV1,
+  requireOwnerOpen: () => void,
+): Rfc64SwmAuthorInventoryOperationsV1 {
+  const fence = createInventoryOperationFenceV1(requireOwnerOpen);
+  return Object.freeze({
     readSwmAuthorInventorySnapshotV1: fence(
       inventory.readSwmAuthorInventorySnapshotV1.bind(inventory),
     ),
@@ -375,6 +381,20 @@ export function createRfc64InventoryOperationsViewV1(
       inventory.compareAndSwapSwmAuthorInventoryV1.bind(inventory),
     ),
   });
+}
+
+function createInventoryOperationFenceV1(
+  requireOwnerOpen: () => void,
+): <TArguments extends unknown[], TResult>(
+  operation: (...arguments_: TArguments) => TResult,
+) => (...arguments_: TArguments) => TResult {
+  return <TArguments extends unknown[], TResult>(
+    operation: (...arguments_: TArguments) => TResult,
+  ): ((...arguments_: TArguments) => TResult) =>
+    (...arguments_: TArguments): TResult => {
+      requireOwnerOpen();
+      return operation(...arguments_);
+    };
 }
 
 interface EncodedAppliedCatalogHeadV1 {

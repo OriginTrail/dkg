@@ -3,6 +3,7 @@
 // unverified low-level reopen callback.
 export {
   createRfc64InventoryOperationsViewV1,
+  createRfc64SwmAuthorInventoryOperationsViewV1,
   InventoryV1CandidateError,
   type AppliedCatalogHeadCasResultV1,
   type AppliedCatalogHeadSnapshotV1,
@@ -22,6 +23,7 @@ export {
   type InventoryV1CandidateErrorCode,
   type Rfc64InventoryV1CandidateApi,
   type Rfc64InventoryV1OperationsV1,
+  type Rfc64SwmAuthorInventoryOperationsV1,
   type SwmAuthorInventoryCasResultV1,
   type SwmAuthorInventoryMutationV1,
   type VerifiedCandidateBucketLoadV1,
