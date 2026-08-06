@@ -57,6 +57,37 @@ interface MessageUpdateEvent {
   };
   message?: { role?: string; content?: unknown; errorMessage?: string; stopReason?: string };
 }
+interface AgentMessageLike {
+  role?: string;
+  content?: unknown;
+  customType?: string;
+  details?: unknown;
+}
+interface BeforeAgentStartEvent {
+  prompt?: string;
+}
+interface BeforeAgentStartEventResult {
+  message: {
+    customType: string;
+    content: string;
+    display: boolean;
+    details: { ownershipToken: string };
+  };
+}
+interface MessageStartEvent {
+  message?: AgentMessageLike;
+}
+interface ContextEvent {
+  messages?: AgentMessageLike[];
+}
+interface InputEvent {
+  text?: string;
+  source?: string;
+}
+type InputEventResult =
+  | { action: 'continue' }
+  | { action: 'transform'; text: string }
+  | { action: 'handled' };
 interface ExtensionApiLike {
   on(event: string, handler: (event: any, ctx: ExtensionCtxLike) => unknown): void;
   sendUserMessage(content: string, options?: { deliverAs?: 'steer' | 'followUp' }): void;
@@ -75,6 +106,11 @@ const TURN_HARD_TIMEOUT_MS = 55 * 60_000;
 // republication that landed (atomic rename, fresh mtime) between our read and
 // the rm. Mirrored in the daemon-side reader (`session-registry.ts`).
 const PRUNE_MIN_AGE_MS = 30_000;
+// Removed by our `input` handler before Prime creates the user message. The
+// opaque tag distinguishes this extension's submission from another extension
+// (or an identical local prompt) without exposing metadata to the model.
+const BRIDGE_INPUT_TAG_PREFIX = '\u2063dkg-bridge-turn:';
+const BRIDGE_TURN_MARKER_TYPE = 'dkg.bridge.turn-owner';
 
 function agentDir(): string {
   return process.env.PRIME_AGENT_CODING_AGENT_DIR ?? join(homedir(), '.prime', 'agent');
@@ -131,12 +167,16 @@ function isProcessAlive(pid: number): boolean {
 
 interface PendingTurn {
   correlationId: string;
+  prompt: string;
+  taggedPrompt: string;
+  ownershipToken: string;
+  inputObserved: boolean;
   chunks: string[];
   subscribers: Set<ServerResponse>;
   responseSettled: boolean;
   resolve: (outcome: TurnOutcome) => void;
-  idleTimer: NodeJS.Timeout;
-  hardTimer: NodeJS.Timeout;
+  idleTimer?: NodeJS.Timeout;
+  hardTimer?: NodeJS.Timeout;
 }
 
 interface TurnOutcome {
@@ -215,14 +255,17 @@ class SessionBridge {
   /** Fixed for the bridge's lifetime; re-publications move only lastActiveAt. */
   #startedAt: string | undefined;
   #turn: PendingTurn | undefined;
+  // `before_agent_start` results are cached on Prime's queued action. The
+  // hidden ownership marker therefore follows the bridge prompt into the run
+  // that actually commits, even if another local/retry run starts after its
+  // preparation hook. Local turns and agent.continue() retries have no marker.
+  #activeRunTurn: PendingTurn | undefined;
+  #runHasFreshPrompt = false;
+  // A terminal HTTP verdict must stop Prime from continuing that logical turn
+  // in the background. Retry starts have no before_agent_start; abort them
+  // until a genuinely fresh prompt boundary supersedes the failed run.
+  #failedRunQuarantined = false;
   #agentActive = false;
-  // Set by #failTurn, cleared by the next agent_start (or consumed by the
-  // failed turn's own trailing agent_end). While set, every agent event still
-  // belongs to the failed turn: a late agent_end must not settle a successor
-  // request, late text_deltas from a zombie turn the hard-timeout abort could
-  // not stop must not contaminate its transcript, and the trailing
-  // `error`/`aborted` frame the abort itself produces must not fail it.
-  #discardStaleTurnEvents = false;
   #abortActiveAgent: (() => void) | undefined;
   #closed = false;
   readonly #turnIdleTimeoutMs: number;
@@ -380,6 +423,9 @@ class SessionBridge {
       this.#settleResponse({ text: this.#turn.chunks.join(''), error: 'Bridge stopped' });
       this.#clearTurn(this.#turn);
     }
+    this.#activeRunTurn = undefined;
+    this.#runHasFreshPrompt = false;
+    this.#failedRunQuarantined = false;
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
     const server = this.#server;
@@ -448,32 +494,21 @@ class SessionBridge {
     }
 
     const done = new Promise<TurnOutcome>((resolve) => {
+      const ownershipToken = randomUUID();
       const turn: PendingTurn = {
         correlationId,
+        prompt: text,
+        taggedPrompt: `${BRIDGE_INPUT_TAG_PREFIX}${ownershipToken}\u2063${text}`,
+        ownershipToken,
+        inputObserved: false,
         chunks: [],
         subscribers: new Set(),
         responseSettled: false,
         resolve,
-        idleTimer: undefined as unknown as NodeJS.Timeout,
-        hardTimer: undefined as unknown as NodeJS.Timeout,
       };
       this.#turn = turn;
-      this.#armIdleTimer(turn);
-      turn.hardTimer = setTimeout(() => {
-        if (this.#turn !== turn) return;
-        const abort = this.#abortActiveAgent;
-        this.#failTurn({
-          code: 'PRIME_AGENT_TURN_TIMEOUT',
-          message: `Prime Agent turn exceeded the ${this.#turnHardTimeoutMs}ms hard limit.`,
-        });
-        try {
-          abort?.();
-        } catch {
-          /* the bridge state is already safely released */
-        }
-      }, this.#turnHardTimeoutMs);
-      turn.hardTimer.unref?.();
     });
+    const admittedTurn = this.#turn!;
 
     if (stream) {
       res.writeHead(200, {
@@ -486,9 +521,8 @@ class SessionBridge {
       // the first delta — which for a slow first token looks like a hang, and
       // for a turn that produces no tokens at all never resolves.
       res.write(': open\n\n');
-      const turn = this.#turn!;
-      turn.subscribers.add(res);
-      req.on('close', () => turn.subscribers.delete(res));
+      admittedTurn.subscribers.add(res);
+      req.on('close', () => admittedTurn.subscribers.delete(res));
     }
 
     // Inject as a real user message so the turn is indistinguishable from one
@@ -497,9 +531,9 @@ class SessionBridge {
     // follow-up for the remaining race window so a locally-started turn is
     // never interrupted by a remote UI message.
     try {
-      this.#pi.sendUserMessage(text, { deliverAs: 'followUp' });
+      this.#pi.sendUserMessage(admittedTurn.taggedPrompt, { deliverAs: 'followUp' });
     } catch {
-      this.#failTurn({
+      this.#failTurn(admittedTurn, {
         code: 'PRIME_AGENT_DELIVERY_FAILED',
         message: 'Prime Agent rejected the local message before starting the turn.',
       });
@@ -551,46 +585,97 @@ class SessionBridge {
 
   /* ── agent event plumbing ───────────────────────────────────────────────── */
 
-  onMessageUpdate(event: MessageUpdateEvent): void {
-    // Everything between #failTurn and the successor's agent_start is the
-    // failed turn talking: deltas from a zombie turn the abort could not stop,
-    // or the trailing `error`/`aborted` frame the abort itself produces. A
-    // successor turn's own events always follow its agent_start, which clears
-    // this flag — so nothing discarded here can belong to a live request.
-    if (this.#discardStaleTurnEvents) {
-      // Content is discarded, but zombie deltas are still proof the session
-      // loop is draining toward a queued successor's followUp — keep that
-      // successor's idle window alive so it does not spuriously 504 while its
-      // message is guaranteed to run next.
-      const pending = this.#turn;
-      const staleType = event.assistantMessageEvent?.type;
-      if (
-        pending &&
-        !pending.responseSettled &&
-        (staleType === 'text_delta' || staleType === 'thinking_delta' || staleType === 'toolcall_delta')
-      ) {
-        this.#armIdleTimer(pending);
-      }
-      return;
+  onInput(event: InputEvent): InputEventResult {
+    if (event.source !== 'extension' || typeof event.text !== 'string') {
+      return { action: 'continue' };
     }
     const turn = this.#turn;
+    if (turn && !turn.responseSettled && event.text === turn.taggedPrompt) {
+      turn.inputObserved = true;
+      return { action: 'transform', text: turn.prompt };
+    }
+    // A tagged submission whose HTTP request was already cleared must never
+    // execute later. Swallow it instead of letting the internal tag or a
+    // fail-then-execute side effect reach Prime.
+    if (event.text.startsWith(BRIDGE_INPUT_TAG_PREFIX)) return { action: 'handled' };
+    return { action: 'continue' };
+  }
+
+  onBeforeAgentStart(event: BeforeAgentStartEvent): BeforeAgentStartEventResult | undefined {
+    // Prime caches this result on the queued turn action. Unlike transient
+    // bridge state, the marker survives a deferred handoff and is emitted only
+    // when that exact prepared action enters the agent loop.
+    const turn = this.#turn;
+    if (!turn || !turn.inputObserved || turn.responseSettled || event.prompt !== turn.prompt) {
+      return undefined;
+    }
+    return {
+      message: {
+        customType: BRIDGE_TURN_MARKER_TYPE,
+        content: '',
+        display: false,
+        details: { ownershipToken: turn.ownershipToken },
+      },
+    };
+  }
+
+  onMessageStart(event: MessageStartEvent): void {
+    const message = event.message;
+    if (message?.role === 'user') {
+      this.#runHasFreshPrompt = true;
+      this.#failedRunQuarantined = false;
+      return;
+    }
+    if (message?.role !== 'custom' || message.customType !== BRIDGE_TURN_MARKER_TYPE) return;
+    const ownershipToken =
+      message.details && typeof message.details === 'object'
+        ? (message.details as { ownershipToken?: unknown }).ownershipToken
+        : undefined;
+    const turn = this.#turn;
+    if (turn && !turn.responseSettled && ownershipToken === turn.ownershipToken) {
+      this.#activeRunTurn = turn;
+      this.#armTurnTimers(turn);
+    }
+  }
+
+  onContext(event: ContextEvent): { messages: AgentMessageLike[] } | undefined {
+    if (!event.messages?.some((message) => message.customType === BRIDGE_TURN_MARKER_TYPE)) {
+      return undefined;
+    }
+    // The marker is transport metadata, not conversation content. Keep it out
+    // of every provider request while retaining it in Prime's event stream as
+    // a reliable committed-action identity signal.
+    return {
+      messages: event.messages.filter((message) => message.customType !== BRIDGE_TURN_MARKER_TYPE),
+    };
+  }
+
+  onBeforeProviderRequest(ctx?: ExtensionCtxLike): void {
+    if (!this.#failedRunQuarantined || this.#runHasFreshPrompt) return;
+    // Prime retry/continue runs have agent_start but no newly emitted user
+    // message. Abort at the last hook before provider I/O so a turn that has
+    // already returned a terminal HTTP verdict cannot resume or execute tools.
+    try {
+      if (typeof ctx?.abort === 'function') ctx.abort();
+      else this.#abortActiveAgent?.();
+    } catch {
+      /* quarantine still prevents this run from owning a bridge request */
+    }
+  }
+
+  onMessageUpdate(event: MessageUpdateEvent): void {
+    const turn = this.#activeRunTurn;
+    if (!turn || this.#turn !== turn || turn.responseSettled) return;
     const assistantEvent = event.assistantMessageEvent;
     const eventType = assistantEvent?.type;
     // Prime's provider stream contract declares `error` terminal. Treat it as
     // authoritative even when Prime fails to emit the higher-level agent_end:
     // finish the HTTP/SSE turn, clear admission, and never expose the raw
     // provider payload (which may contain credential-bearing diagnostics).
-    // Known gap: the event carries no turn identity, so in the pre-agent_start
-    // admission window (see the followUp comment in #handleSend) an error or
-    // operator abort of a *locally-typed* turn also fails a pending bridge
-    // turn whose message is still queued — the caller may see TURN_ABORTED for
-    // a message that later executes. Closing that needs turn-association data
-    // from the Prime event API.
     if (eventType === 'error') {
-      this.#failTurn(sanitizedProviderFailure(event));
+      this.#failTurn(turn, sanitizedProviderFailure(event));
       return;
     }
-    if (!turn || turn.responseSettled) return;
     // At the pinned Prime Agent API, only text_delta is user-visible answer
     // text. Thinking/tool-call deltas still prove liveness, but must never leak
     // into the response transcript.
@@ -611,9 +696,8 @@ class SessionBridge {
   }
 
   onAgentStart(ctx?: ExtensionCtxLike): void {
-    // If a failed turn never emitted agent_end, this start necessarily belongs
-    // to the successor and supersedes the stale-event guard.
-    this.#discardStaleTurnEvents = false;
+    this.#activeRunTurn = undefined;
+    this.#runHasFreshPrompt = false;
     this.#agentActive = true;
     this.#abortActiveAgent = typeof ctx?.abort === 'function' ? () => ctx.abort!() : undefined;
     // Election stamp, once per turn — agent_start fires for locally-typed and
@@ -630,22 +714,33 @@ class SessionBridge {
   }
 
   onAgentEnd(): void {
-    if (this.#discardStaleTurnEvents) {
-      this.#discardStaleTurnEvents = false;
-      this.#agentActive = false;
-      this.#abortActiveAgent = undefined;
-      return;
-    }
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
-    const turn = this.#turn;
+    this.#runHasFreshPrompt = false;
+    const turn = this.#activeRunTurn;
+    this.#activeRunTurn = undefined;
     if (!turn) return;
-    if (!turn.responseSettled) this.#settleResponse({ text: turn.chunks.join('') });
+    if (this.#turn === turn && !turn.responseSettled) {
+      this.#settleResponse({ text: turn.chunks.join('') });
+    }
     this.#clearTurn(turn);
   }
 
+  #armTurnTimers(turn: PendingTurn): void {
+    if (turn.idleTimer || turn.hardTimer) return;
+    this.#armIdleTimer(turn);
+    turn.hardTimer = setTimeout(() => {
+      if (this.#turn !== turn) return;
+      this.#failTurn(turn, {
+        code: 'PRIME_AGENT_TURN_TIMEOUT',
+        message: `Prime Agent turn exceeded the ${this.#turnHardTimeoutMs}ms hard limit.`,
+      });
+    }, this.#turnHardTimeoutMs);
+    turn.hardTimer.unref?.();
+  }
+
   #armIdleTimer(turn: PendingTurn): void {
-    clearTimeout(turn.idleTimer);
+    if (turn.idleTimer) clearTimeout(turn.idleTimer);
     turn.idleTimer = setTimeout(() => {
       if (this.#turn !== turn || turn.responseSettled) return;
       // Resolve the HTTP request visibly as a timeout, but retain #turn until
@@ -660,19 +755,19 @@ class SessionBridge {
     const turn = this.#turn;
     if (!turn || turn.responseSettled) return;
     turn.responseSettled = true;
-    clearTimeout(turn.idleTimer);
+    if (turn.idleTimer) clearTimeout(turn.idleTimer);
     turn.resolve(outcome);
   }
 
   #clearTurn(turn: PendingTurn): void {
-    clearTimeout(turn.idleTimer);
-    clearTimeout(turn.hardTimer);
+    if (turn.idleTimer) clearTimeout(turn.idleTimer);
+    if (turn.hardTimer) clearTimeout(turn.hardTimer);
     if (this.#turn === turn) this.#turn = undefined;
   }
 
-  #failTurn(failure: SanitizedTurnFailure): void {
-    const turn = this.#turn;
-    if (turn) {
+  #failTurn(turn: PendingTurn, failure: SanitizedTurnFailure): void {
+    const ownsActiveRun = this.#activeRunTurn === turn;
+    if (this.#turn === turn) {
       this.#settleResponse({
         text: turn.chunks.join(''),
         error: failure.message,
@@ -680,13 +775,15 @@ class SessionBridge {
       });
       this.#clearTurn(turn);
     }
-    // The failure verdict is terminal, so accepting the next request is safe.
-    // Remember that the failed turn may still emit events — trailing deltas,
-    // an abort's own `error` frame, its agent_end — and none of them may touch
-    // a successor request.
-    this.#discardStaleTurnEvents = true;
-    this.#agentActive = false;
-    this.#abortActiveAgent = undefined;
+    if (!ownsActiveRun) return;
+    this.#failedRunQuarantined = true;
+    // Keep #agentActive true until the actual agent_end so the bridge does not
+    // admit a successor into a run that has not reached a boundary yet.
+    try {
+      this.#abortActiveAgent?.();
+    } catch {
+      /* the ownership quarantine remains authoritative */
+    }
   }
 
   #json(res: ServerResponse, status: number, body: unknown): void {
@@ -748,8 +845,22 @@ export default function dkgBridgeExtension(pi: ExtensionApiLike): void {
     bridge?.onMessageUpdate(event);
   });
 
+  pi.on('input', (event: InputEvent) => bridge?.onInput(event) ?? { action: 'continue' });
+
+  pi.on('before_agent_start', (event: BeforeAgentStartEvent) => bridge?.onBeforeAgentStart(event));
+
   pi.on('agent_start', (_event: unknown, ctx: ExtensionCtxLike) => {
     bridge?.onAgentStart(ctx);
+  });
+
+  pi.on('message_start', (event: MessageStartEvent) => {
+    bridge?.onMessageStart(event);
+  });
+
+  pi.on('context', (event: ContextEvent) => bridge?.onContext(event));
+
+  pi.on('before_provider_request', (_event: unknown, ctx: ExtensionCtxLike) => {
+    bridge?.onBeforeProviderRequest(ctx);
   });
 
   pi.on('agent_end', () => {

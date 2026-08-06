@@ -23,7 +23,13 @@ let base: string;
 function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'followUp' }) => void) {
   return {
     on: () => {},
-    sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => onSend(content, options),
+    sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => {
+      // Mirror Prime's input normalization: the bridge tags its own submission
+      // and the input hook removes that tag before the user message is built.
+      const result = bridge.onInput({ source: 'extension', text: content });
+      if (result.action === 'handled') return;
+      onSend(result.action === 'transform' ? result.text : content, options);
+    },
   };
 }
 
@@ -48,6 +54,38 @@ async function bridgeBaseUrl(b: SessionBridge): Promise<string> {
   const mine = sessions.find((s) => s.sessionId === b.sessionId);
   if (!mine) throw new Error('bridge did not publish a descriptor');
   return mine.bridgeUrl;
+}
+
+type PreparedBridgeRun = NonNullable<ReturnType<SessionBridge['onBeforeAgentStart']>>;
+
+/** Commit a bridge action using the marker Prime cached during preparation. */
+function startBridgeRun(
+  ctx?: Parameters<SessionBridge['onAgentStart']>[0],
+  prepared?: PreparedBridgeRun,
+): void {
+  const prompt = sent.at(-1);
+  if (!prompt) throw new Error('startBridgeRun(): no injected prompt');
+  const ownership = prepared ?? bridge.onBeforeAgentStart({ prompt });
+  if (!ownership) throw new Error('startBridgeRun(): prompt did not receive an ownership marker');
+  bridge.onAgentStart(ctx);
+  bridge.onMessageStart({
+    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+  });
+  bridge.onMessageStart({
+    message: { role: 'custom', ...ownership.message },
+  });
+}
+
+/** A locally typed prompt is a fresh run, but must not claim a bridge request. */
+function startLocalRun(
+  prompt = 'locally typed prompt',
+  ctx?: Parameters<SessionBridge['onAgentStart']>[0],
+): void {
+  bridge.onBeforeAgentStart({ prompt });
+  bridge.onAgentStart(ctx);
+  bridge.onMessageStart({
+    message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+  });
 }
 
 beforeEach(async () => {
@@ -147,7 +185,7 @@ describe('session election', () => {
     // ISO stamps have millisecond resolution; a strictly-newer stamp needs a
     // real gap.
     await new Promise((r) => setTimeout(r, 15));
-    bridge.onAgentStart();
+    startLocalRun();
     const after = readOwn();
     expect(after.startedAt).toBe(before.startedAt);
     expect(after.lastActiveAt > before.lastActiveAt).toBe(true);
@@ -260,6 +298,7 @@ describe('/send', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(sent).toEqual(['hello agent']);
 
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'hi ' } });
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'there' } });
     bridge.onAgentEnd();
@@ -289,6 +328,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'one', correlationId: 'c-a' }),
     });
     await new Promise((r) => setTimeout(r, 30));
+    startBridgeRun();
     const second = await fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
@@ -300,7 +340,7 @@ describe('/send', () => {
   });
 
   it('rejects bridge input while a locally-started agent turn is active', async () => {
-    bridge.onAgentStart();
+    startLocalRun();
     const res = await fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
@@ -319,11 +359,14 @@ describe('/send', () => {
     await bridge.start();
     base = await bridgeBaseUrl(bridge);
 
-    const first = await fetch(`${base}/send`, {
+    const firstPending = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
       body: JSON.stringify({ text: 'long turn', correlationId: 'c-timeout' }),
     });
+    await until(() => sent.length === 1);
+    startBridgeRun();
+    const first = await firstPending;
     expect(first.status).toBe(504);
     expect(await first.json()).toMatchObject({ timedOut: true, correlationId: 'c-timeout' });
 
@@ -340,14 +383,18 @@ describe('/send', () => {
     bridge.onAgentEnd();
   });
 
-  it('releases a provider-auth failure, sanitizes it, and ignores the failed turn late agent_end', async () => {
+  it('sanitizes a provider failure and aborts its auto-retry without touching the successor', async () => {
     const firstResponse = await fetch(`${base}/stream`, {
       method: 'POST',
       headers: authed(),
       body: JSON.stringify({ text: 'use the provider', correlationId: 'c-provider-auth' }),
     });
-    await new Promise((r) => setTimeout(r, 20));
-    bridge.onAgentStart();
+    await until(() => sent.length === 1);
+    let failedRunAbortCount = 0;
+    startBridgeRun({
+      sessionManager: { getSessionId: () => 'sess-test' },
+      abort: () => { failedRunAbortCount += 1; },
+    });
     bridge.onMessageUpdate({
       assistantMessageEvent: {
         type: 'error',
@@ -369,24 +416,62 @@ describe('/send', () => {
     expect(firstText).toContain('"type":"final"');
     expect(firstText).not.toContain('must-not-leak');
     expect(firstText).not.toContain('sk-');
+    expect(failedRunAbortCount).toBe(1);
 
-    // Start the successor before Prime emits the failed turn's late agent_end.
-    // That stale event must be consumed without resolving this new request.
+    // The failed run is still active until its real agent_end, so a successor
+    // cannot be injected into an ambiguous lifecycle window.
+    const tooSoon = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'too soon', correlationId: 'c-too-soon' }),
+    });
+    expect(tooSoon.status).toBe(429);
+    expect(sent).toEqual(['use the provider']);
+    bridge.onAgentEnd();
+
     const second = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
       body: JSON.stringify({ text: 'retry after credentials are fixed', correlationId: 'c-retry' }),
     });
-    await new Promise((r) => setTimeout(r, 20));
+    await until(() => sent.length === 2);
     expect(sent).toEqual(['use the provider', 'retry after credentials are fixed']);
+
+    // Prime may prepare the queued action before its retry wins the handoff.
+    // Its hidden ownership marker is cached on that action and excluded from
+    // provider context; it must not be consumed by the intervening retry run.
+    const preparedSuccessor = bridge.onBeforeAgentStart({ prompt: 'retry after credentials are fixed' });
+    expect(preparedSuccessor).toBeDefined();
+    const providerContext = bridge.onContext({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'retry after credentials are fixed' }] },
+        { role: 'custom', ...preparedSuccessor!.message },
+      ],
+    });
+    expect(providerContext?.messages).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'retry after credentials are fixed' }] },
+    ]);
+
+    // Prime auto-retry uses agent.continue(), so it emits no ownership marker.
+    // It remains unowned, is aborted, and neither its output nor its end can
+    // settle the queued successor.
+    let retryAbortCount = 0;
+    const retryCtx = {
+      sessionManager: { getSessionId: () => 'sess-test' },
+      abort: () => { retryAbortCount += 1; },
+    };
+    bridge.onAgentStart(retryCtx);
+    bridge.onBeforeProviderRequest(retryCtx);
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'retry output from failed turn' } });
     bridge.onAgentEnd();
+    expect(retryAbortCount).toBe(1);
     const settledByStaleEnd = await Promise.race([
       second.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
     ]);
     expect(settledByStaleEnd).toBe(false);
 
-    bridge.onAgentStart();
+    startBridgeRun(undefined, preparedSuccessor);
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'recovered' } });
     bridge.onAgentEnd();
     const secondResponse = await second;
@@ -410,7 +495,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'hung turn', correlationId: 'c-hard-timeout' }),
     });
     await new Promise((r) => setTimeout(r, 10));
-    bridge.onAgentStart({
+    startBridgeRun({
       sessionManager: { getSessionId: () => 'sess-hard-timeout' },
       abort: () => { abortCount += 1; },
     });
@@ -426,19 +511,22 @@ describe('/send', () => {
 
     await new Promise((r) => setTimeout(r, 70));
     expect(abortCount).toBe(1);
+    // The hard timeout aborts but keeps admission closed until Prime confirms
+    // the lifecycle boundary with agent_end.
+    bridge.onAgentEnd();
     const recovered = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
       body: JSON.stringify({ text: 'after hard timeout', correlationId: 'c-after-hard' }),
     });
-    await new Promise((r) => setTimeout(r, 20));
-    bridge.onAgentStart();
+    await until(() => sent.length === 2);
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
     bridge.onAgentEnd();
     expect((await recovered).status).toBe(200);
   });
 
-  it('discards a zombie turn stale deltas and abort error so they never touch the successor', async () => {
+  it('keeps a zombie run closed through its end and discards an unowned retry tail', async () => {
     await bridge.stop();
     bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-stale-events', {
       turnIdleTimeoutMs: 30,
@@ -454,10 +542,27 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'zombie turn', correlationId: 'c-zombie' }),
     });
     await until(() => sent.length === 1);
-    bridge.onAgentStart();
+    startBridgeRun();
     expect((await firstPromise).status).toBe(504);
 
     await new Promise((r) => setTimeout(r, 90));
+
+    const tooSoon = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'successor', correlationId: 'c-successor' }),
+    });
+    expect(tooSoon.status).toBe(429);
+    expect(sent).toEqual(['zombie turn']);
+
+    // The zombie keeps talking after its terminal verdict. It owns no live
+    // bridge request, and admission stays closed until its real agent_end.
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie-tail ' } });
+    bridge.onMessageUpdate({
+      assistantMessageEvent: { type: 'error', reason: 'aborted' },
+      message: { role: 'assistant', stopReason: 'aborted' },
+    });
+    bridge.onAgentEnd();
 
     const successor = fetch(`${base}/send`, {
       method: 'POST',
@@ -466,17 +571,19 @@ describe('/send', () => {
     });
     await until(() => sent.length === 2);
     expect(sent).toEqual(['zombie turn', 'successor']);
-    // The zombie keeps talking before the successor's agent_start: trailing
-    // deltas, an abort's own error frame, then its agent_end. None of it may
-    // contaminate, fail, or settle the successor request.
-    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie-tail ' } });
-    bridge.onMessageUpdate({
-      assistantMessageEvent: { type: 'error', reason: 'aborted' },
-      message: { role: 'assistant', stopReason: 'aborted' },
-    });
-    bridge.onAgentEnd();
 
+    // A continuation/retry has no before_agent_start and therefore cannot
+    // claim or settle the pending successor.
     bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie-retry-tail ' } });
+    bridge.onAgentEnd();
+    const settledByRetry = await Promise.race([
+      successor.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+    ]);
+    expect(settledByRetry).toBe(false);
+
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh answer' } });
     bridge.onAgentEnd();
     const res = await successor;
@@ -484,47 +591,54 @@ describe('/send', () => {
     expect(await res.json()).toMatchObject({ text: 'fresh answer', correlationId: 'c-successor' });
   });
 
-  it('keeps a queued successor alive on zombie liveness instead of spuriously idling it out', async () => {
+  it('does not let a local-turn error fail a bridge prompt queued before its own start', async () => {
     await bridge.stop();
-    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-zombie-liveness', {
-      turnIdleTimeoutMs: 80,
-      turnHardTimeoutMs: 400,
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-local-race', {
+      turnIdleTimeoutMs: 40,
+      turnHardTimeoutMs: 80,
     });
     await bridge.start();
     base = await bridgeBaseUrl(bridge);
 
-    const firstPromise = fetch(`${base}/send`, {
+    const pending = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
-      body: JSON.stringify({ text: 'zombie turn', correlationId: 'c-liveness-zombie' }),
+      body: JSON.stringify({ text: 'bridge prompt', correlationId: 'c-local-race' }),
     });
     await until(() => sent.length === 1);
-    bridge.onAgentStart();
-    expect((await firstPromise).status).toBe(504);
-    await new Promise((r) => setTimeout(r, 340));
+    expect(sent).toEqual(['bridge prompt']);
 
-    // Successor admitted while the zombie is still draining. Its idle window
-    // (80ms) is shorter than the zombie's remaining run (5 x 25ms): the
-    // discarded deltas must still count as liveness, or the successor 504s
-    // while its queued message later executes invisibly.
-    const successor = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'queued successor', correlationId: 'c-liveness-succ' }),
+    // Preparation can complete before the competing local run starts. Prime
+    // retains this marker on the queued bridge action until its later commit.
+    const preparedBridge = bridge.onBeforeAgentStart({ prompt: 'bridge prompt' });
+    expect(preparedBridge).toBeDefined();
+
+    // A local prompt won Prime's admission fence just before the bridge's
+    // followUp. Its error belongs to that unowned local run, not to the queued
+    // bridge request.
+    startLocalRun('local prompt that won the race');
+    bridge.onMessageUpdate({
+      assistantMessageEvent: { type: 'error', reason: 'aborted' },
+      message: { role: 'assistant', stopReason: 'aborted' },
     });
-    await until(() => sent.length === 2);
-    for (let i = 0; i < 5; i += 1) {
-      await new Promise((r) => setTimeout(r, 25));
-      bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie noise' } });
-    }
     bridge.onAgentEnd();
 
-    bridge.onAgentStart();
+    // Bridge timers begin only when its cached ownership marker is emitted, so
+    // waiting beyond both configured limits here cannot return a false terminal
+    // verdict for a prompt that is still queued.
+    await new Promise((r) => setTimeout(r, 100));
+    const settledByLocalFailure = await Promise.race([
+      pending.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20)),
+    ]);
+    expect(settledByLocalFailure).toBe(false);
+
+    startBridgeRun(undefined, preparedBridge);
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh' } });
     bridge.onAgentEnd();
-    const res = await successor;
+    const res = await pending;
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ text: 'fresh', correlationId: 'c-liveness-succ' });
+    expect(await res.json()).toMatchObject({ text: 'fresh', correlationId: 'c-local-race' });
   });
 
   it('reports PRIME_AGENT_TURN_TIMEOUT when the hard limit fires while the turn is still live', async () => {
@@ -543,7 +657,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'never ends', correlationId: 'c-hard-first' }),
     });
     await until(() => sent.length === 1);
-    bridge.onAgentStart({
+    startBridgeRun({
       sessionManager: { getSessionId: () => 'sess-hard-first' },
       abort: () => { abortCount += 1; },
     });
@@ -568,7 +682,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'use the provider', correlationId: 'c-send-auth' }),
     });
     await until(() => sent.length === 1);
-    bridge.onAgentStart();
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'partial ' } });
     bridge.onMessageUpdate({
       assistantMessageEvent: {
@@ -623,8 +737,8 @@ describe('/send', () => {
       correlationId: 'c-deliver',
     });
 
-    // No agent turn ever started, so the stale-event guard set by the failure
-    // must not swallow the next real turn's events.
+    // No agent turn ever started, so a synchronous delivery rejection creates
+    // no failed-run quarantine and the next admitted prompt can own its run.
     const retry = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
@@ -632,7 +746,7 @@ describe('/send', () => {
     });
     await until(() => sent.length === 1);
     expect(sent).toEqual(['deliverable']);
-    bridge.onAgentStart();
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'delivered' } });
     bridge.onAgentEnd();
     const res = await retry;
@@ -646,7 +760,8 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'filter events', correlationId: 'c-filter' }),
     });
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => sent.length === 1);
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'thinking_delta', delta: 'secret' } });
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_end', text: 'cumulative' } });
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'visible' } });
@@ -666,7 +781,8 @@ describe('/stream', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/event-stream');
 
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => sent.length === 1);
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'alpha' } });
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'beta' } });
     bridge.onAgentEnd();
