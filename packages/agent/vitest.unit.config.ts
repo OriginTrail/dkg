@@ -103,6 +103,7 @@ export default defineConfig({
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",
+      "test/system-context-graph-policy.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-fanout-peer-selection.test.ts",
