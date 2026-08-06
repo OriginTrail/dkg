@@ -465,9 +465,10 @@ describe('StorePriorityScheduler admission V1 — generation seals', () => {
         ackReservedSlots: 0,
         healthReservedSlots: 0,
         backgroundReservedSlots: 0,
-        // A queue of one, already saturated, so `queue_full` is live for
-        // anything that reaches the ordinary admission path.
-        queueLimits: 1,
+        // Headroom on purpose. A held call now counts against its lane's queue
+        // limit, so a limit of 1 would be the degenerate arity where one held
+        // call alone saturates the lane and nothing else can be observed.
+        queueLimits: 4,
         queueWaitTimeoutMs: 50,
       });
       const storeId = {};
@@ -480,8 +481,9 @@ describe('StorePriorityScheduler admission V1 — generation seals', () => {
         return 'written';
       }, undefined, admission(storeId, 'shared'));
 
-      // Off-queue: it consumes no capacity, so it cannot be rejected by
-      // `queue_full` and the queue-wait timer never applies to it.
+      // Parked off-queue and carrying no wait timer, so the queue-wait timeout
+      // cannot reach it. It does hold a reservation against the lane's limit —
+      // that is what makes the release below total.
       expect(scheduler.snapshot).toMatchObject({
         admissionHeldRuns: 1,
         normalQueued: 0,
@@ -558,6 +560,64 @@ describe('StorePriorityScheduler admission V1 — generation seals', () => {
     await expect(queued).resolves.toBe('written');
   });
 
+  it('bounds the held population and never converts a release into a rejection burst', async () => {
+    // Discriminating by construction: N is 25x the queue limit, so any policy
+    // that parks first and bounds later shows up as a rejection burst AFTER the
+    // wait. The earlier version of this test held exactly ONE call at a limit of
+    // one — the single arity at which a release cannot overrun — so it could
+    // only ever confirm what it already expected.
+    const queueLimit = 8;
+    const callCount = 200;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      normalReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: queueLimit,
+      queueWaitTimeoutMs: 600_000,
+    });
+    const storeId = {};
+    const seal = scheduler.sealStoreGeneration(storeId, 'gen-1');
+
+    let rejectedAtAdmission = 0;
+    let rejectedAfterRelease = 0;
+    let sealCommitted = false;
+    const calls = Array.from({ length: callCount }, (_, index) =>
+      scheduler.run('normal', `agents.write.${index}`, async () => 'ok',
+        undefined, admission(storeId, 'shared'))
+        .catch((error: { code?: string }) => {
+          if (error?.code !== 'STORE_SCHEDULER_BUSY') throw error;
+          if (sealCommitted) rejectedAfterRelease += 1;
+          else rejectedAtAdmission += 1;
+          return 'rejected';
+        }));
+    await tick();
+
+    // Memory is bounded by the lane's limit, not by caller volume.
+    expect(scheduler.snapshot.admissionHeldRuns).toBe(queueLimit);
+    expect(rejectedAtAdmission).toBe(callCount - queueLimit);
+    expect(rejectedAfterRelease).toBe(0);
+
+    sealCommitted = true;
+    seal.commit();
+    const outcomes = await Promise.all(calls);
+
+    // The load-bearing assertion: every call that was ever held still ran.
+    // Nothing waited out the seal only to be rejected at the end of it.
+    expect(rejectedAfterRelease).toBe(0);
+    expect(outcomes.filter((outcome) => outcome === 'ok')).toHaveLength(queueLimit);
+    expect(outcomes.filter((outcome) => outcome === 'rejected'))
+      .toHaveLength(callCount - queueLimit);
+    expect(scheduler.snapshot).toMatchObject({
+      admissionHeldRuns: 0,
+      admissionSealedStores: 0,
+      admissionTrackedStores: 0,
+      normalQueued: 0,
+      normalInflight: 0,
+    });
+  });
+
   it('refcounts nested seals and commits idempotently', async () => {
     const scheduler = openScheduler();
     const storeId = {};
@@ -615,7 +675,7 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       backgroundReservedSlots: 0,
       // Deliberately tiny: the barrier must be immune to `queue_full`.
       queueLimits: 1,
-      queueWaitTimeoutMs: 60_000,
+      queueWaitTimeoutMs: 600_000,
       now: () => clock,
     });
     const storeId = {};
@@ -668,13 +728,6 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     });
     expect(scheduler.snapshot.barrierCoalesced).toBe(2);
 
-    // Tagged work arriving mid-transition is held by the barrier's own seal.
-    let heldStarted = false;
-    const heldWrite = scheduler.run('normal', 'agents.write.during', async () => {
-      heldStarted = true;
-      return 'held';
-    }, undefined, admission(storeId, 'shared'));
-    expect(scheduler.snapshot.admissionHeldRuns).toBe(1);
     expect(events).not.toContain('barrier:start');
 
     clock += 60;
@@ -685,8 +738,6 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     await expect(first).resolves.toBe('barrier-1');
     await expect(second).resolves.toBe('barrier-1');
     await expect(viaRun).resolves.toBe('barrier-1');
-    await expect(heldWrite).resolves.toBe('held');
-    expect(heldStarted).toBe(true);
 
     const snapshot = scheduler.snapshot;
     // The barrier genuinely waited (so the zero below is not vacuous) and held
@@ -750,7 +801,77 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     });
   });
 
-  it('drains only the sealed generation, not unrelated generations of the same store', async () => {
+  it('stops UNTAGGED traffic for the whole transition and waits for it to drain', async () => {
+    // The operational case this exists for: the transition IS the Oxigraph
+    // stop-and-restart, and untagged legacy work is 100% of today's store
+    // traffic. Dispatching it into a child being SIGTERM'd — or into no
+    // listener at all — is a burst of connection errors across unrelated lanes
+    // instead of backpressure.
+    const scheduler = openScheduler();
+    const storeId = {};
+    let untaggedStartedDuringTransition = 0;
+    let transitionActive = false;
+    let releasePre!: () => void;
+    let releaseTransition!: () => void;
+
+    const pre = scheduler.run('normal', 'legacy.pre', async () => {
+      await new Promise<void>((resolve) => {
+        releasePre = resolve;
+      });
+    });
+    await settle(() => scheduler.snapshot.normalInflight === 1, 'untagged work in flight');
+
+    const barrier = scheduler.runControlBarrier(storeId, 'oxigraph.restart', async () => {
+      transitionActive = true;
+      await new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      transitionActive = false;
+      return 'restarted';
+    }, 'gen-1');
+
+    // Untagged work already in flight when the barrier armed must be WAITED on:
+    // the transition cannot claim the store while it is still being read.
+    await tick();
+    expect(scheduler.snapshot).toMatchObject({ barrierPending: 1, barrierInflight: 0 });
+    expect(transitionActive).toBe(false);
+
+    const during: Array<Promise<unknown>> = [];
+    for (let index = 0; index < 20; index += 1) {
+      during.push(scheduler.run('normal', `legacy.during.${index}`, async () => {
+        if (transitionActive) untaggedStartedDuringTransition += 1;
+        return 'during';
+      }));
+    }
+    await tick();
+    // Held in their queue rather than dispatched — still admitted, still owed a
+    // result, simply not started.
+    expect(scheduler.snapshot.normalQueued).toBe(20);
+
+    releasePre();
+    await settle(() => transitionActive, 'transition started after untagged drain');
+    expect(scheduler.snapshot).toMatchObject({ barrierInflight: 1, normalInflight: 0 });
+
+    await tick();
+    releaseTransition();
+    await expect(barrier).resolves.toBe('restarted');
+    await Promise.all([pre, ...during]);
+
+    // Not one ordinary store operation was dispatched into the restart window,
+    // and every one of them still completed afterwards.
+    expect(untaggedStartedDuringTransition).toBe(0);
+    expect(scheduler.snapshot).toMatchObject({
+      barrierPending: 0,
+      barrierInflight: 0,
+      normalQueued: 0,
+      normalInflight: 0,
+    });
+  });
+
+  it('waits for tagged work of EVERY generation on the store, not just the sealed one', async () => {
+    // Supersedes an earlier assertion that a barrier ignored other generations.
+    // That was wrong for the case the barrier exists to serve: the transition
+    // restarts one child process, and that child serves every generation.
     const scheduler = openScheduler();
     const storeId = {};
     const events: string[] = [];
@@ -764,17 +885,48 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       events.push('next-gen:end');
     }, undefined, admission(storeId, 'shared', undefined, 'gen-2'));
     await settle(() => events.includes('next-gen:start'), 'gen-2 write started');
+    expect(scheduler.snapshot.admissionGenerationsInflight).toBe(1);
 
-    // The barrier drains `gen-1`; `gen-2` work runs against a different child
-    // store, so it is not part of this transition's drain.
-    await expect(scheduler.runControlBarrier(storeId, 'retire.gen-1', async () => {
+    const barrier = scheduler.runControlBarrier(storeId, 'retire.gen-1', async () => {
       events.push('barrier:start');
       return 'retired';
-    }, 'gen-1')).resolves.toBe('retired');
+    }, 'gen-1');
+    await tick();
+    expect(events).toEqual(['next-gen:start']);
 
-    expect(events).toEqual(['next-gen:start', 'barrier:start']);
     releaseNextGen();
+    await expect(barrier).resolves.toBe('retired');
     await nextGenWrite;
+    expect(events).toEqual(['next-gen:start', 'next-gen:end', 'barrier:start']);
+  });
+
+  it('holds tagged work arriving mid-transition and releases it on commit', async () => {
+    const scheduler = openScheduler();
+    const storeId = {};
+    let heldStarted = false;
+    let releaseTransition!: () => void;
+
+    const barrier = scheduler.runControlBarrier(storeId, 'profile.apply', async () => {
+      await new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      return 'applied';
+    }, 'gen-1');
+    await settle(() => scheduler.snapshot.barrierInflight === 1, 'transition running');
+
+    const heldWrite = scheduler.run('normal', 'agents.write.during', async () => {
+      heldStarted = true;
+      return 'held';
+    }, undefined, admission(storeId, 'shared'));
+    await tick();
+    expect(scheduler.snapshot.admissionHeldRuns).toBe(1);
+    expect(heldStarted).toBe(false);
+
+    releaseTransition();
+    await expect(barrier).resolves.toBe('applied');
+    await expect(heldWrite).resolves.toBe('held');
+    expect(heldStarted).toBe(true);
+    expect(scheduler.snapshot.admissionTrackedStores).toBe(0);
   });
 
   it('propagates a failing transition and still releases the seal', async () => {

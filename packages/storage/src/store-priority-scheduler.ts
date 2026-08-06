@@ -42,9 +42,19 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   admissionBypassesGranted: number;
   /** Cumulative times the bounded bypass held shared work back for an exclusive. */
   admissionBoundHolds: number;
-  /** `run()` calls parked by a seal — held, never rejected, and off-queue. */
+  /**
+   * `run()` calls parked by a seal. Bounded: a held call has been ADMITTED, so
+   * it counts against its lane's queue limit exactly like a queued one, which
+   * is what guarantees every held call still fits when the seal commits.
+   */
   admissionHeldRuns: number;
   admissionSealedStores: number;
+  /**
+   * Distinct generations with live execution permits. Operational answer to
+   * "why is this restart still waiting" — a barrier that cannot start is
+   * waiting on the work these permits represent.
+   */
+  admissionGenerationsInflight: number;
   /** Control barriers awaiting quiescence (they occupy no execution slot). */
   barrierPending: number;
   /** The single reserved controller slot: 0 or 1, and OUTSIDE `maxConcurrent`. */
@@ -222,8 +232,6 @@ interface HeldRun {
 interface BarrierEntry {
   storeId: object;
   purpose: string;
-  /** Generation whose permits must drain; `undefined` ⇒ all tagged work. */
-  generation: string | undefined;
   transition: () => Promise<unknown>;
   promise: Promise<unknown>;
   resolve: (value: unknown) => void;
@@ -431,6 +439,19 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * with nothing tagged queued there is nothing for it to block.
    */
   private taggedQueuedCount = 0;
+  /**
+   * Held `run()` calls per lane. A held call has been ADMITTED — it is
+   * admitted-but-not-running work exactly like a queued one — so it counts
+   * against the lane's queue limit. That accounting is what makes the release
+   * path total: `queued + held <= limit` is invariant, so every held call still
+   * fits when the seal commits and none can be rejected after its wait.
+   */
+  private readonly heldByLane: Record<StoreWorkPriority, number> = {
+    ack: 0,
+    health: 0,
+    normal: 0,
+    background: 0,
+  };
   private admissionSeqCounter = 0;
   private readonly storeStates = new Map<object, StoreAdmissionState>();
   private sealedStoreCount = 0;
@@ -581,6 +602,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       admissionBoundHolds: this.admissionBoundHolds,
       admissionHeldRuns: this.heldRunCount,
       admissionSealedStores: this.sealedStoreCount,
+      admissionGenerationsInflight: this.countGenerationsInflight(),
       barrierPending: this.barriers.length,
       barrierInflight: this.barrierRunning ? 1 : 0,
       barrierCoalesced: this.barrierCoalescedTotal,
@@ -617,13 +639,17 @@ export class StorePriorityScheduler extends ObservableScheduler {
       const reason = signal.reason;
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
     }
-    // Held BEFORE the queue-limit check: a sealed store's work must be parked,
-    // not rejected, and parking it off-queue is what makes `queue_full` and the
-    // queue-wait timeout unable to reach it.
-    if (admission !== undefined && this.isSealed(admission.storeId)) {
-      return await this.holdRun(normalizedPriority, operation, work, signal, admission);
-    }
-    if (this.queues[normalizedPriority].length >= this.queueLimits[normalizedPriority]) {
+    // Capacity is checked BEFORE the seal is consulted, and held calls count
+    // toward it. Parking first and bounding never would make "held, never
+    // rejected" true only WHILE held: an unbounded park converts into a
+    // `queue_full` burst the moment the seal commits, so a caller would wait out
+    // the entire transition only to be rejected anyway. Rejecting here instead
+    // fails fast, bounds the parked population, and — because `queued + held`
+    // can never exceed the limit — guarantees the release itself cannot reject.
+    if (
+      this.queues[normalizedPriority].length + this.heldByLane[normalizedPriority]
+      >= this.queueLimits[normalizedPriority]
+    ) {
       const error = new StoreSchedulerBusyError('queue_full', normalizedPriority, operation);
       this.pressureReject(
         { lane: normalizedPriority, operation },
@@ -631,6 +657,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
       );
       this.observeRejection(error);
       throw error;
+    }
+    // Admitted under the bound above, so from here the call is guaranteed to
+    // run or to be cancelled by its own caller — never rejected for capacity.
+    if (admission !== undefined && this.isSealed(admission.storeId)) {
+      return await this.holdRun(normalizedPriority, operation, work, signal, admission);
     }
     // Both fields are written unconditionally to keep one entry shape; the
     // sequence counter only advances for tagged work so untagged traffic cannot
@@ -704,11 +735,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private nextRunnable(): QueueEntry<unknown> | undefined {
     const priorities: StoreWorkPriority[] = ['ack', 'health', 'normal', 'background'];
     priorities.sort((a, b) => storeWorkPriorityRank(a) - storeWorkPriorityRank(b));
-    // The entire admission extension hangs off this one integer comparison.
-    // With nothing tagged queued, every entry below is provably untagged, so
-    // the head of a runnable lane is unconditionally the winner — exactly the
-    // pre-#2052 selection, with no per-entry scan and no allocation.
-    const admissionActive = this.taggedQueuedCount > 0;
+    // The entire admission extension hangs off these two integer comparisons.
+    // With nothing tagged queued AND no transition pending, every entry below is
+    // provably ungated, so the head of a runnable lane is unconditionally the
+    // winner — exactly the pre-#2052 selection, with no per-entry scan and no
+    // allocation. The barrier term is what lets a transition stop untagged
+    // traffic, which carries no store identity to gate on.
+    const admissionActive = this.taggedQueuedCount > 0 || this.barriers.length > 0;
     for (const priority of priorities) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
@@ -790,6 +823,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
         // exclusive are re-evaluated in the same turn.
         if (entry.admission !== undefined) this.releaseRunningAdmission(entry);
         this.decrement(entry.priority);
+        // Evaluated only after BOTH counters are settled. Barrier readiness
+        // derives untagged inflight as `total - tagged`, so pumping between the
+        // two updates would make a finishing tagged entry look like a phantom
+        // untagged one and stall the transition. Untagged completions must pump
+        // too — the gate now waits on them.
+        this.pumpBarriers();
         this.observeDepths();
         this.drain();
       });
@@ -929,9 +968,18 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * idempotent control transition; do not use one purpose for two different
    * transitions.
    *
-   * The transition owns the store exclusively by construction and must NOT
-   * re-enter `run()` with tagged admission for the same `storeId` — its own
-   * seal would hold that call until the transition it is nested in returns.
+   * The transition owns the store exclusively, and that is enforced rather than
+   * assumed: from the moment a barrier is pending, ALL untagged work is held in
+   * its queue and all tagged work for this store is held off-queue, and the
+   * transition does not start until both populations have drained. Untagged
+   * traffic is the load-bearing half — it is 100% of today's store traffic, and
+   * it is precisely what would otherwise keep being dispatched into a child
+   * that is being stopped.
+   *
+   * The cost is that the transition must NOT re-enter `run()` at all for the
+   * duration — with tagged admission for this `storeId` (held by its own seal)
+   * or untagged (held by its own barrier). It does not need to: it already owns
+   * the store, so it issues its work directly.
    */
   runControlBarrier<T>(
     storeId: object,
@@ -992,6 +1040,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private countTaggedInflight(): number {
     let total = 0;
     for (const state of this.storeStates.values()) total += state.taggedInflight;
+    return total;
+  }
+
+  private countGenerationsInflight(): number {
+    let total = 0;
+    for (const state of this.storeStates.values()) total += state.runningPermits.size;
     return total;
   }
 
@@ -1105,8 +1159,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
       }
     }
     this.releaseStoreStateIfIdle(admission.storeId, state);
-    // A permit reaching zero is the only event a waiting barrier cares about.
-    this.pumpBarriers();
+    // Barriers are pumped by the caller, after the lane counter is also
+    // decremented — see the note in `start()`.
   }
 
   /**
@@ -1120,9 +1174,18 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // merely if a tagged entry is examined.
     this.admissionEvaluations += 1;
     const admission = entry.admission;
-    // Untagged legacy entries are never gated. A caller that knows nothing
-    // about materialization must keep the exact pre-#2052 behaviour.
-    if (admission === undefined) return true;
+    if (admission === undefined) {
+      // Untagged legacy entries carry no store identity, so a pending
+      // transition cannot rule them out — and must therefore assume the worst.
+      // This is the whole reason the barrier can claim exclusive ownership: the
+      // transition IS the store's stop-and-restart, and dispatching ordinary
+      // queries into a child being SIGTERM'd (or into no listener at all) turns
+      // a bounded control window into a burst of connection errors across every
+      // unrelated lane. Holding them in the queue instead converts that into
+      // ordinary backpressure — and the existing wait timer still bounds it,
+      // with a typed retryable rejection rather than a transport failure.
+      return this.barriers.length === 0;
+    }
     const state = this.storeStates.get(admission.storeId);
     if (state === undefined) return true;
     // Sealed: the transition owns this store until it commits.
@@ -1187,6 +1250,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
         if (index >= 0) {
           state.heldRuns.splice(index, 1);
           this.heldRunCount -= 1;
+          // Released before the re-entry below re-checks capacity, so the slot
+          // this call already owns is the one it reclaims.
+          this.heldByLane[priority] -= 1;
         }
       };
       record.release = () => {
@@ -1212,6 +1278,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       }
       state.heldRuns.push(record);
       this.heldRunCount += 1;
+      this.heldByLane[priority] += 1;
       this.observeDepths();
     });
   }
@@ -1248,7 +1315,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const barrier: BarrierEntry = {
       storeId,
       purpose,
-      generation,
       transition,
       promise,
       resolve,
@@ -1272,6 +1338,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * its own store cannot head-of-line block one that is already quiesced.
    */
   private pumpBarriers(): void {
+    // Called from every completion now, so the no-barrier case is one read.
+    if (this.barriers.length === 0) return;
     if (this.barrierRunning !== undefined) return;
     for (const barrier of this.barriers) {
       if (barrier.running) continue;
@@ -1281,16 +1349,30 @@ export class StorePriorityScheduler extends ObservableScheduler {
     }
   }
 
+  /**
+   * Quiescence gate. A transition may start only once nothing is executing that
+   * could still be touching the store it is about to stop.
+   *
+   * Two populations, and they need different treatment:
+   *
+   * - **Untagged inflight** carries no store identity, so it can be neither
+   *   attributed to this store nor ruled out. It is waited on in full. Derived
+   *   from the counters that already exist rather than tracked separately, so
+   *   the untagged path pays nothing to be waitable.
+   * - **Tagged inflight for THIS store**, in every domain and every generation.
+   *   Deliberately not narrowed to the sealed generation: the transition is a
+   *   child-process restart, and the child it stops serves them all.
+   *
+   * Tagged work for OTHER stores is not waited on — it is attributable, and
+   * provably not this store's.
+   */
   private isBarrierReady(barrier: BarrierEntry): boolean {
+    const totalInflight = this.ackInflight + this.healthInflight
+      + this.normalInflight + this.backgroundInflight;
+    if (totalInflight - this.countTaggedInflight() > 0) return false;
     const state = this.storeStates.get(barrier.storeId);
     if (state === undefined) return true;
-    // A store-wide transition touches every generation, so it is always waited
-    // on regardless of which generation this barrier is draining.
-    if (state.storeWideExclusiveInflight > 0) return false;
-    if (barrier.generation === undefined) return state.taggedInflight === 0;
-    // Work of a different generation runs against a different child store by
-    // construction, so it is not part of this transition's drain.
-    return (state.runningPermits.get(barrier.generation) ?? 0) === 0;
+    return state.taggedInflight === 0;
   }
 
   private startBarrier(barrier: BarrierEntry): void {
