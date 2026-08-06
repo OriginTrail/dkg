@@ -89,7 +89,11 @@ import {
   type Digest32V1,
   type EvmAddressV1,
 } from './sync-wire-scalars.js';
-import { snapshotExactDataRecord } from './sync-wire-objects.js';
+import {
+  hasOwnDataProperty,
+  snapshotDataRecord,
+  snapshotExactDataRecord,
+} from './sync-wire-objects.js';
 
 const UTF8 = new TextEncoder();
 const RFC3339_SECONDS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/;
@@ -400,16 +404,16 @@ export function computeAgentProfileHeadObjectDigestV1(
 }
 
 function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHeadObjectV1 {
-  const probe = snapshotRecord(value, 'agent profile head');
+  const probe = snapshotSystemRecordDataRecord(value, 'agent profile head');
   const state = probe.state;
   if (state !== 'active' && state !== 'tombstone') {
     fail('system-record-schema', 'agent profile head state must be active or tombstone');
   }
-  const optional = HEAD_OPTIONAL_DIGEST_KEYS.filter((key) => hasOwn(probe, key));
+  const optional = HEAD_OPTIONAL_DIGEST_KEYS.filter((key) => hasOwnDataProperty(probe, key));
   const expected = state === 'active'
     ? [...HEAD_COMMON_KEYS, ...optional, ...ACTIVE_HEAD_KEYS]
     : [...HEAD_COMMON_KEYS, ...optional];
-  const head = snapshotExactDataRecord(value, expected, 'agent profile head');
+  const head = snapshotExactDataRecord(probe, expected, 'agent profile head');
   if (head.objectType !== 'agent-profile-head' || head.kind !== REQUEST_RECORD_KIND) {
     fail('system-record-schema', 'agent profile head tag is invalid');
   }
@@ -437,9 +441,9 @@ function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHeadObjec
     fail('system-record-limit', 'profile projection exceeds the V1 bound');
   }
 
-  const previous = hasOwn(head, 'previousHeadDigest');
-  const transition = hasOwn(head, 'acceptedTransitionDigest');
-  const resolution = hasOwn(head, 'forkResolutionDigest');
+  const previous = hasOwnDataProperty(head, 'previousHeadDigest');
+  const transition = hasOwnDataProperty(head, 'acceptedTransitionDigest');
+  const resolution = hasOwnDataProperty(head, 'forkResolutionDigest');
   if (authoritySequence === 0n && transition) {
     fail('system-record-history', 'sequence zero must omit acceptedTransitionDigest');
   }
@@ -538,7 +542,7 @@ export function computeAgentProfileAuthorityTransitionDigestV1(
 }
 
 function validateAuthorityTransition(value: unknown): AgentProfileAuthorityTransitionV1 {
-  const probe = snapshotRecord(value, 'authority transition');
+  const probe = snapshotSystemRecordDataRecord(value, 'authority transition');
   const mode = probe.mode;
   if (mode !== 'co-signed' && mode !== 'expired-prior') {
     fail('system-record-schema', 'authority transition mode is invalid');
@@ -549,7 +553,7 @@ function validateAuthorityTransition(value: unknown): AgentProfileAuthorityTrans
     'priorEvmIssuer', 'nextEvmIssuer', 'nextRoot', 'issuedAt',
     ...(mode === 'expired-prior' ? ['priorValidUntil'] : []),
   ] as const;
-  const transition = snapshotExactDataRecord(value, expected, 'authority transition');
+  const transition = snapshotExactDataRecord(probe, expected, 'authority transition');
   if (transition.objectType !== 'authority-transition' || transition.kind !== REQUEST_RECORD_KIND) {
     fail('system-record-schema', 'authority transition tag is invalid');
   }
@@ -607,14 +611,14 @@ export function computeAgentProfileForkResolutionDigestV1(
 }
 
 function validateForkResolution(value: unknown): AgentProfileForkResolutionV1 {
-  const probe = snapshotRecord(value, 'fork resolution');
+  const probe = snapshotSystemRecordDataRecord(value, 'fork resolution');
   const expected = [
     'objectType', 'kind', 'networkId', 'peerId', 'peerPublicKey', 'evmIssuer',
     'authoritySequence', 'forkedVersion', 'resolutionVersion',
-    ...(hasOwn(probe, 'forkBaseHeadDigest') ? ['forkBaseHeadDigest'] : []),
+    ...(hasOwnDataProperty(probe, 'forkBaseHeadDigest') ? ['forkBaseHeadDigest'] : []),
     'evidenceHeadDigests', 'issuedAt',
   ] as const;
-  const resolution = snapshotExactDataRecord(value, expected, 'fork resolution');
+  const resolution = snapshotExactDataRecord(probe, expected, 'fork resolution');
   if (resolution.objectType !== 'fork-resolution' || resolution.kind !== REQUEST_RECORD_KIND) {
     fail('system-record-schema', 'fork resolution tag is invalid');
   }
@@ -627,10 +631,10 @@ function validateForkResolution(value: unknown): AgentProfileForkResolutionV1 {
   if (sequence > SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX || version <= forked) {
     fail('system-record-history', 'fork resolution sequence/version is invalid');
   }
-  if ((forked === 0n) === hasOwn(resolution, 'forkBaseHeadDigest')) {
+  if ((forked === 0n) === hasOwnDataProperty(resolution, 'forkBaseHeadDigest')) {
     fail('system-record-history', 'fork base is omitted only for a version-zero fork');
   }
-  if (hasOwn(resolution, 'forkBaseHeadDigest')) digest(resolution.forkBaseHeadDigest, 'forkBaseHeadDigest');
+  if (hasOwnDataProperty(resolution, 'forkBaseHeadDigest')) digest(resolution.forkBaseHeadDigest, 'forkBaseHeadDigest');
   digestArray(resolution.evidenceHeadDigests, 'evidenceHeadDigests', 2, SYSTEM_RECORD_MAX_CONFLICT_DIGESTS);
   assertCanonicalRfc3339SecondsV1(resolution.issuedAt, 'issuedAt');
   return Object.freeze({ ...resolution }) as unknown as AgentProfileForkResolutionV1;
@@ -687,12 +691,12 @@ function validateConflictEvidence(value: unknown): AgentProfileConflictEvidenceV
   let totalDigests = 0;
   let priorSortKey = '';
   const entries = evidence.entries.map((candidate, index) => {
-    const probe = snapshotRecord(candidate, `conflict evidence entry ${index}`);
+    const probe = snapshotSystemRecordDataRecord(candidate, `conflict evidence entry ${index}`);
     let entry: AgentProfileForkConflictEntryV1 | AgentProfileTransitionConflictEntryV1;
     let sortKey: string;
     if (probe.type === 'fork') {
       const row = snapshotExactDataRecord(
-        candidate,
+        probe,
         ['type', 'authoritySequence', 'version', 'objectDigests'],
         `fork conflict entry ${index}`,
       );
@@ -703,7 +707,7 @@ function validateConflictEvidence(value: unknown): AgentProfileConflictEvidenceV
       entry = Object.freeze({ ...row }) as unknown as AgentProfileForkConflictEntryV1;
     } else if (probe.type === 'transition') {
       const row = snapshotExactDataRecord(
-        candidate,
+        probe,
         ['type', 'priorAuthoritySequence', 'nextAuthoritySequence', 'objectDigests'],
         `transition conflict entry ${index}`,
       );
@@ -1286,11 +1290,11 @@ export function evaluateAgentProfileHeadAdvanceV1(
   if (BigInt(lineage.length) !== currentSequence) {
     return { decision: 'reject', reason: 'accepted authority state has incomplete transition lineage' };
   }
-  if (accepted.disposition === 'transition-equivocation-quarantined') {
-    return { decision: 'quarantine', reason: 'transition-equivocation' };
-  }
   if (current.networkId !== candidate.networkId || current.peerId !== candidate.peerId) {
     return { decision: 'reject', reason: 'stable record key changed' };
+  }
+  if (accepted.disposition === 'transition-equivocation-quarantined') {
+    return { decision: 'quarantine', reason: 'transition-equivocation' };
   }
   const candidateSequence = parseCanonicalDecimalU64(candidate.authoritySequence);
   if (candidateSequence < currentSequence) return { decision: 'stale' };
@@ -1516,6 +1520,10 @@ export function evaluateAuthorityTransitionAgainstAcceptedStateV1(
   if (current !== undefined
     && BigInt(lineage.length) !== parseCanonicalDecimalU64(current.authoritySequence)) {
     return { decision: 'reject', reason: 'accepted authority state has incomplete transition lineage' };
+  }
+  if (current !== undefined
+    && (current.networkId !== transition.networkId || current.peerId !== transition.peerId)) {
+    return { decision: 'reject', reason: 'stable record key changed' };
   }
   const digestValue = computeAgentProfileAuthorityTransitionDigestV1(transition);
   const retained = lineage.find(
@@ -2115,7 +2123,7 @@ export interface SystemRecordCachePreflightInputV1 {
 export function preflightSystemRecordCacheAccountingV1(
   input: SystemRecordCachePreflightInputV1,
 ): SystemRecordCachePreflightResultV1 {
-  const hasInventoryLeaves = hasOwnProperty(input, 'inventoryLeaves');
+  const hasInventoryLeaves = hasOwnDataProperty(input, 'inventoryLeaves');
   const exact = snapshotExactDataRecord(
     input,
     ['mode', 'rows', ...(hasInventoryLeaves ? ['inventoryLeaves'] : [])],
@@ -2152,8 +2160,8 @@ export function preflightSystemRecordCacheAccountingV1(
   let metadataBytes = 0;
   let sidecarMetadataBytes = 0;
   for (const row of rows) {
-    const hasSidecar = hasOwnProperty(row, 'sidecar');
-    const hasSidecarMetadata = hasOwnProperty(row, 'sidecarMetadata');
+    const hasSidecar = hasOwnDataProperty(row, 'sidecar');
+    const hasSidecarMetadata = hasOwnDataProperty(row, 'sidecarMetadata');
     const exactRow = snapshotExactDataRecord(
       row,
       [
@@ -2302,12 +2310,6 @@ export function preflightSystemRecordCacheAccountingV1(
   function sumPhysicalBytes(references: ReadonlyMap<Digest32V1, SystemRecordCacheReferenceFactsV1>): number {
     return [...references.values()].reduce((sum, facts) => sum + facts.byteLength, 0);
   }
-}
-
-function hasOwnProperty(value: unknown, key: string): boolean {
-  return value !== null
-    && typeof value === 'object'
-    && Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function requireCacheMetadataBytes(value: unknown, label: string): number {
@@ -2491,7 +2493,7 @@ function issuerForRole(
 }
 
 function classifyEnvelopeObject(value: unknown): 'head' | 'transition' | 'fork' {
-  const record = snapshotRecord(value, 'signed envelope object');
+  const record = snapshotSystemRecordDataRecord(value, 'signed envelope object');
   if (record.objectType === 'agent-profile-head') return 'head';
   if (record.objectType === 'authority-transition') return 'transition';
   if (record.objectType === 'fork-resolution') return 'fork';
@@ -2508,28 +2510,15 @@ function objectKindForEnvelope(
       : 'fork-resolution';
 }
 
-function snapshotRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    fail('system-record-schema', `${label} must be a plain object`);
+function snapshotSystemRecordDataRecord(
+  value: unknown,
+  label: string,
+): Readonly<Record<string, unknown>> {
+  try {
+    return snapshotDataRecord(value, label, { rejectNullValues: true });
+  } catch (cause) {
+    fail('system-record-schema', cause instanceof Error ? cause.message : `${label} is invalid`, cause);
   }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    fail('system-record-schema', `${label} must be a plain object`);
-  }
-  const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key !== 'string')) {
-    fail('system-record-schema', `${label} must not contain symbols`);
-  }
-  const result: Record<string, unknown> = Object.create(null);
-  for (const key of keys as string[]) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      fail('system-record-schema', `${label} must contain only enumerable data properties`);
-    }
-    if (descriptor.value === null) fail('system-record-schema', `${label} must omit optional fields, not use null`);
-    result[key] = descriptor.value;
-  }
-  return result;
 }
 
 function assertNetwork(value: unknown): asserts value is NetworkIdV1 {
@@ -2573,10 +2562,6 @@ function digestArray(
       fail('system-record-order', `${label} must be sorted and duplicate-free`);
     }
   }
-}
-
-function hasOwn(record: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function compareBytes(left: Uint8Array, right: Uint8Array): number {

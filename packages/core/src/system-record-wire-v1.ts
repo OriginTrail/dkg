@@ -43,7 +43,7 @@ import {
   type DecimalU64V1,
   type Digest32V1,
 } from './sync-wire-scalars.js';
-import { snapshotExactDataRecord } from './sync-wire-objects.js';
+import { snapshotDataRecord, snapshotExactDataRecord } from './sync-wire-objects.js';
 
 const REQUEST_ID = /^[0-9a-f]{32}$/;
 
@@ -313,7 +313,9 @@ function assertRequestedControlContextV1(
 }
 
 function validateRequestHeader(value: unknown): SystemRecordRequestHeaderV1 {
-  const probe = plainRecord(value, 'system-record request header');
+  const probe = snapshotDataRecord(value, 'system-record request header', {
+    rejectNullValues: true,
+  });
   const operation = probe.operation;
   let expected: readonly string[];
   if (operation === 'get-root') {
@@ -331,7 +333,7 @@ function validateRequestHeader(value: unknown): SystemRecordRequestHeaderV1 {
   } else {
     throw new Error('system-record request operation is invalid');
   }
-  const request = snapshotExactDataRecord(value, expected, 'system-record request header');
+  const request = snapshotExactDataRecord(probe, expected, 'system-record request header');
   validateHeaderCommon(request);
   if (request.kind !== SYSTEM_RECORD_KIND_V1 || request.payloadBytes !== '0') {
     throw new Error('system-record request kind/payloadBytes is invalid');
@@ -360,11 +362,13 @@ function validateRequestHeader(value: unknown): SystemRecordRequestHeaderV1 {
 }
 
 function validateResponseHeader(value: unknown): SystemRecordResponseHeaderV1 {
-  const probe = plainRecord(value, 'system-record response header');
+  const probe = snapshotDataRecord(value, 'system-record response header', {
+    rejectNullValues: true,
+  });
   const status = probe.status;
   if (status === 'ok') {
     const response = snapshotExactDataRecord(
-      value,
+      probe,
       ['wireVersion', 'requestId', 'status', 'objectKind', 'objectDigest', 'payloadBytes'],
       'successful system-record response header',
     );
@@ -390,7 +394,7 @@ function validateResponseHeader(value: unknown): SystemRecordResponseHeaderV1 {
   } as const;
   if (!(status as string in errors)) throw new Error('response status is invalid');
   const response = snapshotExactDataRecord(
-    value,
+    probe,
     ['wireVersion', 'requestId', 'status', 'payloadBytes', 'errorCode'],
     'error system-record response header',
   );
@@ -441,21 +445,4 @@ function splitFrame(frameBytes: Uint8Array): { headerBytes: Uint8Array; payload:
     headerBytes: frameBytes.subarray(4, 4 + headerLength),
     payload: frameBytes.subarray(4 + headerLength),
   };
-}
-
-function plainRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be a plain object`);
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) throw new Error(`${label} must be a plain object`);
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string') throw new Error(`${label} must not contain symbols`);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} must contain only enumerable data properties`);
-    }
-    if (descriptor.value === null) throw new Error(`${label} must omit optional fields, not use null`);
-  }
-  return value as Record<string, unknown>;
 }

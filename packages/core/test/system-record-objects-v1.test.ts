@@ -348,6 +348,31 @@ describe('system-record V1 object codecs', () => {
       .toEqual({ decision: 'quarantine', reason: 'transition-equivocation' });
   });
 
+  it('rejects foreign records before honoring a retained transition quarantine', async () => {
+    const fixture = await authorityFixture();
+    const other = await authorityFixture(17);
+    const current = activeHead(fixture);
+    const foreignHead = activeHead(other);
+    const foreignTransition = authorityTransition(other, foreignHead);
+    const quarantined = {
+      current,
+      disposition: 'transition-equivocation-quarantined' as const,
+      transitionLineage: [],
+      historicalRoots: [],
+    };
+
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      quarantined,
+      foreignHead,
+      { nowMs: Date.parse('2026-08-05T12:10:00Z') },
+    )).toEqual({ decision: 'reject', reason: 'stable record key changed' });
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      quarantined,
+      foreignTransition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({ decision: 'reject', reason: 'stable record key changed' });
+  });
+
   it('makes a verified tombstone dominant regardless of active-head delivery order', async () => {
     const fixture = await authorityFixture();
     const initial = activeHead(fixture);
@@ -770,6 +795,89 @@ describe('system-record owned subjects and verification closure', () => {
     })).rejects.toThrow(/missing/);
   });
 
+  it('cryptographically verifies a cold rotated tombstone closure and rejects tampered history', async () => {
+    const fixture = await authorityFixture();
+    const nextAuthority = await authorityFixture(31);
+    const initial = activeHead(fixture);
+    const transition = transitionFrom(fixture, initial, '1', nextAuthority.evmIssuer);
+    const transitionDigest = computeAgentProfileAuthorityTransitionDigestV1(transition);
+    const rotated = activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+      acceptedTransitionDigest: transitionDigest,
+    });
+    const tombstone = tombstoneHead(rotated);
+    const initialEnvelope = await signedHeadEnvelope(fixture, initial);
+    const rotatedEnvelope = await signedHeadEnvelope(
+      fixture,
+      rotated,
+      nextAuthority.evmPrivateKey,
+    );
+    const tombstoneEnvelope = await signedHeadEnvelope(
+      fixture,
+      tombstone,
+      nextAuthority.evmPrivateKey,
+    );
+    const transitionEnvelope = await signedTransitionEnvelope(
+      fixture,
+      transition,
+      fixture.evmPrivateKey,
+      nextAuthority.evmPrivateKey,
+    );
+    const artifacts = closureArtifacts(tombstone, [rotated, initial], [transition]);
+    for (const envelope of [initialEnvelope, rotatedEnvelope, tombstoneEnvelope]) {
+      artifacts.set(`agent-profile-head:${envelope.objectDigest}`, {
+        objectKind: 'agent-profile-head',
+        digest: envelope.objectDigest,
+        canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(envelope),
+      });
+    }
+    artifacts.set(`authority-transition:${transitionEnvelope.objectDigest}`, {
+      objectKind: 'authority-transition',
+      digest: transitionEnvelope.objectDigest,
+      canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(transitionEnvelope),
+    });
+    const verifier = {
+      nowMs: Date.parse('2026-08-08T00:00:00Z'),
+      resolve: async (reference: { objectKind: string; digest: string }) =>
+        artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: (envelope: SignedSystemRecordEnvelopeV1<
+      AgentProfileHeadObjectV1 | AgentProfileAuthorityTransitionV1 | AgentProfileForkResolutionV1
+      >) => verifySignedSystemRecordEnvelopeV1(envelope),
+      verifyCurrentBundle: () => true,
+    };
+
+    const closure = await buildAgentProfileVerificationClosureV1(
+      tombstoneEnvelope.objectDigest,
+      verifier,
+    );
+    expect(closure.authoritySummary).toMatchObject({
+      candidateHeadDigest: tombstoneEnvelope.objectDigest,
+      deletionTableDigest: rotated.ownedSubjectTableDigest,
+      historicalRoots: [initial.rootSubject],
+    });
+
+    const tamperedTransitionEnvelope = {
+      ...transitionEnvelope,
+      signatures: transitionEnvelope.signatures.map((signature) => signature.role === 'prior-evm'
+        ? {
+            ...signature,
+            signature: signEip191(new Uint8Array([1]), fixture.evmPrivateKey),
+          }
+        : signature),
+    } as SignedSystemRecordEnvelopeV1<AgentProfileAuthorityTransitionV1>;
+    const tamperedArtifacts = new Map(artifacts);
+    tamperedArtifacts.set(`authority-transition:${transitionEnvelope.objectDigest}`, {
+      objectKind: 'authority-transition',
+      digest: transitionEnvelope.objectDigest,
+      canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(tamperedTransitionEnvelope),
+    });
+    await expect(buildAgentProfileVerificationClosureV1(tombstoneEnvelope.objectDigest, {
+      ...verifier,
+      resolve: async (reference) => tamperedArtifacts.get(
+        `${reference.objectKind}:${reference.digest}`,
+      ),
+    })).rejects.toThrow(/authority-transition verification failed/);
+  });
+
   it('fails closed when authority verification rejects each closure control kind', async () => {
     const fixture = await authorityFixture();
     const initial = { ...activeHead(fixture), bundleDigest: CLOSURE_BUNDLE_DIGEST };
@@ -979,7 +1087,10 @@ async function authorityFixture(offset = 0) {
   const peerKey = await generateKeyPairFromSeed('Ed25519', peerSecretSeed);
   const peerId = peerIdFromPublicKey(peerKey.publicKey).toString();
   const peerPublicKey = Buffer.from(peerKey.publicKey.raw).toString('base64url');
-  const evmPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 33);
+  const evmPrivateKey = Uint8Array.from(
+    { length: 32 },
+    (_, index) => (index + 33 + offset) & 0xff,
+  );
   const publicKey = secp256k1.getPublicKey(evmPrivateKey, false);
   const evmIssuer = `0x${Buffer.from(keccak256(publicKey.subarray(1)).subarray(12)).toString('hex')}`;
   return {
@@ -1233,7 +1344,8 @@ function signEip191(message: Uint8Array, privateKey: Uint8Array): string {
 
 async function signedHeadEnvelope(
   fixture: Awaited<ReturnType<typeof authorityFixture>>,
-  object: AgentProfileActiveHeadObjectV1,
+  object: AgentProfileHeadObjectV1,
+  evmPrivateKey = fixture.evmPrivateKey,
 ): Promise<SignedAgentProfileHeadEnvelopeV1> {
   const objectDigest = computeAgentProfileHeadObjectDigestV1(object);
   return {
@@ -1248,11 +1360,49 @@ async function signedHeadEnvelope(
         )).toString('base64url'),
       },
       {
-        role: 'current-evm', suite: 'eip191-personal-sign-digest-v1', signer: fixture.evmIssuer,
+        role: 'current-evm', suite: 'eip191-personal-sign-digest-v1', signer: object.evmIssuer,
         evidence: { kind: 'none' },
         signature: signEip191(
           buildSystemRecordSignatureMessageV1(object, objectDigest, 'current-evm'),
-          fixture.evmPrivateKey,
+          evmPrivateKey,
+        ),
+      },
+    ],
+  };
+}
+
+async function signedTransitionEnvelope(
+  fixture: Awaited<ReturnType<typeof authorityFixture>>,
+  object: AgentProfileAuthorityTransitionV1,
+  priorEvmPrivateKey: Uint8Array,
+  nextEvmPrivateKey: Uint8Array,
+): Promise<SignedSystemRecordEnvelopeV1<AgentProfileAuthorityTransitionV1>> {
+  const objectDigest = computeAgentProfileAuthorityTransitionDigestV1(object);
+  return {
+    object,
+    objectDigest,
+    signatures: [
+      {
+        role: 'peer', suite: 'ed25519-v1', signer: object.peerId, evidence: { kind: 'none' },
+        signature: Buffer.from(await signEd25519(
+          buildSystemRecordSignatureMessageV1(object, objectDigest, 'peer'),
+          fixture.peerSecretSeed,
+        )).toString('base64url'),
+      },
+      {
+        role: 'prior-evm', suite: 'eip191-personal-sign-digest-v1',
+        signer: object.priorEvmIssuer, evidence: { kind: 'none' },
+        signature: signEip191(
+          buildSystemRecordSignatureMessageV1(object, objectDigest, 'prior-evm'),
+          priorEvmPrivateKey,
+        ),
+      },
+      {
+        role: 'next-evm', suite: 'eip191-personal-sign-digest-v1',
+        signer: object.nextEvmIssuer, evidence: { kind: 'none' },
+        signature: signEip191(
+          buildSystemRecordSignatureMessageV1(object, objectDigest, 'next-evm'),
+          nextEvmPrivateKey,
         ),
       },
     ],

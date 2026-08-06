@@ -56,7 +56,11 @@ import {
   type DecimalU64V1,
   type Digest32V1,
 } from './sync-wire-scalars.js';
-import { snapshotExactDataRecord } from './sync-wire-objects.js';
+import {
+  hasOwnDataProperty,
+  snapshotDataRecord,
+  snapshotExactDataRecord,
+} from './sync-wire-objects.js';
 
 const UTF8 = new TextEncoder();
 const ROW_FLAG_TOMBSTONE = 1;
@@ -283,13 +287,13 @@ function validateLeaf(
   root: boolean,
 ): SystemRecordInventoryLeafObjectV1 {
   assertNetworkIdV1(networkId);
-  const probe = plainRecord(value, 'inventory leaf');
+  const probe = snapshotDataRecord(value, 'inventory leaf', { rejectNullValues: true });
   if (!Array.isArray(probe.rows)) throw new Error('inventory leaf rows must be an array');
   const empty = probe.rows.length === 0;
   const expected = empty
     ? ['objectType', 'rows'] as const
     : ['objectType', 'firstKeyHash', 'lastKeyHash', 'rows'] as const;
-  const leaf = snapshotExactDataRecord(value, expected, 'inventory leaf');
+  const leaf = snapshotExactDataRecord(probe, expected, 'inventory leaf');
   if (leaf.objectType !== 'inventory-leaf') throw new Error('inventory leaf tag is invalid');
   const encodedRows = leaf.rows as unknown as string[];
   const minimum = root ? 0 : SYSTEM_RECORD_LEAF_MIN_ROWS;
@@ -457,10 +461,10 @@ export function computeSystemRecordRootDescriptorDigestV1(
 }
 
 function validateRootDescriptor(value: unknown): SystemRecordRootDescriptorObjectV1 {
-  const probe = plainRecord(value, 'root descriptor');
-  const hasPrior = Object.prototype.hasOwnProperty.call(probe, 'priorRootDigest');
+  const probe = snapshotDataRecord(value, 'root descriptor', { rejectNullValues: true });
+  const hasPrior = hasOwnDataProperty(probe, 'priorRootDigest');
   const descriptor = snapshotExactDataRecord(
-    value,
+    probe,
     [
       'objectType', 'kind', 'networkId', 'epoch', 'version',
       ...(hasPrior ? ['priorRootDigest'] : []),
@@ -1499,15 +1503,6 @@ function compareRows(left: SystemRecordInventoryRowV1, right: SystemRecordInvent
   if (left.peerId === right.peerId) return 0;
   // Same hash with a different peer is a collision refusal, not a secondary bucket.
   throw new Error('stable-key hash collision between different canonical peers');
-}
-
-function plainRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be a plain object`);
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) throw new Error(`${label} must be a plain object`);
-  return value as Record<string, unknown>;
 }
 
 function writeU64(target: Uint8Array, offset: number, value: bigint): void {

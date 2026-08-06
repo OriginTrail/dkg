@@ -715,6 +715,8 @@ For every present record, `accountedBytes` is canonical and exact:
 `64 KiB fixed state/security precharge + ownedSubjectTableBytes + projectionBytes +
 pendingDeletionTableBytes`. The pending term is zero when omitted; current JSON size is
 validated against the 64-KiB envelope but never reduces the precharge.
+Tombstones commit the canonical SHA-256 digest of an empty projection under
+`dkg-ka-projection-v1\n`; active state rejects that empty-projection digest.
 Capacity accounting separates state/table bytes, persistent V1 projection bytes, and
 projection quads.
 `conflictEvidenceDigest` is present only for a fully cached unresolved availability

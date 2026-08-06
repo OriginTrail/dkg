@@ -11,6 +11,7 @@ import {
   parseCanonicalSystemRecordCapacityStateV1,
   parseCanonicalSystemRecordMaterializationReceiptV1,
   systemRecordAppliedStateAbsentV1,
+  SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
   type SystemRecordAppliedStatePresentV1,
 } from '../src/system-record-applied-state-v1.js';
 import { computeSystemRecordStableKeyHashV1 } from '../src/system-record-inventory-v1.js';
@@ -141,8 +142,12 @@ describe('system-record applied-state codecs', () => {
   });
 
   it('round-trips terminal tombstone state and materialization receipts', () => {
+    expect(SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1).toBe(
+      '0x4d798c66290f2feed54b20ad25eab62df38360cab298332be5e6d921ad1b5f3c',
+    );
     const tombstone = {
       ...activeState(), status: 'tombstone' as const,
+      projectionDigest: SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
       projectionBytes: '0' as const, projectionQuads: '0' as const,
       ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
       ownedSubjectCount: '0' as const, ownedSubjectTableBytes: '0' as const,
@@ -151,6 +156,14 @@ describe('system-record applied-state codecs', () => {
     expect(parseCanonicalSystemRecordAppliedStateV1(
       canonicalizeSystemRecordAppliedStateV1(tombstone),
     )).toEqual(tombstone);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...tombstone,
+      projectionDigest: HASH_B,
+    })).toThrow(/canonical empty projection/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(),
+      projectionDigest: SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
+    })).toThrow(/nonempty projection/);
     const receipt = {
       objectType: 'system-record-materialization-receipt', kind: 'agents', networkId: 'otp:20430',
       stableKeyHash: STABLE_KEY, stateRevision: '1', appliedStateDigest: HASH_A,
