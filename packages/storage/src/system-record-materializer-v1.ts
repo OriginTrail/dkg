@@ -184,6 +184,7 @@ export function createSystemRecordLaneControllerV1(
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
   });
+  session.owner = controller;
   registeredController = controller;
   return controller;
 }
@@ -200,6 +201,12 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
   private transition: { kind: 'open' | 'disable' | 'shutdown'; descriptor: string | null; work: Promise<void> } | null =
     null;
 
+  /**
+   * The controller this session backs, so shutdown can release the
+   * process-global registration only if it is still the registered one.
+   */
+  owner: SystemRecordLaneControllerV1 | null = null;
+
   constructor(private readonly deps: SystemRecordLaneControllerDepsV1) {}
 
   get state(): SystemRecordLaneStateV1 {
@@ -215,10 +222,7 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
   async open(activation: SystemRecordLaneActivationV1): Promise<SystemRecordLaneSessionV1> {
     const wanted = descriptorOf(activation);
 
-    if (this.current === 'shutdown' || this.current === 'unavailable') {
-      // Terminal states never reopen: admission stays sealed.
-      throw new Error(`system-record lane is terminal (${this.current}) and cannot be reopened`);
-    }
+    this.assertNotTerminal();
 
     // Same-descriptor concurrent opens coalesce; a different descriptor is a
     // caller error rather than an implicit reconfiguration, because switching
@@ -226,11 +230,21 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
     if (this.transition) {
       if (this.transition.kind === 'open' && this.transition.descriptor === wanted) {
         await this.transition.work;
+        // Re-check: the joined open may itself have failed into `unavailable`.
+        this.assertNotTerminal();
         return this;
       }
       if (this.transition.kind !== 'open') {
-        // Disable and shutdown both outrank open.
-        await this.transition.work;
+        // Disable and shutdown both outrank open. Awaiting is correct, but the
+        // state we validated BEFORE the await is stale afterwards — a shutdown
+        // that completes here makes the lane terminal, and proceeding would
+        // start a fresh child after shutdown already proved the old one dead
+        // and its port released. An executed exploit reached exactly that:
+        // state `enabled`, activation generation 2, and a subsequent
+        // `applyVerified` dispatched to the executor on a lane the process had
+        // already shut down.
+        await this.transition.work.catch(() => undefined);
+        this.assertNotTerminal();
       } else {
         throw new SystemRecordLaneActivationConflictError(
           this.transition.descriptor ?? 'unknown',
@@ -282,6 +296,21 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       this.descriptor = null;
       throw error;
     }
+    // POST-CONDITION: the handoff claims to have started and proved a clean
+    // generation, so verify that rather than assume it. Without this,
+    // `runEnable` moved to `enabled` purely because no step threw, and a
+    // handoff that resolved without binding a ready generation produced an
+    // "enabled" lane over a child that was not the proven listener.
+    const bound = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
+    if (!bound || bound.terminal || !bound.ready) {
+      this.current = 'unavailable';
+      this.descriptor = null;
+      throw new Error(
+        'system-record lane enable completed without a proven-ready child generation ' +
+          `(${bound ? `ready=${bound.ready} terminal=${bound.terminal}` : 'no lease'})`,
+      );
+    }
+
     this.activation += 1n;
     this.descriptor = descriptor;
     this.current = 'enabled';
@@ -300,6 +329,10 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       if (this.transition.kind === 'shutdown') return this.transition.work;
       // Disable outranks an in-flight open: join it, then disable the result.
       await this.transition.work.catch(() => undefined);
+      // The joined open may have ended terminal, or a shutdown may have won
+      // the race while we waited. Re-read rather than acting on stale state.
+      const after = this.readState();
+      if (after === 'shutdown' || after === 'disabled' || after === 'unavailable') return;
     }
 
     const work = this.runDisable();
@@ -339,6 +372,19 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
     if (this.current === 'shutdown') return;
     if (this.transition?.kind === 'shutdown') return this.transition.work;
 
+    // JOIN an in-flight open/disable rather than clobbering it. Overwriting
+    // `this.transition` left the other transition running concurrently, so a
+    // stalled enable would resume AFTER shutdown completed and set the lane
+    // back to `enabled` — starting a replacement child after shutdown had
+    // already proved the old one dead. Shutdown supersedes, which means it
+    // must outlive the transition it supersedes, not race it.
+    //
+    // Failures are absorbed: the other transition losing to a teardown is an
+    // expected outcome, and shutdown must reach terminal regardless.
+    const inFlight = this.transition?.work;
+    if (inFlight) await inFlight.catch(() => undefined);
+    if (this.readState() === 'shutdown') return;
+
     const work = (async () => {
       try {
         await this.deps.handoff.destroyClient();
@@ -347,6 +393,12 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       } finally {
         this.descriptor = null;
         this.current = 'shutdown';
+        // Release the process-global registration. Holding it past shutdown
+        // made a replacement controller unconstructable for the process
+        // lifetime — and because the adapter calls the factory inside an
+        // unguarded capability probe, the resulting throw escaped a
+        // `getSystemRecordLaneControllerV1?.()` call, which must never throw.
+        if (registeredController === this.owner) registeredController = null;
       }
     })();
 
@@ -398,6 +450,35 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       }
     }
     return result;
+  }
+
+  /**
+   * Terminal states never reopen.
+   *
+   * Called both BEFORE and AFTER every `await this.transition.work`, because
+   * state validated before an await is stale after it — that staleness is what
+   * let a shut-down lane revive and dispatch a write.
+   */
+  private assertNotTerminal(): void {
+    const state = this.readState();
+    if (state === 'shutdown' || state === 'unavailable') {
+      throw new Error(`system-record lane is terminal (${state}) and cannot be reopened`);
+    }
+  }
+
+  /**
+   * Widened read of `current`, defeating control-flow narrowing.
+   *
+   * TypeScript narrows `this.current` and does NOT invalidate that narrowing
+   * across an `await` — it assumes no one else mutated the field meanwhile.
+   * That assumption is exactly the bug this class had: a concurrent transition
+   * DOES change the state under an await, and the compiler was reporting the
+   * post-await re-checks as impossible comparisons. Reading through a method
+   * call keeps the union wide so the guards type-check and, more importantly,
+   * so a future reader is not tempted to delete them as dead code.
+   */
+  private readState(): SystemRecordLaneStateV1 {
+    return this.current;
   }
 
   private assertLeaseLive(): void {

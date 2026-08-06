@@ -255,6 +255,145 @@ describe('system-record lane session lifecycle V1', () => {
     });
   });
 
+  describe('transition precedence UNDER CONCURRENCY', () => {
+    /**
+     * The suite previously drove this machine only SEQUENTIALLY, which is the
+     * single reason both of the defects below shipped. An independent review
+     * executed them as working exploits: a shut-down lane that spawned a fresh
+     * child after shutdown had proved the old one dead, and — worse — one that
+     * then accepted and applied a record write.
+     */
+    class StallingHandoff extends RecordingHandoff {
+      private releaseGate!: () => void;
+      private reachedGate!: () => void;
+      readonly reachedStart: Promise<void>;
+      private readonly gate: Promise<void>;
+
+      constructor() {
+        super();
+        let r!: () => void;
+        this.reachedStart = new Promise<void>((resolve) => {
+          r = resolve;
+        });
+        this.reachedGate = r;
+        let g!: () => void;
+        this.gate = new Promise<void>((resolve) => {
+          g = resolve;
+        });
+        this.releaseGate = g;
+      }
+
+      release(): void {
+        this.releaseGate();
+      }
+
+      override startAndProveCleanGeneration = async (): Promise<void> => {
+        this.calls.push('startAndProveCleanGeneration');
+        this.reachedGate();
+        await this.gate;
+      };
+    }
+
+    const buildStalling = () => {
+      const stalling = new StallingHandoff();
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: stalling,
+        executor,
+      });
+      return { stalling, controller };
+    };
+
+    it('shutdown outlives a stalled re-open instead of being overwritten by it', async () => {
+      const { stalling, controller } = buildStalling();
+      // Get a session handle from a completed open, then disable so the next
+      // open must run the full handoff — where it will stall.
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+      await session.close('disable');
+
+      const reopened = new StallingHandoff();
+      // Re-arm the stall on the same session by swapping the handoff's start.
+      (stalling as unknown as { startAndProveCleanGeneration: () => Promise<void> })
+        .startAndProveCleanGeneration = reopened.startAndProveCleanGeneration;
+
+      const opening = controller.open(ACTIVATION).then(
+        () => 'resolved',
+        (e: Error) => `rejected: ${e.message}`,
+      );
+      await reopened.reachedStart;
+
+      const shutdown = session.close('shutdown');
+      reopened.release();
+      await shutdown;
+      await opening;
+
+      // The property that matters is NOT whether the stalled open resolves —
+      // shutdown now JOINS it, so it may legitimately complete first. What must
+      // hold is that the resuming enable cannot leave the lane live afterwards,
+      // and that teardown ran AFTER the start rather than being overtaken by
+      // it. Previously shutdown clobbered the transition and the enable
+      // resurrected the lane to `enabled` with a fresh child already spawned.
+      expect(session.state).toBe('shutdown');
+      const startedAt = stalling.calls.lastIndexOf('startAndProveCleanGeneration');
+      const stoppedAt = stalling.calls.lastIndexOf('stopAndProveOwnedChildDead');
+      expect(stoppedAt).toBeGreaterThan(startedAt);
+
+      // And nothing can dispatch on it.
+      const before = executor.calls.length;
+      expect(await session.applyVerified({})).toEqual({ outcome: 'capability-lost' });
+      expect(executor.calls.length).toBe(before);
+    });
+
+    it('a shut-down lane never dispatches, even if an open was awaiting the shutdown', async () => {
+      const { stalling, controller } = buildStalling();
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+
+      // Shutdown in flight; a concurrent open joins it and must NOT proceed.
+      const shutdown = session.close('shutdown');
+      const opening = controller.open(ACTIVATION).then(
+        () => 'resolved',
+        (e: Error) => `rejected: ${e.message}`,
+      );
+      await shutdown;
+      expect(await opening).toMatch(/rejected: .*terminal/);
+
+      expect(session.state).toBe('shutdown');
+      const before = executor.calls.length;
+      expect(await session.applyVerified({})).toEqual({ outcome: 'capability-lost' });
+      // The exploit's step 5: a lane the process had shut down applied a write.
+      expect(executor.calls.length).toBe(before);
+    });
+
+    it('releases the process-global registration on shutdown', async () => {
+      const { stalling, controller } = buildStalling();
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+      await session.close('shutdown');
+
+      // Holding the registration past shutdown made a replacement controller
+      // unconstructable for the process lifetime — and the adapter surfaces
+      // that as a throw from a capability PROBE.
+      expect(() =>
+        createSystemRecordLaneControllerV1({ lease: ownership.lease, handoff: new RecordingHandoff(), executor }),
+      ).not.toThrow();
+    });
+
+    it('refuses to report enabled when the handoff bound no ready generation', async () => {
+      // The handoff resolves every step but never binds a proven-ready child.
+      const silent = createManagedOxigraphOwnershipControllerV1();
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: silent.lease,
+        handoff: new RecordingHandoff(),
+        executor,
+      });
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/proven-ready/);
+    });
+  });
+
   describe('applyVerified admission', () => {
     it('dispatches bound to the current child generation', async () => {
       const session = await build().open(ACTIVATION);

@@ -42,6 +42,7 @@ import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
@@ -410,17 +411,31 @@ export class SparqlHttpStore implements TripleStore {
     // be stated, so it advertises nothing rather than something unusable.
     if (!this.ownershipLease || !this.supervisorHandoff) return undefined;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
-    if (!snapshot || snapshot.terminal) return undefined;
+    // `ready` is checked, not just `terminal`. A store whose child has exited
+    // still holds the lease object; advertising then would hand out a lane over
+    // a child that is not the proven listener. Absence here is transient by
+    // design, which is why the decorators above re-probe rather than latch it.
+    if (!snapshot || snapshot.terminal || !snapshot.ready) return undefined;
 
     if (this.systemRecordLane === undefined) {
-      this.systemRecordLane = createSystemRecordLaneControllerV1({
-        lease: this.ownershipLease,
-        handoff: this.buildChildHandoff(this.supervisorHandoff),
-        executor: {
-          applyVerified: (proof, childGeneration) =>
-            this.executeSystemRecordApply(proof, childGeneration),
-        },
-      });
+      try {
+        this.systemRecordLane = createSystemRecordLaneControllerV1({
+          lease: this.ownershipLease,
+          handoff: this.buildChildHandoff(this.supervisorHandoff),
+          executor: {
+            applyVerified: (proof, childGeneration) =>
+              this.executeSystemRecordApply(proof, childGeneration),
+          },
+        });
+      } catch {
+        // A capability PROBE must never throw. The factory refuses a second
+        // owned-store registration, and that refusal used to propagate out of
+        // `getSystemRecordLaneControllerV1?.()` — through three decorators that
+        // call it inside an unguarded memo fill — so merely ASKING whether the
+        // capability existed could take down the caller. Absence is the correct
+        // answer to "can I have the lane?" when one is already registered.
+        this.systemRecordLane = null;
+      }
     }
     return this.systemRecordLane ?? undefined;
   }
@@ -569,7 +584,16 @@ export class SparqlHttpStore implements TripleStore {
     } else {
       // The DELETE template must use the `GRAPH` keyword â€” `{ ?g_ctx { â€¦ } }`
       // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
-      update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
+      // An unscoped pattern binds `?g_ctx` across EVERY named graph, so it
+      // reaches reserved system-record state while sailing past
+      // `assertGenericMutationScope` — whose body is `if (graph)` and is
+      // therefore a no-op when `pattern.graph` is undefined. Excluding the
+      // operation-internal prefix in the WHERE is the narrow fix: no legitimate
+      // caller targets those graphs (they are invisible to enumeration), so
+      // this closes a bypass without changing any real caller's semantics.
+      update =
+        `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } ` +
+        `FILTER(!STRSTARTS(STR(?g_ctx), "${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}")) }`;
     }
     await this.postUpdate(update, {
       ...options,
