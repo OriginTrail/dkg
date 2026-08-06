@@ -275,7 +275,7 @@ import {
   type ExactDurableFetchDisposition,
 } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
-import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { runSharedMemorySync, selectSwmSnapshotCoverage, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -297,9 +297,16 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   catchupAdmissionSource,
+  runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
   type CatchupMode,
 } from './sync/catchup-policy.js';
+import {
+  SwmCatchupPassTracker,
+  catchupPassNowMs,
+  resolveSwmCatchupPassConfig,
+  type CatchupPassConfig,
+} from './sync/catchup-pass-policy.js';
 import {
   classifyDurableProgress,
   createDurableSyncAccumulator,
@@ -501,6 +508,7 @@ import {
   type CatchupSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncResult,
+  type SwmSnapshotCoverage,
   type DKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -1242,6 +1250,9 @@ function emptySharedMemorySyncResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
+    snapshotPlaneIncomplete: 0,
+    replayPhaseBytesReceived: 0,
+    snapshotPhaseBytesReceived: 0,
   };
 }
 
@@ -1249,6 +1260,7 @@ function mergeSharedMemorySyncResults(
   a: SharedMemorySyncResult,
   b: SharedMemorySyncResult,
 ): SharedMemorySyncResult {
+  const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
     insertedTriples: a.insertedTriples + b.insertedTriples,
     fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
@@ -1268,6 +1280,17 @@ function mergeSharedMemorySyncResults(
     deniedPhases: a.deniedPhases + b.deniedPhases,
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
+    snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
+    continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
+    // The two halves of `bytesReceived`, kept apart so replay cost stays
+    // measurable once passes repeat.
+    replayPhaseBytesReceived: (a.replayPhaseBytesReceived ?? 0) + (b.replayPhaseBytesReceived ?? 0),
+    snapshotPhaseBytesReceived:
+      (a.snapshotPhaseBytesReceived ?? 0) + (b.snapshotPhaseBytesReceived ?? 0),
+    // Scalars above sum; coverage does NOT. It is selected whole from one round
+    // so the counts, their peer and the sample can never be spliced together
+    // from different manifests — see `selectSwmSnapshotCoverage`.
+    ...(swmCoverage ? { swmCoverage } : {}),
   };
 }
 
@@ -6427,7 +6450,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     includeSharedMemory: boolean,
     peers: Array<{ toString(): string }>,
-    stats?: { totalPeers?: number; mode?: CatchupMode; sourceOverride?: SyncAdmissionSource },
+    stats?: {
+      totalPeers?: number;
+      mode?: CatchupMode;
+      sourceOverride?: SyncAdmissionSource;
+      /** Explicit test/embedding override; production resolves the operator env per job. */
+      swmCatchupPassConfig?: CatchupPassConfig;
+    },
   ): Promise<{
     /** Ordered connected peers before optional caller windowing. */
     connectedPeers: number;
@@ -6451,7 +6480,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     let syncCapablePeers = 0;
     let peersTried = 0;
-    let peersResponded = 0;
+    const peersResponded = new Set<string>();
     let deferredBackpressure = 0;
     let dataSynced = 0;
     let sharedMemorySynced = 0;
@@ -6492,8 +6521,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         failedPeers: 0,
         failedPhases: 0,
         deferredBackpressure: 0,
+        snapshotPlaneIncomplete: 0,
+        continuationPasses: 0,
+        replayPhaseBytesReceived: 0,
+        snapshotPhaseBytesReceived: 0,
       },
     };
+    const passTracker = new SwmCatchupPassTracker<SwmSnapshotCoverage>();
 
     if (DEBUG_SYNC_PROGRESS) {
       this.log.info(
@@ -6584,12 +6618,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       },
     );
-    let accessDeniedPeers = 0;
+    const accessDeniedPeers = new Set<string>();
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
-    let peersSucceeded = 0;
-    for (const r of results) {
+    const peersSucceeded = new Set<string>();
+    for (const [resultIndex, r] of results.entries()) {
+      const remotePeerId = syncCapable[resultIndex]!;
       // A peer "succeeded" when its sync round finished without a transport
       // failure, denial, or timeout and either made phase/checkpoint progress,
       // or cleanly completed empty. Empty responses still count as a
@@ -6599,6 +6634,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         complete: r.durable.complete,
       });
       const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
+      if (r.shared) {
+        passTracker.recordPeerRound(
+          remotePeerId,
+          r.shared.swmCoverage,
+          Boolean(sharedProgress?.completedWithoutFailure),
+        );
+      }
       const durableFailed = durableProgress.transportFailed;
       const sharedFailed = Boolean(sharedProgress?.transportFailed);
       const durablePhaseFailed = durableProgress.phaseFailed;
@@ -6648,7 +6690,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
       }
       if (durableResponded || sharedResponded) {
-        peersResponded++;
+        peersResponded.add(remotePeerId);
       }
       if (
         !durableFailed &&
@@ -6663,7 +6705,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         !durableProgress.integrityRejected &&
         (peerMadeProgress || !peerMetadataOnly)
       ) {
-        peersSucceeded++;
+        peersSucceeded.add(remotePeerId);
       }
       dataSynced += r.durable.insertedDataTriples;
       diagnostics.durable.fetchedMetaTriples += r.durable.fetchedMetaTriples;
@@ -6689,6 +6731,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
+        // The #2050 signals. Without these the in-agent walk silently drops the
+        // only per-graph SWM coverage the plane has ever produced, and a job run
+        // through the inline runner reports a shortfall it cannot name — while
+        // the worker-backed runner reports it fully. Coverage is SELECTED, never
+        // summed: independent maxima over resolved and total would combine a peer
+        // reporting 178/250 with one reporting 200/200 into 200/250, a state no
+        // peer described.
+        if (r.shared.swmCoverage) {
+          diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
+            diagnostics.sharedMemory.swmCoverage,
+            r.shared.swmCoverage,
+          );
+        }
+        diagnostics.sharedMemory.snapshotPlaneIncomplete =
+          (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
+          + (r.shared.snapshotPlaneIncomplete ?? 0);
+        diagnostics.sharedMemory.replayPhaseBytesReceived =
+          (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
+          + (r.shared.replayPhaseBytesReceived ?? 0);
+        diagnostics.sharedMemory.snapshotPhaseBytesReceived =
+          (diagnostics.sharedMemory.snapshotPhaseBytesReceived ?? 0)
+          + (r.shared.snapshotPhaseBytesReceived ?? 0);
         diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
         diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
         diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;
@@ -6707,13 +6771,137 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deferredBackpressure += r.shared.deferredBackpressure ?? 0;
         peerDenied = peerDenied || Boolean(sharedProgress?.denied);
       }
-      if (peerDenied) accessDeniedPeers++;
+      if (peerDenied) accessDeniedPeers.add(remotePeerId);
+    }
+
+    const accumulateContinuationShared = (
+      remotePeerId: string,
+      shared: SharedMemorySyncResult,
+    ): void => {
+      const progress = classifyDurableProgress(shared);
+      passTracker.recordPeerRound(
+        remotePeerId,
+        shared.swmCoverage,
+        progress.completedWithoutFailure,
+      );
+
+      sharedMemorySynced += shared.insertedDataTriples;
+      if (shared.swmCoverage) {
+        diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
+          diagnostics.sharedMemory.swmCoverage,
+          shared.swmCoverage,
+        );
+      }
+      diagnostics.sharedMemory.snapshotPlaneIncomplete =
+        (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
+        + (shared.snapshotPlaneIncomplete ?? 0);
+      diagnostics.sharedMemory.replayPhaseBytesReceived =
+        (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
+        + (shared.replayPhaseBytesReceived ?? 0);
+      diagnostics.sharedMemory.snapshotPhaseBytesReceived =
+        (diagnostics.sharedMemory.snapshotPhaseBytesReceived ?? 0)
+        + (shared.snapshotPhaseBytesReceived ?? 0);
+      diagnostics.sharedMemory.fetchedMetaTriples += shared.fetchedMetaTriples;
+      diagnostics.sharedMemory.fetchedDataTriples += shared.fetchedDataTriples;
+      diagnostics.sharedMemory.insertedMetaTriples += shared.insertedMetaTriples;
+      diagnostics.sharedMemory.insertedDataTriples += shared.insertedDataTriples;
+      diagnostics.sharedMemory.bytesReceived += shared.bytesReceived;
+      diagnostics.sharedMemory.resumedPhases += shared.resumedPhases;
+      diagnostics.sharedMemory.timedOutPhases += shared.timedOutPhases;
+      diagnostics.sharedMemory.completedPhases += shared.completedPhases;
+      diagnostics.sharedMemory.checkpointAdvances += shared.checkpointAdvances;
+      diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
+      diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
+      diagnostics.sharedMemory.failedPeers += shared.failedPeers;
+      diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
+      diagnostics.sharedMemory.deferredBackpressure =
+        (diagnostics.sharedMemory.deferredBackpressure ?? 0)
+        + (shared.deferredBackpressure ?? 0);
+      deferredBackpressure += shared.deferredBackpressure ?? 0;
+
+      const responded = !progress.transportFailed
+        && (!progress.deferredByBackpressure || (
+          shared.bytesReceived > 0
+          || shared.completedPhases > 0
+          || shared.emptyResponses > 0
+          || shared.insertedMetaTriples > 0
+          || shared.insertedDataTriples > 0
+        ));
+      if (responded) peersResponded.add(remotePeerId);
+      if (
+        !progress.transportFailed
+        && !progress.phaseFailed
+        && !progress.denied
+        && !progress.deferredByBackpressure
+        && !progress.timedOut
+        && !progress.integrityRejected
+        && (progress.madeReadinessProgress || !progress.hasMetadataEvidence)
+      ) {
+        peersSucceeded.add(remotePeerId);
+      }
+      if (progress.denied) accessDeniedPeers.add(remotePeerId);
+
+      if (shared.insertedDataTriples > 0 && progress.completedWithoutFailure) {
+        cleanSharedMemoryDataSynced += shared.insertedDataTriples;
+      }
+    };
+
+    if (includeSharedMemory) {
+      const passConfig = stats?.swmCatchupPassConfig ?? resolveSwmCatchupPassConfig();
+      const passDeadlineMs = catchupPassNowMs() + passConfig.budgetMs;
+      for (;;) {
+        const decision = passTracker.decide({
+          nowMs: catchupPassNowMs(),
+          deadlineMs: passDeadlineMs,
+          maxPasses: passConfig.maxPasses,
+          planeProven: cleanSharedMemoryDataSynced > 0,
+        });
+        if (!decision.continue) {
+          diagnostics.sharedMemory.continuationStopReason = decision.reason;
+          this.log.info(
+            ctx,
+            `Catch-up SWM pass loop for "${contextGraphId}" stopped after `
+            + `${1 + passTracker.continuationPasses()} pass(es): ${decision.reason}`,
+          );
+          break;
+        }
+
+        const before = passTracker.startContinuationPass();
+        const mode = stats?.mode ?? 'background';
+        const continuationResults = await mapWithConcurrency(
+          decision.peers,
+          CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+          async (remotePeerId) => {
+            if (catchupPassNowMs() >= passDeadlineMs) return null;
+            const shared = await runCatchupPlaneWithPolicy(
+              mode,
+              ({ priority, source }) => this.syncSharedMemoryFromPeerDetailed(
+                remotePeerId,
+                [contextGraphId],
+                { ...(priority === undefined ? {} : { priority }), source },
+              ).catch(emptyShared),
+              { sourceOverride: stats?.sourceOverride },
+            );
+            return { remotePeerId, shared };
+          },
+        );
+        for (const result of continuationResults) {
+          if (result) accumulateContinuationShared(result.remotePeerId, result.shared);
+        }
+        this.log.info(
+          ctx,
+          `Catch-up SWM pass ${1 + passTracker.continuationPasses()} for `
+          + `"${contextGraphId}": ${decision.peers.length} capable peer(s), progress `
+          + `${before} -> ${passTracker.progress()} resolved summed across peers`,
+        );
+      }
+      diagnostics.sharedMemory.continuationPasses = passTracker.continuationPasses();
     }
     diagnostics.noProtocolPeers = noProtocolPeers;
 
     this.log.info(
       ctx,
-      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced} denied=${accessDeniedPeers} deferred=${deferredBackpressure}`,
+      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced} denied=${accessDeniedPeers.size} deferred=${deferredBackpressure}`,
     );
 
     await this.refreshMetaSyncedFlags([contextGraphId]);
@@ -6751,14 +6939,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selectedPeers: peers.length,
       syncCapablePeers,
       peersTried,
-      peersResponded,
-      peersSucceeded,
+      peersResponded: peersResponded.size,
+      peersSucceeded: peersSucceeded.size,
       deferredBackpressure,
       dataSynced,
       sharedMemorySynced,
       sharedMemoryCompletedCleanly,
-      denied: accessDeniedPeers > 0,
-      deniedPeers: accessDeniedPeers,
+      denied: accessDeniedPeers.size > 0,
+      deniedPeers: accessDeniedPeers.size,
       diagnostics,
     };
   }

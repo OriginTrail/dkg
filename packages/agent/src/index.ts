@@ -238,6 +238,7 @@ export {
   type DurableSyncResult,
   type SharedMemorySyncDiagnostics,
   type SharedMemorySyncResult,
+  type SwmSnapshotCoverage,
 } from './dkg-agent-types.js';
 export {
   computeImportedArtifactSelector,
@@ -349,6 +350,25 @@ export {
   type CatchupPlaneSourceOverride,
   type CatchupPlaneResult,
 } from './sync/catchup-policy.js';
+// #2050 — the bounded repeat of the public SWM peer walk. Both drivers of that
+// walk call the same stop rule, and one of them is the CLI daemon's Worker
+// runner, so the rule and the operator-facing bounds it reads must be on the
+// published surface. The env PARSERS stay in-package for the same reason the
+// retry policy's do: in-package tests import them from
+// `./sync/catchup-pass-policy.js` directly rather than pinning them here.
+export {
+  DEFAULT_SWM_CATCHUP_MAX_PASSES,
+  DEFAULT_SWM_CATCHUP_PASS_BUDGET_MS,
+  SwmCatchupPassTracker,
+  catchupPassNowMs,
+  resolveSwmCatchupPassConfig,
+  shouldRunAnotherCatchupPass,
+  type CatchupPassConfig,
+  type CatchupPassCoverage,
+  type CatchupPassDecision,
+  type CatchupPassDecisionReason,
+  type CatchupPassPolicyInput,
+} from './sync/catchup-pass-policy.js';
 // Which peer may let one answer stand for a WHOLE Context Graph is the load-
 // bearing distinction of the foreground catch-up walk (#2006), and the walk
 // lives in the CLI's worker. Publishing the model — rather than letting the
@@ -368,6 +388,11 @@ export {
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './sync/durable-progress.js';
+// The ONE reduction for `SwmSnapshotCoverage`. Exported so the CLI catch-up
+// walk reduces across peers with the same rule the agent uses across Context
+// Graphs — two implementations is how a numerator and a denominator end up
+// coming from different peers.
+export { selectSwmSnapshotCoverage } from './sync/requester/shared-memory-sync.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

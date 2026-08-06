@@ -15,6 +15,7 @@
  */
 
 import type { ethers } from 'ethers';
+import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
   Quad,
   TripleStore,
@@ -1030,6 +1031,92 @@ export interface DurableSyncDiagnostics {
   deferredBackpressure?: number;
 }
 
+/**
+ * ONE peer's public-SWM snapshot coverage for ONE round, and the ONLY shape in
+ * which that coverage travels.
+ *
+ * **Reduced whole or not at all.** Numerator and denominator are never reduced
+ * independently: an independent `max` over ready and total combines peers
+ * reporting `178/250` and `200/200` into `200/250` — a state no peer reported,
+ * attributed to a peer that never said it, alongside a missing sample drawn
+ * from a third inventory. Every reducer therefore picks one record and keeps it
+ * intact; `selectSwmSnapshotCoverage` in `sync/requester/shared-memory-sync.ts`
+ * is that reducer, and it is the only one.
+ */
+export interface SwmSnapshotCoverage {
+  /**
+   * The Context Graph this coverage describes. Required, because the reduction
+   * runs INSIDE the `contextGraphIds` loop: on a multi-CG call exactly one
+   * graph's record survives, and without this field no consumer can tell which
+   * graph the surviving counts belong to.
+   */
+  contextGraphId: string;
+  /** Last 8 chars of the peer id this whole record came from. */
+  peerIdSuffix: string;
+  /**
+   * Snapshot refs whose Knowledge Assets are MATERIALIZED — written and locally
+   * visible — either already present before this round or made visible by it.
+   *
+   * Not "fetched". A ref sitting valid in the blob cache whose write failed does
+   * NOT count here, and that is deliberate: the capability gate reads this field
+   * to decide whether a peer still owes us anything, and a round that cached
+   * every ref while writing none would otherwise report `N/N`, drop the peer as
+   * satisfied, and disable the retry loop in exactly the failure class it exists
+   * for.
+   */
+  snapshotsResolved: number;
+  /** Snapshot refs declared by this peer's verified SWM metadata. */
+  snapshotsTotal: number;
+  /**
+   * The peer's SWM metadata phase paged to completion, so `snapshotsTotal` is
+   * its full manifest rather than a truncated prefix. False means the
+   * denominator is a lower bound.
+   */
+  manifestComplete: boolean;
+  /**
+   * Refs NOT materialized: `snapshotsTotal - snapshotsResolved`, by
+   * construction, so `resolved + missing === total` always holds.
+   *
+   * Covers both causes at once — never fetched, and fetched-but-unwritten. It is
+   * NOT a retrieval-only count, and it must never be added to
+   * `materializationFailures`; every unwritten ref is already in here.
+   */
+  missingCount: number;
+  /**
+   * Bounded identifiers for the shortfall — a public peer controls manifest
+   * size, so this is a sample, never the full inventory. Always drawn from the
+   * same round as the counts above, and deduplicated, so it can never exceed
+   * `missingCount`.
+   */
+  missingSample: string[];
+  /**
+   * Descriptor writes that FAILED after their snapshot fetched and
+   * digest-verified — a store error inside the KA write lock, the failure class
+   * the G7 repair exists for, likeliest under the same store pressure that
+   * produces incomplete rounds.
+   *
+   * A CAUSE indicator for `missingCount`, not a second disjoint count. Those
+   * refs are already counted as missing; this field says the shortfall is a
+   * store problem rather than a network one, which is what sends an operator to
+   * the right place.
+   *
+   * Note the unit: this counts failing DESCRIPTORS while `missingCount` counts
+   * REFS, and one ref can carry several descriptors. Neither is a subset count
+   * of the other, so never render them as "N of which K".
+   *
+   * `materializationFailures > 0` with `missingCount === 0` is unrepresentable:
+   * a ref with a failing descriptor is excluded from the materialized set, which
+   * forces `resolved < total`. A fixture asserting that pair is testing a state
+   * the producer cannot emit.
+   */
+  materializationFailures: number;
+  /**
+   * This round came from the metadata-resolved curator. Set only by the
+   * catch-up walk, which knows peer roles; the agent-side sync does not.
+   */
+  fromAuthority?: boolean;
+}
+
 export interface SharedMemorySyncDiagnostics {
   fetchedMetaTriples: number;
   fetchedDataTriples: number;
@@ -1047,6 +1134,38 @@ export interface SharedMemorySyncDiagnostics {
   backoffWorthyFailures?: number;
   /** Context Graph admissions deferred by local scheduler pressure. */
   deferredBackpressure?: number;
+  /** Coverage for the graph this round touched; see {@link SwmSnapshotCoverage}. */
+  swmCoverage?: SwmSnapshotCoverage;
+  /**
+   * Snapshot phases that stopped on the local clock with unfetched refs
+   * remaining — a VOLUNTARY yield, not a peer fault. Deliberately distinct from
+   * `timedOutPhases`, which marks the round backoff-worthy
+   * (`durable-progress.ts` `backoffWorthyFailure`) and would put a healthy peer
+   * into backoff for our own budget decision.
+   */
+  snapshotPlaneIncomplete?: number;
+  /** Extra catch-up passes spent over the peer set beyond the first. */
+  continuationPasses?: number;
+  /**
+   * Why the bounded repeat stopped. Typed as the policy's own closed union
+   * rather than `string`, so a new stop reason cannot reach the terminal message
+   * unnoticed — the terminal text renders this, and an unhandled reason there
+   * would read as a missing explanation rather than as a new state.
+   */
+  continuationStopReason?: CatchupPassDecisionReason;
+  /**
+   * The REPLAY half of `bytesReceived`: the metadata and aggregate-data phases,
+   * which a repeated pass re-fetches in full. Named for the plan's single
+   * "metadata/aggregate replay" bucket — it spans BOTH phases, not just meta.
+   *
+   * Split out because `bytesReceived` merges replay and useful bytes into one
+   * scalar, which makes the accepted cost of repeating the peer walk
+   * unmeasurable in bytes — exactly the quantity the efficiency gate exists to
+   * bound. `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
+   */
+  replayPhaseBytesReceived?: number;
+  /** The USEFUL half of `bytesReceived`: immutable snapshot content. */
+  snapshotPhaseBytesReceived?: number;
 }
 
 export interface CatchupSyncDiagnostics {
