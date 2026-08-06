@@ -217,7 +217,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           deps.store,
           descriptor.assertionGraph,
           descriptor.publicQuadsDigest,
-          Date.now(),
+
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessWrite' },
         ).catch(() => false);
       }
@@ -246,12 +246,20 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // write then evicts v1 atomically. That holds with or without this call,
       // and it is the property the tests pin.
       //
-      // This call exists so the witness graph does not accumulate claims about
-      // content that no longer exists — including after a replace whose digest
-      // nothing subsequently verifies. Both orderings are safe for the same
-      // reason (the digest is bound either way); after the replace is chosen so
-      // a crash between the two leaves a stale row that misses rather than no
-      // row at all, which is identical in effect and cheaper to reason about.
+      // Where the digest binding does NOT cover, and this call is the only
+      // cover: witness(v1) + content(v2) + a descriptor still naming v1. The
+      // binding protects the (old witness, new descriptor) direction; it does
+      // nothing for (old witness, old descriptor, new content), because there
+      // the ASK's digest and the witness's digest agree while the store has
+      // moved on. That asymmetry is why this is not merely hygiene.
+      //
+      // It is nevertheless BEST EFFORT — `.catch` below — so the residual is
+      // real rather than zero: a swallowed failure, or a crash between the
+      // replace and this line, reaches exactly that state. It is bounded by the
+      // count gate whenever the replace also changed the quad count, and by the
+      // next successful verify otherwise. Ordering is after the replace because
+      // invalidating first would drop a still-valid memo on a replace that then
+      // throws; neither order removes the window.
       await invalidateSwmMaterializationWitness(deps.store, graphUri, {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',

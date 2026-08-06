@@ -43,14 +43,13 @@
  * count, different digest). That is why the digest is part of the read, and why
  * the write must EVICT any prior row for the graph rather than accumulate.
  */
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, sparqlString } from '@origintrail-official/dkg-core';
 import type { QueryOptions, Quad, TripleStore } from './triple-store.js';
 import { tryReplaceSubjectAtomically } from './triple-store.js';
 
 export const SWM_MATERIALIZATION_WITNESS_GRAPH = 'urn:dkg:local:swm-materialization-witness';
 
 const WITNESS_DIGEST_PREDICATE = 'urn:dkg:local:swm-materialization-witness:digest';
-const WITNESS_VERIFIED_AT_PREDICATE = 'urn:dkg:local:swm-materialization-witness:verified-at-ms';
 
 /**
  * One subject per assertion graph — NOT per (graph, digest) pair.
@@ -59,14 +58,16 @@ const WITNESS_VERIFIED_AT_PREDICATE = 'urn:dkg:local:swm-materialization-witness
  * old claim in the same atomic replace. Folding the digest into the subject IRI
  * would leave the previous version's row standing, so a later return to that
  * digest — or any equal-count replace — would find a standing lie.
+ *
+ * PRECONDITION: `assertionGraph` carries no `#`. Every caller passes a
+ * `knowledgeAssetLayerGraphUri`, which does not, but `assertSafeIri` does NOT
+ * reject `#` — so a fragment-bearing graph would yield a double-fragment IRI
+ * here. That would be a distinct, self-consistent subject rather than a
+ * collision (both write and read derive it the same way), but it is outside
+ * what this keying scheme intends.
  */
 export function swmMaterializationWitnessSubject(assertionGraph: string): string {
   return `${assertionGraph}#dkg-swm-materialized`;
-}
-
-/** True for the witness graph itself — for sync/serve exclusion assertions. */
-export function isSwmMaterializationWitnessGraph(graphUri: string): boolean {
-  return graphUri === SWM_MATERIALIZATION_WITNESS_GRAPH;
 }
 
 /**
@@ -83,12 +84,18 @@ export async function readSwmMaterializationWitness(
   options: QueryOptions = {},
 ): Promise<boolean> {
   const subject = swmMaterializationWitnessSubject(assertionGraph);
-  const result = await store.query(
-    `ASK { GRAPH <${assertSafeIri(SWM_MATERIALIZATION_WITNESS_GRAPH)}> { `
-    + `<${assertSafeIri(subject)}> <${assertSafeIri(WITNESS_DIGEST_PREDICATE)}> ${JSON.stringify(digest)} } }`,
-    options,
-  );
-  return result.type === 'boolean' && result.value === true;
+  // Contained: this is a pure OPTIMISATION, so a transient store error must
+  // degrade to "not memoized" and let the caller do the real read-back. Letting
+  // it throw would make a check that used to succeed fail, which is a strictly
+  // worse outcome than recomputing.
+  const result = await store
+    .query(
+      `ASK { GRAPH <${assertSafeIri(SWM_MATERIALIZATION_WITNESS_GRAPH)}> { `
+      + `<${assertSafeIri(subject)}> <${assertSafeIri(WITNESS_DIGEST_PREDICATE)}> ${sparqlString(digest)} } }`,
+      options,
+    )
+    .catch(() => null);
+  return result?.type === 'boolean' && result.value === true;
 }
 
 /**
@@ -107,21 +114,18 @@ export async function writeSwmMaterializationWitness(
   store: TripleStore,
   assertionGraph: string,
   digest: string,
-  nowMs: number,
   options: QueryOptions = {},
 ): Promise<boolean> {
   const subject = swmMaterializationWitnessSubject(assertionGraph);
+  // Exactly ONE row. An earlier revision also stored a `verified-at-ms`
+  // timestamp; nothing read it, and every witness write appends a changelog
+  // marker and advances `seq`, so a second row doubled that churn for no
+  // consumer. Add a row here only when something reads it.
   const quads: Quad[] = [
     {
       subject,
       predicate: WITNESS_DIGEST_PREDICATE,
-      object: JSON.stringify(digest),
-      graph: SWM_MATERIALIZATION_WITNESS_GRAPH,
-    },
-    {
-      subject,
-      predicate: WITNESS_VERIFIED_AT_PREDICATE,
-      object: JSON.stringify(String(nowMs)),
+      object: sparqlString(digest),
       graph: SWM_MATERIALIZATION_WITNESS_GRAPH,
     },
   ];

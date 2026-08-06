@@ -149,7 +149,6 @@ export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
 export {
   SWM_MATERIALIZATION_WITNESS_GRAPH,
   swmMaterializationWitnessSubject,
-  isSwmMaterializationWitnessGraph,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
   invalidateSwmMaterializationWitness,

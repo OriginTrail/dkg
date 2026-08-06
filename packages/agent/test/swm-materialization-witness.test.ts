@@ -74,7 +74,7 @@ function countingStore(inner: TripleStore) {
 describe('#2079 witness module', () => {
   it('reads back only for the digest it was written with', async () => {
     const store = newStore();
-    expect(await writeSwmMaterializationWitness(store, GRAPH, 'sha256:aaa', 1)).toBe(true);
+    expect(await writeSwmMaterializationWitness(store, GRAPH, 'sha256:aaa')).toBe(true);
     expect(await readSwmMaterializationWitness(store, GRAPH, 'sha256:aaa')).toBe(true);
     // A different digest must MISS. This is what makes an equal-count version
     // change safe without relying on anyone remembering to invalidate.
@@ -83,8 +83,8 @@ describe('#2079 witness module', () => {
 
   it('EVICTS the previous claim rather than accumulating', async () => {
     const store = newStore();
-    await writeSwmMaterializationWitness(store, GRAPH, 'sha256:aaa', 1);
-    await writeSwmMaterializationWitness(store, GRAPH, 'sha256:bbb', 2);
+    await writeSwmMaterializationWitness(store, GRAPH, 'sha256:aaa');
+    await writeSwmMaterializationWitness(store, GRAPH, 'sha256:bbb');
     // If the write appended instead of replacing the subject, the OLD digest
     // would still read true — a standing lie about content that is gone.
     expect(await readSwmMaterializationWitness(store, GRAPH, 'sha256:aaa')).toBe(false);
@@ -93,7 +93,7 @@ describe('#2079 witness module', () => {
 
   it('invalidate removes the claim', async () => {
     const store = newStore();
-    await writeSwmMaterializationWitness(store, GRAPH, 'sha256:aaa', 1);
+    await writeSwmMaterializationWitness(store, GRAPH, 'sha256:aaa');
     await invalidateSwmMaterializationWitness(store, GRAPH);
     expect(await readSwmMaterializationWitness(store, GRAPH, 'sha256:aaa')).toBe(false);
   });
@@ -151,6 +151,40 @@ describe('#2079 isGraphAssetMaterialized fast path', () => {
     expect(await readSwmMaterializationWitness(store, GRAPH, d.publicQuadsDigest)).toBe(true);
 
     expect(await mat.isGraphAssetMaterialized(d)).toBe(false);
+  });
+
+  it('writes NO witness when the digest does NOT match, and stays false on re-check', async () => {
+    // "Only the branch that VERIFIED it writes it" is the entire soundness
+    // argument — it is why #2079's head-row proposal was killed — and without
+    // this row nothing pins it: making the write unconditional passes every
+    // other test in the repo.
+    //
+    // Under that mutation the damage is sticky, not transient. A mismatch would
+    // write a witness for `descriptor.publicQuadsDigest` — exactly the value
+    // the NEXT round's ASK binds — so once `replaceGraph` fails (it throws on a
+    // missing snapshot, and that throw is caught upstream, so the only
+    // invalidator never runs) the check returns true forever.
+    const store = newStore();
+    const v1 = payload('v1', 6);
+    const v2 = payload('v2', 6);
+    await store.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    const mat = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d2 = descriptorFor(v2);
+
+    // Store holds v1; ask about v2. Count matches, digest does not.
+    expect(await mat.isGraphAssetMaterialized(d2)).toBe(false);
+
+    // No witness may exist for a digest this node never matched.
+    expect(await readSwmMaterializationWitness(store, GRAPH, d2.publicQuadsDigest)).toBe(false);
+
+    // The second call is what kills the mutant: an unconditional write would
+    // have memoized v2 on the first call, and this would come back true while
+    // the store still holds v1.
+    expect(await mat.isGraphAssetMaterialized(d2)).toBe(false);
   });
 
   it('does not certify v2 from a v1 witness when the quad COUNT is unchanged', async () => {
