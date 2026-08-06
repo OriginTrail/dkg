@@ -386,6 +386,66 @@ describe('/api/prime-agent-channel/send', () => {
     expect(res.body).not.toContain('sk-');
   });
 
+  it('forwards the partial transcript with a terminal code while replacing the bridge message', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      sendStatus: 503,
+      sendBody: {
+        error: 'Prime Agent turn exceeded the 3300000ms hard limit.',
+        code: 'PRIME_AGENT_TURN_TIMEOUT',
+        text: 'partial answer so far',
+        details: { providerToken: 'must-not-leak' },
+      },
+    });
+    writeDescriptor('s1', bridge.url);
+
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-hard' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/send',
+    } as any);
+
+    expect(res.statusCode).toBe(502);
+    const body = JSON.parse(res.body);
+    expect(body).toMatchObject({
+      code: 'PRIME_AGENT_TURN_TIMEOUT',
+      error: 'Prime Agent turn exceeded its hard limit.',
+      // The partial transcript is deltas-only output and reaches the UI, just
+      // like the idle-timeout 504 below preserves it.
+      text: 'partial answer so far',
+      source: 'prime-agent-channel',
+      correlationId: 'c-hard',
+      retryable: false,
+    });
+    // The daemon substitutes its own message and never forwards bridge details.
+    expect(res.body).not.toContain('must-not-leak');
+    expect(res.body).not.toContain('3300000');
+  });
+
+  it('treats a prototype-key bridge code as a generic bridge error, not an allowlist hit', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      sendStatus: 503,
+      sendBody: { error: 'boom', code: 'constructor' },
+    });
+    writeDescriptor('s1', bridge.url);
+
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-proto' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/send',
+    } as any);
+
+    expect(res.statusCode).toBe(502);
+    expect(JSON.parse(res.body).code).toBe('BRIDGE_ERROR');
+  });
+
   it('propagates the bridge idle timeout with its partial text instead of a generic 502', async () => {
     const bridge = await startStubBridge({
       sessionId: 's1',

@@ -146,6 +146,12 @@ interface TurnOutcome {
   errorCode?: PrimeAgentTurnErrorCode;
 }
 
+// Must stay in lock-step with SANITIZED_PRIME_AGENT_BRIDGE_FAILURES in
+// packages/cli/src/daemon/routes/prime-agent.ts (the daemon's forwarding
+// allowlist) and the per-code branches in
+// packages/node-ui/src/ui/components/Shell/PanelRight/local-agent-errors.ts:
+// a code missing from the daemon map degrades to a generic BRIDGE_ERROR on
+// /send while /stream forwards it verbatim, and the two transports diverge.
 type PrimeAgentTurnErrorCode =
   | 'PRIME_AGENT_PROVIDER_UNAUTHORIZED'
   | 'PRIME_AGENT_PROVIDER_ERROR'
@@ -158,13 +164,30 @@ interface SanitizedTurnFailure {
   message: string;
 }
 
+// Classification only ever needs the head of each diagnostic; the cap also
+// keeps the regex off provider-sized inputs, which are attacker-influenced.
+// Capped per field (not after joining) so an oversized first diagnostic
+// cannot starve the second out of classification entirely, and the trailing
+// partial token is stripped so truncation cannot fabricate a marker (a cut
+// through "status: 4013" must not leave a matching "status: 401").
+const PROVIDER_FAILURE_CLASSIFICATION_MAX_CHARS = 4096;
+
+function clipDiagnostic(value: string): string {
+  if (value.length <= PROVIDER_FAILURE_CLASSIFICATION_MAX_CHARS) return value;
+  return value.slice(0, PROVIDER_FAILURE_CLASSIFICATION_MAX_CHARS).replace(/\w+$/, '');
+}
+
 function sanitizedProviderFailure(event: MessageUpdateEvent): SanitizedTurnFailure {
   const assistantEvent = event.assistantMessageEvent;
   const raw = [assistantEvent?.error?.errorMessage, event.message?.errorMessage]
     .filter((value): value is string => typeof value === 'string')
+    .map(clipDiagnostic)
     .join('\n');
+  // `\s*(?:[:=]\s*)?` is the linear-time equivalent of `\s*[:=]?\s*`: two
+  // adjacent unbounded \s* backtrack quadratically on a long whitespace run,
+  // and this runs on raw provider error text.
   if (
-    /\bunauthori[sz]ed\b|\bauthentication failed\b|\binvalid[_ ]api[_ ]key\b|\bincorrect api key\b|\b(?:http|status(?: code)?)\s*[:=]?\s*401\b/i.test(raw)
+    /\bunauthori[sz]ed\b|\bauthentication failed\b|\binvalid[_ ]api[_ ]key\b|\bincorrect api key\b|\b(?:http|status(?: code)?)\s*(?:[:=]\s*)?401\b/i.test(raw)
   ) {
     return {
       code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
@@ -193,10 +216,13 @@ class SessionBridge {
   #startedAt: string | undefined;
   #turn: PendingTurn | undefined;
   #agentActive = false;
-  // A provider error is a terminal stream event, but Prime may still emit the
-  // corresponding agent_end shortly afterwards. If a new bridge request lands
-  // in that small window, the old agent_end must not settle the new request.
-  #discardNextAgentEnd = false;
+  // Set by #failTurn, cleared by the next agent_start (or consumed by the
+  // failed turn's own trailing agent_end). While set, every agent event still
+  // belongs to the failed turn: a late agent_end must not settle a successor
+  // request, late text_deltas from a zombie turn the hard-timeout abort could
+  // not stop must not contaminate its transcript, and the trailing
+  // `error`/`aborted` frame the abort itself produces must not fail it.
+  #discardStaleTurnEvents = false;
   #abortActiveAgent: (() => void) | undefined;
   #closed = false;
   readonly #turnIdleTimeoutMs: number;
@@ -526,6 +552,27 @@ class SessionBridge {
   /* ── agent event plumbing ───────────────────────────────────────────────── */
 
   onMessageUpdate(event: MessageUpdateEvent): void {
+    // Everything between #failTurn and the successor's agent_start is the
+    // failed turn talking: deltas from a zombie turn the abort could not stop,
+    // or the trailing `error`/`aborted` frame the abort itself produces. A
+    // successor turn's own events always follow its agent_start, which clears
+    // this flag — so nothing discarded here can belong to a live request.
+    if (this.#discardStaleTurnEvents) {
+      // Content is discarded, but zombie deltas are still proof the session
+      // loop is draining toward a queued successor's followUp — keep that
+      // successor's idle window alive so it does not spuriously 504 while its
+      // message is guaranteed to run next.
+      const pending = this.#turn;
+      const staleType = event.assistantMessageEvent?.type;
+      if (
+        pending &&
+        !pending.responseSettled &&
+        (staleType === 'text_delta' || staleType === 'thinking_delta' || staleType === 'toolcall_delta')
+      ) {
+        this.#armIdleTimer(pending);
+      }
+      return;
+    }
     const turn = this.#turn;
     const assistantEvent = event.assistantMessageEvent;
     const eventType = assistantEvent?.type;
@@ -533,6 +580,12 @@ class SessionBridge {
     // authoritative even when Prime fails to emit the higher-level agent_end:
     // finish the HTTP/SSE turn, clear admission, and never expose the raw
     // provider payload (which may contain credential-bearing diagnostics).
+    // Known gap: the event carries no turn identity, so in the pre-agent_start
+    // admission window (see the followUp comment in #handleSend) an error or
+    // operator abort of a *locally-typed* turn also fails a pending bridge
+    // turn whose message is still queued — the caller may see TURN_ABORTED for
+    // a message that later executes. Closing that needs turn-association data
+    // from the Prime event API.
     if (eventType === 'error') {
       this.#failTurn(sanitizedProviderFailure(event));
       return;
@@ -559,8 +612,8 @@ class SessionBridge {
 
   onAgentStart(ctx?: ExtensionCtxLike): void {
     // If a failed turn never emitted agent_end, this start necessarily belongs
-    // to the successor and supersedes the stale-end guard.
-    if (this.#discardNextAgentEnd) this.#discardNextAgentEnd = false;
+    // to the successor and supersedes the stale-event guard.
+    this.#discardStaleTurnEvents = false;
     this.#agentActive = true;
     this.#abortActiveAgent = typeof ctx?.abort === 'function' ? () => ctx.abort!() : undefined;
     // Election stamp, once per turn — agent_start fires for locally-typed and
@@ -577,8 +630,8 @@ class SessionBridge {
   }
 
   onAgentEnd(): void {
-    if (this.#discardNextAgentEnd) {
-      this.#discardNextAgentEnd = false;
+    if (this.#discardStaleTurnEvents) {
+      this.#discardStaleTurnEvents = false;
       this.#agentActive = false;
       this.#abortActiveAgent = undefined;
       return;
@@ -627,10 +680,11 @@ class SessionBridge {
       });
       this.#clearTurn(turn);
     }
-    // The provider `error` event is terminal, so accepting the next request is
-    // safe. Remember that one stale agent_end may still arrive and must be
-    // consumed without touching that successor request.
-    this.#discardNextAgentEnd = true;
+    // The failure verdict is terminal, so accepting the next request is safe.
+    // Remember that the failed turn may still emit events — trailing deltas,
+    // an abort's own `error` frame, its agent_end — and none of them may touch
+    // a successor request.
+    this.#discardStaleTurnEvents = true;
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
   }
@@ -712,4 +766,4 @@ export default function dkgBridgeExtension(pi: ExtensionApiLike): void {
   });
 }
 
-export { SessionBridge, tokenMatches, sessionsDir, stateDir };
+export { SessionBridge, sanitizedProviderFailure, tokenMatches, sessionsDir, stateDir };

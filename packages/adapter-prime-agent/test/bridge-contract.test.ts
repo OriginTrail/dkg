@@ -27,6 +27,18 @@ function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'follow
   };
 }
 
+/**
+ * Deterministic barrier on an observable side effect (usually `sent` growing):
+ * fixed sleeps race the loopback HTTP round-trip under CI load, a poll cannot.
+ */
+async function until(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('until(): condition not reached in time');
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+
 async function bridgeBaseUrl(b: SessionBridge): Promise<string> {
   // The bridge publishes its descriptor; read the port back out of it.
   const { readLiveSessions } = await import('../src/session-registry.js');
@@ -424,6 +436,208 @@ describe('/send', () => {
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
     bridge.onAgentEnd();
     expect((await recovered).status).toBe(200);
+  });
+
+  it('discards a zombie turn stale deltas and abort error so they never touch the successor', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-stale-events', {
+      turnIdleTimeoutMs: 30,
+      turnHardTimeoutMs: 80,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    // No abort in ctx: the hard timeout cannot stop this turn, only release it.
+    const firstPromise = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'zombie turn', correlationId: 'c-zombie' }),
+    });
+    await until(() => sent.length === 1);
+    bridge.onAgentStart();
+    expect((await firstPromise).status).toBe(504);
+
+    await new Promise((r) => setTimeout(r, 90));
+
+    const successor = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'successor', correlationId: 'c-successor' }),
+    });
+    await until(() => sent.length === 2);
+    expect(sent).toEqual(['zombie turn', 'successor']);
+    // The zombie keeps talking before the successor's agent_start: trailing
+    // deltas, an abort's own error frame, then its agent_end. None of it may
+    // contaminate, fail, or settle the successor request.
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie-tail ' } });
+    bridge.onMessageUpdate({
+      assistantMessageEvent: { type: 'error', reason: 'aborted' },
+      message: { role: 'assistant', stopReason: 'aborted' },
+    });
+    bridge.onAgentEnd();
+
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh answer' } });
+    bridge.onAgentEnd();
+    const res = await successor;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ text: 'fresh answer', correlationId: 'c-successor' });
+  });
+
+  it('keeps a queued successor alive on zombie liveness instead of spuriously idling it out', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-zombie-liveness', {
+      turnIdleTimeoutMs: 80,
+      turnHardTimeoutMs: 400,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const firstPromise = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'zombie turn', correlationId: 'c-liveness-zombie' }),
+    });
+    await until(() => sent.length === 1);
+    bridge.onAgentStart();
+    expect((await firstPromise).status).toBe(504);
+    await new Promise((r) => setTimeout(r, 340));
+
+    // Successor admitted while the zombie is still draining. Its idle window
+    // (80ms) is shorter than the zombie's remaining run (5 x 25ms): the
+    // discarded deltas must still count as liveness, or the successor 504s
+    // while its queued message later executes invisibly.
+    const successor = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'queued successor', correlationId: 'c-liveness-succ' }),
+    });
+    await until(() => sent.length === 2);
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((r) => setTimeout(r, 25));
+      bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie noise' } });
+    }
+    bridge.onAgentEnd();
+
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh' } });
+    bridge.onAgentEnd();
+    const res = await successor;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ text: 'fresh', correlationId: 'c-liveness-succ' });
+  });
+
+  it('reports PRIME_AGENT_TURN_TIMEOUT when the hard limit fires while the turn is still live', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-hard-first', {
+      turnIdleTimeoutMs: 5_000,
+      turnHardTimeoutMs: 80,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+    let abortCount = 0;
+
+    const pending = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'never ends', correlationId: 'c-hard-first' }),
+    });
+    await until(() => sent.length === 1);
+    bridge.onAgentStart({
+      sessionManager: { getSessionId: () => 'sess-hard-first' },
+      abort: () => { abortCount += 1; },
+    });
+
+    const res = await pending;
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      code: 'PRIME_AGENT_TURN_TIMEOUT',
+      source: 'prime-agent-channel',
+      retryable: false,
+      correlationId: 'c-hard-first',
+    });
+    expect(body.error).toContain('hard limit');
+    expect(abortCount).toBe(1);
+  });
+
+  it('shapes the /send 503 provider-failure body exactly as the daemon allowlist parses it', async () => {
+    const pending = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'use the provider', correlationId: 'c-send-auth' }),
+    });
+    await until(() => sent.length === 1);
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'partial ' } });
+    bridge.onMessageUpdate({
+      assistantMessageEvent: {
+        type: 'error',
+        reason: 'error',
+        error: { errorMessage: 'Unauthorized: provider key sk-must-not-leak' },
+      },
+    });
+
+    const res = await pending;
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    // The daemon's sanitizedPrimeAgentBridgeFailure reads the top-level `code`
+    // of this body, and its terminal branch forwards `text`; this pins the
+    // producer half of that wire contract.
+    expect(body).toMatchObject({
+      code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+      source: 'prime-agent-channel',
+      retryable: false,
+      text: 'partial ',
+      correlationId: 'c-send-auth',
+      sessionId: 'sess-test',
+    });
+    const rawBody = JSON.stringify(body);
+    expect(rawBody).not.toContain('must-not-leak');
+    expect(rawBody).not.toContain('sk-');
+    bridge.onAgentEnd();
+  });
+
+  it('fails fast with PRIME_AGENT_DELIVERY_FAILED when injection throws, then recovers fully', async () => {
+    await bridge.stop();
+    let rejectNext = true;
+    bridge = new SessionBridge(stubPi((t) => {
+      if (rejectNext) {
+        rejectNext = false;
+        throw new Error('session rejected the message');
+      }
+      sent.push(t);
+    }) as never, 'sess-delivery');
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const failed = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'undeliverable', correlationId: 'c-deliver' }),
+    });
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({
+      code: 'PRIME_AGENT_DELIVERY_FAILED',
+      retryable: false,
+      correlationId: 'c-deliver',
+    });
+
+    // No agent turn ever started, so the stale-event guard set by the failure
+    // must not swallow the next real turn's events.
+    const retry = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'deliverable', correlationId: 'c-deliver-2' }),
+    });
+    await until(() => sent.length === 1);
+    expect(sent).toEqual(['deliverable']);
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'delivered' } });
+    bridge.onAgentEnd();
+    const res = await retry;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ text: 'delivered', correlationId: 'c-deliver-2' });
   });
 
   it('only emits verified text_delta events, not thinking or cumulative snapshots', async () => {
