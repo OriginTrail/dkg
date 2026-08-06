@@ -47,6 +47,7 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import { assertNotReservedInternalGraphV1 } from '../internal-graph-policy.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
@@ -309,8 +310,41 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
+  /**
+   * Refuse a caller-authored mutation aimed at persistent system-record V1
+   * reserved state (#2052 B2).
+   *
+   * This lives on the ADAPTER rather than on a decorator on purpose. Every
+   * decorator is optional — the changelog defaults off, and the graph-set index
+   * and blob store are conditional — but all of them delegate downward, so the
+   * adapter is the only always-on choke point for the managed endpoint that
+   * actually holds reserved state.
+   *
+   * Reserved graphs are writable only through the materializer's structured,
+   * generation-bound command path, which derives its own scope and never calls
+   * these public methods. A hard throw is safe because reserved graphs never
+   * enumerate: no legitimate iterate-and-drop loop can reach one, only a
+   * hardcoded IRI can.
+   *
+   * `update()` is deliberately NOT guarded. Its argument is an opaque SPARQL
+   * program, and scanning it for reserved IRIs would be exactly the evadable
+   * best-effort string check that `ChangelogStore.assertNoReservedRef` already
+   * documents as insufficient. Opaque updates instead rotate the
+   * materialization epoch; Stack C audits and migrates the remaining raw
+   * callers before any of this behaviour is enabled.
+   */
+  private assertGenericMutationScope(
+    graphs: Iterable<string | undefined>,
+    operation: string,
+  ): void {
+    for (const graph of graphs) {
+      if (graph) assertNotReservedInternalGraphV1(graph, operation, 'SparqlHttpStore');
+    }
+  }
+
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
+    this.assertGenericMutationScope(quads.map((q) => q.graph), 'insert');
     assertQuadLiteralsMutf8Safe(quads, {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.insert',
@@ -341,6 +375,7 @@ export class SparqlHttpStore implements TripleStore {
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
+    this.assertGenericMutationScope(quads.map((q) => q.graph), 'delete');
     // SPARQL forbids blank nodes in `DELETE DATA` — a spec-compliant endpoint
     // (Oxigraph, Fuseki, …) rejects the whole statement with HTTP 400 if any
     // quad's subject or object is a blank node. `buildBlankNodeSafeDelete`
@@ -360,6 +395,7 @@ export class SparqlHttpStore implements TripleStore {
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
     const graphUri = pattern.graph;
+    this.assertGenericMutationScope([graphUri], 'deleteByPattern');
     const before = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern.countBefore',
@@ -391,6 +427,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
+    this.assertGenericMutationScope([graphUri], 'deleteBySubjectPrefix');
     const before = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
@@ -431,6 +468,11 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
+    // Reserved-scope refusal is checked BEFORE the capability refusal so the
+    // outcome does not depend on `atomicUpdates`, which the storage factory
+    // synthesizes from plain config and therefore cannot be trusted to order
+    // this guard.
+    this.assertGenericMutationScope([graphUri], 'replaceGraph');
     if (!this.atomicUpdates) {
       // A generic SPARQL endpoint may apply the staged DROP/INSERT/MOVE
       // operations non-transactionally, which can strand the target graph in a
@@ -467,6 +509,7 @@ export class SparqlHttpStore implements TripleStore {
     metadataQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
+    this.assertGenericMutationScope([graphUri, metaGraphUri], 'replaceGraphAndSubject');
     if (!this.atomicUpdates) {
       throw new UnsupportedTripleStoreCapabilityError(
         'replaceGraphAndSubject',
@@ -504,6 +547,7 @@ export class SparqlHttpStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
+    this.assertGenericMutationScope([graphUri], 'replaceSubject');
     if (!this.atomicUpdates) {
       // A generic endpoint may apply DELETE WHERE; INSERT DATA as separate
       // operations, re-exposing the transient-empty subject. Fail closed before
@@ -627,6 +671,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
+    this.assertGenericMutationScope([graphUri], 'dropGraph');
     const update = `DROP SILENT GRAPH <${escapeUri(graphUri)}>`;
     await this.postUpdate(update, {
       ...options,

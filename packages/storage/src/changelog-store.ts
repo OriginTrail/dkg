@@ -15,6 +15,7 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -241,6 +242,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.insert(quads, options);
+    this.assertNoPersistentReservedQuads(quads, 'insert');
     // The reserved plane is not writable through the public API: strip any
     // caller-supplied quads targeting it so a forged marker (e.g. a fake seq to
     // jump the high-water mark) can never reach the inner store. Only the
@@ -271,6 +273,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.delete(quads, options);
+    this.assertNoPersistentReservedQuads(quads, 'delete');
     // Strip reserved-graph quads: callers cannot delete markers out of the log.
     const safe = this.stripReserved(quads);
     const touched = this.attributableGraphs(safe);
@@ -819,6 +822,28 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   /** Drop caller quads that target the reserved plane (marker forgery guard). */
   private stripReserved(quads: readonly Quad[]): Quad[] {
     return quads.filter((q) => !(q.graph && this.isReservedGraph(q.graph)));
+  }
+
+  /**
+   * Deny — rather than strip — a batch touching persistent system-record V1
+   * state (#2052 B2).
+   *
+   * Stripping is right for the changelog plane and for ephemeral staging
+   * graphs: both are decorator-internal, and a caller that names one is either
+   * confused or forging a marker, so dropping the quad and continuing is
+   * harmless. It is WRONG for persistent reserved state, because there the
+   * caller's write silently does not happen and it receives a resolved promise
+   * saying it did — a lost update with no signal, exactly the failure the
+   * materializer's full-state CAS exists to prevent.
+   *
+   * Applied before `stripReserved` so the refusal does not depend on whether
+   * the changelog happens to be enabled; the adapter beneath enforces the same
+   * rule for the disabled path.
+   */
+  private assertNoPersistentReservedQuads(quads: readonly Quad[], op: string): void {
+    for (const q of quads) {
+      if (q.graph) assertNotReservedInternalGraphV1(q.graph, op, 'ChangelogStore');
+    }
   }
 
   /** Reject a graph-targeted mutation aimed at the reserved plane. Safe as a
