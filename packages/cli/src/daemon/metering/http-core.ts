@@ -1,0 +1,164 @@
+// V2 Stage-3 — the metering endpoint's testable core.
+//
+// Buyer-found (Hermes/Bo, 2026-08-06): the previous archive could not be
+// executed because routes/metering.ts imports the daemon's http-utils, which
+// transitively drags in chain ABIs and websocket transports — bundling it
+// standalone was impossible, so 84 of 100 gates were unreproducible.
+//
+// The security-relevant logic does not need any of that. It needs to read a
+// body, write JSON, and decide. So the decisions live HERE, dependency-light
+// and bundleable, with I/O injected; routes/metering.ts is a thin adapter that
+// passes the daemon's real helpers. The core is what the gates exercise, and
+// the core is what carries every fail-closed rule.
+import { createHash } from "node:crypto";
+import { canonicalize, loadMeterConfig } from "./ledger.js";
+import { COEFFICIENTS_CANONICAL, SCHEDULE_VERSION } from "./read-meter.js";
+import {
+  termsQuote, handshake, openTab, tabView, creditObservedDeposit,
+} from "./stage3-endpoint.js";
+
+const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
+
+/** Everything the core needs from the outside world. */
+export interface MeteringIo {
+  /** Send a JSON response. */
+  json(status: number, body: unknown): void;
+  /** Read the request body as text (bounded). */
+  readBody(): Promise<string>;
+}
+
+export interface MeteringRequest {
+  method: string;
+  path: string;
+  searchParams: URLSearchParams;
+  /** Provider wallet address advertised in the quote. */
+  providerAddress: string;
+  /** Caller identity resolved by the daemon, if any. */
+  requestAgentAddress?: string;
+  /** Observed safe head, or null when the chain is unreachable. */
+  safeHeadBlock: number | null;
+  /** Metering home (DKG_HOME). */
+  home: string;
+}
+
+/**
+ * Returns true when this request was handled. A false return means the path is
+ * not ours and the caller should continue its dispatch chain.
+ */
+export async function handleMetering(req: MeteringRequest, io: MeteringIo): Promise<boolean> {
+  const { path, method, home } = req;
+  if (!path.startsWith("/api/metering/")) return false;
+
+  const cfg = loadMeterConfig(home);
+  const coefficientsDigest = sha256(canonicalize(COEFFICIENTS_CANONICAL as unknown as Record<string, unknown>));
+
+  // ── GET /api/metering/terms ────────────────────────────────────────────
+  // Priced and verifiable before the buyer commits to anything at all.
+  if (method === "GET" && path === "/api/metering/terms") {
+    io.json(200, termsQuote({
+      providerAddress: req.providerAddress,
+      refundAddressHint: req.searchParams.get("refundAddress") ?? undefined,
+      askMicroPer1k: cfg.readAskMicroPer1k,
+      scheduleVersion: SCHEDULE_VERSION,
+      coefficientsDigest,
+      meterMode: cfg.mode,
+      safeHeadBlock: req.safeHeadBlock,
+    }));
+    return true;
+  }
+
+  // ── POST /api/metering/handshake ───────────────────────────────────────
+  // Zero-value preflight. No funded tab, no ledger write, no charge.
+  if (method === "POST" && path === "/api/metering/handshake") {
+    let body: Record<string, any>;
+    try { body = JSON.parse((await io.readBody()) || "{}"); }
+    catch { io.json(400, { error: "E_BAD_JSON" }); return true; }
+    const { delegation, walletPublicKeyPem, request, revocationCheckpoint } = body;
+    if (!delegation || !walletPublicKeyPem || !request) {
+      io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "walletPublicKeyPem", "request"] });
+      return true;
+    }
+    try {
+      // A rejected preflight is a SUCCESSFUL preflight: 200 with a stable
+      // reason code, so the buyer asserts on codes rather than parsing prose.
+      io.json(200, handshake(home, {
+        delegation, walletPublicKeyPem, request,
+        revocationCheckpoint: revocationCheckpoint ?? { observedAt: null, maxCheckpointAgeMs: 0 },
+      }));
+    } catch (e: unknown) {
+      io.json(400, { error: "E_PREFLIGHT", detail: String((e as Error)?.message ?? e).slice(0, 200) });
+    }
+    return true;
+  }
+
+  // ── POST /api/metering/tab/open ────────────────────────────────────────
+  if (method === "POST" && path === "/api/metering/tab/open") {
+    let b: Record<string, any>;
+    try { b = JSON.parse((await io.readBody()) || "{}"); }
+    catch { io.json(400, { error: "E_BAD_JSON" }); return true; }
+    if (!b.delegation || !b.walletPublicKeyPem || !b.refundAddress || !b.request) {
+      io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "walletPublicKeyPem", "refundAddress", "request"] });
+      return true;
+    }
+    try {
+      const out = openTab(home, {
+        delegation: b.delegation,
+        walletPublicKeyPem: b.walletPublicKeyPem,
+        refundAddress: b.refundAddress,
+        providerAddress: req.providerAddress,
+        askMicroPer1k: cfg.readAskMicroPer1k,
+        scheduleVersion: SCHEDULE_VERSION,
+        request: b.request,
+        revocationCheckpoint: b.revocationCheckpoint ?? { observedAt: null, maxCheckpointAgeMs: 0 },
+      });
+      io.json(out.opened ? 200 : 403, out);
+    } catch (e: unknown) {
+      io.json(400, { error: "E_OPEN_TAB", detail: String((e as Error)?.message ?? e).slice(0, 200) });
+    }
+    return true;
+  }
+
+  // ── GET /api/metering/tab ──────────────────────────────────────────────
+  if (method === "GET" && path === "/api/metering/tab") {
+    const principal = req.searchParams.get("principal") ?? req.requestAgentAddress;
+    if (!principal) { io.json(400, { error: "E_NO_PRINCIPAL" }); return true; }
+    io.json(200, tabView(home, principal, req.safeHeadBlock));
+    return true;
+  }
+
+  // ── POST /api/metering/tab/credit ──────────────────────────────────────
+  // Operator-only: hand the node an OBSERVED on-chain transfer. Every
+  // buyer-set rule (confirmations, sender, minimum, open tab) is re-checked
+  // inside creditObservedDeposit — this route cannot bypass any of them.
+  if (method === "POST" && path === "/api/metering/tab/credit") {
+    let b: Record<string, any>;
+    try { b = JSON.parse((await io.readBody()) || "{}"); }
+    catch { io.json(400, { error: "E_BAD_JSON" }); return true; }
+    if (!b.principal || !b.transfer) {
+      io.json(400, { error: "E_MISSING_FIELD", required: ["principal", "transfer"] });
+      return true;
+    }
+    // A malformed transfer must be REFUSED, not thrown: an unhandled throw
+    // surfaces as a 500 with a stack trace, which is both an information leak
+    // and an ambiguous answer to "was I credited?". Validate the shape first.
+    const need = ["txHash", "from", "to", "token", "amountTrac", "blockNumber", "safeHeadBlock"];
+    const missing = need.filter((k) => b.transfer[k] === undefined || b.transfer[k] === null);
+    if (missing.length) { io.json(400, { error: "E_MALFORMED_TRANSFER", missing }); return true; }
+    if (!Number.isFinite(b.transfer.blockNumber) || !Number.isFinite(b.transfer.safeHeadBlock)) {
+      io.json(400, { error: "E_MALFORMED_TRANSFER", detail: "block numbers must be finite" });
+      return true;
+    }
+    try {
+      const out = creditObservedDeposit(home, b.principal, b.transfer);
+      io.json(out.credited ? 200 : 403, out);
+    } catch (e: unknown) {
+      io.json(400, { error: "E_CREDIT", detail: String((e as Error)?.message ?? e).slice(0, 200) });
+    }
+    return true;
+  }
+
+  // Default-deny: an unknown /api/metering/* path is a 404, not a fallthrough
+  // into some other route module's namespace.
+  io.json(404, { error: "E_UNKNOWN_METERING_ROUTE", path });
+  return true;
+}

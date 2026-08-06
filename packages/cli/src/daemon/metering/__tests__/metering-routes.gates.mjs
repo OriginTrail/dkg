@@ -17,7 +17,7 @@ const dist = join(here, "../../../../dist/daemon");
 
 process.env.DKG_HOME = mkdtempSync(join(tmpdir(), "metering-routes-"));
 
-const { handleMeteringRoutes } = await import(join(dist, "routes/metering.js"));
+const { handleMetering } = await import(join(dist, "metering/http-core.js"));
 const { canonicalize } = await import(join(dist, "metering/ledger.js"));
 const { COEFFICIENTS_CANONICAL } = await import(join(dist, "metering/read-meter.js"));
 
@@ -31,15 +31,21 @@ const ok = (name, cond, detail) => {
 const wallets = { publisher: { address: "0x633E5a7C0000000000000000000000000000dEaD" } };
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
-  const ctx = {
-    req, res, url, path: url.pathname,
-    opWallets: wallets,
-    agent: {},
-    requestAgentAddress: "0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba",
+  // The adapter's job, reproduced exactly: read a body, write JSON. Everything
+  // the gates care about lives in the core, which is what we exercise here.
+  const io = {
+    json: (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); },
+    readBody: () => new Promise((resolve) => { let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => resolve(b)); }),
   };
   try {
-    await handleMeteringRoutes(ctx);
-    if (!res.writableEnded) { res.writeHead(404); res.end("not a metering route"); }
+    const handled = await handleMetering({
+      method: req.method, path: url.pathname, searchParams: url.searchParams,
+      providerAddress: wallets.publisher.address,
+      requestAgentAddress: "0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba",
+      safeHeadBlock: null,
+      home: process.env.DKG_HOME,
+    }, io);
+    if (!handled && !res.writableEnded) { res.writeHead(404); res.end("not a metering route"); }
   } catch (e) {
     if (!res.writableEnded) { res.writeHead(500); res.end(String(e?.stack ?? e)); }
   }
@@ -57,6 +63,23 @@ console.log("\nStage-3 provider endpoint — HTTP-level gates\n");
 
 // ── 1. the regression that started this file ──────────────────────────────
 console.log("route registration (the buyer-found defect):");
+// The core is what the rest of this file exercises, but a perfectly correct
+// core is still a 404 if nobody mounts it — that WAS the defect. So assert the
+// wiring itself, against the built daemon, not against a hopeful comment.
+{
+  const { readFileSync, existsSync } = await import("node:fs");
+  const hr = join(dist, "handle-request.js");
+  const adapter = join(dist, "routes", "metering.js");
+  const src = existsSync(hr) ? readFileSync(hr, "utf8") : "";
+  ok("the built daemon imports the metering route adapter",
+    src.includes("handleMeteringRoutes"), "handle-request.js does not reference it");
+  ok("the built daemon actually CALLS it in the dispatch chain",
+    /await\s+handleMeteringRoutes\s*\(/.test(src), "imported but never invoked");
+  ok("the adapter delegates to the core under test",
+    existsSync(adapter) && readFileSync(adapter, "utf8").includes("handleMetering"),
+    "adapter does not call handleMetering — gates would test dead code");
+}
+
 const terms = await get("/api/metering/terms");
 ok("GET /api/metering/terms is NOT 404 — the route is actually mounted",
   terms.status === 200, `got ${terms.status}`);
