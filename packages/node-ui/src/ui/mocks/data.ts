@@ -1,4 +1,4 @@
-import type { NotificationsFeedResponse } from '../api.js';
+import type { NotificationsFeedResponse, SubGraphInfo } from '../api.js';
 
 export const MOCK_STATUS = {
   name: 'my-dkg-node',
@@ -197,4 +197,54 @@ export const MOCK_SESSIONS = {
       ],
     },
   ],
+};
+
+// GH#1763 — mock sub-graph lists keyed by CG id, mirroring the real
+// `/api/sub-graph/list` response shape. `provider.ts` previously reached for
+// this map through `(mock as any).MOCK_SUBGRAPHS`, which the module never
+// exported: the optional lookup kept mock mode from crashing, but the
+// per-CG override the comment promised could never fire and the production
+// Vite build emitted a missing-export warning on every run.
+//
+// Only CGs whose sub-graph UI is worth exercising need an entry — the
+// provider falls back to an empty list for anything absent, which is what
+// `cg:supply-chain-eu` deliberately exercises.
+export const MOCK_SUBGRAPHS: Record<
+  string,
+  { contextGraphId: string; subGraphs: SubGraphInfo[] }
+> = {
+  'cg:pharma-drug-interactions': {
+    contextGraphId: 'cg:pharma-drug-interactions',
+    subGraphs: [
+      {
+        name: 'Interactions',
+        uri: 'cg:pharma-drug-interactions/interactions',
+        description: 'Pairwise drug interaction records',
+        createdBy: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+        createdAt: '2026-04-02T09:15:00Z',
+        entityCount: 148,
+        tripleCount: 1721,
+      },
+      {
+        name: 'Contraindications',
+        uri: 'cg:pharma-drug-interactions/contraindications',
+        createdBy: 'did:dkg:agent:0x2222222222222222222222222222222222222222',
+        createdAt: '2026-04-05T16:40:00Z',
+        entityCount: 79,
+        tripleCount: 604,
+      },
+    ],
+  },
+  'cg:climate-science': {
+    contextGraphId: 'cg:climate-science',
+    subGraphs: [
+      {
+        name: 'Arctic Ice',
+        uri: 'cg:climate-science/arctic-ice',
+        description: 'Sea-ice extent projections',
+        entityCount: 32,
+        tripleCount: 410,
+      },
+    ],
+  },
 };
