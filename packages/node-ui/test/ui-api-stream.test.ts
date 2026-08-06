@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import {
   fetchMemorySessionGraphDelta,
+  fetchLocalAgentIntegrations,
   importFile,
   persistLocalAgentChatFailure,
   LocalAgentApiError,
@@ -11,6 +12,7 @@ import {
   streamOpenClawLocalChat,
   streamPrimeAgentLocalChat,
 } from '../src/ui/api.js';
+import { resolveLocalAgentConversation } from '../src/ui/components/Shell/PanelRight/selection.js';
 
 let server: Server;
 let baseUrl: string;
@@ -171,10 +173,32 @@ describe('ui local-agent stream api', () => {
     }
   });
 
-  it('forwards the pinned Prime Agent session through the generic chat transport', async () => {
+  it('maps the elected Prime session through selection into the generic chat transport', async () => {
     const savedFetch = globalThis.fetch;
     let payload: Record<string, unknown> = {};
-    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations')) {
+        return Response.json({
+          integrations: [{
+            id: 'prime-agent',
+            name: 'Prime Agent',
+            description: 'Prime Agent framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'ready', ready: true },
+            metadata: { sessionCount: 2, activeSessionId: '019f-session-a' },
+          }],
+        });
+      }
+      if (url.includes('/api/prime-agent-channel/health')) {
+        return Response.json({
+          ok: true,
+          sessionCount: 2,
+          target: '019f-session-a',
+          sessions: [{ sessionId: '019f-session-a' }, { sessionId: '019f-session-b' }],
+        });
+      }
       payload = JSON.parse(String(init?.body ?? '{}'));
       const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
@@ -192,11 +216,58 @@ describe('ui local-agent stream api', () => {
     }) as typeof globalThis.fetch;
 
     try {
+      const { integrations } = await fetchLocalAgentIntegrations();
+      const prime = integrations.find((integration) => integration.id === 'prime-agent');
+      const conversation = resolveLocalAgentConversation({
+        integrationId: 'prime-agent',
+        sessionId: null,
+        defaultSessionId: prime?.defaultSessionId,
+      });
       const result = await streamLocalAgentChat('prime-agent', 'hello', {
-        sessionId: '019f-session-a',
+        sessionId: conversation.sessionId ?? undefined,
       });
       expect(result.sessionId).toBe('019f-session-a');
       expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('re-elects once when an automatically pinned Prime session has exited', async () => {
+    const savedFetch = globalThis.fetch;
+    const payloads: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      payloads.push(JSON.parse(String(init?.body ?? '{}')));
+      if (payloads.length === 1) {
+        return Response.json({
+          error: 'No live Prime Agent session stale-session',
+          code: 'PRIME_AGENT_NO_SESSION',
+          source: 'prime-agent-channel',
+        }, { status: 409 });
+      }
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"type":"final","text":"Recovered","correlationId":"p-retry","sessionId":"live-session"}\n\n',
+          ));
+          controller.close();
+        },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    try {
+      const result = await streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: 'stale-session',
+      });
+      expect(result).toMatchObject({ text: 'Recovered', sessionId: 'live-session' });
+      expect(payloads).toHaveLength(2);
+      expect(payloads[0]).toMatchObject({ text: 'hello', sessionId: 'stale-session' });
+      expect(payloads[1]).toMatchObject({ text: 'hello' });
+      expect(payloads[1].sessionId).toBeUndefined();
     } finally {
       globalThis.fetch = savedFetch;
     }

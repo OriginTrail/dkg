@@ -100,6 +100,12 @@ function isPrimeAgentTimeoutError(err: unknown): boolean {
   );
 }
 
+// Must stay in lock-step with PrimeAgentTurnErrorCode in
+// packages/adapter-prime-agent/extension/src/extension.ts (the producer) and
+// the per-code branches in
+// packages/node-ui/src/ui/components/Shell/PanelRight/local-agent-errors.ts:
+// a bridge code missing here degrades to a generic BRIDGE_ERROR on /send
+// while /stream forwards the SSE frame verbatim, and the transports diverge.
 const SANITIZED_PRIME_AGENT_BRIDGE_FAILURES: Readonly<Record<string, string>> = {
   PRIME_AGENT_PROVIDER_UNAUTHORIZED:
     'Prime Agent provider authentication failed. Check the configured provider credentials.',
@@ -109,15 +115,17 @@ const SANITIZED_PRIME_AGENT_BRIDGE_FAILURES: Readonly<Record<string, string>> = 
   PRIME_AGENT_DELIVERY_FAILED: 'Prime Agent rejected the local message before starting the turn.',
 };
 
-function sanitizedPrimeAgentBridgeFailure(text: string): { code: string; error: string } | null {
-  try {
-    const parsed = JSON.parse(text) as { code?: unknown };
-    const code = typeof parsed?.code === 'string' ? parsed.code : '';
-    const error = SANITIZED_PRIME_AGENT_BRIDGE_FAILURES[code];
-    return error ? { code, error } : null;
-  } catch {
-    return null;
-  }
+function sanitizedPrimeAgentBridgeFailure(
+  body: Record<string, unknown>,
+): { code: string; error: string } | null {
+  const code = typeof body.code === 'string' ? body.code : '';
+  // Own-property check: a hostile `code` like "constructor" or "__proto__"
+  // must fall through to the generic BRIDGE_ERROR envelope, not resolve a
+  // truthy value off Object.prototype.
+  const error = Object.hasOwn(SANITIZED_PRIME_AGENT_BRIDGE_FAILURES, code)
+    ? SANITIZED_PRIME_AGENT_BRIDGE_FAILURES[code]
+    : undefined;
+  return error ? { code, error } : null;
 }
 
 /**
@@ -200,30 +208,34 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       });
       const text = await forwardRes.text();
       if (!forwardRes.ok) {
+        let bridgeBody: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed && typeof parsed === 'object') bridgeBody = parsed as Record<string, unknown>;
+        } catch {
+          /* non-JSON body: the fallback envelopes below still tell the UI what happened */
+        }
         if (forwardRes.status === 504) {
           // The bridge's own idle-timeout verdict. Its JSON body carries any
           // partial turn output, which must reach the UI rather than being
           // flattened into a generic bridge fault.
-          let bridgeBody: Record<string, unknown> = {};
-          try {
-            const parsed = JSON.parse(text);
-            if (parsed && typeof parsed === 'object') bridgeBody = parsed as Record<string, unknown>;
-          } catch {
-            /* non-JSON body: the timeout envelope alone still tells the UI what happened */
-          }
           return jsonResponse(res, 504, {
             ...timeoutBody(payload.correlationId, target.sessionId, PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS),
             ...('text' in bridgeBody ? { text: bridgeBody.text } : {}),
             ...('timedOut' in bridgeBody ? { timedOut: bridgeBody.timedOut } : {}),
           });
         }
-        const terminalFailure = sanitizedPrimeAgentBridgeFailure(text);
+        const terminalFailure = sanitizedPrimeAgentBridgeFailure(bridgeBody);
         if (terminalFailure) {
           // Only forward codes from the fixed allowlist above. The provider's
           // raw error body may contain credential-bearing diagnostics and must
-          // not cross the bridge/daemon trust boundary.
+          // not cross the bridge/daemon trust boundary. The partial transcript
+          // is the exception: it only ever accumulates verified text_delta
+          // frames, and the UI renders it (LocalAgentApiError.text) exactly as
+          // it does for the idle-timeout 504 above.
           return jsonResponse(res, 502, {
             ...terminalFailure,
+            ...(typeof bridgeBody.text === 'string' ? { text: bridgeBody.text } : {}),
             source: 'prime-agent-channel',
             sessionId: target.sessionId,
             correlationId: payload.correlationId,
@@ -325,6 +337,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
         Connection: 'keep-alive',
         ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
       });

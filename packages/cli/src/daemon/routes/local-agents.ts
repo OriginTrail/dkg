@@ -347,7 +347,10 @@ function withPrimeAgentSessionCounts<T extends { id: string; metadata?: Record<s
       metadata: {
         ...(integration.metadata ?? {}),
         sessionCount: sessions.length,
-        ...(sessions[0] ? { activeSessionId: sessions[0].sessionId } : {}),
+        // `null` intentionally overwrites a persisted connect-time id. Omitting
+        // the field would leave the UI pinned to a session that no longer has
+        // a descriptor after Prime restarts.
+        activeSessionId: sessions[0]?.sessionId ?? null,
       },
     };
   });

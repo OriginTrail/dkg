@@ -96,6 +96,28 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     expect(state.cancelled).toBe(1);
   });
 
+  it.each([
+    [
+      'comment text split across reads',
+      [': keepal', 'ive\n\n', 'data: {"type":"final","text":"done"}\n\n'],
+    ],
+    [
+      'comment terminator split into the final-frame read',
+      [': keepalive\n', '\ndata: {"type":"final","text":"done"}\n\n'],
+    ],
+  ])('forwards a %s and still detects the terminal frame', async (_name, frames) => {
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const { reader, state } = makeReader(frames);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.chunks.join('')).toContain(': keepalive\n\n');
+    expect(res.chunks.join('')).toContain('"type":"final"');
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+  });
+
   it('drops frames coalesced after final while forwarding the final frame itself', async () => {
     const req = new EventEmitter() as any;
     const res = makeRes();

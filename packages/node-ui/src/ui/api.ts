@@ -1886,6 +1886,12 @@ export interface LocalAgentHealthResponse {
     error?: string;
   };
   status?: string;
+  sessionCount?: number;
+  sessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
+  busy?: boolean;
+  turnState?: 'queued' | 'running';
+  clientConnected?: boolean;
+  clientDisconnectedAt?: string;
   bridge?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
   gateway?: Omit<LocalAgentHealthResponse, 'bridge' | 'gateway'>;
 }
@@ -2185,10 +2191,7 @@ export const streamPrimeAgentLocalChat = (
  * caller decides how to render it.
  */
 export const fetchPrimeAgentLocalHealth = () =>
-  get<LocalAgentHealthResponse & {
-    sessionCount?: number;
-    sessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
-  }>('/api/prime-agent-channel/health');
+  get<LocalAgentHealthResponse>('/api/prime-agent-channel/health');
 
 function formatLocalAgentError(body: unknown, fallback: string): string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fallback;
@@ -2315,6 +2318,10 @@ export interface LocalAgentIntegration {
   sessionCount?: number;
   /** Which session the node is currently routing to, when several are live. */
   activeSessionId?: string;
+  /** The selected Prime session currently owns an agent turn. */
+  busy?: boolean;
+  /** Live Prime sessions available for an explicit UI routing choice. */
+  liveSessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
 }
 
 export interface LocalAgentConnectResult {
@@ -2347,14 +2354,7 @@ interface LocalAgentSurface {
     sessionId?: string;
     profile?: string;
   }) => Record<string, unknown>;
-  fetchHealth?: () => Promise<{
-    ok: boolean;
-    target?: LocalAgentChannelTarget;
-    error?: string;
-    profile?: string;
-    memory?: LocalAgentHealthResponse['memory'];
-    status?: string;
-  }>;
+  fetchHealth?: () => Promise<LocalAgentHealthResponse>;
   streamChat?: typeof streamOpenClawLocalChat;
 }
 
@@ -2391,7 +2391,7 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     // node must not synthesise one. The integrations endpoint already elects a
     // live session; pin the UI conversation to that exact id instead of asking
     // the daemon to run a second most-recently-active election on every turn.
-    defaultSessionId: ({ record }) => firstTrimmedString(record?.metadata?.activeSessionId),
+    defaultSessionId: ({ record }) => firstTrimmedString(record?.metadata?.activeSessionId) ?? undefined,
     resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,
@@ -2642,8 +2642,14 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   );
   const hermesRuntimeDetail = hermesDetail(record, health);
   const defaultSessionId = surface?.defaultSessionId?.({ integrationId: id, record, health });
+  const primeTurnDetached = id === 'prime-agent'
+    && health?.busy === true
+    && health.clientConnected === false;
+  const liveSessions = id === 'prime-agent' && Array.isArray(health?.sessions)
+    ? health.sessions.filter((session) => typeof session?.sessionId === 'string' && session.sessionId.trim())
+    : undefined;
   const profile = id === 'hermes'
-    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile)
+    ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile) ?? undefined
     : undefined;
 
   let status: LocalAgentIntegrationStatus;
@@ -2663,8 +2669,12 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
       ?? `${record.name} is registered and still starting up.`;
   } else if (bridgeOnline) {
     status = 'chat_ready';
-    statusLabel = 'Chat ready';
-    detail = `${record.name} is connected to this node and ready for chat.`;
+    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Chat ready';
+    detail = primeTurnDetached
+      ? `${record.name} is still working after the browser stream disconnected. Wait for it to finish before sending another message.`
+      : health?.busy
+        ? `${record.name} is working on the current turn.`
+        : `${record.name} is connected to this node and ready for chat.`;
   } else if (persistentChat) {
     status = 'bridge_offline';
     statusLabel = 'Bridge offline';
@@ -2730,6 +2740,8 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     ...(typeof record.metadata?.activeSessionId === 'string'
       ? { activeSessionId: record.metadata.activeSessionId as string }
       : {}),
+    ...(liveSessions?.length ? { liveSessions } : {}),
+    ...(typeof health?.busy === 'boolean' ? { busy: health.busy } : {}),
   } satisfies LocalAgentIntegration;
 }
 
@@ -2887,14 +2899,31 @@ export async function streamLocalAgentChat(
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
     const { sessionId, profile, ...transportOpts } = opts;
-    return surface.streamChat(text, {
+    const chatOptions = (resolvedSessionId?: string) => ({
       ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
-        sessionId,
+        sessionId: resolvedSessionId,
         profile,
       }),
     });
+    try {
+      return await surface.streamChat(text, chatOptions(sessionId));
+    } catch (err) {
+      // A Prime session id is an automatic live-session pin, not a durable
+      // user-owned conversation id. If Prime restarted after the panel pinned
+      // it, an explicit miss is guaranteed to have executed nothing; retry
+      // once without the stale id so the daemon can elect the current head.
+      if (
+        normalizedId === 'prime-agent'
+        && sessionId
+        && err instanceof LocalAgentApiError
+        && err.code === 'PRIME_AGENT_NO_SESSION'
+      ) {
+        return surface.streamChat(text, chatOptions());
+      }
+      throw err;
+    }
   }
   throw new Error(`${id} local chat is not available yet.`);
 }

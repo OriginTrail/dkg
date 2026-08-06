@@ -27,4 +27,20 @@ describe('Prime Agent terminal error messages', () => {
       'Prime Agent turn exceeded its maximum run time.',
     );
   });
+
+  // The mapper falls through to the raw message when no branch matches, so a
+  // dropped branch degrades silently — every terminal code needs a pin.
+  it.each([
+    ['PRIME_AGENT_NO_SESSION', 'No live Prime Agent session is available. Start or resume a session and try again.'],
+    ['PRIME_AGENT_PROVIDER_ERROR', 'Prime Agent provider request failed. Check its provider configuration and try again.'],
+    ['PRIME_AGENT_TURN_ABORTED', 'Prime Agent turn was aborted.'],
+    ['PRIME_AGENT_DELIVERY_FAILED', 'Prime Agent rejected the message before starting the turn.'],
+  ])('renders %s with its per-code guidance', (code, expected) => {
+    const error = new LocalAgentApiError('sanitized bridge failure', {
+      code,
+      source: 'prime-agent-channel',
+    });
+
+    expect(formatLocalAgentErrorMessage(primeAgent, error)).toBe(expected);
+  });
 });
