@@ -72,6 +72,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build harness dependency closure
+        # The harness resolves `@origintrail-official/dkg-storage` through its
+        # published `dist/` types, so the closure must exist before ANY
+        # typecheck. Omitting this passes locally (where a dist is usually left
+        # over from a previous build) and fails only in CI.
+        run: >-
+          pnpm -r --filter @origintrail-official/dkg-storage...
+          --filter '!@origintrail-official/dkg-evm-module' run build
+
       - name: Typecheck the ownership gate harness
         run: pnpm typecheck:live:system-record-managed-ownership
 
