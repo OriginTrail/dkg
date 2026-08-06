@@ -17,7 +17,8 @@
 // Zero new contracts: a deposit is a plain TRAC transfer; settlement is an
 // aggregate withdrawal. The journal remains the ledger.
 import { createHash } from "node:crypto";
-import { canonicalize, credit, balance } from "./ledger.js";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { canonicalize, credit, balance, refundOnExpiry } from "./ledger.js";
 
 export const TERMS_VERSION = "tab-terms/v1";
 
@@ -150,17 +151,61 @@ export function evaluateExpiry(home: string, artifact: OpeningArtifact, credited
 // notion of expiry, so a read could still debit a dead tab. These two
 // functions close that.
 
-/** Registry of live tab openings, keyed by principal, per DKG_HOME. */
+/**
+ * Registry of live tab openings, keyed by principal, per DKG_HOME.
+ *
+ * Found 2026-08-06 with a real funded tab open on production: this was an
+ * in-memory Map with no durable store and no boot replay, so a node restart
+ * destroyed the opening artifact while the CREDIT remained durable in the
+ * journal. That leaves a real balance with no tab to spend from and no terms
+ * digest or refund address to refund against — the money is not lost, but the
+ * agreement around it is, which is nearly as bad and much harder to explain.
+ *
+ * Openings are now append-only on disk and replayed on first access. Append-only
+ * because an opening is evidence of what was agreed at a moment in time; the
+ * latest record for a principal wins, and the earlier ones stay readable.
+ */
 const openingsByHome = new Map<string, Map<string, OpeningArtifact>>();
+const replayedOpenings = new Set<string>();
+
+const openingsPath = (home: string) => `${home}/metering/openings.jsonl`;
+
+function replayOpenings(home: string): Map<string, OpeningArtifact> {
+  if (!openingsByHome.has(home)) openingsByHome.set(home, new Map());
+  const m = openingsByHome.get(home)!;
+  if (replayedOpenings.has(home)) return m;
+  replayedOpenings.add(home);
+  const p = openingsPath(home);
+  if (existsSync(p)) {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const a = JSON.parse(line) as OpeningArtifact;
+        if (a?.tabPrincipal) m.set(a.tabPrincipal.toLowerCase(), a);
+      } catch { /* a corrupt line must not deny every other tab */ }
+    }
+  }
+  return m;
+}
 
 export function registerOpening(home: string, artifact: OpeningArtifact) {
-  if (!openingsByHome.has(home)) openingsByHome.set(home, new Map());
-  openingsByHome.get(home)!.set(artifact.tabPrincipal.toLowerCase(), artifact);
+  const m = replayOpenings(home);
+  m.set(artifact.tabPrincipal.toLowerCase(), artifact);
+  try {
+    const dir = `${home}/metering`;
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    appendFileSync(openingsPath(home), JSON.stringify(artifact) + "\n");
+  } catch { /* an unwritable disk must not silently drop a live tab */ }
   return artifact;
 }
 
 export function activeOpening(home: string, principal: string): OpeningArtifact | undefined {
-  return openingsByHome.get(home)?.get(String(principal).toLowerCase());
+  return replayOpenings(home).get(String(principal).toLowerCase());
+}
+
+/** Every opening this home knows about, for sweeps and operator inspection. */
+export function allOpenings(home: string): OpeningArtifact[] {
+  return [...replayOpenings(home).values()];
 }
 
 /**
@@ -174,4 +219,40 @@ export function debitAllowed(home: string, principal: string, now = Date.now()):
   if (!a) return { ok: false, code: "E_NO_OPEN_TAB" };
   if (now > Date.parse(a.expiresAt)) return { ok: false, code: "E_TAB_EXPIRED" };
   return { ok: true, artifact: a };
+}
+
+/**
+ * Sweep expired tabs and record their refunds.
+ *
+ * Found 2026-08-06, with 1 TRAC of a counterparty's money sitting in a live
+ * tab: `refundOnExpiry` and `evaluateExpiry` were implemented, correct, and
+ * covered by six passing gates — and NOTHING called either of them. A refund
+ * that no code path invokes is a promise, not a mechanism, and I had described
+ * it to the buyer as a mechanism.
+ *
+ * This is the caller. It is idempotent by construction: `refundOnExpiry`
+ * records exactly one refund per (principal, termsDigest), so a sweep that runs
+ * every minute forever still produces one entry per expired tab.
+ *
+ * What it does NOT do, and must not be described as doing: move TRAC on-chain.
+ * A ledger refund says the credit is owed back. Returning it is a separate
+ * transaction from the provider wallet, requiring its own operator approval.
+ */
+export function sweepExpiredTabs(home: string, now = Date.now()): Array<{
+  principal: string; refundedMicroTrac: number; alreadyRefunded: boolean; refundAddress: string;
+}> {
+  const out: Array<{ principal: string; refundedMicroTrac: number; alreadyRefunded: boolean; refundAddress: string }> = [];
+  for (const a of allOpenings(home)) {
+    if (now <= Date.parse(a.expiresAt)) continue;          // still live
+    const b = balance(home, a.tabPrincipal);
+    if (b.balance <= 0) continue;                           // nothing owed
+    const r = refundOnExpiry(home, a.tabPrincipal, a.terms.refundAddress, a.termsDigest);
+    out.push({
+      principal: a.tabPrincipal,
+      refundedMicroTrac: r.refundedMicroTrac,
+      alreadyRefunded: r.alreadyRefunded,
+      refundAddress: a.terms.refundAddress,
+    });
+  }
+  return out;
 }
