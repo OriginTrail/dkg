@@ -7,8 +7,12 @@ export type SchedulerPressureOutcome = 'completed' | 'failed' | 'cancelled' | 'r
  * How a scheduler's capacity is divided between its lanes.
  *
  * `partitioned` (the default): every lane owns a private allocation, declared
- * in `lanes`, and those allocations add up to the scheduler's ceiling. A lane
- * fills independently of its neighbours — `StorePriorityScheduler`.
+ * in `lanes`, and fills independently of its neighbours —
+ * `StorePriorityScheduler`. The scheduler-level `queueLimit` is an independent
+ * rollup ceiling, **not** a derived sum: nothing validates the two against each
+ * other, and a scheduler may legitimately cap its total below what its lanes
+ * could hold between them. Read a lane's own limit for lane pressure and the
+ * scheduler's for the rollup; do not compute either from the other.
  *
  * `shared`: every lane draws on ONE pool bounded by the scheduler-level
  * `queueLimit`/`inflightLimit`. There is no private allocation to declare, so a
@@ -32,7 +36,11 @@ interface SchedulerPressureCapacityLimits {
 export type SchedulerPressureCapacity =
   | (SchedulerPressureCapacityLimits & {
     capacityModel?: 'partitioned';
-    /** Private per-lane allocations. These sum to the scheduler's ceiling. */
+    /**
+     * Private per-lane allocations. Independent of the scheduler-level limits
+     * above — see {@link SchedulerLaneCapacityModel}; they are not summed and
+     * not validated against them.
+     */
     lanes?: Record<string, {
       queueLimit?: number | null;
       inflightLimit?: number | null;
@@ -657,6 +665,7 @@ export function recordBackpressureSnapshotMetrics(snapshot: BackpressureSnapshot
     lane: string,
     values: {
       queued: number;
+      pressureQueued?: number;
       queueLimit: number | null;
       inflight: number;
       inflightLimit: number | null;
@@ -666,6 +675,12 @@ export function recordBackpressureSnapshotMetrics(snapshot: BackpressureSnapshot
   ) => {
     const attributes = { scheduler: snapshot.scheduler, lane };
     metrics.backpressureQueueDepth.record(values.queued, attributes);
+    // `queue_depth` stays this lane's own backlog — the attribution signal —
+    // so the numerator that actually goes with `queue_limit` is published
+    // beside it. Without this a shared lane exports `queue_depth: 1` against a
+    // pool `queue_limit: 4` and a utilization alert reads 25% while the lane is
+    // `saturated`; on a private allocation the two are equal.
+    metrics.backpressurePressureDepth.record(values.pressureQueued ?? values.queued, attributes);
     metrics.backpressureInflight.record(values.inflight, attributes);
     metrics.backpressureOldestQueuedAgeMs.record(values.oldestQueuedAgeMs, attributes);
     metrics.backpressureOldestActiveAgeMs.record(values.oldestActiveAgeMs, attributes);
@@ -678,6 +693,8 @@ export function recordBackpressureSnapshotMetrics(snapshot: BackpressureSnapshot
   };
   record('all', {
     queued: snapshot.totals.queued,
+    // The rollup row is the whole queue, so its depth is its own pressure.
+    pressureQueued: snapshot.totals.queued,
     queueLimit: snapshot.totals.queueLimit,
     inflight: snapshot.totals.inflight,
     inflightLimit: snapshot.totals.inflightLimit,

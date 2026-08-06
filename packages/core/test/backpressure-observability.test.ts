@@ -2,9 +2,48 @@ import { describe, expect, it } from 'vitest';
 import {
   BackpressureMonitor,
   BackpressureRegistry,
+  recordBackpressureSnapshotMetrics,
   SchedulerPressureTracker,
   type BackpressureSnapshot,
 } from '../src/backpressure-observability.js';
+import { metrics as otelMetrics } from '@opentelemetry/api';
+import { rebuildMetrics } from '../src/telemetry-api.js';
+
+interface RecordedMetric { metric: string; lane: string; value: number }
+
+/**
+ * Capture emitted instruments by NAME, through a stand-in meter provider.
+ *
+ * Patching the instrument objects directly does not work: with no global
+ * provider registered, the API hands back **one shared no-op instrument**, so
+ * stubbing `backpressureQueueDepth.record` silently stubs every other gauge too
+ * and the capture cannot tell them apart. Binding a real provider also pins the
+ * published metric names, which is the actual contract a dashboard depends on.
+ */
+function captureMetrics(run: () => void): RecordedMetric[] {
+  const recorded: RecordedMetric[] = [];
+  const instrument = (metric: string) => ({
+    record: (value: number, attributes?: Record<string, unknown>) => {
+      recorded.push({ metric, lane: String(attributes?.lane), value });
+    },
+    add: () => {},
+  });
+  const meter = {
+    createGauge: instrument,
+    createCounter: instrument,
+    createHistogram: instrument,
+    createUpDownCounter: instrument,
+  };
+  otelMetrics.setGlobalMeterProvider({ getMeter: () => meter } as never);
+  rebuildMetrics();
+  try {
+    run();
+  } finally {
+    otelMetrics.disable();
+    rebuildMetrics();
+  }
+  return recorded;
+}
 
 describe('SchedulerPressureTracker', () => {
   it('tracks queue and active age without owning scheduling policy', () => {
@@ -492,6 +531,55 @@ describe('BackpressureMonitor', () => {
     // own `all` record is no longer emitted — which is why the pool depth had
     // to move onto the lane records.
     expect(line('all')).toBeUndefined();
+  });
+
+  it('exports a depth a metric consumer can divide by the limit beside it', () => {
+    // The snapshot and the log line both carry the pressure numerator; metrics
+    // are the third surface, and the one W1 alerting actually reads. Without
+    // this a shared lane exports `queue_depth: 1` against a pool
+    // `queue_limit: 4` — a utilization alert reads 25% while the lane state is
+    // `degraded` at 75%, which is exactly the pressure this change exists to
+    // surface.
+    const now = 1_000;
+    const shared = new SchedulerPressureTracker({
+      scheduler: 'sync-global',
+      now: () => now,
+      capacity: { queueLimit: 4, capacityModel: 'shared' },
+    });
+    shared.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
+    shared.enqueue({ lane: 'changelog', operation: 'changelog:reconcile' });
+    shared.enqueue({ lane: 'shared_memory', operation: 'shared-memory:on-connect' });
+    const sharedSnapshot = shared.snapshot();
+
+    const emitted = captureMetrics(() => recordBackpressureSnapshotMetrics(sharedSnapshot));
+    const valueOf = (metric: string, lane: string) =>
+      emitted.find((e) => e.metric === metric && e.lane === lane)?.value;
+
+    expect(sharedSnapshot.lanes.every((lane) => lane.state === 'degraded')).toBe(true);
+    for (const lane of ['changelog', 'durable', 'shared_memory']) {
+      // Attribution is unchanged: each lane still exports its own backlog…
+      expect(valueOf('dkg.backpressure.queue_depth', lane)).toBe(1);
+      // …and the numerator that pairs with the exported limit is the pool's, so
+      // a metric-only alert sees the same 75% the lane state was classified on.
+      const pressure = valueOf('dkg.backpressure.pressure_depth', lane)!;
+      const limit = valueOf('dkg.backpressure.queue_limit', lane)!;
+      expect({ lane, pressure, limit }).toEqual({ lane, pressure: 3, limit: 4 });
+      expect(pressure / limit).toBeGreaterThanOrEqual(0.75);
+    }
+
+    // A private allocation publishes the same number under both names, so a
+    // consumer never has to know which model it is looking at.
+    const partitioned = new SchedulerPressureTracker({
+      scheduler: 'store',
+      now: () => now,
+      capacity: { queueLimit: 4, lanes: { ack: { queueLimit: 2 } } },
+    });
+    partitioned.enqueue({ lane: 'ack', operation: 'store.ack' });
+    const ackEmitted = captureMetrics(() => recordBackpressureSnapshotMetrics(partitioned.snapshot()));
+    const ackValue = (metric: string) =>
+      ackEmitted.find((e) => e.metric === metric && e.lane === 'ack')?.value;
+    expect(ackValue('dkg.backpressure.queue_depth')).toBe(1);
+    expect(ackValue('dkg.backpressure.pressure_depth')).toBe(1);
   });
 
   it('contains logger failures', () => {

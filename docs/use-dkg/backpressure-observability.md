@@ -224,7 +224,8 @@ attributes:
 
 | Metric | Type | Purpose |
 | --- | --- | --- |
-| `dkg.backpressure.queue_depth` | gauge | Current waiting work |
+| `dkg.backpressure.queue_depth` | gauge | Current waiting work in this lane — the attribution signal |
+| `dkg.backpressure.pressure_depth` | gauge | The depth this lane's state was classified against. **Divide this by `queue_limit` for utilization**, not `queue_depth`: on a `shared` lane the limit is the pool's, so pairing it with the lane's own backlog underreports. Equal to `queue_depth` on a `partitioned` lane |
 | `dkg.backpressure.queue_limit` | gauge | Configured queue capacity |
 | `dkg.backpressure.inflight` | gauge | Current admitted work |
 | `dkg.backpressure.inflight_limit` | gauge | Configured concurrency |

@@ -205,6 +205,13 @@ export interface DkgMetrics {
   storeSchedulerActive: UpDownCounter;
   /** current queued work; scheduler and lane are bounded static labels */
   backpressureQueueDepth: Gauge;
+  /**
+   * depth the lane's pressure state was classified against — the numerator that
+   * pairs with `backpressureQueueLimit`. Equals queue depth on a lane holding a
+   * private allocation, and the pool's depth on a lane drawing from a shared
+   * one; scheduler and lane are bounded static labels
+   */
+  backpressurePressureDepth: Gauge;
   /** configured queue capacity; scheduler and lane are bounded static labels */
   backpressureQueueLimit: Gauge;
   /** current admitted work; scheduler and lane are bounded static labels */
@@ -393,6 +400,10 @@ function buildMetrics(): DkgMetrics {
     }),
     backpressureQueueDepth: meter.createGauge('dkg.backpressure.queue_depth', {
       description: 'Current scheduler queue depth by bounded scheduler and lane',
+    }),
+    backpressurePressureDepth: meter.createGauge('dkg.backpressure.pressure_depth', {
+      description:
+        'Queue depth a lane\'s pressure state was classified against, by bounded scheduler and lane',
     }),
     backpressureQueueLimit: meter.createGauge('dkg.backpressure.queue_limit', {
       description: 'Configured scheduler queue capacity by bounded scheduler and lane',
