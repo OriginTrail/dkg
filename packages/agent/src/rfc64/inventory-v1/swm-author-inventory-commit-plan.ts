@@ -3,6 +3,7 @@ import {
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
+  computeControlSignatureVariantDigestHex,
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
@@ -10,6 +11,10 @@ import {
   type EvmAddressV1,
   type SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
+import {
+  readVerifiedControlEnvelopeIssuerSignatureV1,
+  verifyEip191ControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 
 import {
   isSwmAuthorInventoryErrorV1,
@@ -17,7 +22,11 @@ import {
   type SwmAuthorInventoryErrorCodeV1,
   type SwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-contracts.js';
-import { snapshotExactPlainDataRecordV1 } from './exact-record.js';
+import {
+  assertExactFieldSetV1,
+  snapshotExactPlainDataRecordV1,
+  snapshotPlainDataRecordV1,
+} from './exact-record.js';
 import {
   digest32ToSqlBlobV1,
   evmAddressToSqlBlobV1,
@@ -69,11 +78,18 @@ export function prepareSwmAuthorInventoryCommitV1(
   error: SwmAuthorInventoryErrorFactoryV1,
 ): PreparedSwmAuthorInventoryCommitV1 {
   try {
-    const candidate = snapshotExactPlainDataRecordV1(
-      input,
-      ['snapshot', 'mutation', 'expectedCurrentHeadDigest'],
+    const candidateRecord = snapshotPlainDataRecordV1(input, 'SWM author inventory CAS input');
+    const hasIssuerSignature = Object.keys(candidateRecord).includes('issuerSignature');
+    assertExactFieldSetV1(
+      candidateRecord,
+      hasIssuerSignature
+        ? ['snapshot', 'mutation', 'issuerSignature', 'expectedCurrentHeadDigest']
+        : ['snapshot', 'mutation', 'expectedCurrentHeadDigest'],
       'SWM author inventory CAS input',
     );
+    const candidate = candidateRecord as unknown as Readonly<
+      CompareAndSwapSwmAuthorInventoryInputV1
+    >;
     const candidateSnapshot = snapshotExactPlainDataRecordV1(
       candidate.snapshot,
       ['head', 'rows'],
@@ -91,6 +107,20 @@ export function prepareSwmAuthorInventoryCommitV1(
     );
     const snapshot = Object.freeze({ head, rows });
     assertSwmAuthorInventorySnapshotBindingV1(snapshot);
+    const issuerSignature = readVerifiedControlEnvelopeIssuerSignatureV1(
+      hasIssuerSignature
+        ? candidate.issuerSignature
+        : verifyEip191ControlEnvelopeIssuerSignatureV1(head),
+    );
+    if (
+      issuerSignature.objectDigest !== head.objectDigest
+      || issuerSignature.signatureVariantDigest
+        !== computeControlSignatureVariantDigestHex(head.objectDigest, head.signature)
+      || issuerSignature.issuer !== head.issuer
+      || issuerSignature.signatureSuite !== head.signatureSuite
+    ) {
+      throw new Error('issuer signature proof is not bound to the exact SWM inventory head');
+    }
     const scope = deriveSwmAuthorInventoryScopeFromHeadV1(head.payload);
     const key = encodeSwmAuthorInventoryKeyV1(
       computeSwmAuthorInventoryScopeDigestV1(scope),

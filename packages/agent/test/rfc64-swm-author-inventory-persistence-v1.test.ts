@@ -3,6 +3,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
+import {
+  EIP1271_CANONICAL_ABI_RETURN_V1,
+  verifyControlEnvelopeIssuerSignatureV1,
+  verifyEip191ControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -32,8 +38,9 @@ import {
 import { CandidateInventoryV1 } from '../src/rfc64/inventory-v1/candidate.js';
 import { INVENTORY_V1_STATEMENT_SQL } from '../src/rfc64/inventory-v1/statements.js';
 
-const AUTHOR = '0x3333333333333333333333333333333333333333';
-const SIGNATURE = `0x${'77'.repeat(65)}`;
+const AUTHOR_WALLET = new ethers.Wallet(`0x${'33'.repeat(32)}`);
+const OTHER_WALLET = new ethers.Wallet(`0x${'44'.repeat(32)}`);
+const AUTHOR = AUTHOR_WALLET.address.toLowerCase();
 const SCOPE = Object.freeze({
   networkId: 'otp:20430',
   contextGraphId: 'public-swm-persistence-fixture',
@@ -309,6 +316,65 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
       snapshot: wrong,
       mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects a canonical EIP-191 forgery before writing either head or rows', async () => {
+    const inventory = await openInventoryV1(temporaryDirectory());
+    foundations.push(inventory);
+    const valid = snapshot([ROW_A]);
+    const forged = Object.freeze({
+      ...valid,
+      head: Object.freeze({
+        ...valid.head,
+        signature: OTHER_WALLET.signMessageSync(
+          ethers.getBytes(valid.head.objectDigest),
+        ).toLowerCase(),
+      }),
+    }) as SwmAuthorInventorySnapshotV1;
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: forged,
+      mutation: { kind: 'upsert', row: ROW_A },
+      expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('rejects a forged EIP-1271 signature variant before writing', async () => {
+    const inventory = await openInventoryV1(temporaryDirectory());
+    foundations.push(inventory);
+    const valid = snapshot([ROW_A]);
+    const unsigned = Object.freeze({
+      issuer: AUTHOR,
+      objectType: SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+      payload: valid.head.payload,
+      signatureEvidence: Object.freeze({
+        kind: 'eip1271-current-finalized',
+        chainId: '20430',
+        contractAddress: AUTHOR,
+      }),
+      signatureSuite: 'eip1271-current-finalized-v1',
+    }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
+    const head = Object.freeze({
+      ...unsigned,
+      objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(unsigned),
+      signature: '0x1234',
+    }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
+    const issuerSignature = await verifyControlEnvelopeIssuerSignatureV1(head, {
+      callEvmAtCurrentFinalized: async () => Object.freeze({
+        chainId: '20430',
+        blockNumber: '123',
+        blockHash: `0x${'55'.repeat(32)}`,
+        returnData: EIP1271_CANONICAL_ABI_RETURN_V1,
+      }),
+    });
+    const forgedHead = Object.freeze({ ...head, signature: '0x5678' });
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: Object.freeze({ head: forgedHead, rows: Object.freeze([ROW_A]) }),
+      mutation: { kind: 'upsert', row: ROW_A },
+      issuerSignature,
       expectedCurrentHeadDigest: null,
     })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
@@ -680,9 +746,16 @@ function snapshot(
   const head = Object.freeze({
     ...unsigned,
     objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(unsigned),
-    signature: SIGNATURE,
+    signature: '',
+  });
+  const signed = Object.freeze({
+    ...head,
+    signature: AUTHOR_WALLET.signMessageSync(
+      ethers.getBytes(head.objectDigest),
+    ).toLowerCase(),
   }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
-  return Object.freeze({ head, rows: Object.freeze([...rows]) });
+  verifyEip191ControlEnvelopeIssuerSignatureV1(signed);
+  return Object.freeze({ head: signed, rows: Object.freeze([...rows]) });
 }
 
 function temporaryDirectory(): string {

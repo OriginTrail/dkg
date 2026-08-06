@@ -31,14 +31,13 @@ import {
   sqlBlobToDecimalU64V1,
   sqlBlobToDigest32V1,
   sqlBlobToEvmAddressV1,
+  nullableSqlBlobsEqualV1,
+  sqlBlobsEqualV1,
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
 import {
   assertBoundedSqlBlobV1,
-  byteArraysEqualV1,
   decodeStoredSwmAuthorInventoryRowV1,
-  inputDigestV1,
-  nullableByteArraysEqualV1,
   swmAuthorHeadParametersV1,
   swmAuthorKeyParametersV1,
   swmAuthorRowParametersV1,
@@ -91,7 +90,7 @@ function planSwmAuthorInventoryCommitV1(
   const actual = (
     current?.snapshot.head.objectDigest as Digest32V1 | undefined
   ) ?? null;
-  const expected = next.expectedHead === null ? null : inputDigestV1(next.expectedHead);
+  const expected = next.expectedHead === null ? null : sqlBlobToDigest32V1(next.expectedHead);
   if (actual === next.snapshot.head.objectDigest && current !== null) {
     if (!swmAuthorInventorySnapshotsEqualV1(current.snapshot, next.snapshot)) {
       return Object.freeze({
@@ -194,7 +193,7 @@ export class SwmAuthorInventoryPersistenceV1 {
       );
       decodeSwmAuthorInventoryMutationV1(canonicalMutation);
       if (
-        (expectedHead === null ? null : inputDigestV1(expectedHead))
+        (expectedHead === null ? null : sqlBlobToDigest32V1(expectedHead))
         !== head.payload.previousHeadDigest
       ) {
         throw new Error('stored replay predecessor does not match the signed head');
@@ -258,7 +257,7 @@ export class SwmAuthorInventoryPersistenceV1 {
       if (Number(result.changes) !== 1) {
         throw this.conflict(
           current.snapshot.head.objectDigest as Digest32V1,
-          next.expectedHead === null ? null : inputDigestV1(next.expectedHead),
+          next.expectedHead === null ? null : sqlBlobToDigest32V1(next.expectedHead),
         );
       }
     }
@@ -381,7 +380,7 @@ function swmAuthorInventoryRowsEqualV1(
   left: SwmAuthorInventorySnapshotV1['rows'],
   right: SwmAuthorInventorySnapshotV1['rows'],
 ): boolean {
-  return byteArraysEqualV1(
+  return sqlBlobsEqualV1(
     canonicalizeSwmAuthorInventoryRowsBytesV1(left),
     canonicalizeSwmAuthorInventoryRowsBytesV1(right),
   );
@@ -392,7 +391,7 @@ function swmAuthorInventorySnapshotsEqualV1(
   right: SwmAuthorInventorySnapshotV1,
 ): boolean {
   return left.head.objectDigest === right.head.objectDigest
-    && byteArraysEqualV1(
+    && sqlBlobsEqualV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(left.head),
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(right.head),
     )
@@ -403,6 +402,6 @@ function swmAuthorInventoryReplayEvidenceEqualV1(
   stored: StoredSwmAuthorInventoryCommitV1,
   requested: PreparedSwmAuthorInventoryCommitV1,
 ): boolean {
-  return nullableByteArraysEqualV1(stored.expectedHead, requested.expectedHead)
-    && byteArraysEqualV1(stored.canonicalMutation, requested.canonicalMutation);
+  return nullableSqlBlobsEqualV1(stored.expectedHead, requested.expectedHead)
+    && sqlBlobsEqualV1(stored.canonicalMutation, requested.canonicalMutation);
 }

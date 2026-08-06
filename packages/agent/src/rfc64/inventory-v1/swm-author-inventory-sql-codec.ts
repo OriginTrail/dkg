@@ -12,7 +12,6 @@ import type {
   PreparedSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import {
-  assertSqlBlobWidthV1,
   decimalU64ToSqlBlobV1,
   digest32ToSqlBlobV1,
   sqlBlobToDecimalU64V1,
@@ -93,25 +92,6 @@ export function assertBoundedSqlBlobV1(
     throw new Error(`${label} is outside its bounded BLOB shape`);
   }
   return value.slice();
-}
-
-export function byteArraysEqualV1(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
-}
-
-export function nullableByteArraysEqualV1(
-  left: Uint8Array | null,
-  right: Uint8Array | null,
-): boolean {
-  return left === null || right === null ? left === right : byteArraysEqualV1(left, right);
-}
-
-export function inputDigestV1(bytes: Uint8Array): Digest32V1 {
-  return sqlBlobToDigest32V1(assertSqlBlobWidthV1(bytes, 32, 'expected current head'));
 }
 
 function assertSqlTextV1(value: unknown, label: string): string {

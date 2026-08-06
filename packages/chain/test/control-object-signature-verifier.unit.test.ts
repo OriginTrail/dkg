@@ -22,6 +22,7 @@ import {
   assertVerifiedControlEnvelopeIssuerSignatureV1,
   readVerifiedControlEnvelopeIssuerSignatureV1,
   verifyControlEnvelopeIssuerSignatureV1,
+  verifyEip191ControlEnvelopeIssuerSignatureV1,
   type CurrentFinalizedEvmCallResultV1,
   type CurrentFinalizedEvmCallV1,
 } from '../src/control-object-signature-verifier.js';
@@ -78,6 +79,21 @@ describe('RFC-64 control-object issuer signature verifier', () => {
     expect(Object.getPrototypeOf(capability)).toBeNull();
     expect(Object.isFrozen(verified)).toBe(true);
     expect(Object.isFrozen(verified.verificationEvidence)).toBe(true);
+  });
+
+  it('mints the same bound capability through the synchronous EIP-191-only path', async () => {
+    const envelope = await eoaEnvelope(new ethers.Wallet(PRIVATE_KEY));
+    const verified = readVerifiedControlEnvelopeIssuerSignatureV1(
+      verifyEip191ControlEnvelopeIssuerSignatureV1(envelope),
+    );
+    expect(verified).toMatchObject({
+      objectDigest: envelope.objectDigest,
+      issuer: envelope.issuer,
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+      verificationEvidence: { kind: 'eip191' },
+    });
+    expect(() => verifyEip191ControlEnvelopeIssuerSignatureV1(safeEnvelope()))
+      .toThrowError(expect.objectContaining({ code: 'CONTROL_SIGNATURE_CHAIN_UNSUPPORTED' }));
   });
 
   it('rejects forged, cloned, and serialized verification-token lookalikes', async () => {

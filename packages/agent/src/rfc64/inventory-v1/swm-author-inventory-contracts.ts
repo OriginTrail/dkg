@@ -3,6 +3,7 @@ import type {
   SwmAuthorInventoryRowV1,
   SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
+import type { VerifiedControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
 /** Error codes owned by the durable SWM author-inventory boundary. */
 export type SwmAuthorInventoryErrorCodeV1 =
@@ -40,6 +41,12 @@ export type SwmAuthorInventoryMutationV1 =
 export interface CompareAndSwapSwmAuthorInventoryInputV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
   readonly mutation: SwmAuthorInventoryMutationV1;
+  /**
+   * Process-local proof bound to the exact signed head envelope. EIP-191 heads
+   * may omit this because the synchronous boundary verifies them directly;
+   * EIP-1271 heads must provide verifier-issued finalized-chain evidence.
+   */
+  readonly issuerSignature?: VerifiedControlEnvelopeIssuerSignatureV1;
   /** `null` initializes version 0; otherwise the exact current head must match. */
   readonly expectedCurrentHeadDigest: Digest32V1 | null;
 }
