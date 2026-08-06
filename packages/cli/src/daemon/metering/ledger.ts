@@ -111,6 +111,14 @@ function replay(home: string) {
     try { rec = JSON.parse(line); } catch { continue; }
     const t = entry(home, rec.principal);
     if (rec.kind === "credit") { t.balance += rec.amountMicroTrac; continue; }
+    // Buyer-found (Hermes/Bo, 2026-08-06), by insisting the post-restart balance
+    // be verified through the API rather than read from the journal: replay
+    // handled credits and debits but IGNORED refunds, so a refunded balance
+    // resurrected on the next restart. That is worse than never refunding — the
+    // journal said the money was returned while the live ledger said the buyer
+    // still had it to spend, and in enforce mode they could have spent it twice.
+    // Subtraction rather than zeroing, so a future partial refund replays right.
+    if (rec.kind === "refund") { t.balance = Math.max(0, t.balance - rec.amountMicroTrac); continue; }
     if (rec.kind === "debit") {
       t.balance = rec.leg.tab.after;
       t.sequence = rec.leg.sequence;

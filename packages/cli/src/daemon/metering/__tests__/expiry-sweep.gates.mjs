@@ -116,6 +116,22 @@ console.log("\nthe sweep actually refunds — the caller that did not exist:");
   ok("the refund record names the amount and destination", refunds[0]?.amountMicroTrac === 1_000_000 && refunds[0]?.refundAddress === BUYER);
 }
 
+console.log("\nthe refund SURVIVES a restart (buyer-found: it did not):");
+{
+  const out = JSON.parse(inFreshProcess(`
+    console.log(JSON.stringify({
+      balance: L.balance(${JSON.stringify(home)}, ${JSON.stringify(BUYER)}).balance,
+      tabActive: !!D.activeOpening(${JSON.stringify(home)}, ${JSON.stringify(BUYER)}),
+    }));
+  `));
+  ok("a refunded balance stays refunded across a real process restart",
+    out.balance === 0, `balance replayed as ${out.balance} — the refund evaporated`);
+  const journal = readFileSync(join(home, "metering", "read-journal.jsonl"), "utf8")
+    .trim().split("\n").map((l) => JSON.parse(l));
+  ok("replay created no second refund record",
+    journal.filter((r) => r.kind === "refund").length === 1);
+}
+
 console.log("\nwhat the sweep must NOT claim:");
 {
   const { D } = await load();
