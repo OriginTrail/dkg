@@ -11,9 +11,9 @@
  * the verdict and throws on any violation.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,7 +164,19 @@ interface Manifest {
 }
 
 async function main(): Promise<void> {
-  const manifest = JSON.parse(await readFile(MANIFEST, 'utf8')) as Manifest;
+  // Delete any previous artifact FIRST. Without this, a run that throws part
+  // way through leaves the last successful result on disk, and the standalone
+  // `verify` script will cheerfully re-verify it and exit 0 � certifying a run
+  // that crashed. Demonstrated: a malformed manifest crashed the generator and
+  // the stale artifact still verified as PASS.
+  await rm(ARTIFACT, { force: true });
+  await rm(join(HERE, 'artifacts', 'managed-ownership-verdict.json'), { force: true });
+
+  // Strip a UTF-8 BOM if an editor or shell redirect added one. `JSON.parse`
+  // rejects it, and that crash is exactly what exposed the stale-artifact hole
+  // above, so tolerating it here removes a foot-gun rather than hiding one.
+  const manifestText = (await readFile(MANIFEST, 'utf8')).replace(/^﻿/, '');
+  const manifest = JSON.parse(manifestText) as Manifest;
 
   const cacheDir = join(tmpdir(), 'dkg-managed-ownership-gate', 'oxigraph');
   await mkdir(cacheDir, { recursive: true });
@@ -178,7 +190,25 @@ async function main(): Promise<void> {
 
   const server = await startPinnedServer(binaryPath, location);
 
+  // Every pinned commit must exist in this repository. This is the check that
+  // would have caught a manifest entry carrying a short SHA zero-padded to 40
+  // characters — which is not a commit, resolves to nothing, and was being
+  // copied verbatim into the artifact CI uploads as evidence.
+  const manifestCommitsResolved = manifest.entries.every((entry) => {
+    try {
+      execFileSync('git', ['cat-file', '-e', `${entry.commit}^{commit}`], {
+        cwd: resolve(HERE, '../..'),
+        stdio: 'ignore',
+      });
+      return true;
+    } catch {
+      console.error(`[managed-ownership-gate] manifest commit does not resolve: ${entry.commit}`);
+      return false;
+    }
+  });
+
   const predecessors: PredecessorEntryResultV1[] = [];
+  let ownedSocketsBeforeDestroy = 0;
   let leakedOwnedSockets = 0;
   const capability = {
     withoutLease: false,
@@ -275,6 +305,10 @@ async function main(): Promise<void> {
       'INSERT DATA { GRAPH <urn:dkg:gate:probe> { <urn:s> <urn:p> "o" . } }',
       5_000,
     );
+    // Captured BEFORE destroy. `destroyAndSettle` loops until the count is zero
+    // and throws otherwise, so reading it afterwards alone can only ever be 0 —
+    // an assertion that cannot fail. The pair proves the probe is live.
+    ownedSocketsBeforeDestroy = owned.openSocketCount;
     await owned.destroyAndSettle();
     leakedOwnedSockets = owned.openSocketCount;
 
@@ -346,20 +380,9 @@ async function main(): Promise<void> {
     nodeVersion: process.versions.node,
     predecessors,
     manifestEntryCount: manifest.entries.length,
-    foreignProcessSignals: 0,
-    postCloseChildSpawns: 0,
-    oldGenerationDispatches: 0,
-    oldGenerationOutstandingAtReplacementBind: 0,
-    oldGenerationSettlementsAfterReplacementBind: 0,
-    staleFacadeDispatches: 0,
-    defaultOffWorkUnits: 0,
-    leakedStructuredLeases: 0,
+    manifestCommitsResolved,
+    ownedSocketsBeforeDestroy,
     leakedOwnedSockets,
-    barrierWaitOccupiedSlotMs: 0,
-    deadlineInducedRecoveriesHealthy: 0,
-    indeterminateReturnMsMax: 0,
-    recoveryMsMax: 0,
-    stopGraceMs: STOP_GRACE_MS,
     capability,
   };
 

@@ -26,6 +26,23 @@ export interface PredecessorEntryResultV1 {
   readonly failures: readonly string[];
 }
 
+/**
+ * IMPORTANT — what this gate does and does not measure.
+ *
+ * An earlier revision declared thirteen counters here (foreign-process signals,
+ * old-generation dispatches, stale-facade dispatches, barrier slot-ms, healthy
+ * deadline recoveries, indeterminate/recovery latencies …) and asserted each
+ * `=== 0`. Every one was a constant the generator hardcoded: `run.ts` never
+ * restarted a child, never opened a lane session and never ran a barrier, so no
+ * code path could have made any of them non-zero. Thirteen of eighteen "checks"
+ * were assertions about literals, printed as `PASS: 18 checks`.
+ *
+ * They are deleted rather than left in place. A verdict that overclaims is
+ * worse than a smaller one, because the smaller one does not stop anyone
+ * looking. Those properties belong to the generation-handoff and lane-session
+ * behaviour that lands with the CAS stack; the rows return when something
+ * actually drives them.
+ */
 export interface ManagedOwnershipRawResultV1 {
   readonly schemaVersion: typeof MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION;
   readonly oxigraphVersion: string;
@@ -33,27 +50,23 @@ export interface ManagedOwnershipRawResultV1 {
   readonly platform: string;
   readonly nodeVersion: string;
 
-  /** Every immutable predecessor-manifest entry, executed. */
+  /**
+   * Every manifest entry, checked against a live pinned Oxigraph.
+   *
+   * NOTE: these run against the CURRENT binary, not against each entry's
+   * commit — no predecessor is checked out or built. The manifest's role today
+   * is to pin WHICH commits must keep the property and to require that each one
+   * resolves; executing them per-commit is not implemented.
+   */
   readonly predecessors: readonly PredecessorEntryResultV1[];
   readonly manifestEntryCount: number;
+  /** Every manifest commit resolved to a real object in this repository. */
+  readonly manifestCommitsResolved: boolean;
 
-  /** Counters the verdict enforces as exactly zero. */
-  readonly foreignProcessSignals: number;
-  readonly postCloseChildSpawns: number;
-  readonly oldGenerationDispatches: number;
-  readonly oldGenerationOutstandingAtReplacementBind: number;
-  readonly oldGenerationSettlementsAfterReplacementBind: number;
-  readonly staleFacadeDispatches: number;
-  readonly defaultOffWorkUnits: number;
-  readonly leakedStructuredLeases: number;
+  /** Sockets still held by the owned pool BEFORE it was destroyed. */
+  readonly ownedSocketsBeforeDestroy: number;
+  /** Sockets still held AFTER destroy settled. Must be zero. */
   readonly leakedOwnedSockets: number;
-  readonly barrierWaitOccupiedSlotMs: number;
-  readonly deadlineInducedRecoveriesHealthy: number;
-
-  /** Bounded-latency evidence. */
-  readonly indeterminateReturnMsMax: number;
-  readonly recoveryMsMax: number;
-  readonly stopGraceMs: number;
 
   /** Capability fail-closed matrix. */
   readonly capability: {
@@ -89,26 +102,21 @@ export function evaluateManagedOwnership(
   });
 
   const checks: { name: string; pass: boolean; detail?: string }[] = [
-    zero('foreignProcessSignals', raw.foreignProcessSignals),
-    zero('postCloseChildSpawns', raw.postCloseChildSpawns),
-    zero('oldGenerationDispatches', raw.oldGenerationDispatches),
-    zero('oldGenerationOutstandingAtReplacementBind', raw.oldGenerationOutstandingAtReplacementBind),
-    zero('oldGenerationSettlementsAfterReplacementBind', raw.oldGenerationSettlementsAfterReplacementBind),
-    zero('staleFacadeDispatches', raw.staleFacadeDispatches),
-    zero('defaultOffWorkUnits', raw.defaultOffWorkUnits),
-    zero('leakedStructuredLeases', raw.leakedStructuredLeases),
-    zero('leakedOwnedSockets', raw.leakedOwnedSockets),
-    zero('barrierWaitOccupiedSlotMs', raw.barrierWaitOccupiedSlotMs),
-    zero('deadlineInducedRecoveriesHealthy', raw.deadlineInducedRecoveriesHealthy),
+    // The socket check is a PAIR on purpose. Asserting only the post-destroy
+    // zero was unfalsifiable: `destroyAndSettle` loops until the count reaches
+    // zero and throws otherwise, so the value it returns is necessarily 0 and
+    // the check could never report a failure. Requiring a socket to have
+    // existed first makes the probe demonstrably live.
     {
-      name: 'indeterminateReturnWithinThreeSeconds',
-      pass: raw.indeterminateReturnMsMax <= 3_000,
-      detail: `max ${raw.indeterminateReturnMsMax}ms`,
+      name: 'ownedSocketExistedBeforeDestroy',
+      pass: raw.ownedSocketsBeforeDestroy > 0,
+      detail: `${raw.ownedSocketsBeforeDestroy} socket(s)`,
     },
+    zero('leakedOwnedSockets', raw.leakedOwnedSockets),
     {
-      name: 'recoveryWithinStopGracePlusThirtySeconds',
-      pass: raw.recoveryMsMax <= raw.stopGraceMs + 30_000,
-      detail: `max ${raw.recoveryMsMax}ms against bound ${raw.stopGraceMs + 30_000}ms`,
+      name: 'everyManifestCommitResolves',
+      pass: raw.manifestCommitsResolved,
+      detail: raw.manifestCommitsResolved ? undefined : 'a pinned commit does not exist',
     },
     // Capability is fail-closed in every direction. Asserting the NEGATIVE
     // cases matters more than the positive one: a lane that advertises when it
@@ -118,12 +126,14 @@ export function evaluateManagedOwnership(
     { name: 'capabilityAbsentOnTerminalOwnership', pass: raw.capability.withTerminalOwnership === false },
     { name: 'capabilityDeniedByEnabledChangelog', pass: raw.capability.throughEnabledChangelog === false },
     { name: 'capabilityPresentWhenFullyProven', pass: raw.capability.withLiveLeaseAndHandoff === true },
-    // A gate that ran zero manifest entries would otherwise pass vacuously.
+    // Kept, but honestly: `predecessors` is built one push per manifest entry
+    // in the same loop, so the equality is structural. Its real content is the
+    // `> 0` term — a manifest emptied by accident still fails.
     {
-      name: 'everyPredecessorManifestEntryExecuted',
+      name: 'manifestIsNonEmptyAndFullyIterated',
       pass:
         raw.manifestEntryCount > 0 && raw.predecessors.length === raw.manifestEntryCount,
-      detail: `${raw.predecessors.length}/${raw.manifestEntryCount} executed`,
+      detail: `${raw.predecessors.length}/${raw.manifestEntryCount} iterated`,
     },
     {
       name: 'everyPredecessorEntryPassed',

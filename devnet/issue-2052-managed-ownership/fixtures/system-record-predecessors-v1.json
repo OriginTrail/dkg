@@ -40,8 +40,7 @@
     {
       "id": "release-10-0-12",
       "description": "Shipped release line operators are running today. This is the entry that proves the downgrade property for real deployments rather than only for branch heads.",
-      "commit": "843f5213d0000000000000000000000000000000",
-      "commitResolution": "release tag v10.0.12; the gate resolves and records the exact 40-character SHA at run time and fails if it cannot",
+      "commit": "843f5213d172096500a176eeda56e7e3ec0233c3",
       "nodeVersion": "22",
       "seededReservedState": "reserved-state-fixture-v1",
       "expected": {
