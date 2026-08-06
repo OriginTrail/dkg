@@ -22,6 +22,21 @@ import { createHash, createPublicKey } from "node:crypto";
 
 export const BINDING_DOMAIN = "odysseus-dkg:wallet-binding:v1";
 
+/**
+ * Maximum authorised lifetime of a binding proof.
+ *
+ * Buyer-recommended (Hermes/Bo): "enforce an explicit maximum notAfter rather
+ * than leave lifetime unbounded." An expiry field the buyer chooses is not a
+ * limit — a proof with notAfter 9999-12-31 is a permanent grant of signing
+ * authority that survives key rotation, host compromise and staff turnover,
+ * and nothing about the signature says so. The ceiling is the provider's, so
+ * the worst case is bounded no matter what the buyer signs.
+ *
+ * 30 days: long enough that re-signing is not operational friction, short
+ * enough that a leaked ed25519 key stops being useful within a billing month.
+ */
+export const MAX_BINDING_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+
 export interface BindingProof {
   domain: typeof BINDING_DOMAIN;
   principal: string;
@@ -67,6 +82,7 @@ export type BindingCode =
   | "E_BINDING_WRONG_DOMAIN"
   | "E_BINDING_EXPIRED"
   | "E_BINDING_WRONG_CHAIN"
+  | "E_BINDING_LIFETIME_TOO_LONG"
   | "E_BINDING_SIGNER_MISMATCH"
   | "E_BINDING_BAD_SIGNATURE";
 
@@ -87,6 +103,13 @@ export function verifyBinding(proof: BindingProof, opts: { chainId: number; now?
   const exp = Date.parse(proof.notAfter);
   if (!Number.isFinite(exp)) return { ok: false, code: "E_BINDING_MALFORMED", detail: "notAfter is not a date" };
   if (now > exp) return { ok: false, code: "E_BINDING_EXPIRED" };
+  // A buyer-chosen expiry is not a limit until the provider caps it.
+  if (exp - now > MAX_BINDING_LIFETIME_MS) {
+    return {
+      ok: false, code: "E_BINDING_LIFETIME_TOO_LONG",
+      detail: `notAfter is ${Math.round((exp - now) / 86_400_000)} days out; this provider accepts at most ${MAX_BINDING_LIFETIME_MS / 86_400_000} days`,
+    };
+  }
 
   let fingerprint: string;
   let statement: string;

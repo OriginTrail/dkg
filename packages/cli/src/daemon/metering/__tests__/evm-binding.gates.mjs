@@ -79,6 +79,18 @@ console.log("\nreplay and substitution:");
   const expired = await makeProof({ notAfter: new Date(Date.now() - 1000).toISOString() });
   ok("an expired proof is refused", B.verifyBinding(expired, { chainId: CHAIN }).code === "E_BINDING_EXPIRED");
 
+  // Buyer-recommended: an expiry the buyer picks is not a limit until the
+  // provider caps it. A "valid" far-future proof is a permanent grant.
+  const forever = await makeProof({ notAfter: "9999-12-31T23:59:59.000Z" });
+  ok("a correctly-signed but far-future proof is REFUSED (lifetime cap)",
+    B.verifyBinding(forever, { chainId: CHAIN }).code === "E_BINDING_LIFETIME_TOO_LONG",
+    JSON.stringify(B.verifyBinding(forever, { chainId: CHAIN })));
+  const justInside = await makeProof({ notAfter: new Date(Date.now() + B.MAX_BINDING_LIFETIME_MS - 60_000).toISOString() });
+  ok("a proof just inside the cap is accepted", B.verifyBinding(justInside, { chainId: CHAIN }).ok === true);
+  const justOutside = await makeProof({ notAfter: new Date(Date.now() + B.MAX_BINDING_LIFETIME_MS + 600_000).toISOString() });
+  ok("a proof just outside the cap is refused",
+    B.verifyBinding(justOutside, { chainId: CHAIN }).code === "E_BINDING_LIFETIME_TOO_LONG");
+
   const wrongDomain = await makeProof({ domain: "some-other-protocol:v1" });
   ok("a proof from another domain is refused",
     B.verifyBinding(wrongDomain, { chainId: CHAIN }).code === "E_BINDING_WRONG_DOMAIN");
