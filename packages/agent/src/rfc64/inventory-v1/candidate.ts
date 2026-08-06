@@ -372,14 +372,23 @@ export function createRfc64SwmAuthorInventoryOperationsViewV1(
   inventory: Rfc64SwmAuthorInventoryOperationsV1,
   requireOwnerOpen: () => void,
 ): Rfc64SwmAuthorInventoryOperationsV1 {
-  const fence = createInventoryOperationFenceV1(requireOwnerOpen);
   return Object.freeze({
-    readSwmAuthorInventorySnapshotV1: fence(
-      inventory.readSwmAuthorInventorySnapshotV1.bind(inventory),
-    ),
-    compareAndSwapSwmAuthorInventoryV1: fence(
-      inventory.compareAndSwapSwmAuthorInventoryV1.bind(inventory),
-    ),
+    readSwmAuthorInventorySnapshotV1: (
+      inventoryScopeDigest: Digest32V1,
+      authorAddress: EvmAddressV1,
+    ): SwmAuthorInventorySnapshotV1 | null => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventorySnapshotV1(
+        inventoryScopeDigest,
+        authorAddress,
+      );
+    },
+    compareAndSwapSwmAuthorInventoryV1: (
+      input: CompareAndSwapSwmAuthorInventoryInputV1,
+    ): SwmAuthorInventoryCasResultV1 => {
+      requireOwnerOpen();
+      return inventory.compareAndSwapSwmAuthorInventoryV1(input);
+    },
   });
 }
 
