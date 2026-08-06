@@ -119,6 +119,13 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       scheduler: hooks.observability?.scheduler ?? 'priority-admission',
       thresholds: hooks.observability?.thresholds,
       now,
+      // Registration happens here, but capacity is only published on the first
+      // acquire — so without this a freshly booted daemon advertises
+      // `partitioned` on the field documented as authoritative, permanently so
+      // when sync admission is disabled and no acquire ever runs. The limits
+      // themselves still arrive with the first acquire; this declares only the
+      // model, which is a property of this queue rather than of a call.
+      capacity: { capacityModel: 'shared' },
     });
     this.hooks = hooks;
     this.now = now;
@@ -177,6 +184,14 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       this.updatePressureCapacity({
         queueLimit: options.queueLimit,
         inflightLimit: this.hooks.observability.inflightLimit?.(base) ?? null,
+        // Lanes here order one pool by priority, they do not partition it:
+        // `queueLimit` bounds the whole queue (`globalFull` below) and `canRun`
+        // bounds total inflight, so no lane has a private allocation to
+        // publish. Declaring the model is what makes lane `state` classifiable
+        // from queue depth at all — without it the depth branches see a null
+        // ceiling, and only queue age or an already-taken rejection can move a
+        // lane off `healthy`.
+        capacityModel: 'shared',
       });
     }
 
