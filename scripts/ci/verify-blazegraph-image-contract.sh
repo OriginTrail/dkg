@@ -5,9 +5,14 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 cd "$repo_root"
 
-runtime="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json)"
-IFS=$'\t' read -r image container_port data_path <<< "$runtime"
-if [[ -z "$image" || -z "$container_port" || -z "$data_path" ]]; then
+# Fields are requested by NAME — the metadata contract is JSON, never
+# positional output.
+read_contract_field() {
+  node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json "$1"
+}
+if ! image="$(read_contract_field image)" \
+  || ! container_port="$(read_contract_field containerPort)" \
+  || ! data_path="$(read_contract_field dataPath)"; then
   echo "::error::Could not read image contract from blazegraph-image.json"
   exit 1
 fi
@@ -67,21 +72,13 @@ if ! start_contract_container; then
   exit 1
 fi
 
-curl -fsS --max-time 10 -X POST \
-  "http://127.0.0.1:${host_port}/bigdata/namespace" \
-  -H 'Content-Type: application/xml' \
-  --data-binary @- >/dev/null <<EOF
-<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
-<properties>
-  <entry key="com.bigdata.rdf.sail.namespace">${namespace}</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.quads">true</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers">false</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.textIndex">false</entry>
-  <entry key="com.bigdata.rdf.sail.truthMaintenance">false</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.axiomsClass">com.bigdata.rdf.axioms.NoAxioms</entry>
-</properties>
-EOF
+# The canonical namespace-properties XML is rendered by the shared contract
+# module — no inline copy to drift.
+node packages/cli/blazegraph-image-metadata.cjs --namespace-xml "$namespace" \
+  | curl -fsS --max-time 10 -X POST \
+    "http://127.0.0.1:${host_port}/bigdata/namespace" \
+    -H 'Content-Type: application/xml' \
+    --data-binary @- >/dev/null
 
 curl -fsS --max-time 10 \
   "http://127.0.0.1:${host_port}/bigdata/namespace/${namespace}/sparql/properties" \

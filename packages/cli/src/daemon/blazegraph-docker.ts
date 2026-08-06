@@ -35,25 +35,6 @@ import * as net from 'node:net';
 import { runtimeAssetPaths } from '../runtime-assets.js';
 
 /**
- * Shared XML template for a Blazegraph namespace tuned for DKG V10
- * (quads enabled, no truth maintenance, no text index, no statement
- * identifiers). Substitutes `{namespace}` for the namespace name.
- *
- * Mirrors the body inlined at scripts/devnet.sh:287-294. Kept here so
- * future tweaks land in one place.
- */
-export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
-<properties>
-  <entry key="com.bigdata.rdf.sail.namespace">{namespace}</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.quads">true</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers">false</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.textIndex">false</entry>
-  <entry key="com.bigdata.rdf.sail.truthMaintenance">false</entry>
-  <entry key="com.bigdata.rdf.store.AbstractTripleStore.axiomsClass">com.bigdata.rdf.axioms.NoAxioms</entry>
-</properties>`;
-
-/**
  * Pinned multi-architecture image index — matches the deployed mainnet fleet.
  * `lyrasis/blazegraph:2.1.5` is amd64-only and fails with `exec format error`
  * when the provisioner runs on an arm64 Linux node.
@@ -67,14 +48,27 @@ interface BlazegraphImageMetadata {
   dataPath: string;
 }
 
-interface BlazegraphImageMetadataParser {
+interface BlazegraphRuntimeContract {
+  BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: string;
   readBlazegraphImageMetadata(path: string): BlazegraphImageMetadata;
 }
 
 const require = createRequire(import.meta.url);
-const { readBlazegraphImageMetadata } = require(
+const { BLAZEGRAPH_NAMESPACE_XML_TEMPLATE: NAMESPACE_XML_TEMPLATE, readBlazegraphImageMetadata } = require(
   '../../blazegraph-image-metadata.cjs',
-) as BlazegraphImageMetadataParser;
+) as BlazegraphRuntimeContract;
+
+/**
+ * Shared XML template for a Blazegraph namespace tuned for DKG V10
+ * (quads enabled, no truth maintenance, no text index, no statement
+ * identifiers). Substitutes `{namespace}` for the namespace name.
+ *
+ * The canonical copy lives in packages/cli/blazegraph-image-metadata.cjs so
+ * shell consumers (devnet + CI scripts) render the SAME document via its
+ * `--namespace-xml` CLI mode — future tweaks land in exactly one place.
+ * Re-exported here so TypeScript importers keep their existing name.
+ */
+export const BLAZEGRAPH_NAMESPACE_XML_TEMPLATE = NAMESPACE_XML_TEMPLATE;
 
 function loadBlazegraphImageMetadata(): BlazegraphImageMetadata {
   for (const path of runtimeAssetPaths('blazegraph-image.json')) {
