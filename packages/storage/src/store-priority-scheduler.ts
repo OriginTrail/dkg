@@ -359,9 +359,17 @@ const BARRIER_ANY_GENERATION = '*';
 /**
  * Default bound on a whole control transition, wait plus execution.
  *
- * Comfortably above the managed child's 30 s `readyTimeoutMs` so a genuinely
- * slow Oxigraph restart is never mistaken for a deadlock — this exists to catch
- * a circular wait, not to police a slow disk.
+ * Deliberately DOUBLE the managed child's 30 s `readyTimeoutMs`, and that
+ * relationship is the tuning constraint, not the number: this bound exists to
+ * catch a circular wait, not to police a slow disk. A legitimate Oxigraph
+ * restart is allowed to consume the child's full ready timeout, so anything at
+ * or below it converts every genuinely slow restart into a spurious
+ * `StoreControlBarrierTimeoutError` — a bound that fires on normal operation is
+ * worse than no bound, because it trains operators to ignore the one signal
+ * that means a transition has actually deadlocked.
+ *
+ * If `readyTimeoutMs` is raised, raise this with it. Tune via
+ * `DKG_STORE_BARRIER_TIMEOUT_MS`, or per transition via `runControlBarrier`.
  */
 export const DEFAULT_STORE_CONTROL_BARRIER_TIMEOUT_MS = 60_000;
 
