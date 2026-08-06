@@ -49,9 +49,9 @@ DKG organizes knowledge into three memory layers rather than collapsing everythi
 
 * **Working Memory** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No cost, no coordination overhead. This is where all knowledge starts.
 * **Shared Working Memory** — _Collaborative, gossip-replicated, no charge._ Selectively share knowledge with specific peers (other agents) without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, partially-verified, or consensus-verified. This is where knowledge graduates from working context to ground truth.
+* **Verifiable Memory** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs a durable, independently verifiable record. Each published version is bound to an on-chain commitment; later updates create an auditable new committed state instead of silently rewriting history. Query access follows the Context Graph's policy. Trust level is explicit: self-attested, endorsed, partially verified, or consensus verified.
 
-<table><thead><tr><th width="167">Layer</th><th width="183">Scope</th><th width="79">Cost</th><th width="164">Trust</th><th>Persistence</th></tr></thead><tbody><tr><td><strong>Working Memory (WM)</strong></td><td>Private to your agent</td><td>Free</td><td>Self-attested</td><td>Local, survives restarts</td></tr><tr><td><strong>Shared Working Memory (SWM)</strong></td><td>Visible to context-graph peers</td><td>Free</td><td>Self-attested, gossip-replicated</td><td>TTL-bounded</td></tr><tr><td><strong>Verifiable Memory (VM)</strong></td><td>Permanent, on-chain</td><td>TRAC</td><td>Self-attested → endorsed → consensus-verified</td><td>Permanent</td></tr></tbody></table>
+<table><thead><tr><th width="167">Layer</th><th width="183">Scope</th><th width="79">Cost</th><th width="164">Trust</th><th>Persistence</th></tr></thead><tbody><tr><td><strong>Working Memory (WM)</strong></td><td>Private to your agent</td><td>Free</td><td>Self-attested</td><td>Local, survives restarts</td></tr><tr><td><strong>Shared Working Memory (SWM)</strong></td><td>Visible to context-graph peers</td><td>Free</td><td>Self-attested, gossip-replicated</td><td>TTL-bounded</td></tr><tr><td><strong>Verifiable Memory (VM)</strong></td><td>Network-queryable, chain-anchored</td><td>Gas + TRAC</td><td>Self-attested → endorsed → consensus-verified</td><td>Durable</td></tr></tbody></table>
 
 Agents can therefore collaborate before finality, and humans can decide when knowledge deserves the cost and permanence of publication.
 
@@ -59,12 +59,12 @@ Agents can therefore collaborate before finality, and humans can decide when kno
 flowchart LR
   A["Agent drafts a finding"] --> WM["Working Memory<br/>private"]
   WM --> SWM["Shared Working Memory<br/>peer-visible"]
-  SWM --> VM["Verifiable Memory<br/>on-chain"]
+  SWM --> VM["Verifiable Memory<br/>chain-anchored"]
 ```
 
 > ## Documentation Index
 >
-> Agents can start from [`llms.txt`](../llms.txt) for the compact docs index, or [`llms-full.txt`](../llms-full.txt) for the expanded context pack.
+> Start from [`SUMMARY.md`](SUMMARY.md) for the complete documentation map or [`agent-context/context-pack.md`](agent-context/context-pack.md) for compact agent context.
 
 #### The DKG node
 
