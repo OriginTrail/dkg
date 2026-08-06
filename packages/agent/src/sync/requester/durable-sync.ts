@@ -41,8 +41,11 @@ import {
 
 export {
   createContextGraphSyncDeadline,
+  createDurableMetaPhaseFetchDeadline,
   createDurableSyncBudget,
   createGraphScopedAuthenticationDeadline,
+  DURABLE_DATA_PHASE_MIN_BUDGET_MS,
+  DURABLE_META_PHASE_BUDGET_FRACTION,
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
   normalizeDurableSyncTimeoutMs,
@@ -337,7 +340,14 @@ async function runDurableSyncWithBudget(
         remainingContextGraphs: contextGraphIds.length - contextGraphIndex,
       });
       const deadline = contextGraphBudget.fetchDeadline;
-      const activeFetchContext = fetchContext(deadline);
+      // Meta may never outlive the CG window even if a budget hands out a
+      // later phase deadline, so both phases combined stay inside the per-CG
+      // wall clock. The data phase runs to the full CG deadline, which is how
+      // a meta phase that finishes early rolls its unused time into data.
+      const metaFetchDeadline = Math.min(
+        contextGraphBudget.metaFetchDeadline ?? deadline,
+        deadline,
+      );
       const exactAssetUals = exactAssetUalsFor?.(pid);
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
@@ -363,7 +373,7 @@ async function runDurableSyncWithBudget(
         graphUri,
         sinceBatchId,
         exactAssetUals,
-        fetchContext: activeFetchContext,
+        fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {

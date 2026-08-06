@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 import {
   createContextGraphSyncDeadline,
+  createDurableMetaPhaseFetchDeadline,
   createDurableSyncBudget,
   createGraphScopedAuthenticationDeadline,
+  DURABLE_DATA_PHASE_MIN_BUDGET_MS,
+  DURABLE_META_PHASE_BUDGET_FRACTION,
   type DurableSyncBudget,
 } from '../src/sync/requester/durable-sync-budget.js';
 import {
@@ -78,6 +81,7 @@ function requesterBudgetContext(options: {
   graphScoped?: boolean;
   onFetchPhase?: (phase: 'data' | 'meta') => void;
   onFetchContext?: (fetchContext: DurableSyncFetchContext) => void;
+  mapFetchResult?: (phase: 'data' | 'meta', page: SyncPageResult) => SyncPageResult;
   onVerify?: () => void;
   onVerifiedFullSnapshot?: DurableSyncContext['onVerifiedFullSnapshot'];
   emptyResponses?: number;
@@ -105,9 +109,10 @@ function requesterBudgetContext(options: {
     }) => {
       options.onFetchPhase?.(phase);
       options.onFetchContext?.(fetchContext);
-      return phase === 'data'
+      const page = phase === 'data'
         ? requesterPage(phase, dataQuads)
         : requesterPage(phase, metadataQuads);
+      return options.mapFetchResult?.(phase, page) ?? page;
     },
     processDurableBatchInWorker: async () => {
       options.onVerify?.();
@@ -687,5 +692,194 @@ describe('durable sync deadline budget', () => {
       failedPhases: 1,
     });
     expect(storeInsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('durable sync per-phase deadline split', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('caps meta at its budget fraction while data keeps the full CG deadline', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    const budget = createDurableSyncBudget({ fetchTimeoutMs: 100_000 })
+      .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 });
+
+    expect(budget.fetchDeadline).toBe(1_100_000);
+    expect(budget.metaFetchDeadline).toBe(
+      1_000_000 + 100_000 * DURABLE_META_PHASE_BUDGET_FRACTION,
+    );
+  });
+
+  it('reserves the data floor when an operation deadline clamps the CG window', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    const budget = createDurableSyncBudget({
+      fetchTimeoutMs: 100_000,
+      operationDeadline: 1_008_000,
+    }).createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 });
+
+    expect(budget.fetchDeadline).toBe(1_008_000);
+    expect(budget.metaFetchDeadline).toBe(1_003_000);
+    expect(budget.fetchDeadline - budget.metaFetchDeadline!)
+      .toBe(DURABLE_DATA_PHASE_MIN_BUDGET_MS);
+  });
+
+  it('keeps the shared deadline when the window cannot reserve the data floor', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    expect(createDurableMetaPhaseFetchDeadline({
+      fetchDeadline: 1_000_000 + DURABLE_DATA_PHASE_MIN_BUDGET_MS - 1_000,
+    })).toBe(1_000_000 + DURABLE_DATA_PHASE_MIN_BUDGET_MS - 1_000);
+    expect(createDurableMetaPhaseFetchDeadline({ fetchDeadline: 999_000 }))
+      .toBe(999_000);
+  });
+
+  it('never lets the phase deadlines extend the prior single-deadline total', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+
+    for (const remainingContextGraphs of [1, 2, 7]) {
+      const budget = createDurableSyncBudget({ fetchTimeoutMs: 100_000 })
+        .createContextGraphBudget({ contextGraphId, remainingContextGraphs });
+      const priorSharedDeadline = createContextGraphSyncDeadline({
+        remainingContextGraphs,
+        totalTimeoutMs: 100_000,
+      });
+      expect(budget.fetchDeadline).toBe(priorSharedDeadline);
+      expect(budget.metaFetchDeadline!).toBeLessThanOrEqual(priorSharedDeadline);
+      expect(budget.metaFetchDeadline!).toBeGreaterThan(1_000_000);
+    }
+  });
+
+  it('threads the bounded meta deadline and full CG deadline through per-phase fetch contexts', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const observed: Array<{ phase: 'data' | 'meta'; deadline: number }> = [];
+    let activeFetchPhase: 'data' | 'meta' = 'meta';
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: createDurableSyncBudget({ fetchTimeoutMs: 100_000 }),
+      graphScoped: false,
+      onFetchPhase: (phase) => { activeFetchPhase = phase; },
+      onFetchContext: (fetchContext) => observed.push({
+        phase: activeFetchPhase,
+        deadline: fetchContext.deadline,
+      }),
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    expect(observed).toEqual([
+      { phase: 'meta', deadline: 1_040_000 },
+      { phase: 'data', deadline: 1_100_000 },
+    ]);
+  });
+
+  it('leaves the data phase at least the floor after meta exhausts its slice', async () => {
+    let nowMs = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    const dataWindows: number[] = [];
+    let activeFetchPhase: 'data' | 'meta' = 'meta';
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: createDurableSyncBudget({
+        fetchTimeoutMs: 100_000,
+        operationDeadline: 1_008_000,
+      }),
+      graphScoped: false,
+      onFetchPhase: (phase) => { activeFetchPhase = phase; },
+      onFetchContext: (fetchContext) => {
+        if (activeFetchPhase === 'meta') {
+          // Burn the whole meta slice: the transfer times out exactly at its
+          // own phase deadline instead of the shared CG deadline.
+          nowMs = fetchContext.deadline;
+        } else {
+          dataWindows.push(fetchContext.deadline - nowMs);
+        }
+      },
+      mapFetchResult: (phase, page) => (phase === 'meta'
+        ? { ...page, quads: [], nextOffset: 0, completed: false, timedOut: true }
+        : page),
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    expect(dataWindows).toEqual([DURABLE_DATA_PHASE_MIN_BUDGET_MS]);
+  });
+
+  it('rolls unused meta time into the data phase', async () => {
+    let nowMs = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    const dataWindows: number[] = [];
+    let activeFetchPhase: 'data' | 'meta' = 'meta';
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: createDurableSyncBudget({ fetchTimeoutMs: 100_000 }),
+      graphScoped: false,
+      onFetchPhase: (phase) => { activeFetchPhase = phase; },
+      onFetchContext: (fetchContext) => {
+        if (activeFetchPhase === 'meta') {
+          nowMs += 5_000;
+          expect(fetchContext.deadline).toBe(1_040_000);
+        } else {
+          dataWindows.push(fetchContext.deadline - nowMs);
+        }
+      },
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    // 100s window minus the 5s meta actually used: the unused 35s of meta's
+    // slice belongs to data, not merely the 60s reserved remainder.
+    expect(dataWindows).toEqual([95_000]);
+  });
+
+  it('gives a meta-skipping system CG its full deadline for the only data phase', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const observed: Array<{ phase: 'data' | 'meta'; deadline: number }> = [];
+    let activeFetchPhase: 'data' | 'meta' = 'meta';
+    const syncContext = requesterBudgetContext({
+      durableSyncBudget: createDurableSyncBudget({ fetchTimeoutMs: 100_000 }),
+      graphScoped: false,
+      onFetchPhase: (phase) => { activeFetchPhase = phase; },
+      onFetchContext: (fetchContext) => observed.push({
+        phase: activeFetchPhase,
+        deadline: fetchContext.deadline,
+      }),
+      storeGraphScopedAsset: async () => 'applied',
+    });
+    syncContext.contextGraphIds = [SYSTEM_CONTEXT_GRAPHS.AGENTS];
+    syncContext.syncAgentsMeta = false;
+
+    await runDurableSync(syncContext);
+
+    expect(observed).toEqual([
+      { phase: 'data', deadline: 1_100_000 },
+    ]);
+  });
+
+  it('clamps a budget-supplied meta deadline to the CG fetch deadline', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const observed: Array<{ phase: 'data' | 'meta'; deadline: number }> = [];
+    let activeFetchPhase: 'data' | 'meta' = 'meta';
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: {
+        createContextGraphBudget: () => ({
+          fetchDeadline: 1_060_000,
+          metaFetchDeadline: 1_090_000,
+          createGraphScopedAuthenticationDeadline: () => 1_060_000,
+        }),
+      },
+      graphScoped: false,
+      onFetchPhase: (phase) => { activeFetchPhase = phase; },
+      onFetchContext: (fetchContext) => observed.push({
+        phase: activeFetchPhase,
+        deadline: fetchContext.deadline,
+      }),
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    expect(observed).toEqual([
+      { phase: 'meta', deadline: 1_060_000 },
+      { phase: 'data', deadline: 1_060_000 },
+    ]);
   });
 });
