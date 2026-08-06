@@ -14,6 +14,7 @@ import { SessionBridge } from '../extension/src/extension.js';
 import {
   ADAPTER_CONFIG_FILENAME,
   defaultExtensionPath,
+  disconnectPrimeAgentProfile,
   readSetupState,
   resolvePrimeAgentProfile,
   restorePrimeAgentProfile,
@@ -31,7 +32,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'prime-agent-setup-'));
   agentDir = join(root, 'prime-agent');
   dkgHome = join(root, 'dkg-home');
-  extensionPath = join(root, 'node_modules', 'dkg-adapter-prime-agent', 'extension', 'dist', 'extension.js');
+  extensionPath = join(root, 'packages', 'adapter-prime-agent', 'extension', 'dist', 'extension.js');
   mkdirSync(dirname(extensionPath), { recursive: true });
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(dkgHome, { recursive: true });
@@ -115,6 +116,43 @@ describe('idempotence and recovery', () => {
     setup();
     const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
     expect(settings.extensions).toEqual(['/user/ext.js', extensionPath]);
+  });
+
+  it('is idempotent when the exact source-tree extension path is already registered', () => {
+    setup();
+    setup();
+
+    const settings = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8'));
+    expect(settings.extensions).toEqual([extensionPath]);
+  });
+
+  it('disconnect removes a source-tree extension path', () => {
+    setup();
+    disconnectPrimeAgentProfile({ agentDir, dkgHome, extensionPath });
+
+    const settings = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8'));
+    expect(settings.extensions).toEqual([]);
+  });
+
+  it('disconnect removes the exact persisted extension path even without a managed-looking name', () => {
+    const customPath = join(root, 'custom', 'extension', 'dist', 'extension.js');
+    mkdirSync(dirname(customPath), { recursive: true });
+    writeFileSync(customPath, 'export default () => {};\n');
+    setupPrimeAgentProfile({ agentDir, dkgHome, extensionPath: customPath });
+
+    disconnectPrimeAgentProfile({ agentDir, dkgHome, extensionPath: customPath });
+
+    const settings = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8'));
+    expect(settings.extensions).toEqual([]);
+  });
+
+  it('reconnect after disconnect registers exactly one extension entry', () => {
+    setup();
+    disconnectPrimeAgentProfile({ agentDir, dkgHome, extensionPath });
+    setup();
+
+    const settings = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8'));
+    expect(settings.extensions).toEqual([extensionPath]);
   });
 
   it('preserves malformed user settings before restoring the retained backup', () => {

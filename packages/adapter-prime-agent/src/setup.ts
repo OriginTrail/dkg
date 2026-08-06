@@ -133,7 +133,12 @@ interface PrimeAgentAdapterFile {
 }
 
 function isManagedExtensionPath(value: string): boolean {
-  return value.includes('dkg-adapter-prime-agent');
+  return /(^|[/\\])(?:dkg-)?adapter-prime-agent([/\\]|$)/.test(value)
+    || value.includes(MANAGED_BY);
+}
+
+function isOwnedExtensionPath(value: string, extensionPath: string): boolean {
+  return value === extensionPath || isManagedExtensionPath(value);
 }
 
 function trimmed(value: string | undefined): string | undefined {
@@ -233,7 +238,7 @@ export function planPrimeAgentSetup(options: PrimeAgentSetupOptions = {}): Prime
 
   const settings = readSettings(profile.settingsPath);
   const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
-  const managedExtensions = extensions.filter(isManagedExtensionPath);
+  const managedExtensions = extensions.filter((entry) => isOwnedExtensionPath(entry, extensionPath));
   const already = managedExtensions.length === 1 && managedExtensions[0] === extensionPath;
 
   if (!existsSync(profile.agentDir)) {
@@ -317,7 +322,7 @@ export function setupPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): Pr
 
   const settings = readSettings(profile.settingsPath);
   const extensions = Array.isArray(settings.extensions) ? [...settings.extensions] : [];
-  const managedExtensions = extensions.filter(isManagedExtensionPath);
+  const managedExtensions = extensions.filter((entry) => isOwnedExtensionPath(entry, extensionPath));
   const already = managedExtensions.length === 1 && managedExtensions[0] === extensionPath;
   const preserveBlocked =
     options.preserveSettings && managedExtensions.length > 0 && !already;
@@ -367,7 +372,10 @@ export function setupPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): Pr
     // STEP 3 — the destructive write.
     const next: PrimeSettings = {
       ...settings,
-      extensions: [...extensions.filter((entry) => !isManagedExtensionPath(entry)), extensionPath],
+      extensions: [
+        ...extensions.filter((entry) => !isOwnedExtensionPath(entry, extensionPath)),
+        extensionPath,
+      ],
     };
     writeFileSync(profile.settingsPath, `${JSON.stringify(next, null, 2)}\n`);
     managedFiles.add(profile.settingsPath);
@@ -386,15 +394,16 @@ export function restorePrimeAgentProfile(req: PrimeAgentRestoreRequest = {}): Pr
   const profile = resolvePrimeAgentProfile({ agentDir: req.agentDir, profileName: req.profile });
   const state = readSetupState(profile);
   if (!state) return { ok: true, path: 'noop' };
+  const isOwned = (entry: string) => isOwnedExtensionPath(entry, state.extensionPath);
 
   try {
     const settings = readSettings(profile.settingsPath);
     const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
-    if (extensions.some(isManagedExtensionPath)) {
-      const next: PrimeSettings = { ...settings, extensions: extensions.filter((p) => !isManagedExtensionPath(p)) };
+    if (extensions.some(isOwned)) {
+      const next: PrimeSettings = { ...settings, extensions: extensions.filter((entry) => !isOwned(entry)) };
       writeFileSync(profile.settingsPath, `${JSON.stringify(next, null, 2)}\n`);
       const post = readSettings(profile.settingsPath);
-      const stillThere = Array.isArray(post.extensions) && post.extensions.some(isManagedExtensionPath);
+      const stillThere = Array.isArray(post.extensions) && post.extensions.some(isOwned);
       if (stillThere) return { ok: false, path: 'failed', restoreError: 'entry still present after rewrite' };
       return { ok: true, path: 'surgical' };
     }
@@ -410,7 +419,7 @@ export function restorePrimeAgentProfile(req: PrimeAgentRestoreRequest = {}): Pr
         }
         copyFileSync(backup, profile.settingsPath);
         const post = readSettings(profile.settingsPath);
-        const stillThere = Array.isArray(post.extensions) && post.extensions.some(isManagedExtensionPath);
+        const stillThere = Array.isArray(post.extensions) && post.extensions.some(isOwned);
         if (stillThere) {
           return { ok: false, path: 'failed', restoredFrom: backup, ...(rejectedPath ? { rejectedPath } : {}), restoreError: 'entry present in backup' };
         }
@@ -426,7 +435,10 @@ export function restorePrimeAgentProfile(req: PrimeAgentRestoreRequest = {}): Pr
 export function disconnectPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): PrimeAgentSetupPlan {
   const plan = planPrimeAgentSetup(options);
   if (plan.dryRun) return plan;
-  restorePrimeAgentProfile({ agentDir: options.agentDir, profile: options.profileName });
+  const restore = restorePrimeAgentProfile({ agentDir: options.agentDir, profile: options.profileName });
+  if (!restore.ok) {
+    throw new Error(`failed to disconnect Prime Agent adapter: ${restore.restoreError ?? 'restore failed'}`);
+  }
   const profile = plan.profile;
   const state = readSetupState(profile);
   if (state) writeSetupState(profile, { ...state, status: 'disconnected', updatedAt: new Date().toISOString() });
@@ -457,8 +469,11 @@ export function verifyPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): P
   try {
     const settings = readSettings(profile.settingsPath);
     const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
-    if (!extensions.includes(state.extensionPath)) {
+    const registeredCount = extensions.filter((entry) => entry === state.extensionPath).length;
+    if (registeredCount === 0) {
       errors.push('extension path is not registered in settings.json');
+    } else if (registeredCount > 1) {
+      errors.push(`extension path is registered ${registeredCount} times in settings.json`);
     }
     const staleManaged = extensions.filter((entry) => isManagedExtensionPath(entry) && entry !== state.extensionPath);
     if (staleManaged.length) errors.push(`stale Prime Agent adapter extension path(s): ${staleManaged.join(', ')}`);
@@ -629,7 +644,7 @@ export async function runUninstall(options: PrimeAgentSetupOptions = {}): Promis
     return;
   }
   const restore = restorePrimeAgentProfile({ agentDir: options.agentDir, profile: options.profileName });
-  if (!restore.ok) console.warn(`[prime-agent] restore reported: ${restore.restoreError}`);
+  if (!restore.ok) throw new Error(`failed to uninstall Prime Agent adapter: ${restore.restoreError ?? 'restore failed'}`);
   if (restore.rejectedPath) console.warn(`[prime-agent] preserved replaced settings at ${restore.rejectedPath}`);
   console.log(`[prime-agent] uninstalled${restore.restoredFrom ? ` (backup retained at ${restore.restoredFrom})` : ''}`);
 }
