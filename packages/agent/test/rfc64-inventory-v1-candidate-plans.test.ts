@@ -209,8 +209,8 @@ function collectPlanClass(database: DatabaseSync): PlanClass {
   return Object.freeze(plans);
 }
 
-function parametersFor(sql: string): Record<string, Uint8Array | number> {
-  const all: Readonly<Record<string, Uint8Array | number>> = {
+function parametersFor(sql: string): Record<string, Uint8Array | number | string | null> {
+  const all: Readonly<Record<string, Uint8Array | number | string | null>> = {
     session: hexBytes(NEW_SESSION_HEX),
     oldSession: hexBytes(OLD_SESSION_HEX),
     newSession: hexBytes(NEW_SESSION_HEX),
@@ -224,6 +224,22 @@ function parametersFor(sql: string): Record<string, Uint8Array | number> {
     inventoryDigest: hexBytes('77'.repeat(32)),
     catalogVersion: hexBytes('0000000000000001'),
     inventoryRowCount: hexBytes('0000000000000001'),
+    inventoryVersion: hexBytes('0000000000000001'),
+    totalRows: hexBytes('0000000000000001'),
+    rowsDigest: hexBytes('77'.repeat(32)),
+    signedHeadEnvelope: hexBytes('7b7d'),
+    mutationKind: 'remove',
+    mutationKaUal: 'did:dkg:otp:20430/0x4444444444444444444444444444444444444444/1',
+    kaUal: 'did:dkg:otp:20430/0x4444444444444444444444444444444444444444/1',
+    assertionCoordinate: 'fixture-row',
+    assertionVersion: hexBytes('0000000000000001'),
+    shareOperationId: 'fixture-share-operation',
+    projectionDigest: hexBytes('88'.repeat(32)),
+    publicTripleCount: hexBytes('0000000000000001'),
+    privateTripleCount: hexBytes('0000000000000000'),
+    sealDigest: hexBytes('99'.repeat(32)),
+    sharedAt: hexBytes('0000018bcfe56800'),
+    expiresAt: null,
     bucket: hexBytes(SELECTED_BUCKET_HEX),
     afterKaIdU256be: hexBytes(`${AUTHOR_HEX}${'00'.repeat(11)}01`),
     limit: 256,
@@ -302,6 +318,18 @@ function expectPlanGate(plans: PlanClass): void {
     plans.updateAppliedHeadCas.some((detail) => detail.includes('USING PRIMARY KEY')),
     `${INVENTORY_V1_STATEMENT_IDS.updateAppliedHeadCas} must use its exact scope primary key`,
   ).toBe(true);
+
+  for (const statementId of [
+    'getSwmAuthorHead',
+    'getSwmAuthorRows',
+    'updateSwmAuthorHeadCas',
+    'deleteSwmAuthorRow',
+  ] as const) {
+    expect(
+      plans[statementId].some((detail) => detail.includes('USING PRIMARY KEY')),
+      `${INVENTORY_V1_STATEMENT_IDS[statementId]} must use its exact scope/UAL key`,
+    ).toBe(true);
+  }
 }
 
 function oldHeadWidePrimaryKeyDdl(): string {
