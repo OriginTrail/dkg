@@ -22,7 +22,7 @@ export function formatLocalAgentErrorMessage(
       return `${integration.name} session is busy — try again in a moment.`;
     }
     if (err.code === 'PRIME_AGENT_NO_SESSION') {
-      return `No live ${integration.name} session is available. Start or resume a session and try again.`;
+      return `No live ${integration.name} session is available. Start or resume a session, then send again.`;
     }
     // The PRIME_AGENT_* terminal codes below must stay in lock-step with
     // PrimeAgentTurnErrorCode in

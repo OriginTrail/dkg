@@ -31,7 +31,6 @@ describe('Prime Agent terminal error messages', () => {
   // The mapper falls through to the raw message when no branch matches, so a
   // dropped branch degrades silently — every terminal code needs a pin.
   it.each([
-    ['PRIME_AGENT_NO_SESSION', 'No live Prime Agent session is available. Start or resume a session and try again.'],
     ['PRIME_AGENT_PROVIDER_ERROR', 'Prime Agent provider request failed. Check its provider configuration and try again.'],
     ['PRIME_AGENT_TURN_ABORTED', 'Prime Agent turn was aborted.'],
     ['PRIME_AGENT_DELIVERY_FAILED', 'Prime Agent rejected the message before starting the turn.'],
@@ -42,5 +41,18 @@ describe('Prime Agent terminal error messages', () => {
     });
 
     expect(formatLocalAgentErrorMessage(primeAgent, error)).toBe(expected);
+  });
+
+  it('renders a dead pinned session as an actionable message, not the raw daemon 409', () => {
+    const error = new LocalAgentApiError('No live Prime Agent session 019f-dead-uuid', {
+      code: 'PRIME_AGENT_NO_SESSION',
+      source: 'prime-agent-channel',
+    });
+
+    const message = formatLocalAgentErrorMessage(primeAgent, error);
+    expect(message).toBe(
+      'No live Prime Agent session is available. Start or resume a session, then send again.',
+    );
+    expect(message).not.toContain('019f-dead-uuid');
   });
 });

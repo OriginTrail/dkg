@@ -857,10 +857,26 @@ describe('/stream', () => {
       });
       expect(health.clientDisconnectedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
-      // Disconnecting the HTTP subscriber does not cancel the Prime turn. Its
-      // real lifecycle boundary still settles and releases the bridge cleanly.
+      // Several keepalive intervals with the subscriber gone must not write to
+      // the dead response or keep an interval alive. The Prime turn itself is
+      // not cancelled and still settles at its real lifecycle boundary.
+      await new Promise((r) => setTimeout(r, 70));
       startBridgeRun();
+      bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'unseen tail' } });
       bridge.onAgentEnd();
+
+      const next = fetch(`${base}/send`, {
+        method: 'POST',
+        headers: authed(),
+        body: JSON.stringify({ text: 'after abort', correlationId: 'c-after-abort' }),
+      });
+      await until(() => sent.length === 2);
+      startBridgeRun();
+      bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
+      bridge.onAgentEnd();
+      const recovered = await next;
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({ text: 'accepted', correlationId: 'c-after-abort' });
     } finally {
       setIntervalSpy.mockRestore();
       clearIntervalSpy.mockRestore();

@@ -544,6 +544,9 @@ describe('/api/prime-agent-channel/stream', () => {
     expect(res.headers['Cache-Control']).toBe('no-cache, no-transform');
     expect(res.headers['X-Accel-Buffering']).toBe('no');
     expect(res.headers.Connection).toBe('keep-alive');
+    // Keepalive comments only defeat proxy idle timeouts if fronting proxies
+    // flush them; nginx-family buffering is disabled per response.
+    expect(res.headers['X-Accel-Buffering']).toBe('no');
     expect(res.writableEnded).toBe(true);
     expect(res.body).toContain('"type":"final"');
     expect(res.body).toContain('Hello!');
@@ -666,18 +669,21 @@ describe('local-agent integrations listing', () => {
     expect(integrations.find((entry) => entry.id === 'hermes')?.metadata?.sessionCount).toBeUndefined();
   });
 
-  it('overwrites a stale persisted pin when no Prime session is live', async () => {
+  it('drops a stale persisted activeSessionId when no session is live', async () => {
+    // node-ui pins chat to activeSessionId. A zero-session listing that keeps
+    // advertising the connect-time id routes every send into a guaranteed 409.
     const config = makeConfig({
       localAgentIntegrations: {
         'prime-agent': {
           enabled: true,
           capabilities: { localChat: true },
-          metadata: { sessionCount: 1, activeSessionId: 'stale-session' },
+          transport: { kind: 'prime-agent-channel' },
+          metadata: { sessionCount: 1, activeSessionId: 'stale-connect-time-uuid' },
         },
       },
     } as Partial<DkgConfig>);
-    const res = makeJsonResponse();
 
+    const res = makeJsonResponse();
     await handleLocalAgentsRoutes({
       req: makeJsonRequest('GET', '/api/local-agent-integrations'),
       res,
@@ -686,10 +692,41 @@ describe('local-agent integrations listing', () => {
       url: new URL('http://127.0.0.1:9200/api/local-agent-integrations'),
     } as any);
 
+    expect(res.statusCode).toBe(200);
     const integrations = JSON.parse(res.body).integrations as Array<{ id: string; metadata?: any }>;
-    expect(integrations.find((entry) => entry.id === 'prime-agent')?.metadata).toMatchObject({
-      sessionCount: 0,
-      activeSessionId: null,
-    });
+    const primeAgent = integrations.find((entry) => entry.id === 'prime-agent');
+    expect(primeAgent?.metadata?.sessionCount).toBe(0);
+    expect(primeAgent?.metadata?.activeSessionId).toBeUndefined();
+    expect(res.body).not.toContain('stale-connect-time-uuid');
+  });
+
+  it('applies the session overlay to the single-integration GET as well as the listing', async () => {
+    const bridge = await startStubBridge({ sessionId: 's-live' });
+    writeDescriptor('s-live', bridge.url);
+    // Both persisted fields are deliberately wrong so each overlay half fails
+    // independently if the single-integration path bypasses it.
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: { kind: 'prime-agent-channel' },
+          metadata: { sessionCount: 5, activeSessionId: 'stale-connect-time-uuid' },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const res = makeJsonResponse();
+    await handleLocalAgentsRoutes({
+      req: makeJsonRequest('GET', '/api/local-agent-integrations/prime-agent'),
+      res,
+      config,
+      path: '/api/local-agent-integrations/prime-agent',
+      url: new URL('http://127.0.0.1:9200/api/local-agent-integrations/prime-agent'),
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    const integration = JSON.parse(res.body).integration as { metadata?: any };
+    expect(integration.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's-live' });
   });
 });
