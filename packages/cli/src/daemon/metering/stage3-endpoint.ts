@@ -22,6 +22,7 @@ import {
 } from "./deposit-rail.js";
 import { verifyCapability, zeroValuePreflight, type SignedDelegation, type CapabilityState } from "./capability.js";
 import { MAX_BINDING_LIFETIME_MS, BINDING_DOMAIN } from "./evm-binding.js";
+import { CAPABILITY_DOMAIN } from "./capability.js";
 
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
 
@@ -96,6 +97,36 @@ export function termsQuote(args: {
       maxLifetimeDays: MAX_BINDING_LIFETIME_MS / 86_400_000,
       chainId: args.chainId ?? 8453,
       note: "A binding proof is checked against this ceiling before signature recovery. Rejections never reveal whether a principal is registered.",
+    },
+    // Buyer-requested: a counterparty must not have to guess a billable request
+    // envelope, a delegation route string, or a signature preimage from a chat
+    // message. Everything needed to construct and countersign a metered read is
+    // published here, versioned, next to the terms it prices.
+    meteredRead: {
+      schemaVersion: "metered-read/v1",
+      route: "POST /api/metering/read",
+      // This EXACT string must appear in delegation.routes, or the capability
+      // does not authorise the call.
+      delegationRoute: "POST /api/metering/read",
+      request: {
+        required: ["delegation", "sparql"],
+        optional: ["bindingProof", "contextGraphId", "view", "maxMicroTrac", "scopeQuads", "revocationCheckpoint", "nodeClass", "settlementId", "priceVectorDigest"],
+        note: "maxMicroTrac is YOUR per-call ceiling; a read priced above it is refused with E_OVER_BUYER_CEILING, never silently discounted.",
+      },
+      countersign: {
+        route: "POST /api/metering/countersign",
+        domain: CAPABILITY_DOMAIN,
+        // preimage = domain + "\n" + ("sha256:" + sha256(canonicalize(leg)))
+        // over the leg EXACTLY as delivered, with no field surgery.
+        preimage: `${CAPABILITY_DOMAIN}\n` + "sha256:<sha256 of RFC-8785-canonicalized leg, verbatim as delivered>",
+        signWith: "the sessionPublicKeyPem named in your delegation",
+        required: ["leg", "countersignature", "sessionPublicKeyPem"],
+      },
+      canonicalization: {
+        rule: "RFC 8785 (JCS) with an INTEGER-ONLY restriction: every number in signed material must be an integer, or canonicalization throws E_CANON_NON_INTEGER.",
+        unitsField: "meter.unitsTenths (integer tenths of U)",
+        breakdownField: "meter.breakdownScaled (integers, with an explicit `scale`)",
+      },
     },
     meterMode: args.meterMode,
     // Honesty rule from /api/status: never let a shadow node look like it bills.
