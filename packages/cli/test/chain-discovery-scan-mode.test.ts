@@ -91,4 +91,52 @@ describe('chainDiscoveryScanOptions', () => {
     expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
   });
+
+  // GH#1486 — a chain scan is non-critical: a rejected
+  // `discoverContextGraphsFromChain` must be swallowed and must clear the
+  // `inFlight` guard via the `finally`, or the first transient RPC failure
+  // would permanently disable every later scheduled scan.
+  it('swallows a rejected scan and still runs the next scheduled invocation', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi
+        .fn<() => Promise<number>>()
+        .mockRejectedValueOnce(new Error('chain RPC unavailable'))
+        .mockResolvedValueOnce(3),
+    };
+    const log = vi.fn();
+    const runner = createChainDiscoveryScanRunner({ agent, log });
+
+    await expect(runner()).resolves.toBeUndefined();
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
+    expect(log).not.toHaveBeenCalled();
+
+    await runner();
+
+    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledWith('Chain scan: discovered 3 new context graph(s)');
+  });
+
+  // A rejection from the watermark probe happens before
+  // `discoverContextGraphsFromChain` is reached, so it takes a different path
+  // out of the `try` — it must clear `inFlight` just the same.
+  it('swallows a rejected watermark probe and still runs the next scheduled invocation', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi
+        .fn<() => Promise<boolean>>()
+        .mockRejectedValueOnce(new Error('watermark read failed'))
+        .mockResolvedValueOnce(true),
+      discoverContextGraphsFromChain: vi.fn(async () => 0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    await expect(runner()).resolves.toBeUndefined();
+    expect(agent.discoverContextGraphsFromChain).not.toHaveBeenCalled();
+
+    await runner();
+
+    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
+  });
 });
