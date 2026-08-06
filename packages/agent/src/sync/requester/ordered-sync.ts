@@ -5,6 +5,20 @@ import {
   type SyncContextGraphPriorityConfig,
 } from '../policy.js';
 
+/**
+ * Peer-dead cutoff for one fanout batch. One Context Graph's failed round must
+ * never cost the remaining CGs their turn — a single poisoned transfer (an
+ * oversized system CG dying mid-stream every cycle) otherwise starves every
+ * small CG behind it indefinitely. But the inverse is also real: when the peer
+ * itself is dead or unreachable, every remaining item re-dials it and burns a
+ * full transport timeout, so a long CG list turns one dead peer into an
+ * hours-long stall. Three consecutive rounds in which the peer never responded
+ * is treated as peer-dead evidence and stops the batch; any round the peer
+ * answered — cleanly, denied, or failed after responding — resets the streak,
+ * so per-CG failures alone can never trip this guard.
+ */
+export const MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES = 3;
+
 export interface ContextGraphSyncWork<Result> {
   contextGraphId: string;
   /**
@@ -38,7 +52,15 @@ export interface OrderedContextGraphSyncOptions<Result> {
     skipped: readonly ContextGraphSyncWork<Result>[],
   ) => Result;
   shouldContinue?: () => boolean;
-  shouldStop?: (part: Result) => boolean;
+  /**
+   * True when one merged item result shows the PEER never responded for that
+   * Context Graph's round (transport-class: dial/stream death before any
+   * answer). Failures the peer did respond to must return false — they are
+   * already recorded in the merged summary, and the fanout continues to the
+   * next CG. Consecutive true verdicts feed the peer-dead cutoff
+   * ({@link MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES}).
+   */
+  isPeerTransportFailure?: (part: Result) => boolean;
   onDeferred?: (item: ContextGraphSyncWork<Result>, error: Error) => void;
 }
 
@@ -72,6 +94,7 @@ export async function runOrderedContextGraphSyncs<Result>(
 ): Promise<Result> {
   let summary = options.emptyResult();
   const orderedWork = orderWork(options.work, options.priorities);
+  let consecutivePeerTransportFailures = 0;
   for (const [index, item] of orderedWork.entries()) {
     if (options.shouldContinue && !options.shouldContinue()) {
       summary = options.markSkipped?.(summary, orderedWork.slice(index)) ?? summary;
@@ -84,8 +107,16 @@ export async function runOrderedContextGraphSyncs<Result>(
         () => item.run(remaining),
       );
       summary = options.merge(summary, part);
-      if (options.shouldStop?.(part)) break;
+      if (options.isPeerTransportFailure?.(part)) {
+        consecutivePeerTransportFailures += 1;
+        if (consecutivePeerTransportFailures >= MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES) break;
+      } else {
+        consecutivePeerTransportFailures = 0;
+      }
     } catch (error) {
+      // The GLOBAL admission queue rejected this item, so every later item
+      // would be rejected identically — stopping here is correct and cheap,
+      // unlike a per-CG failure, which stays isolated above.
       const backpressureError = getSyncBackpressureBusyError(error);
       if (!backpressureError) throw error;
       summary = options.markDeferred(summary);
