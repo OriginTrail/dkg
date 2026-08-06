@@ -25,15 +25,18 @@ import {
   type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
-import { ethers } from 'ethers';
 
+import {
+  Rfc64ControlEnvelopeSigningErrorV1,
+  signAndVerifyRfc64ControlEnvelopeV1,
+  type Rfc64ControlEnvelopeEip191SignerV1,
+} from './control-envelope-signer-v1.js';
 import {
   InventoryV1CandidateError,
   type Rfc64InventoryV1OperationsV1,
   type SwmAuthorInventoryCasResultV1,
 } from './inventory-v1/index.js';
 import { applySwmAuthorInventoryMutationV1 } from './inventory-v1/swm-author-inventory-mutation.js';
-import type { Rfc64AuthorCatalogEip191SignerV1 } from './author-catalog-producer.js';
 
 export const RFC64_SWM_AUTHOR_INVENTORY_PRODUCER_MAX_CAS_ATTEMPTS_V1 = 4;
 
@@ -58,7 +61,7 @@ export interface MaintainRfc64SwmAuthorInventoryInputV1 {
   readonly scope: SwmAuthorInventoryScopeV1;
   readonly row: SwmAuthorInventoryRowV1;
   readonly issuedAt: TimestampMsV1;
-  readonly signer: Rfc64AuthorCatalogEip191SignerV1;
+  readonly signer: Rfc64ControlEnvelopeEip191SignerV1;
   readonly maxCasAttempts?: number;
 }
 
@@ -76,7 +79,7 @@ export interface RemoveRfc64SwmAuthorInventoryInputV1 {
     'kaUal' | 'assertionVersion' | 'sealDigest'
   >>;
   readonly issuedAt: TimestampMsV1;
-  readonly signer: Rfc64AuthorCatalogEip191SignerV1;
+  readonly signer: Rfc64ControlEnvelopeEip191SignerV1;
   readonly maxCasAttempts?: number;
 }
 
@@ -211,7 +214,7 @@ export async function removeRfc64SwmAuthorInventoryRowV1(
 type PreparedMutationInputV1 = Readonly<{
   scope: Readonly<SwmAuthorInventoryScopeV1>;
   issuedAt: TimestampMsV1;
-  signer: Rfc64AuthorCatalogEip191SignerV1;
+  signer: Rfc64ControlEnvelopeEip191SignerV1;
   maxCasAttempts: number;
 }>;
 
@@ -318,7 +321,7 @@ function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{
   scope: Readonly<SwmAuthorInventoryScopeV1>;
   row: Readonly<SwmAuthorInventoryRowV1>;
   issuedAt: TimestampMsV1;
-  signer: Rfc64AuthorCatalogEip191SignerV1;
+  signer: Rfc64ControlEnvelopeEip191SignerV1;
   maxCasAttempts: number;
 }> {
   try {
@@ -360,7 +363,7 @@ function prepareRemovalInput(input: RemoveRfc64SwmAuthorInventoryInputV1): Reado
     'kaUal' | 'assertionVersion' | 'sealDigest'
   >>;
   issuedAt: TimestampMsV1;
-  signer: Rfc64AuthorCatalogEip191SignerV1;
+  signer: Rfc64ControlEnvelopeEip191SignerV1;
   maxCasAttempts: number;
 }> {
   try {
@@ -435,7 +438,7 @@ async function signHead(input: Readonly<{
   rows: readonly SwmAuthorInventoryRowV1[];
   issuedAt: TimestampMsV1;
   previous: SignedSwmAuthorInventoryHeadEnvelopeV1 | null;
-  signer: Rfc64AuthorCatalogEip191SignerV1;
+  signer: Rfc64ControlEnvelopeEip191SignerV1;
 }>): Promise<SignedSwmAuthorInventoryHeadEnvelopeV1> {
   const previousVersion = input.previous === null
     ? -1n
@@ -463,27 +466,25 @@ async function signHead(input: Readonly<{
     signatureSuite: 'eip191-personal-sign-digest-v1' as const,
   }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
   const objectDigest = computeSwmAuthorInventoryHeadObjectDigestV1(unsigned);
-  let signature: string;
   try {
-    signature = await input.signer.signDigest(ethers.getBytes(objectDigest));
-  } catch (cause) {
-    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
-      'swm-inventory-producer-signer',
-      'SWM inventory signer callback failed',
-      { cause },
+    const candidate = await signAndVerifyRfc64ControlEnvelopeV1<
+      SignedSwmAuthorInventoryHeadEnvelopeV1
+    >(
+      unsigned,
+      objectDigest,
+      input.signer,
+      assertSignedSwmAuthorInventoryHeadEnvelopeV1,
     );
-  }
-  try {
-    const candidate = { ...unsigned, objectDigest, signature };
-    assertSignedSwmAuthorInventoryHeadEnvelopeV1(candidate);
-    await verifyControlEnvelopeIssuerSignatureV1(candidate);
     return parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1(
       canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(candidate),
     );
   } catch (cause) {
     throw new Rfc64SwmAuthorInventoryProducerErrorV1(
       'swm-inventory-producer-signer',
-      'SWM inventory signer did not produce a canonical author signature',
+      cause instanceof Rfc64ControlEnvelopeSigningErrorV1
+        && cause.phase === 'callback'
+        ? 'SWM inventory signer callback failed'
+        : 'SWM inventory signer did not produce a canonical author signature',
       { cause },
     );
   }

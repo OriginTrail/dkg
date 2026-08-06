@@ -124,6 +124,7 @@ const blockedRfc64Modules = [
   'catalog-peers-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
+  'control-envelope-signer-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
