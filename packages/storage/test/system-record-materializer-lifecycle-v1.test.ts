@@ -25,9 +25,11 @@ const ACTIVATION: SystemRecordLaneActivationV1 = {
 class RecordingHandoff implements SystemRecordChildHandoffV1 {
   readonly calls: string[] = [];
   failAt: string | null = null;
+  barrier: RecordingBarrier | null = null;
 
   private async step(name: string): Promise<void> {
     this.calls.push(name);
+    this.barrier?.note(name);
     if (this.failAt === name) throw new Error(`handoff failed at ${name}`);
   }
 
@@ -36,6 +38,49 @@ class RecordingHandoff implements SystemRecordChildHandoffV1 {
   awaitRetiredWork = () => this.step('awaitRetiredWork');
   startAndProveCleanGeneration = () => this.step('startAndProveCleanGeneration');
   rotateMaterializationEpoch = () => this.step('rotateMaterializationEpoch');
+}
+
+/**
+ * Pass-through stand-in for the scheduler's control barrier.
+ *
+ * It records the purpose of every transition AND brackets it, so a test can
+ * assert that a handoff step ran INSIDE an exclusive section rather than merely
+ * that a barrier was requested somewhere. `sections` holds one entry per
+ * transition; `depth` catches a nested barrier, which the scheduler refcounts
+ * but which the lane must never need.
+ */
+class RecordingBarrier {
+  readonly sections: Array<{ purpose: string; inside: string[] }> = [];
+  depth = 0;
+  maxDepth = 0;
+  failWith: Error | null = null;
+
+  private active: { purpose: string; inside: string[] } | null = null;
+
+  /** Called by the handoff stub so each step lands in its enclosing section. */
+  note(step: string): void {
+    this.active?.inside.push(step);
+  }
+
+  run = async <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+    if (this.failWith) throw this.failWith;
+    const section = { purpose, inside: [] as string[] };
+    this.sections.push(section);
+    const previous = this.active;
+    this.active = section;
+    this.depth += 1;
+    this.maxDepth = Math.max(this.maxDepth, this.depth);
+    try {
+      return await transition();
+    } finally {
+      this.depth -= 1;
+      this.active = previous;
+    }
+  };
+
+  get purposes(): string[] {
+    return this.sections.map((s) => s.purpose);
+  }
 }
 
 class StubExecutor {
@@ -59,12 +104,14 @@ describe('system-record lane session lifecycle V1', () => {
   let ownership: ManagedOxigraphOwnershipControllerV1;
   let handoff: RecordingHandoff;
   let executor: StubExecutor;
+  let barrier: RecordingBarrier;
 
   const build = () => {
     const controller = createSystemRecordLaneControllerV1({
       lease: ownership.lease,
       handoff,
       executor,
+      barrier: barrier.run,
     });
     return controller;
   };
@@ -73,7 +120,9 @@ describe('system-record lane session lifecycle V1', () => {
     __resetSystemRecordControllerRegistrationForTests();
     ownership = createManagedOxigraphOwnershipControllerV1();
     ownership.bindReadyGeneration();
+    barrier = new RecordingBarrier();
     handoff = new RecordingHandoff();
+    handoff.barrier = barrier;
     executor = new StubExecutor();
   });
 
@@ -161,6 +210,7 @@ describe('system-record lane session lifecycle V1', () => {
         lease: {} as never,
         handoff,
         executor,
+        barrier: barrier.run,
       });
       await expect(controller.open(ACTIVATION)).rejects.toThrow(/ownership lease/);
       expect(handoff.calls).toEqual([]);
@@ -296,11 +346,13 @@ describe('system-record lane session lifecycle V1', () => {
 
     const buildStalling = () => {
       const stalling = new StallingHandoff();
+      stalling.barrier = barrier;
       __resetSystemRecordControllerRegistrationForTests();
       const controller = createSystemRecordLaneControllerV1({
         lease: ownership.lease,
         handoff: stalling,
         executor,
+        barrier: barrier.run,
       });
       return { stalling, controller };
     };
@@ -474,7 +526,12 @@ describe('system-record lane session lifecycle V1', () => {
       // unconstructable for the process lifetime — and the adapter surfaces
       // that as a throw from a capability PROBE.
       expect(() =>
-        createSystemRecordLaneControllerV1({ lease: ownership.lease, handoff: new RecordingHandoff(), executor }),
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor,
+          barrier: barrier.run,
+        }),
       ).not.toThrow();
     });
 
@@ -486,8 +543,93 @@ describe('system-record lane session lifecycle V1', () => {
         lease: silent.lease,
         handoff: new RecordingHandoff(),
         executor,
+        barrier: barrier.run,
       });
       await expect(controller.open(ACTIVATION)).rejects.toThrow(/proven-ready/);
+    });
+  });
+
+  /**
+   * The exclusive section is the whole point of the handoff: stopping the owned
+   * child is only safe when nothing is talking to it. The scheduler's control
+   * barrier shipped exported and unit-tested with ZERO production callers, so
+   * these assert the WIRING — that each transition actually opens a section and
+   * that the child-touching steps happen inside it — not the barrier's own
+   * semantics, which `store-scheduler-system-record-admission.test.ts` covers.
+   */
+  describe('control barrier', () => {
+    it('runs the whole enable handoff inside one exclusive section', async () => {
+      await build().open(ACTIVATION);
+
+      expect(barrier.purposes).toEqual(['system-record.enable']);
+      // Every step, not just the stop: a replacement started outside the
+      // section could be reached by work admitted before the section closed.
+      expect(barrier.sections[0]?.inside).toEqual([
+        'destroyClient',
+        'stopAndProveOwnedChildDead',
+        'awaitRetiredWork',
+        'startAndProveCleanGeneration',
+        'rotateMaterializationEpoch',
+      ]);
+      expect(barrier.maxDepth).toBe(1);
+    });
+
+    it('runs disable inside its own exclusive section', async () => {
+      const session = await build().open(ACTIVATION);
+      await session.close('disable');
+
+      expect(barrier.purposes).toEqual(['system-record.enable', 'system-record.disable']);
+      expect(barrier.sections[1]?.inside).toEqual([
+        'awaitRetiredWork',
+        'rotateMaterializationEpoch',
+      ]);
+      expect(barrier.maxDepth).toBe(1);
+    });
+
+    it('runs shutdown inside its own exclusive section', async () => {
+      const session = await build().open(ACTIVATION);
+      await session.close('shutdown');
+
+      expect(barrier.purposes).toEqual(['system-record.enable', 'system-record.shutdown']);
+      expect(barrier.sections[1]?.inside).toEqual([
+        'destroyClient',
+        'stopAndProveOwnedChildDead',
+        'awaitRetiredWork',
+      ]);
+      expect(barrier.maxDepth).toBe(1);
+    });
+
+    it('touches the child not at all when the section cannot be acquired', async () => {
+      // A barrier that times out means the store did NOT quiesce. Proceeding
+      // anyway is the exact failure the barrier exists to prevent, so enable
+      // must fail terminally with the handoff untouched.
+      barrier.failWith = new Error('STORE_CONTROL_BARRIER_TIMEOUT');
+      const controller = build();
+
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/BARRIER_TIMEOUT/);
+      expect(handoff.calls).toEqual([]);
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+    });
+
+    it('still reaches terminal shutdown when the section cannot be acquired', async () => {
+      const session = await build().open(ACTIVATION);
+      const beforeStops = handoff.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length;
+      barrier.failWith = new Error('STORE_CONTROL_BARRIER_TIMEOUT');
+
+      // The failure is REPORTED — a shutdown that could not quiesce the store
+      // is not a clean one, and the caller has to be able to tell.
+      await expect(session.close('shutdown')).rejects.toThrow(/BARRIER_TIMEOUT/);
+
+      // ...but the lane still reaches terminal, and the child is left ALIVE
+      // rather than stopped outside a section. That is the safe side of this
+      // failure: an unstopped child under a terminal lane serves reads and
+      // accepts nothing through the lane, whereas stopping it while requests
+      // are in flight is the exact hazard the barrier exists to prevent. The
+      // daemon supervisor still owns the child and stops it at process exit.
+      expect(session.state).toBe('shutdown');
+      expect(handoff.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length).toBe(
+        beforeStops,
+      );
     });
   });
 
@@ -505,6 +647,7 @@ describe('system-record lane session lifecycle V1', () => {
         lease: ownership.lease,
         handoff,
         executor,
+        barrier: barrier.run,
       });
       const session = (await controller.open(ACTIVATION)) as SystemRecordLaneSessionV1;
       await session.close('disable');

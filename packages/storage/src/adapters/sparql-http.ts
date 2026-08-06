@@ -426,6 +426,31 @@ export class SparqlHttpStore implements TripleStore {
             applyVerified: (proof, childGeneration) =>
               this.executeSystemRecordApply(proof, childGeneration),
           },
+          // Every lifecycle transition runs under the scheduler's control
+          // barrier, which is what actually makes "the child is stopped only
+          // when nothing is talking to it" true. The barrier existed, was
+          // exported and was tested from the first commit of this stack and had
+          // ZERO production callers, so the lane stopped and replaced the owned
+          // child while ordinary requests were still in flight and the seal it
+          // implements never once ran in anger.
+          //
+          // `this` is the store identity: stable for the adapter's lifetime,
+          // opaque to the scheduler, and distinct per store, so a second managed
+          // store's transition cannot head-of-line block this one's work.
+          //
+          // The generation is read per transition rather than captured, because
+          // the lane outlives any single child: sealing the generation observed
+          // when the controller was BUILT would seal a generation that has since
+          // been replaced.
+          barrier: (purpose, transition) =>
+            externalStorePriorityScheduler.runControlBarrier(
+              this,
+              purpose,
+              transition,
+              this.ownershipLease
+                ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
+                : undefined,
+            ),
         });
       } catch {
         // A capability PROBE must never throw. The factory refuses a second

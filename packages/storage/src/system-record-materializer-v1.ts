@@ -115,11 +115,39 @@ export interface SystemRecordTransactionExecutorV1 {
   applyVerified(proof: unknown, childGeneration: string): Promise<SystemRecordApplyOutcomeV1>;
 }
 
+/**
+ * Run a lifecycle transition as an exclusive section over the whole store.
+ *
+ * Every transition here can invalidate the client or the child, so ordinary
+ * store traffic must be sealed and drained around it — otherwise a request that
+ * was already in flight is cut off mid-exchange when the child is stopped, and
+ * turns into a transport failure or an ambiguous write rather than
+ * backpressure. The adapter backs this with the scheduler's control barrier;
+ * tests supply a recording pass-through.
+ *
+ * The transition MUST NOT re-enter the store scheduler: it owns the store
+ * exclusively for the duration, so scheduled work issued from inside it waits
+ * for a barrier that cannot commit until the work drains. That is why the
+ * handoff steps are limited to supervisor calls, owned-client drains and
+ * synchronous cache invalidation.
+ */
+export type SystemRecordLaneBarrierV1 = <T>(
+  purpose: string,
+  transition: () => Promise<T>,
+) => Promise<T>;
+
 export interface SystemRecordLaneControllerDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
   readonly lease: ManagedOxigraphOwnershipLeaseV1;
   readonly handoff: SystemRecordChildHandoffV1;
   readonly executor: SystemRecordTransactionExecutorV1;
+  /**
+   * Required, not optional. An optional barrier is one that gets forgotten:
+   * this capability shipped once with a barrier implemented, exported and
+   * tested but with zero production callers, so the enable path stopped the
+   * child while ordinary requests were still in flight.
+   */
+  readonly barrier: SystemRecordLaneBarrierV1;
 }
 
 /** Raised when an incompatible activation descriptor is offered to a live session. */
@@ -286,11 +314,16 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
     this.assertLeaseLive();
     this.current = 'enabling';
     try {
-      await this.deps.handoff.destroyClient();
-      await this.deps.handoff.stopAndProveOwnedChildDead();
-      await this.deps.handoff.awaitRetiredWork();
-      await this.deps.handoff.startAndProveCleanGeneration();
-      await this.deps.handoff.rotateMaterializationEpoch();
+      // Under the barrier: admission is sealed and both tagged and untagged
+      // work is drained before the child is touched, and not resumed until the
+      // replacement generation is bound.
+      await this.deps.barrier('system-record.enable', async () => {
+        await this.deps.handoff.destroyClient();
+        await this.deps.handoff.stopAndProveOwnedChildDead();
+        await this.deps.handoff.awaitRetiredWork();
+        await this.deps.handoff.startAndProveCleanGeneration();
+        await this.deps.handoff.rotateMaterializationEpoch();
+      });
     } catch (error) {
       this.current = 'unavailable';
       this.descriptor = null;
@@ -353,8 +386,10 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
   private async runDisable(): Promise<void> {
     this.current = 'disabling';
     try {
-      await this.deps.handoff.awaitRetiredWork();
-      await this.deps.handoff.rotateMaterializationEpoch();
+      await this.deps.barrier('system-record.disable', async () => {
+        await this.deps.handoff.awaitRetiredWork();
+        await this.deps.handoff.rotateMaterializationEpoch();
+      });
     } catch (error) {
       this.current = 'unavailable';
       throw error;
@@ -381,8 +416,8 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
    * assumption at a process-ownership boundary — each one signals a child and
    * asserts a port fact.
    *
-   * Assigning `shutdownWork` before returning makes the second caller join the
-   * first, whatever it is awaiting.
+   * Assigning `this.transition` before returning makes the second caller join
+   * the first, whatever it is awaiting.
    */
   private runShutdown(): Promise<void> {
     if (this.readState() === 'shutdown') return Promise.resolve();
@@ -403,9 +438,23 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       if (this.readState() === 'shutdown') return;
 
       try {
-        await this.deps.handoff.destroyClient();
-        await this.deps.handoff.stopAndProveOwnedChildDead();
-        await this.deps.handoff.awaitRetiredWork();
+        // Shutdown stops the child too, so it is sealed like the others.
+        //
+        // If the section cannot be acquired the teardown does NOT run, and that
+        // is the safe side: the lane still reaches terminal (below, in the
+        // `finally`), so nothing writes through it again, while the child is
+        // left alive under the daemon supervisor that still owns it and stops
+        // it at process exit. Stopping the child outside a section — with
+        // requests in flight — is the exact hazard the barrier exists for, and
+        // "could not quiesce" is not a reason to do it anyway.
+        //
+        // The error propagates: a shutdown that could not quiesce the store is
+        // not a clean one and the caller has to be able to tell.
+        await this.deps.barrier('system-record.shutdown', async () => {
+          await this.deps.handoff.destroyClient();
+          await this.deps.handoff.stopAndProveOwnedChildDead();
+          await this.deps.handoff.awaitRetiredWork();
+        });
       } finally {
         this.descriptor = null;
         this.current = 'shutdown';
