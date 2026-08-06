@@ -75,7 +75,19 @@ reported under in its `capacityModel` field:
 | `capacityModel` | Meaning | Source |
 | --- | --- | --- |
 | `partitioned` | The lane holds a private queue allocation and fills independently of its neighbours. Lane allocations add up to the scheduler's capacity. | `store` |
-| `shared` | Every lane draws on one queue and one concurrency pool. The lane's `queueLimit`/`inflightLimit` **are** that pool's ceilings — the same number on every lane, never to be summed — and `queued` is only this lane's share of a depth the whole pool contributes to. `totals.queued` is that depth. | `sync-global` |
+| `shared` | Every lane draws on one queue and one concurrency pool. The lane's `queueLimit`/`inflightLimit` **are** that pool's ceilings — the same number on every lane, never to be summed. | `sync-global` |
+
+Two depths sit on every lane row, and they differ only under `shared`:
+
+| Field | Meaning |
+| --- | --- |
+| `queued` | This lane's own backlog — *who* is waiting. The attribution signal. |
+| `pressureQueued` | The depth the lane's `state` was classified against, and the numerator that belongs with `queueLimit`. Equal to `queued` for a `partitioned` lane; the whole pool's depth for a `shared` one. |
+
+So compute utilization from **`pressureQueued / queueLimit`**, never from `queued`, and no consumer has
+to special-case the model. Both fields are optional on the type, so a scheduler written against an older
+`dkg-core` still satisfies it: absent `capacityModel` means `partitioned`, absent `pressureQueued` means
+`queued`.
 
 ### Attributing `sync-global` pressure to a trigger
 
@@ -144,10 +156,11 @@ the pool, so **every lane holding queued work reports the pool's pressure** —
 one lane at 1 of a full pool of 4 is `saturated`, because the next admission in
 that lane is the one that gets rejected. A lane with nothing queued stays
 `healthy` however full the pool is: it is not being held back, and per-lane
-`queued` and `queuedOperations` remain the attribution signal for who is. On a
-shared pool the log line carries `poolQueued` beside `queued` for this reason,
-and because the scheduler's own `lane: "all"` line is emitted only while the
-rollup outranks every lane — which, on an all-shared scheduler, it never does.
+`queued` and `queuedOperations` remain the attribution signal for who is. A log
+line whose `pressureQueued` differs from its `queued` carries both for this
+reason, and because the scheduler's own `lane: "all"` line is emitted only while
+the rollup outranks every lane — which, on an all-shared scheduler, it never
+does.
 
 These states describe evidence, not root cause. For example, a stalled store
 operation can be caused by Blazegraph, Oxigraph, disk, or a caller that never

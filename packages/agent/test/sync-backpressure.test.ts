@@ -1322,8 +1322,11 @@ describe('sync global backpressure', () => {
         state: 'saturated',
         totals: { queued: 2, queueLimit: 2, inflight: 1, inflightLimit: 1 },
         lanes: [
-          { lane: 'changelog', state: 'saturated', capacityModel: 'shared', queued: 1, queueLimit: 2 },
-          { lane: 'durable', state: 'saturated', capacityModel: 'shared', queued: 1, queueLimit: 2 },
+          // `queued` attributes the work; `pressureQueued` is the depth the
+          // state was judged against, so `pressureQueued / queueLimit` reads as
+          // utilization without a consumer having to know the model.
+          { lane: 'changelog', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 2, queueLimit: 2 },
+          { lane: 'durable', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 2, queueLimit: 2 },
           // Admitted work, nothing waiting: a full queue is not evidence that
           // this lane is being held back.
           { lane: 'swm_recovery', state: 'healthy', capacityModel: 'shared', queued: 0, inflight: 1 },

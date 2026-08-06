@@ -118,9 +118,12 @@ describe('SchedulerPressureTracker', () => {
       state: 'saturated',
       totals: { queued: 4, queueLimit: 4, inflightLimit: 2 },
       lanes: [
-        { lane: 'changelog', state: 'saturated', capacityModel: 'shared', queued: 1, queueLimit: 4, inflightLimit: 2 },
-        { lane: 'durable', state: 'saturated', capacityModel: 'shared', queued: 2, queueLimit: 4 },
-        { lane: 'shared_memory', state: 'saturated', capacityModel: 'shared', queued: 1, queueLimit: 4 },
+        // `queued` is the lane's own share; `pressureQueued` is the pool depth
+        // the state was judged against, published so no consumer has to
+        // reconstruct it from `totals`.
+        { lane: 'changelog', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 4, queueLimit: 4, inflightLimit: 2 },
+        { lane: 'durable', state: 'saturated', capacityModel: 'shared', queued: 2, pressureQueued: 4, queueLimit: 4 },
+        { lane: 'shared_memory', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 4, queueLimit: 4 },
       ],
     });
     // Depth did it, not age or a rejection.
@@ -218,8 +221,10 @@ describe('SchedulerPressureTracker', () => {
       state: 'saturated',
       totals: { queued: 3, queueLimit: 4 },
       lanes: [
-        { lane: 'ack', state: 'saturated', capacityModel: 'partitioned', queued: 2, queueLimit: 2 },
-        { lane: 'background', state: 'healthy', capacityModel: 'partitioned', queued: 1, queueLimit: 2 },
+        // A private allocation is judged against its own backlog, so the two
+        // depths coincide — the model is uniform, not a special case.
+        { lane: 'ack', state: 'saturated', capacityModel: 'partitioned', queued: 2, pressureQueued: 2, queueLimit: 2 },
+        { lane: 'background', state: 'healthy', capacityModel: 'partitioned', queued: 1, pressureQueued: 1, queueLimit: 2 },
       ],
     });
   });
@@ -297,10 +302,13 @@ describe('BackpressureMonitor', () => {
           oldestActiveAgeMs: 1_000,
           rejectedTotal: 0,
         },
+        // Deliberately the pre-`capacityModel` lane shape. A hand-built
+        // `BackpressureSource` written against an older `dkg-core` must still
+        // satisfy `BackpressureSnapshot` and must still log identically — the
+        // new fields are additive, not required.
         lanes: [{
           lane: 'normal',
           state,
-          capacityModel: 'partitioned',
           queued: state === 'healthy' ? 0 : 3,
           queueLimit: 4,
           inflight: 1,
@@ -348,6 +356,78 @@ describe('BackpressureMonitor', () => {
     expect(messages).toHaveLength(3);
     expect(messages[2]).toMatchObject({ level: 'info' });
     expect(messages[2].message).toContain('"event":"recovered"');
+    // A lane that declares no model is a private allocation, so its own backlog
+    // is what classified it and there is no second depth to report.
+    for (const entry of messages) expect(entry.message).not.toContain('pressureQueued');
+  });
+
+  it('puts the pool depth on a shared lane record and leaves a private one alone', () => {
+    // The classifier tests prove the state; this proves the operator-facing
+    // LOG contract, which nothing else exercises — a regression that dropped or
+    // misspelled the field would otherwise leave every other test green.
+    const registry = new BackpressureRegistry();
+    const laneRow = (
+      lane: string,
+      queued: number,
+      extra: Partial<BackpressureSnapshot['lanes'][number]>,
+    ) => ({
+      lane,
+      state: 'saturated' as const,
+      queued,
+      queueLimit: 4,
+      inflight: 0,
+      inflightLimit: 2,
+      oldestQueuedAgeMs: 0,
+      oldestActiveAgeMs: 0,
+      queuedOperations: [],
+      activeOperations: [],
+      events: {},
+      rejectedTotal: 0,
+      rejectedByReason: {},
+      lastRejectedAgeMs: null,
+      ...extra,
+    });
+    registry.register({
+      backpressureId: 'sync-global',
+      getBackpressureSnapshot: () => ({
+        scheduler: 'sync-global',
+        state: 'saturated',
+        totals: {
+          queued: 4,
+          queueLimit: 4,
+          inflight: 0,
+          inflightLimit: 2,
+          oldestQueuedAgeMs: 0,
+          oldestActiveAgeMs: 0,
+          rejectedTotal: 0,
+        },
+        lanes: [
+          laneRow('durable', 3, { capacityModel: 'shared', pressureQueued: 4 }),
+          laneRow('changelog', 1, { capacityModel: 'shared', pressureQueued: 4 }),
+          // Same scheduler, private allocation: its own backlog IS the depth
+          // that classified it, so the record must carry no second number.
+          laneRow('ack', 4, { capacityModel: 'partitioned', pressureQueued: 4 }),
+        ],
+      }),
+    });
+    const messages: string[] = [];
+    const monitor = new BackpressureMonitor({
+      registry,
+      now: () => 1_000,
+      emit: (_level, message) => messages.push(message),
+    });
+
+    monitor.sample();
+
+    const line = (lane: string) => messages.find((m) => m.includes(`"lane":"${lane}"`));
+    expect(line('durable')).toContain('"queued":3,"pressureQueued":4,"queueLimit":4');
+    expect(line('changelog')).toContain('"queued":1,"pressureQueued":4,"queueLimit":4');
+    expect(line('ack')).toContain('"queued":4,"queueLimit":4');
+    expect(line('ack')).not.toContain('pressureQueued');
+    // Documented consequence: once a lane matches the rollup, the scheduler's
+    // own `all` record is no longer emitted — which is why the pool depth had
+    // to move onto the lane records.
+    expect(line('all')).toBeUndefined();
   });
 
   it('contains logger failures', () => {
