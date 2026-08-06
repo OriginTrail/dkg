@@ -154,11 +154,19 @@ const descriptorOf = (activation: SystemRecordLaneActivationV1): string =>
 /**
  * Process-global single-registration invariant.
  *
- * The store scheduler is process-global and has no store identity, so two
- * managed controllers could not be told apart during a control barrier — and
- * simultaneous second-store recovery would be unorderable. Refusing the second
- * registration before any capability is exposed makes that state unreachable
- * rather than merely unlikely.
+ * Two managed controllers in one process would mean two supervisors each
+ * believing they own "the" daemon-managed child. There is exactly one such
+ * child by construction, so the second controller is necessarily wrong about
+ * what it owns — and its recovery could stop a child the first one is mid-write
+ * against. Refusing the second registration before any capability is exposed
+ * makes that state unreachable rather than merely unlikely.
+ *
+ * Note this is NOT justified by the scheduler lacking store identity. Since
+ * #2052 B2 the scheduler carries an opaque `storeId` and scopes control
+ * barriers per `(storeId, purpose)`, so it would in fact tell two managed
+ * stores apart. The invariant is enforced here rather than there deliberately:
+ * "who owns the managed store" needs one source of truth, and duplicating it
+ * into the scheduler would create a second one to drift out of sync.
  */
 let registeredController: SystemRecordLaneControllerV1 | null = null;
 
