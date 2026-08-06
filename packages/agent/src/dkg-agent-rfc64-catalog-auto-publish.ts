@@ -57,7 +57,6 @@ import {
   removeRfc64SwmAuthorInventoryRowV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
 import {
-  RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1,
   Rfc64SwmInventoryShadowRuntimeV1,
   type Rfc64SwmAuthorInventoryShadowMutationResultV1,
   type Rfc64SwmAuthorInventoryShadowStatusV1,
@@ -220,16 +219,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       authorAddress: params.lifecycleAgentAddress,
       assertionCoordinate: params.assertionCoordinate,
     });
-    const admitted = rfc64SwmInventoryShadowRuntimeV1(this).schedule(
+    rfc64SwmInventoryShadowRuntimeV1(this).schedule(
       assetKey,
       () => this.observeRfc64DurableSwmPromotionV1(params),
     );
-    if (!admitted) {
-      this.log.warn(
-        params.ctx,
-        `RFC-64 SWM inventory shadow observer skipped at bounded concurrency ${RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1}`,
-      );
-    }
   }
 
   /** Canonical non-blocking observer for catalog advancement and exact SWM removal. */

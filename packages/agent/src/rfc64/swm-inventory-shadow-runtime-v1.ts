@@ -44,17 +44,16 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
   readonly #inFlight = new Set<Promise<void>>();
   readonly #assetTails = new Map<string, Promise<void>>();
   readonly #vmConfirmedVersions = new Map<string, Set<string>>();
+  readonly #pendingExecutions: Array<() => void> = [];
+  #activeExecutions = 0;
 
   schedule(assetKey: string, observer: () => Promise<void>): boolean {
-    if (this.#inFlight.size >= RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1) {
-      return false;
-    }
-    this.enqueue(assetKey, observer);
+    this.enqueue(assetKey, observer, false);
     return true;
   }
 
   runExclusive(assetKey: string, observer: () => Promise<void>): Promise<void> {
-    return this.enqueue(assetKey, observer);
+    return this.enqueue(assetKey, observer, true);
   }
 
   markVmConfirmed(assetKey: string, assertionVersion: string): void {
@@ -109,18 +108,17 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     stats.lastError = result.error;
   }
 
-  private enqueue(assetKey: string, observer: () => Promise<void>): Promise<void> {
+  private enqueue(
+    assetKey: string,
+    observer: () => Promise<void>,
+    priority: boolean,
+  ): Promise<void> {
     const predecessor = this.#assetTails.get(assetKey);
-    let pending: Promise<void>;
-    if (predecessor === undefined) {
-      try {
-        pending = observer();
-      } catch (cause) {
-        pending = Promise.reject(cause);
-      }
-    } else {
-      pending = predecessor.catch(() => undefined).then(observer);
-    }
+    const pending = predecessor === undefined
+      ? this.runBounded(observer, priority)
+      : predecessor.catch(() => undefined).then(
+        () => this.runBounded(observer, priority),
+      );
     let tracked!: Promise<void>;
     tracked = pending.finally(() => {
       this.#inFlight.delete(tracked);
@@ -133,5 +131,45 @@ export class Rfc64SwmInventoryShadowRuntimeV1 {
     this.#inFlight.add(tracked);
     void tracked.catch(() => undefined);
     return tracked;
+  }
+
+  private runBounded(observer: () => Promise<void>, priority: boolean): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const start = (): void => {
+        this.#activeExecutions += 1;
+        let execution: Promise<void>;
+        try {
+          execution = observer();
+        } catch (cause) {
+          execution = Promise.reject(cause);
+        }
+        const finish = (): void => {
+          this.#activeExecutions -= 1;
+          queueMicrotask(() => this.pump());
+        };
+        void execution.then(
+          () => {
+            resolve();
+            finish();
+          },
+          (cause) => {
+            reject(cause);
+            finish();
+          },
+        );
+      };
+      if (priority) this.#pendingExecutions.unshift(start);
+      else this.#pendingExecutions.push(start);
+      this.pump();
+    });
+  }
+
+  private pump(): void {
+    while (
+      this.#activeExecutions < RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1
+      && this.#pendingExecutions.length > 0
+    ) {
+      this.#pendingExecutions.shift()!();
+    }
   }
 }
