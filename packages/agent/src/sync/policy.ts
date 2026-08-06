@@ -1,3 +1,5 @@
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+
 export interface SyncResponderSnapshotLimitsConfig {
   global?: {
     rows?: number;
@@ -123,11 +125,56 @@ export function normalizeSyncContextGraphPriorities(
   return Object.freeze(normalized);
 }
 
+/**
+ * System Context Graphs are broadcast directories: every peer replicates them,
+ * they grow with the network (tens of thousands of triples), and any connected
+ * peer can serve them. A user Context Graph has none of those properties — its
+ * one reachable curator may be the only source in a fanout that stops on the
+ * first failure, so a system graph failing mid-transfer ahead of user work
+ * starves every user graph behind it on every cycle. Running system graphs
+ * LAST bounds that blast radius to the graphs that can afford it. Operators
+ * override by naming the graph in `syncContextGraphPriorities`; an explicit 0
+ * restores ordinary scheduling.
+ */
+export const DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY = -100;
+
+const SYSTEM_CONTEXT_GRAPH_IDS: ReadonlySet<string> = new Set(
+  Object.values(SYSTEM_CONTEXT_GRAPHS),
+);
+
+/**
+ * Normalize the operator config and fill in the system-graph defaults. Applied
+ * where the config is normalized (agent construction) so every consumer —
+ * fanout ordering, admission scheduling, responder scheduling, and the
+ * "Resolved sync policy" boot log's class counts — acts on and reports the
+ * same effective map.
+ */
+export function resolveSyncContextGraphPriorities(
+  config: SyncContextGraphPriorityConfig | undefined,
+): Readonly<SyncContextGraphPriorityConfig> {
+  const resolved: SyncContextGraphPriorityConfig = {
+    ...normalizeSyncContextGraphPriorities(config),
+  };
+  for (const contextGraphId of SYSTEM_CONTEXT_GRAPH_IDS) {
+    resolved[contextGraphId] ??= DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY;
+  }
+  return Object.freeze(resolved);
+}
+
 export function contextGraphPriority(
   priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
   contextGraphId: string,
 ): number {
-  return priorities?.[contextGraphId] ?? 0;
+  const configured = priorities?.[contextGraphId];
+  if (configured !== undefined) return configured;
+  // Read-side backstop for maps that never passed through
+  // resolveSyncContextGraphPriorities (a raw config object, or none at all):
+  // system graphs sorting last must not depend on every caller remembering
+  // the resolve step. A resolved map already carries the same value, so the
+  // two layers can never disagree.
+  return SYSTEM_CONTEXT_GRAPH_IDS.has(contextGraphId)
+    ? DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY
+    : 0;
 }
 
 export function syncPriorityClass(priority: number): SyncPriorityClass {

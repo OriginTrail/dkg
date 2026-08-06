@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
+  DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
   SYNC_ADMISSION_SOURCES,
   contextGraphPriority,
   countSyncPriorityClasses,
   normalizeSyncAdmissionSource,
   normalizeSyncContextGraphPriorities,
   orderContextGraphIdsByPriority,
+  resolveSyncContextGraphPriorities,
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
 } from '../src/sync/policy.js';
@@ -39,6 +42,79 @@ describe('sync Context Graph policy', () => {
       default: 1,
       deprioritized: 1,
     });
+  });
+});
+
+describe('system Context Graph default deprioritization', () => {
+  const systemIds = Object.values(SYSTEM_CONTEXT_GRAPHS) as string[];
+
+  it('resolves defaults for every system graph the operator did not configure', () => {
+    for (const config of [undefined, {}]) {
+      const resolved = resolveSyncContextGraphPriorities(config);
+      for (const systemId of systemIds) {
+        expect(resolved[systemId]).toBe(DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY);
+      }
+      expect(Object.isFrozen(resolved)).toBe(true);
+    }
+    // The plain normalizer stays default-free: the defaults enter exactly once,
+    // at the resolve step, so a config round-trip cannot re-apply them.
+    expect(normalizeSyncContextGraphPriorities({})).toEqual({});
+  });
+
+  it('lets an explicit operator value win — positive, zero, and negative', () => {
+    const resolved = resolveSyncContextGraphPriorities({
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS]: 0,
+      [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]: 7,
+      'user-bulk': -3,
+    });
+    // Explicit 0 is a real override back to ordinary scheduling, not "unset".
+    expect(resolved[SYSTEM_CONTEXT_GRAPHS.AGENTS]).toBe(0);
+    expect(resolved[SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]).toBe(7);
+    expect(resolved['user-bulk']).toBe(-3);
+    expect(resolveSyncContextGraphPriorities({
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS]: -1,
+    })[SYSTEM_CONTEXT_GRAPHS.AGENTS]).toBe(-1);
+  });
+
+  it('orders system graphs after all user graphs, even explicitly deprioritized ones', () => {
+    const resolved = resolveSyncContextGraphPriorities({ 'user-bulk': -3 });
+    expect(orderContextGraphIdsByPriority(
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, 'user-a', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'user-bulk', 'user-b'],
+      resolved,
+    )).toEqual([
+      'user-a', 'user-b', 'user-bulk',
+      SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
+    // An elevated override moves a system graph ahead of default user graphs.
+    expect(orderContextGraphIdsByPriority(
+      ['user-a', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
+      resolveSyncContextGraphPriorities({ [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]: 1 }),
+    )).toEqual([SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'user-a']);
+  });
+
+  it('sorts system graphs last through the read-side backstop for unresolved maps', () => {
+    // Callers holding a raw config (or none) must not lose the invariant.
+    expect(contextGraphPriority(undefined, SYSTEM_CONTEXT_GRAPHS.AGENTS))
+      .toBe(DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY);
+    expect(contextGraphPriority({}, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY))
+      .toBe(DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY);
+    expect(contextGraphPriority(undefined, 'user-a')).toBe(0);
+    expect(contextGraphPriority({ [SYSTEM_CONTEXT_GRAPHS.AGENTS]: 0 }, SYSTEM_CONTEXT_GRAPHS.AGENTS)).toBe(0);
+    expect(orderContextGraphIdsByPriority(
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, 'user-a'],
+      undefined,
+    )).toEqual(['user-a', SYSTEM_CONTEXT_GRAPHS.AGENTS]);
+  });
+
+  it('reports the defaults in the resolved class counts', () => {
+    // The "Resolved sync policy" boot log counts the RESOLVED map, so an
+    // operator can see the system graphs running deprioritized without
+    // having configured anything.
+    expect(countSyncPriorityClasses(resolveSyncContextGraphPriorities({ urgent: 5 })))
+      .toEqual({ elevated: 1, default: 0, deprioritized: systemIds.length });
+    expect(countSyncPriorityClasses(resolveSyncContextGraphPriorities({
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS]: 0,
+    }))).toEqual({ elevated: 0, default: 1, deprioritized: systemIds.length - 1 });
   });
 });
 

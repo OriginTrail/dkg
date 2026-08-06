@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createOperationContext, PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC_CHANGELOG, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   runDurableSync,
   type DurableSyncFetchRequest,
@@ -121,6 +121,32 @@ describe('requester per-CG priority admission', () => {
     );
 
     expect(admissions).toEqual(['high', 'default', 'low']);
+  });
+
+  it('admits system Context Graphs last so their failures cannot starve user graphs', async () => {
+    // System graphs are the observed poison transfers in the per-peer fanout,
+    // and the fanout stops on the first failure — so they must run after every
+    // user graph even when the agent config never mentions them. An explicit
+    // operator entry (0 here) restores ordinary scheduling.
+    const admissions: string[] = [];
+    const agent = lifecycleAgent(
+      { [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]: 0 },
+      async (contextGraphId, work) => {
+        admissions.push(contextGraphId);
+        return work();
+      },
+    );
+
+    await (LifecycleSyncMethods.prototype.runLegacyDurableSync as any).call(
+      agent,
+      ctx,
+      'peer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, 'user-a', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'user-b'],
+    );
+
+    expect(admissions).toEqual([
+      'user-a', SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'user-b', SYSTEM_CONTEXT_GRAPHS.AGENTS,
+    ]);
   });
 
   it('preserves completed durable progress when a later admission is deferred', async () => {
