@@ -68,10 +68,18 @@ export function termsQuote(args: {
   meterMode: string; safeHeadBlock: number | null;
 }) {
   const terms = stage3Terms(args.providerAddress, args.refundAddressHint ?? "<buyer-supplied, locked at tab open>", args.askMicroPer1k, args.scheduleVersion);
+  // Buyer-found: a quote WITH ?refundAddress binds that address, so its digest
+  // legitimately differs from the unbound placeholder quote. Two digests for
+  // "the terms" with no signal which is which reads as drift, or worse as
+  // tampering. Say which one this is, in the payload itself.
+  const bound = !!args.refundAddressHint;
   return {
-    quoteVersion: "stage3-quote/v1",
+    quoteVersion: "stage3-quote/v2",
     terms,
     termsDigest: termsDigest(terms),
+    refundAddressBound: bound,
+    digestKind: bound ? "bound-terms (refundAddress fixed; this is the digest a tab will carry)"
+                      : "placeholder-terms (no refundAddress supplied; digest WILL change once you supply one)",
     bindings: { scheduleDigest: args.coefficientsDigest, priceVectorDigest: args.policyDigest ?? args.coefficientsDigest },
     meterMode: args.meterMode,
     // Honesty rule from /api/status: never let a shadow node look like it bills.

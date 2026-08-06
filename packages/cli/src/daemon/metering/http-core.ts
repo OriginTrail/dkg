@@ -16,6 +16,7 @@ import { COEFFICIENTS_CANONICAL, SCHEDULE_VERSION } from "./read-meter.js";
 import {
   termsQuote, handshake, openTab, tabView, creditObservedDeposit,
 } from "./stage3-endpoint.js";
+import { anchorWalletKey } from "./buyer-registry.js";
 
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
 
@@ -89,16 +90,27 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
     let body: Record<string, any>;
     try { body = JSON.parse((await io.readBody()) || "{}"); }
     catch { io.json(400, { error: "E_BAD_JSON" }); return true; }
-    const { delegation, walletPublicKeyPem, request, revocationCheckpoint } = body;
-    if (!delegation || !walletPublicKeyPem || !request) {
-      io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "walletPublicKeyPem", "request"] });
+    const { delegation, request, revocationCheckpoint } = body;
+    if (!delegation || !request) {
+      io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "request"] });
+      return true;
+    }
+    // The key is resolved from operator-approved config, NOT from the request.
+    // A caller cannot supply the evidence that validates its own claim.
+    const anchor = anchorWalletKey(home, delegation.tabPrincipal);
+    if (!anchor.ok) {
+      io.json(200, {
+        preflight: "zero-value", estimatedMicroTrac: 0, verdict: anchor.code,
+        ok: false, ledgerTouched: false,
+        capabilityId: delegation.capabilityId ?? null, detail: anchor.detail,
+      });
       return true;
     }
     try {
       // A rejected preflight is a SUCCESSFUL preflight: 200 with a stable
       // reason code, so the buyer asserts on codes rather than parsing prose.
       io.json(200, handshake(home, {
-        delegation, walletPublicKeyPem, request,
+        delegation, walletPublicKeyPem: anchor.walletPublicKeyPem, request,
         revocationCheckpoint: revocationCheckpoint ?? { observedAt: null, maxCheckpointAgeMs: 0 },
       }));
     } catch (e: unknown) {
@@ -112,14 +124,19 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
     let b: Record<string, any>;
     try { b = JSON.parse((await io.readBody()) || "{}"); }
     catch { io.json(400, { error: "E_BAD_JSON" }); return true; }
-    if (!b.delegation || !b.walletPublicKeyPem || !b.refundAddress || !b.request) {
-      io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "walletPublicKeyPem", "refundAddress", "request"] });
+    if (!b.delegation || !b.refundAddress || !b.request) {
+      io.json(400, { error: "E_MISSING_FIELD", required: ["delegation", "refundAddress", "request"] });
+      return true;
+    }
+    const openAnchor = anchorWalletKey(home, b.delegation.tabPrincipal);
+    if (!openAnchor.ok) {
+      io.json(403, { opened: false, code: openAnchor.code, detail: openAnchor.detail });
       return true;
     }
     try {
       const out = openTab(home, {
         delegation: b.delegation,
-        walletPublicKeyPem: b.walletPublicKeyPem,
+        walletPublicKeyPem: openAnchor.walletPublicKeyPem,
         refundAddress: b.refundAddress,
         providerAddress: req.providerAddress,
         askMicroPer1k: cfg.readAskMicroPer1k,

@@ -84,7 +84,21 @@ const terms = await get("/api/metering/terms");
 ok("GET /api/metering/terms is NOT 404 — the route is actually mounted",
   terms.status === 200, `got ${terms.status}`);
 ok("terms quote carries a version, digest and bindings",
-  terms.body?.quoteVersion === "stage3-quote/v1" && !!terms.body?.termsDigest && !!terms.body?.bindings?.scheduleDigest);
+  terms.body?.quoteVersion === "stage3-quote/v2" && !!terms.body?.termsDigest && !!terms.body?.bindings?.scheduleDigest);
+// Buyer-found: an unbound and a refundAddress-bound quote produce different
+// digests. That is correct, but indistinguishable digests read as drift or
+// tampering, so the quote must say which kind it is.
+ok("an unbound quote declares itself a placeholder",
+  terms.body?.refundAddressBound === false && /placeholder-terms/.test(terms.body?.digestKind ?? ""),
+  JSON.stringify({ b: terms.body?.refundAddressBound, k: terms.body?.digestKind }));
+{
+  const boundQ = await get("/api/metering/terms?refundAddress=0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba");
+  ok("a refundAddress-bound quote declares itself bound and binds the address",
+    boundQ.body?.refundAddressBound === true && /bound-terms/.test(boundQ.body?.digestKind ?? "")
+    && boundQ.body?.terms?.refundAddress === "0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba");
+  ok("the two quotes have DIFFERENT digests, and each says why",
+    boundQ.body?.termsDigest !== terms.body?.termsDigest);
+}
 ok("terms echo the buyer-set rules (12 confirmations, 1 TRAC min, no rollover)",
   terms.body?.terms?.confirmationDepth === 12 && terms.body?.terms?.minimumCreditTrac === "1" && terms.body?.terms?.rolloverPolicy === "none");
 ok("provider address is the node's real publisher wallet, not a placeholder",
@@ -128,6 +142,7 @@ ok("unknown /api/metering/* path → 404 default-deny, no fallthrough",
 
 // ── 4. zero-value preflight over HTTP ─────────────────────────────────────
 console.log("\nzero-value preflight (Bo's gate):");
+
 const wallet = generateKeyPairSync("ed25519"), session = generateKeyPairSync("ed25519");
 const pem = (k, t) => k.export({ type: t === "pub" ? "spki" : "pkcs8", format: "pem" }).toString();
 const walletPublicKeyPem = pem(wallet.publicKey, "pub");
@@ -154,6 +169,64 @@ const mkDelegation = (over = {}) => {
 };
 const req1 = { route: "POST /api/query", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main", scheduleDigest, priceVectorDigest: priceDigest };
 const freshCp = { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 };
+
+// ── the attack Bo actually ran ────────────────────────────────────────────
+console.log("\nwallet anchoring (buyer-found: self-asserted authority):");
+{
+  const { writeFileSync, mkdirSync } = await import("node:fs");
+  const regDir = join(process.env.DKG_HOME, "metering");
+  mkdirSync(regDir, { recursive: true });
+
+  // 1. No registry at all -> nobody may preflight.
+  const unregistered = await post("/api/metering/handshake", { delegation: mkDelegation(), request: req1, revocationCheckpoint: freshCp });
+  ok("an unregistered principal is refused (no registry)",
+    unregistered.body?.ok === false && unregistered.body?.verdict === "E_PRINCIPAL_NOT_REGISTERED",
+    JSON.stringify(unregistered.body));
+
+  // 2. THE ATTACK: a freshly generated, unrelated wallet claiming a registered
+  //    principal. Before the fix this returned OK, because the endpoint checked
+  //    the delegation against the very key the attacker enclosed.
+  writeFileSync(join(regDir, "buyer-registry.json"), JSON.stringify({
+    principals: { [BO]: { label: "hermes-bo", walletPublicKeyPem, approvedVia: "gate-fixture" } },
+  }));
+  const attacker = generateKeyPairSync("ed25519");
+  const forgedByStranger = (() => {
+    const d = {
+      domain: "odysseus-dkg:delegation:v1", capabilityId: "cap-attack", tabPrincipal: BO,
+      sessionPublicKeyPem: pem(session.publicKey, "pub"), agentUrn: "urn:attacker",
+      audience: { settlement: "settle-main", nodeClasses: ["dkg-edge-mainnet"] },
+      routes: ["POST /api/query"], bindings: { scheduleDigest, priceVectorDigest: priceDigest },
+      caps: { absoluteMicroTrac: 999_999_999, windowMicroTrac: 999_999, windowMs: 60_000 },
+      notBefore: new Date(Date.now() - 3600e3).toISOString(),
+      expiresAt: new Date(Date.now() + 3600e3).toISOString(), tier: "session-key",
+    };
+    return { ...d, walletSignature: edSign(null, delegationPreimage(d), createPrivateKey(pem(attacker.privateKey, "priv"))).toString("base64") };
+  })();
+  const attack = await post("/api/metering/handshake", {
+    delegation: forgedByStranger,
+    walletPublicKeyPem: pem(attacker.publicKey, "pub"),   // attacker encloses their OWN key
+    request: req1, revocationCheckpoint: freshCp,
+  });
+  ok("a self-generated wallet claiming a registered principal is REFUSED",
+    attack.body?.ok === false && attack.body?.verdict === "E_CAP_BAD_SIGNATURE",
+    JSON.stringify(attack.body));
+  ok("...and it cannot open a tab either",
+    (await post("/api/metering/tab/open", { delegation: forgedByStranger, walletPublicKeyPem: pem(attacker.publicKey, "pub"), refundAddress: BO, request: req1, revocationCheckpoint: freshCp })).body?.opened === false);
+
+  // 3. The registered buyer still works, and works WITHOUT sending a key.
+  const legit = await post("/api/metering/handshake", { delegation: mkDelegation(), request: req1, revocationCheckpoint: freshCp });
+  ok("the registered buyer preflights OK without supplying any key at all",
+    legit.body?.ok === true, JSON.stringify(legit.body));
+
+  // 4. A caller-supplied key must be inert, not merely compared.
+  const ignored = await post("/api/metering/handshake", {
+    delegation: mkDelegation(), walletPublicKeyPem: pem(attacker.publicKey, "pub"),
+    request: req1, revocationCheckpoint: freshCp,
+  });
+  ok("a caller-supplied key is IGNORED, not trusted and not fatal — the registry decides",
+    ignored.body?.ok === true, JSON.stringify(ignored.body));
+}
+
 const TRAC = "0xA81a52B4dda010896cDd386C7fBdc5CDc835ba23";
 
 const hs = await post("/api/metering/handshake", {
