@@ -1,0 +1,47 @@
+{
+  "name": "@origintrail-official/dkg-adapter-prime-agent",
+  "version": "10.0.12",
+  "description": "Prime Intellect Prime Agent adapter — collocates a Prime Agent with a DKG V10 node for verifiable shared memory",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "extension",
+    "dkg-skill",
+    "setup-entry.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && pnpm run build:extension",
+    "build:extension": "tsc -p extension/tsconfig.json",
+    "test": "pnpm run build:extension && vitest run",
+    "test:ts": "pnpm run build:extension && vitest run",
+    "test:coverage": "pnpm run build:extension && vitest run --coverage",
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','extension/dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/adapter-prime-agent"
+  }
+}

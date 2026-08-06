@@ -176,7 +176,8 @@ describe('local agent integration registry helpers', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
     const openclaw = integrations.find((integration) => integration.id === 'openclaw');
 
-    expect(integrations.map((integration) => integration.id)).toEqual(['hermes', 'openclaw']);
+    // Sorted by display name, so Prime Agent lands after OpenClaw.
+    expect(integrations.map((integration) => integration.id)).toEqual(['hermes', 'openclaw', 'prime-agent']);
     expect(integrations.every((integration) => integration.enabled === false)).toBe(true);
     expect(integrations.every((integration) => integration.status === 'disconnected')).toBe(true);
     expect(openclaw?.capabilities.chatAttachments).toBeUndefined();

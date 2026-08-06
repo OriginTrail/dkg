@@ -49,6 +49,12 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
   }
 }
 
+/**
+ * Structured error from the local-agent chat/health endpoints. On a bridge
+ * idle-timeout (504) the daemon forwards any partial turn output as `text`
+ * (flagged by `timedOut`), so panel code can choose to render the partial
+ * reply alongside the timeout instead of dropping what the agent already said.
+ */
 export class LocalAgentApiError extends Error {
   status?: number;
   code?: string;
@@ -60,6 +66,9 @@ export class LocalAgentApiError extends Error {
   route?: string;
   integrationId?: string;
   retryable?: boolean;
+  /** Partial turn output preserved across a bridge timeout. */
+  text?: string;
+  timedOut?: boolean;
 
   constructor(message: string, metadata: Partial<LocalAgentApiError> = {}) {
     super(message);
@@ -1985,6 +1994,14 @@ export async function streamOpenClawLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2019,13 +2036,19 @@ export async function sendHermesLocalChat(
   return res.json();
 }
 
-export async function streamHermesLocalChat(
+/**
+ * SSE client for the `delta`/`final` frame dialect. Hermes defined it and the
+ * Prime Agent bridge speaks the same one, so both channels share this reader —
+ * a second copy would be a second place for the partial-frame handling to drift.
+ */
+async function streamDeltaFrameLocalChat(
+  url: string,
   text: string,
   opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/hermes-channel/stream', {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2106,6 +2129,14 @@ export async function streamHermesLocalChat(
     buffer += decoder.decode(value, { stream: true });
     processLines(false);
     if (streamError) break;
+    // `final` ends the TURN; upstream EOF is a TRANSPORT event and the two need
+    // not coincide. A bridge that holds its socket open for reuse would
+    // otherwise keep the composer spinning long after the answer arrived, so
+    // stop reading as soon as the terminal frame lands.
+    if (finalPayload) {
+      void reader.cancel().catch(() => {});
+      return finalPayload;
+    }
   }
   buffer += decoder.decode();
   processLines(true);
@@ -2115,8 +2146,49 @@ export async function streamHermesLocalChat(
   return finalPayload;
 }
 
+export const streamHermesLocalChat = (
+  text: string,
+  opts: LocalAgentChatRequestOptions & { onEvent?: (event: OpenClawStreamEvent) => void } = {},
+): Promise<LocalAgentChatResponse> =>
+  streamDeltaFrameLocalChat('/api/hermes-channel/stream', text, opts);
+
 export const fetchHermesLocalHealth = () =>
   get<LocalAgentHealthResponse>('/api/hermes-channel/health');
+
+export async function sendPrimeAgentLocalChat(
+  text: string,
+  opts?: LocalAgentChatRequestOptions,
+): Promise<LocalAgentChatResponse> {
+  const res = await fetch('/api/prime-agent-channel/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
+  }
+  return res.json();
+}
+
+export const streamPrimeAgentLocalChat = (
+  text: string,
+  opts: LocalAgentChatRequestOptions & { onEvent?: (event: OpenClawStreamEvent) => void } = {},
+): Promise<LocalAgentChatResponse> =>
+  streamDeltaFrameLocalChat('/api/prime-agent-channel/stream', text, opts);
+
+/**
+ * The Prime Agent channel reports `ok: false` with `sessionCount: 0` when the
+ * adapter is installed but no session is running. That is idle, not broken, so
+ * the session fields are surfaced alongside the standard health shape and the
+ * caller decides how to render it.
+ */
+export const fetchPrimeAgentLocalHealth = () =>
+  get<LocalAgentHealthResponse & {
+    sessionCount?: number;
+    sessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
+  }>('/api/prime-agent-channel/health');
 
 function formatLocalAgentError(body: unknown, fallback: string): string {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fallback;
@@ -2150,6 +2222,10 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     const value = record[key];
     return typeof value === 'boolean' ? value : undefined;
   };
+  // Partial turn output is payload, not metadata: forwarded untrimmed so a
+  // rendered partial reply is exactly what the agent produced before the
+  // cutoff.
+  const text = typeof record.text === 'string' && record.text.trim() ? record.text : undefined;
   return new LocalAgentApiError(message, {
     status,
     code: stringField('code'),
@@ -2161,6 +2237,8 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     route: stringField('route'),
     integrationId: stringField('integrationId'),
     retryable: booleanField('retryable'),
+    text,
+    timedOut: booleanField('timedOut'),
   });
 }
 
@@ -2229,6 +2307,14 @@ export interface LocalAgentIntegration {
   error?: string;
   target?: LocalAgentChannelTarget;
   source: 'live' | 'planned';
+  /**
+   * Number of live agent sessions backing this integration, when the agent has
+   * more than one. Prime Agent publishes a bridge per session, so 0 is a normal
+   * idle state rather than a fault; Hermes and OpenClaw leave this undefined.
+   */
+  sessionCount?: number;
+  /** Which session the node is currently routing to, when several are live. */
+  activeSessionId?: string;
 }
 
 export interface LocalAgentConnectResult {
@@ -2297,6 +2383,17 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     }),
     fetchHealth: fetchHermesLocalHealth,
     streamChat: streamHermesLocalChat,
+  },
+  'prime-agent': {
+    connectSupported: true,
+    chatSupported: true,
+    // No synthesised default. A Prime Agent session id is a uuidv7 minted by the
+    // agent itself, so the node cannot invent one — leaving it undefined makes
+    // the daemon route to the most recently active live session, which is what
+    // the operator means by "the session I'm in" until they pick another.
+    resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
+    fetchHealth: fetchPrimeAgentLocalHealth,
+    streamChat: streamPrimeAgentLocalChat,
   },
 };
 
@@ -2623,6 +2720,15 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     error: chatReady ? undefined : (health?.error ?? record.runtime?.lastError ?? undefined),
     target: health?.target,
     source: configured || surface ? 'live' : 'planned',
+    // Multi-session agents (Prime Agent) report how many live sessions back the
+    // integration; single-session agents leave these undefined so the UI can
+    // tell "not applicable" apart from "zero sessions".
+    ...(typeof record.metadata?.sessionCount === 'number'
+      ? { sessionCount: record.metadata.sessionCount as number }
+      : {}),
+    ...(typeof record.metadata?.activeSessionId === 'string'
+      ? { activeSessionId: record.metadata.activeSessionId as string }
+      : {}),
   } satisfies LocalAgentIntegration;
 }
 
@@ -2727,6 +2833,7 @@ export async function refreshLocalAgentIntegration(id: string): Promise<LocalAge
 export async function fetchLocalAgentHealth(id: string) {
   if (id === 'openclaw') return fetchOpenClawLocalHealth();
   if (id === 'hermes') return fetchHermesLocalHealth();
+  if (id === 'prime-agent') return fetchPrimeAgentLocalHealth();
   throw new Error(`${id} local health is not available yet.`);
 }
 
