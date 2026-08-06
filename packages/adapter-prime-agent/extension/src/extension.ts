@@ -106,11 +106,49 @@ const TURN_HARD_TIMEOUT_MS = 55 * 60_000;
 // republication that landed (atomic rename, fresh mtime) between our read and
 // the rm. Mirrored in the daemon-side reader (`session-registry.ts`).
 const PRUNE_MIN_AGE_MS = 30_000;
-// Removed by our `input` handler before Prime creates the user message. The
-// opaque tag distinguishes this extension's submission from another extension
-// (or an identical local prompt) without exposing metadata to the model.
+// Retained on Prime's prepared action, then removed by our awaited
+// `message_start` handler before listeners, persistence, or provider context.
+// The opaque tag distinguishes this extension's submission from another
+// extension (or an identical local prompt).
 const BRIDGE_INPUT_TAG_PREFIX = '\u2063dkg-bridge-turn:';
 const BRIDGE_TURN_MARKER_TYPE = 'dkg.bridge.turn-owner';
+const RETIRED_OWNERSHIP_TOKEN_LIMIT = 64;
+
+interface TaggedPrompt {
+  ownershipToken: string;
+  prompt: string;
+}
+
+function parseTaggedPrompt(text: string): TaggedPrompt | undefined {
+  if (!text.startsWith(BRIDGE_INPUT_TAG_PREFIX)) return undefined;
+  const separator = text.indexOf('\u2063', BRIDGE_INPUT_TAG_PREFIX.length);
+  if (separator < 0) return undefined;
+  const ownershipToken = text.slice(BRIDGE_INPUT_TAG_PREFIX.length, separator);
+  if (!ownershipToken) return undefined;
+  return { ownershipToken, prompt: text.slice(separator + 1) };
+}
+
+function sanitizedTaggedUserMessage(
+  message: AgentMessageLike,
+): { tagged: TaggedPrompt; message: AgentMessageLike } | undefined {
+  if (message.role !== 'user') return undefined;
+  if (typeof message.content === 'string') {
+    const tagged = parseTaggedPrompt(message.content);
+    return tagged ? { tagged, message: { ...message, content: tagged.prompt } } : undefined;
+  }
+  if (!Array.isArray(message.content)) return undefined;
+  let tagged: TaggedPrompt | undefined;
+  const content = message.content.map((block) => {
+    if (tagged || !block || typeof block !== 'object') return block;
+    const record = block as { type?: unknown; text?: unknown };
+    if (record.type !== 'text' || typeof record.text !== 'string') return block;
+    const parsed = parseTaggedPrompt(record.text);
+    if (!parsed) return block;
+    tagged = parsed;
+    return { ...record, text: parsed.prompt };
+  });
+  return tagged ? { tagged, message: { ...message, content } } : undefined;
+}
 
 function agentDir(): string {
   return process.env.PRIME_AGENT_CODING_AGENT_DIR ?? join(homedir(), '.prime', 'agent');
@@ -265,6 +303,11 @@ class SessionBridge {
   // in the background. Retry starts have no before_agent_start; abort them
   // until a genuinely fresh prompt boundary supersedes the failed run.
   #failedRunQuarantined = false;
+  // A request may hit its absolute deadline after Prime accepted the action
+  // but before model/auth validation reaches before_agent_start. Remember the
+  // opaque action token so that a delayed commit can be sanitized and aborted
+  // instead of executing after its caller has already received a failure.
+  readonly #retiredOwnershipTokens = new Set<string>();
   #agentActive = false;
   #abortActiveAgent: (() => void) | undefined;
   #closed = false;
@@ -420,6 +463,9 @@ class SessionBridge {
     this.#closed = true;
     this.#cleanupDescriptor();
     if (this.#turn) {
+      if (this.#activeRunTurn !== this.#turn) {
+        this.#rememberRetiredOwnershipToken(this.#turn.ownershipToken);
+      }
       this.#settleResponse({ text: this.#turn.chunks.join(''), error: 'Bridge stopped' });
       this.#clearTurn(this.#turn);
     }
@@ -507,6 +553,19 @@ class SessionBridge {
         resolve,
       };
       this.#turn = turn;
+      // This is an end-to-end deadline, including Prime's asynchronous
+      // validation/preparation phase. The public extension API returns void
+      // and reports async sendUserMessage failures only to Prime's error bus,
+      // so waiting for agent_start can otherwise leave the HTTP request and
+      // per-session busy guard pending forever.
+      turn.hardTimer = setTimeout(() => {
+        if (this.#turn !== turn) return;
+        this.#failTurn(turn, {
+          code: 'PRIME_AGENT_TURN_TIMEOUT',
+          message: `Prime Agent turn exceeded the ${this.#turnHardTimeoutMs}ms hard limit.`,
+        });
+      }, this.#turnHardTimeoutMs);
+      turn.hardTimer.unref?.();
     });
     const admittedTurn = this.#turn!;
 
@@ -592,7 +651,10 @@ class SessionBridge {
     const turn = this.#turn;
     if (turn && !turn.responseSettled && event.text === turn.taggedPrompt) {
       turn.inputObserved = true;
-      return { action: 'transform', text: turn.prompt };
+      // Keep the opaque identity on Prime's prepared action until
+      // before_agent_start. It is removed from the user message at
+      // message_start, before listeners, persistence, or provider context.
+      return { action: 'continue' };
     }
     // A tagged submission whose HTTP request was already cleared must never
     // execute later. Swallow it instead of letting the internal tag or a
@@ -606,7 +668,7 @@ class SessionBridge {
     // bridge state, the marker survives a deferred handoff and is emitted only
     // when that exact prepared action enters the agent loop.
     const turn = this.#turn;
-    if (!turn || !turn.inputObserved || turn.responseSettled || event.prompt !== turn.prompt) {
+    if (!turn || !turn.inputObserved || turn.responseSettled || event.prompt !== turn.taggedPrompt) {
       return undefined;
     }
     return {
@@ -622,6 +684,20 @@ class SessionBridge {
   onMessageStart(event: MessageStartEvent): void {
     const message = event.message;
     if (message?.role === 'user') {
+      const sanitized = sanitizedTaggedUserMessage(message);
+      if (sanitized) {
+        // Prime passes the live message object through this awaited hook before
+        // notifying listeners or persisting it. Mutate only the content so the
+        // internal tag never reaches the terminal transcript or the model.
+        message.content = sanitized.message.content;
+        if (this.#retiredOwnershipTokens.delete(sanitized.tagged.ownershipToken)) {
+          // This prepared action outlived its HTTP request. Treat it like a
+          // failed retry (no fresh prompt) so before_provider_request aborts it.
+          this.#runHasFreshPrompt = false;
+          this.#failedRunQuarantined = true;
+          return;
+        }
+      }
       this.#runHasFreshPrompt = true;
       this.#failedRunQuarantined = false;
       return;
@@ -631,6 +707,14 @@ class SessionBridge {
       message.details && typeof message.details === 'object'
         ? (message.details as { ownershipToken?: unknown }).ownershipToken
         : undefined;
+    if (typeof ownershipToken === 'string' && this.#retiredOwnershipTokens.delete(ownershipToken)) {
+      // The user message can be emitted immediately before this cached marker.
+      // If the absolute deadline fires between those events, the marker is the
+      // final identity-bearing boundary at which to quarantine the stale run.
+      this.#runHasFreshPrompt = false;
+      this.#failedRunQuarantined = true;
+      return;
+    }
     const turn = this.#turn;
     if (turn && !turn.responseSettled && ownershipToken === turn.ownershipToken) {
       this.#activeRunTurn = turn;
@@ -639,15 +723,24 @@ class SessionBridge {
   }
 
   onContext(event: ContextEvent): { messages: AgentMessageLike[] } | undefined {
-    if (!event.messages?.some((message) => message.customType === BRIDGE_TURN_MARKER_TYPE)) {
-      return undefined;
+    if (!event.messages) return undefined;
+    let changed = false;
+    const messages: AgentMessageLike[] = [];
+    for (const message of event.messages) {
+      if (message.customType === BRIDGE_TURN_MARKER_TYPE) {
+        changed = true;
+        continue;
+      }
+      const sanitized = sanitizedTaggedUserMessage(message);
+      if (sanitized) changed = true;
+      messages.push(sanitized?.message ?? message);
     }
+    if (!changed) return undefined;
     // The marker is transport metadata, not conversation content. Keep it out
     // of every provider request while retaining it in Prime's event stream as
-    // a reliable committed-action identity signal.
-    return {
-      messages: event.messages.filter((message) => message.customType !== BRIDGE_TURN_MARKER_TYPE),
-    };
+    // a reliable committed-action identity signal. Tag stripping here is a
+    // defense in depth for host versions that clone message_start payloads.
+    return { messages };
   }
 
   onBeforeProviderRequest(ctx?: ExtensionCtxLike): void {
@@ -727,16 +820,8 @@ class SessionBridge {
   }
 
   #armTurnTimers(turn: PendingTurn): void {
-    if (turn.idleTimer || turn.hardTimer) return;
+    if (turn.idleTimer) return;
     this.#armIdleTimer(turn);
-    turn.hardTimer = setTimeout(() => {
-      if (this.#turn !== turn) return;
-      this.#failTurn(turn, {
-        code: 'PRIME_AGENT_TURN_TIMEOUT',
-        message: `Prime Agent turn exceeded the ${this.#turnHardTimeoutMs}ms hard limit.`,
-      });
-    }, this.#turnHardTimeoutMs);
-    turn.hardTimer.unref?.();
   }
 
   #armIdleTimer(turn: PendingTurn): void {
@@ -767,6 +852,7 @@ class SessionBridge {
 
   #failTurn(turn: PendingTurn, failure: SanitizedTurnFailure): void {
     const ownsActiveRun = this.#activeRunTurn === turn;
+    if (!ownsActiveRun) this.#rememberRetiredOwnershipToken(turn.ownershipToken);
     if (this.#turn === turn) {
       this.#settleResponse({
         text: turn.chunks.join(''),
@@ -784,6 +870,13 @@ class SessionBridge {
     } catch {
       /* the ownership quarantine remains authoritative */
     }
+  }
+
+  #rememberRetiredOwnershipToken(ownershipToken: string): void {
+    this.#retiredOwnershipTokens.add(ownershipToken);
+    if (this.#retiredOwnershipTokens.size <= RETIRED_OWNERSHIP_TOKEN_LIMIT) return;
+    const oldest = this.#retiredOwnershipTokens.values().next().value as string | undefined;
+    if (oldest) this.#retiredOwnershipTokens.delete(oldest);
   }
 
   #json(res: ServerResponse, status: number, body: unknown): void {

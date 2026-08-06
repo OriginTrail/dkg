@@ -16,19 +16,29 @@ const TOKEN = 'test-bridge-token-value';
 let workDir: string;
 let bridge: SessionBridge;
 let sent: string[];
+let submitted: string[];
 let sendOptions: Array<{ deliverAs?: 'steer' | 'followUp' } | undefined>;
 let base: string;
+
+function visiblePrompt(text: string): string {
+  const prefix = '\u2063dkg-bridge-turn:';
+  if (!text.startsWith(prefix)) return text;
+  const separator = text.indexOf('\u2063', prefix.length);
+  return separator < 0 ? text : text.slice(separator + 1);
+}
 
 /** Minimal stand-in for the host ExtensionAPI surface the bridge uses. */
 function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'followUp' }) => void) {
   return {
     on: () => {},
     sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => {
-      // Mirror Prime's input normalization: the bridge tags its own submission
-      // and the input hook removes that tag before the user message is built.
+      // Mirror Prime's input normalization: the bridge keeps its tag on the
+      // prepared action, then message_start removes it from the live message.
       const result = bridge.onInput({ source: 'extension', text: content });
       if (result.action === 'handled') return;
-      onSend(result.action === 'transform' ? result.text : content, options);
+      const normalized = result.action === 'transform' ? result.text : content;
+      submitted.push(normalized);
+      onSend(visiblePrompt(normalized), options);
     },
   };
 }
@@ -63,7 +73,7 @@ function startBridgeRun(
   ctx?: Parameters<SessionBridge['onAgentStart']>[0],
   prepared?: PreparedBridgeRun,
 ): void {
-  const prompt = sent.at(-1);
+  const prompt = submitted.at(-1);
   if (!prompt) throw new Error('startBridgeRun(): no injected prompt');
   const ownership = prepared ?? bridge.onBeforeAgentStart({ prompt });
   if (!ownership) throw new Error('startBridgeRun(): prompt did not receive an ownership marker');
@@ -93,6 +103,7 @@ beforeEach(async () => {
   process.env.PRIME_AGENT_CODING_AGENT_DIR = workDir;
   process.env.DKG_BRIDGE_TOKEN = TOKEN;
   sent = [];
+  submitted = [];
   sendOptions = [];
   bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-test');
   await bridge.start();
@@ -440,11 +451,11 @@ describe('/send', () => {
     // Prime may prepare the queued action before its retry wins the handoff.
     // Its hidden ownership marker is cached on that action and excluded from
     // provider context; it must not be consumed by the intervening retry run.
-    const preparedSuccessor = bridge.onBeforeAgentStart({ prompt: 'retry after credentials are fixed' });
+    const preparedSuccessor = bridge.onBeforeAgentStart({ prompt: submitted.at(-1) });
     expect(preparedSuccessor).toBeDefined();
     const providerContext = bridge.onContext({
       messages: [
-        { role: 'user', content: [{ type: 'text', text: 'retry after credentials are fixed' }] },
+        { role: 'user', content: [{ type: 'text', text: submitted.at(-1) }] },
         { role: 'custom', ...preparedSuccessor!.message },
       ],
     });
@@ -591,7 +602,7 @@ describe('/send', () => {
     expect(await res.json()).toMatchObject({ text: 'fresh answer', correlationId: 'c-successor' });
   });
 
-  it('does not let a local-turn error fail a bridge prompt queued before its own start', async () => {
+  it('does not let an identical local prompt claim the queued bridge action', async () => {
     await bridge.stop();
     bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-local-race', {
       turnIdleTimeoutMs: 40,
@@ -608,37 +619,91 @@ describe('/send', () => {
     await until(() => sent.length === 1);
     expect(sent).toEqual(['bridge prompt']);
 
-    // Preparation can complete before the competing local run starts. Prime
-    // retains this marker on the queued bridge action until its later commit.
-    const preparedBridge = bridge.onBeforeAgentStart({ prompt: 'bridge prompt' });
-    expect(preparedBridge).toBeDefined();
-
-    // A local prompt won Prime's admission fence just before the bridge's
-    // followUp. Its error belongs to that unowned local run, not to the queued
-    // bridge request.
-    startLocalRun('local prompt that won the race');
-    bridge.onMessageUpdate({
-      assistantMessageEvent: { type: 'error', reason: 'aborted' },
-      message: { role: 'assistant', stopReason: 'aborted' },
-    });
+    // The local action has the exact same operator-visible text, but it does
+    // not carry the bridge's opaque prepared-action tag and gets no marker.
+    expect(bridge.onBeforeAgentStart({ prompt: 'bridge prompt' })).toBeUndefined();
+    startLocalRun('bridge prompt');
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'local answer' } });
     bridge.onAgentEnd();
 
-    // Bridge timers begin only when its cached ownership marker is emitted, so
-    // waiting beyond both configured limits here cannot return a false terminal
-    // verdict for a prompt that is still queued.
-    await new Promise((r) => setTimeout(r, 100));
+    // Neither the local output nor its lifecycle boundary can settle the
+    // bridge request that is still queued behind it.
     const settledByLocalFailure = await Promise.race([
       pending.then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20)),
     ]);
     expect(settledByLocalFailure).toBe(false);
 
-    startBridgeRun(undefined, preparedBridge);
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh' } });
     bridge.onAgentEnd();
     const res = await pending;
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ text: 'fresh', correlationId: 'c-local-race' });
+  });
+
+  it('bounds a pre-start async rejection and aborts a prepared action that commits later', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-prestart-timeout', {
+      turnIdleTimeoutMs: 5_000,
+      turnHardTimeoutMs: 70,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const pending = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'validate me', correlationId: 'c-prestart-timeout' }),
+    });
+    await until(() => sent.length === 1);
+
+    // Prime may cache before_agent_start metadata and then lose the action to
+    // a local handoff. Its public extension send API returns void, so an async
+    // validation failure itself is not observable by the bridge.
+    const taggedPrompt = submitted.at(-1);
+    const prepared = bridge.onBeforeAgentStart({ prompt: taggedPrompt });
+    expect(prepared).toBeDefined();
+
+    const failed = await pending;
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({
+      code: 'PRIME_AGENT_TURN_TIMEOUT',
+      retryable: false,
+      correlationId: 'c-prestart-timeout',
+    });
+
+    // If the already-prepared action appears after that terminal response, its
+    // internal tag is removed before display/persistence and provider I/O is
+    // aborted. This rules out a fail-then-execute side effect.
+    let abortCount = 0;
+    const ctx = {
+      sessionManager: { getSessionId: () => 'sess-prestart-timeout' },
+      abort: () => { abortCount += 1; },
+    };
+    const userMessage = {
+      role: 'user',
+      content: [{ type: 'text', text: taggedPrompt }],
+    };
+    bridge.onAgentStart(ctx);
+    bridge.onMessageStart({ message: userMessage });
+    bridge.onMessageStart({ message: { role: 'custom', ...prepared!.message } });
+    expect(userMessage.content[0].text).toBe('validate me');
+    bridge.onBeforeProviderRequest(ctx);
+    expect(abortCount).toBe(1);
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'must not escape' } });
+    bridge.onAgentEnd();
+
+    const retry = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'fresh prompt', correlationId: 'c-after-prestart-timeout' }),
+    });
+    await until(() => sent.length === 2);
+    startBridgeRun();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh answer' } });
+    bridge.onAgentEnd();
+    expect(await retry.then((res) => res.json())).toMatchObject({ text: 'fresh answer' });
   });
 
   it('reports PRIME_AGENT_TURN_TIMEOUT when the hard limit fires while the turn is still live', async () => {
