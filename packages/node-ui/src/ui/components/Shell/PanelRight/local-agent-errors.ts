@@ -21,6 +21,12 @@ export function formatLocalAgentErrorMessage(
     if (err.code === 'PRIME_AGENT_SESSION_BUSY') {
       return `${integration.name} session is busy — try again in a moment.`;
     }
+    // The PRIME_AGENT_* terminal codes below must stay in lock-step with
+    // PrimeAgentTurnErrorCode in
+    // packages/adapter-prime-agent/extension/src/extension.ts and
+    // SANITIZED_PRIME_AGENT_BRIDGE_FAILURES in
+    // packages/cli/src/daemon/routes/prime-agent.ts; an unmatched code falls
+    // through to the raw daemon message at the bottom of this function.
     if (err.code === 'PRIME_AGENT_PROVIDER_UNAUTHORIZED') {
       return `${integration.name} provider authentication failed. Check its provider credentials and try again.`;
     }
