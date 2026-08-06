@@ -49,11 +49,27 @@ so there is no single well-known endpoint. Each session publishes a descriptor:
 
 ```
 ~/.prime/agent/.dkg-adapter-prime-agent/sessions/<sessionId>.json
-{ "sessionId": "...", "bridgeUrl": "http://127.0.0.1:54123", "pid": 4242, "startedAt": "..." }
+{ "sessionId": "...", "bridgeUrl": "http://127.0.0.1:54123", "pid": 4242,
+  "startedAt": "...", "lastActiveAt": "..." }
 ```
 
-written on `session_start` and removed on `session_shutdown`. The daemon reads
-that directory and prunes descriptors whose `pid` is gone.
+written on `session_start` and removed on `session_shutdown`. Dead-pid
+descriptors are pruned twice: on every read by the daemon, and by each bridge
+at its own `session_start` — so a crashed worker converges without waiting for
+a daemon read.
+
+**Several live sessions is a normal, honest state**, not a cleanup failure:
+sessions belong to Prime Agent's daemon and are resumed across terminal
+restarts, so a restart legitimately leaves the resumed session alive next to a
+fresh one. Routing is therefore an **election**, not a uniqueness assumption:
+
+- `lastActiveAt` is re-stamped **per turn** (`agent_start` fires for
+  locally-typed and bridge-injected turns alike);
+- an unaddressed message routes to the **most recently active** session —
+  `lastActiveAt` falling back to `startedAt`, tiebroken by `startedAt` then
+  `sessionId` — so the operator's next turn settles which session wins;
+- an explicit `sessionId` always overrides the election, and a miss is an
+  error, never a fallback.
 
 Two details that are not incidental:
 
@@ -112,7 +128,8 @@ extension.
   and the integration does not advertise primary-memory capability yet.
 - No Python kernel skill yet (Stage 3), so there is no model-facing `dkg` API.
 - The Node UI panel is live (Stage 5) but has **no session picker**: the node
-  routes to the newest live session unless a `sessionId` is supplied.
+  routes to the most recently active live session unless a `sessionId` is
+  supplied.
 - One turn at a time per session: a concurrent `/send` gets `429`.
 - A UI message is sent as `deliverAs: "followUp"`. If a local Prime Agent turn
   is already observed, the bridge returns `429`; the follow-up choice covers the

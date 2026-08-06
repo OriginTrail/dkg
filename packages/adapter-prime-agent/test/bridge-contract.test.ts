@@ -5,7 +5,8 @@
  * of upstream.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { createServer, Server as HttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -74,6 +75,128 @@ describe('bind + discovery', () => {
     expect(readLiveSessions(dir, { prune: false })).toHaveLength(1);
     await bridge.stop();
     expect(readLiveSessions(dir, { prune: false })).toHaveLength(0);
+  });
+
+  it('closes the bound listener when descriptor publication fails', async () => {
+    // Occupy the sessions path with a regular file so the publish step's
+    // mkdirSync throws AFTER listen() has succeeded. Unlike chmod-based
+    // denial this holds on every platform and when running as root.
+    const badDir = mkdtempSync(join(tmpdir(), 'pa-bridge-bad-'));
+    mkdirSync(join(badDir, '.dkg-adapter-prime-agent'), { recursive: true });
+    writeFileSync(join(badDir, '.dkg-adapter-prime-agent', 'sessions'), 'not a directory');
+    process.env.PRIME_AGENT_CODING_AGENT_DIR = badDir;
+    const failing = new SessionBridge(stubPi(() => {}) as never, 'sess-publish-fail');
+
+    // The bridge never exposes its server, so learn the ephemeral port through
+    // a scoped listen() wrap; restored before any assertion can throw.
+    const captured: { server?: HttpServer; port?: number } = {};
+    const originalListen = HttpServer.prototype.listen;
+    (HttpServer.prototype as any).listen = function (this: HttpServer, ...args: unknown[]) {
+      captured.server = this;
+      this.once('listening', () => {
+        const address = this.address();
+        if (address && typeof address !== 'string') captured.port = address.port;
+      });
+      return (originalListen as any).apply(this, args);
+    };
+    try {
+      await expect(failing.start()).rejects.toThrow();
+    } finally {
+      HttpServer.prototype.listen = originalListen;
+      process.env.PRIME_AGENT_CODING_AGENT_DIR = workDir;
+      rmSync(badDir, { recursive: true, force: true });
+    }
+
+    expect(captured.port).toBeDefined();
+    expect(captured.server?.listening).toBe(false);
+    // The port is actually released: a fresh bind to the same port succeeds
+    // where an orphaned listener would produce EADDRINUSE.
+    const rebind = createServer(() => {});
+    await new Promise<void>((resolve, reject) => {
+      rebind.on('error', reject);
+      rebind.listen(captured.port, '127.0.0.1', () => resolve());
+    });
+    await new Promise<void>((resolve) => rebind.close(() => resolve()));
+  });
+});
+
+describe('session election', () => {
+  const dir = () => join(workDir, '.dkg-adapter-prime-agent', 'sessions');
+  const readOwn = () =>
+    JSON.parse(readFileSync(join(dir(), 'sess-test.json'), 'utf8')) as {
+      startedAt: string;
+      lastActiveAt: string;
+    };
+
+  it('re-publishes a fresh lastActiveAt on agent_start with startedAt fixed', async () => {
+    const before = readOwn();
+    // The initial descriptor claims activity at start, nothing earlier.
+    expect(before.lastActiveAt).toBe(before.startedAt);
+    // ISO stamps have millisecond resolution; a strictly-newer stamp needs a
+    // real gap.
+    await new Promise((r) => setTimeout(r, 15));
+    bridge.onAgentStart();
+    const after = readOwn();
+    expect(after.startedAt).toBe(before.startedAt);
+    expect(after.lastActiveAt > before.lastActiveAt).toBe(true);
+    bridge.onAgentEnd();
+  });
+
+  it('prunes dead-pid siblings at start but never a malformed file', async () => {
+    const deadPath = join(dir(), 'dead-sibling.json');
+    writeFileSync(
+      deadPath,
+      JSON.stringify({
+        sessionId: 'dead-sibling',
+        bridgeUrl: 'http://127.0.0.1:1',
+        // pid 2^31-1 is effectively guaranteed not to exist.
+        pid: 2147483647,
+        startedAt: new Date().toISOString(),
+      }),
+    );
+    // Age the file past the prune threshold: deletion is age-gated because a
+    // fresh mtime could be a respawned session's republication.
+    const past = new Date(Date.now() - 120_000);
+    utimesSync(deadPath, past, past);
+    // A malformed file may be another process's in-flight write: unknown
+    // ownership, so start must leave it alone.
+    writeFileSync(join(dir(), 'in-flight.json'), '{not json');
+
+    const sibling = new SessionBridge(stubPi(() => {}) as never, 'sess-sibling');
+    await sibling.start();
+    try {
+      expect(existsSync(deadPath)).toBe(false);
+      expect(existsSync(join(dir(), 'in-flight.json'))).toBe(true);
+      // Live descriptors survive — election, not deletion.
+      expect(existsSync(join(dir(), 'sess-test.json'))).toBe(true);
+      expect(existsSync(join(dir(), 'sess-sibling.json'))).toBe(true);
+    } finally {
+      await sibling.stop();
+    }
+  });
+
+  it('keeps a dead-pid sibling whose mtime is fresh (republish race)', async () => {
+    // The TOCTOU shape: between reading a dead pid and deleting by path, a
+    // respawned session can republish a LIVE descriptor at that path. A fresh
+    // mtime is indistinguishable from that republication, so it must survive.
+    const freshDeadPath = join(dir(), 'fresh-dead.json');
+    writeFileSync(
+      freshDeadPath,
+      JSON.stringify({
+        sessionId: 'fresh-dead',
+        bridgeUrl: 'http://127.0.0.1:1',
+        pid: 2147483647,
+        startedAt: new Date().toISOString(),
+      }),
+    );
+
+    const sibling = new SessionBridge(stubPi(() => {}) as never, 'sess-sibling-fresh');
+    await sibling.start();
+    try {
+      expect(existsSync(freshDeadPath)).toBe(true);
+    } finally {
+      await sibling.stop();
+    }
   });
 });
 

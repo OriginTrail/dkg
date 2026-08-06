@@ -141,11 +141,27 @@ Shipped:
 
 Deliberately **not** in Stage 5:
 
-- No session **selector** yet — the daemon routes to the newest live session and
-  an explicit `sessionId` is honoured, but the panel does not offer a picker.
-  It needs a stable per-session label, which the descriptor does not yet carry.
+- No session **selector** yet — the daemon routes to the most recently active
+  live session and an explicit `sessionId` is honoured, but the panel does not
+  offer a picker. It needs a stable per-session label, which the descriptor
+  does not yet carry.
 - No default session id, so chat history for a session opened outside the UI is
   not back-filled.
+
+### Restart smoke criterion
+
+Prime Agent sessions are daemon-managed and survive terminal restarts: the
+daemon resumes the old session **alongside** the fresh one, and killing the
+worker pid only makes the daemon respawn it (RISKS R11). "Exactly one live
+session after restart" is therefore **not** the pass condition — it is not an
+invariant the host offers, and discovery reporting two live sessions is the
+truth. PASS is:
+
+1. dead-pid descriptors are pruned — at every bridge `session_start` and on
+   every daemon read — so crashed workers converge without manual cleanup; and
+2. unaddressed chat routes to the **most recently active** session: the one
+   whose per-turn `lastActiveAt` stamp moved last, which follows the operator's
+   next turn in whichever surface they actually use.
 
 ## Stage 6 (v2 candidates, each its own ADR)
 

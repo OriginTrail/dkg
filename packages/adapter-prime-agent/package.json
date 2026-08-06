@@ -21,10 +21,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && tsc -p extension/tsconfig.json",
-    "test": "vitest run",
-    "test:ts": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "build": "tsc && pnpm run build:extension",
+    "build:extension": "tsc -p extension/tsconfig.json",
+    "test": "pnpm run build:extension && vitest run",
+    "test:ts": "pnpm run build:extension && vitest run",
+    "test:coverage": "pnpm run build:extension && vitest run --coverage",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','extension/dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "dependencies": {

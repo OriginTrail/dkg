@@ -25,6 +25,7 @@ import {
 import { daemonState } from '../state.js';
 import { hasConfiguredLocalAgentChat } from '../local-agents.js';
 import {
+  PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS,
   PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS,
   buildPrimeAgentChannelHeaders,
   ensurePrimeAgentBridgeAvailable,
@@ -50,9 +51,10 @@ function ensurePrimeAgentIntegrationEnabled(
 
 /**
  * An explicit `sessionId` picks exactly one target; a miss is a 409, never a
- * fallback. Without one we use the newest live session and nothing else: trying
- * the rest in turn would, on a transient failure of the session the user is
- * looking at, deliver their message into a different conversation.
+ * fallback. Without one we use the most-recently-active election winner
+ * (`lastActiveAt`, stamped per turn) and nothing else: trying the rest in turn
+ * would, on a transient failure of the session the user is looking at, deliver
+ * their message into a different conversation.
  */
 function resolveTargets(
   payload: PrimeAgentChatPayload,
@@ -98,14 +100,23 @@ function isPrimeAgentTimeoutError(err: unknown): boolean {
   );
 }
 
-function timeoutBody(correlationId: string, sessionId: string): Record<string, unknown> {
+/**
+ * `timeoutMs` names the limit that actually fired: the bridge's idle window
+ * (the response-timeout constant) when we are relaying its 504 verdict, the
+ * daemon's hard cap when the transport itself hung and the abort tripped.
+ */
+function timeoutBody(
+  correlationId: string,
+  sessionId: string,
+  timeoutMs: number,
+): Record<string, unknown> {
   return {
     error: 'Prime Agent bridge response timeout',
     code: 'PRIME_AGENT_BRIDGE_RESPONSE_TIMEOUT',
     source: 'prime-agent-channel',
     sessionId,
     correlationId,
-    timeoutMs: PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS,
+    timeoutMs,
   };
 }
 
@@ -162,10 +173,30 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
           target.inboundUrl,
         ),
         body: JSON.stringify(buildPrimeAgentChannelBody(payload, target, requestAgentAddress)),
-        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS),
+        // Backstop only: the bridge's activity-based idle timeout is the
+        // authority on turn liveness (and preserves partial output in its 504);
+        // this abort exists to reap a transport that hung without answering.
+        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
       });
       const text = await forwardRes.text();
       if (!forwardRes.ok) {
+        if (forwardRes.status === 504) {
+          // The bridge's own idle-timeout verdict. Its JSON body carries any
+          // partial turn output, which must reach the UI rather than being
+          // flattened into a generic bridge fault.
+          let bridgeBody: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed === 'object') bridgeBody = parsed as Record<string, unknown>;
+          } catch {
+            /* non-JSON body: the timeout envelope alone still tells the UI what happened */
+          }
+          return jsonResponse(res, 504, {
+            ...timeoutBody(payload.correlationId, target.sessionId, PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS),
+            ...('text' in bridgeBody ? { text: bridgeBody.text } : {}),
+            ...('timedOut' in bridgeBody ? { timedOut: bridgeBody.timedOut } : {}),
+          });
+        }
         // 429 is the bridge's one-turn-at-a-time guard, and it is a normal
         // outcome the UI should surface as "busy" rather than as a fault.
         return jsonResponse(res, forwardRes.status === 429 ? 429 : 502, {
@@ -190,7 +221,11 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       });
     } catch (err) {
       if (isPrimeAgentTimeoutError(err)) {
-        return jsonResponse(res, 504, timeoutBody(payload.correlationId, target.sessionId));
+        return jsonResponse(
+          res,
+          504,
+          timeoutBody(payload.correlationId, target.sessionId, PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
+        );
       }
       return jsonResponse(res, 502, {
         error: 'Prime Agent bridge error',
@@ -233,7 +268,9 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
           target.streamUrl,
         ),
         body: JSON.stringify(buildPrimeAgentChannelBody(payload, target, requestAgentAddress)),
-        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS),
+        // Backstop only — see the /send fetch above. An abort at the bridge's
+        // own window would kill actively-streaming long turns mid-flight.
+        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
       });
 
       if (!transportRes.ok || !transportRes.body) {
@@ -276,7 +313,11 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         return;
       }
       if (isPrimeAgentTimeoutError(err)) {
-        return jsonResponse(res, 504, timeoutBody(payload.correlationId, target.sessionId));
+        return jsonResponse(
+          res,
+          504,
+          timeoutBody(payload.correlationId, target.sessionId, PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
+        );
       }
       return jsonResponse(res, 502, {
         error: 'Prime Agent bridge error',

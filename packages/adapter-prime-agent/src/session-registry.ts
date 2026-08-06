@@ -15,13 +15,18 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
 import type { PrimeAgentSessionDescriptor } from './types.js';
 
 /** A session id may become a filename, so keep it to a conservative charset. */
 const SAFE_SESSION_ID = /^[A-Za-z0-9._:-]{1,200}$/;
+
+// A dead-pid descriptor younger than this is never pruned: it may be a live
+// republication that landed (atomic rename, fresh mtime) between our read and
+// the rm. Mirrored in the extension's start-time prune (`extension.ts`).
+const PRUNE_MIN_AGE_MS = 30_000;
 
 export function isSafeSessionId(sessionId: string): boolean {
   return SAFE_SESSION_ID.test(sessionId);
@@ -80,6 +85,14 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
+function isOlderThanPruneAge(path: string): boolean {
+  try {
+    return Date.now() - statSync(path).mtimeMs >= PRUNE_MIN_AGE_MS;
+  } catch {
+    return false; // already gone: nothing left to prune
+  }
+}
+
 function parseDescriptor(raw: string): PrimeAgentSessionDescriptor | null {
   try {
     const parsed = JSON.parse(raw) as Partial<PrimeAgentSessionDescriptor>;
@@ -93,6 +106,11 @@ function parseDescriptor(raw: string): PrimeAgentSessionDescriptor | null {
     }
     if (!isSafeSessionId(parsed.sessionId)) return null;
     if (!isLoopbackBridgeUrl(parsed.bridgeUrl)) return null;
+    // A bad activity stamp invalidates only itself, not the descriptor: the
+    // file still names a live bridge, ordering just falls back to startedAt.
+    if (parsed.lastActiveAt !== undefined && typeof parsed.lastActiveAt !== 'string') {
+      delete parsed.lastActiveAt;
+    }
     return parsed as PrimeAgentSessionDescriptor;
   } catch {
     return null;
@@ -123,6 +141,12 @@ export function isLoopbackBridgeUrl(value: string | undefined): boolean {
  * Every descriptor currently on disk whose owning process is still alive.
  * Stale files are pruned as a side effect so the directory cannot grow
  * unbounded across crashes.
+ *
+ * Ordered most recently ACTIVE first, not most recently started: Prime Agent's
+ * daemon resumes sessions across terminal restarts, so a resumed session's
+ * descriptor can be newer than the fresh one the operator is actually using.
+ * Routing follows the session whose `lastActiveAt` moved last — that stamp is
+ * written per turn, so the operator's next turn settles the election.
  */
 export function readLiveSessions(
   sessionsDir: string,
@@ -149,14 +173,26 @@ export function readLiveSessions(
     // rather than deleting a descriptor whose ownership/liveness is unknown.
     if (!descriptor) continue;
     if (!isProcessAlive(descriptor.pid)) {
-      if (prune) rmSync(full, { force: true });
+      // A dead pid alone does not justify deleting by path: a respawned
+      // session republishes a LIVE descriptor at this exact path via atomic
+      // rename, and that rename can land between our read and the rm. Only a
+      // file old enough that no republication can explain its mtime is
+      // removed; a wrongly deleted descriptor would be republished on that
+      // session's next agent_start anyway, so the failure mode self-heals.
+      if (prune && isOlderThanPruneAge(full)) rmSync(full, { force: true });
       continue;
     }
     live.push(descriptor);
   }
-  // Newest first: the session a user most recently started is the most likely
-  // target when the UI does not name one explicitly.
-  live.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  // Most recently active first; startedAt is both the fallback for descriptors
+  // written before lastActiveAt existed and the tiebreak, and sessionId keeps
+  // the order total so equal stamps cannot flap between reads.
+  live.sort(
+    (a, b) =>
+      (b.lastActiveAt ?? b.startedAt).localeCompare(a.lastActiveAt ?? a.startedAt) ||
+      b.startedAt.localeCompare(a.startedAt) ||
+      a.sessionId.localeCompare(b.sessionId),
+  );
   return live;
 }
 
@@ -165,7 +201,8 @@ export function readLiveSessions(
  * - explicit id wins, and a miss is an error rather than a silent fallback;
  * - exactly one live session is unambiguous;
  * - several live sessions with no id selected is ambiguous by construction, so
- *   return the most recent but report it, letting the caller surface a choice.
+ *   return the most recently active one but report it, letting the caller
+ *   surface a choice.
  */
 export function selectSession(
   sessions: PrimeAgentSessionDescriptor[],

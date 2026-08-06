@@ -144,6 +144,31 @@ supplied (`hermes.ts:663`), which silently disables idempotency.
 - **Mitigation:** the bridge always echoes `correlationId`; a unit test asserts
   a missing discriminator is treated as a programming error, not a fallback.
 
+## R11 — Daemon-managed session resurrection (observed in live smoke)
+
+Sessions belong to the Prime Agent daemon, not the terminal: after a terminal
+restart the daemon resumes the old session **alongside** the fresh one, and
+both publish truthful descriptors. Killing the worker pid does not remove the
+session either — the daemon respawns it and the bridge republishes its
+descriptor. "Exactly one live session" is therefore not an invariant any
+cleanup can enforce, and deleting a live descriptor would be lying about state.
+
+- **Breaks silently:** under `startedAt`-only ordering the resumed session's
+  republished descriptor outranks the one the operator is typing into, so
+  unaddressed chat lands in a conversation nobody is looking at.
+- **Mitigation:** routing is an election on `lastActiveAt`, re-stamped per turn
+  on `agent_start` (which fires for local and bridge-injected turns alike), so
+  the operator's next turn in either surface moves the election. Dead-pid
+  descriptors are pruned at every bridge `session_start` and on every read;
+  live descriptors are never deleted.
+- **Detection:** status/UI report the session count honestly (`N live sessions
+  — the most recently active one is used`), so a surprising count is visible
+  rather than papered over; an explicit `sessionId` still bypasses the
+  election entirely. Note that explicit-`sessionId` sends also stamp election
+  activity, so recurring automated traffic addressed to a background session
+  will pull unaddressed routing toward it — by design, since any turn is
+  activity; the session picker (staged) is the escape hatch.
+
 ## Version pinning strategy
 
 1. **Record both SHAs** in every design and ADR document (done).
@@ -161,6 +186,7 @@ supplied (`hermes.ts:663`), which silently disables idempotency.
 | Extension API renamed | **Loud** | load error → no discovery file → `BRIDGE_OFFLINE` |
 | `message_update` payload changes | **Silent** | no-stream-but-turn-completed assertion |
 | Stale discovery file / recycled port | **Silent** | pid prune + `sessionId` echo in `/health` |
+| Resumed session outranks the one in use | **Silent** | per-turn `lastActiveAt` election + honest session count |
 | Competing memory extension | **Silent** | `verify`/`doctor` enumeration |
 | Local-scope harness leak | **Silent, irreversible** | scope filter + publish guard test |
 | Kernel skill not installed | **Silent until called** | `verify` import probe |

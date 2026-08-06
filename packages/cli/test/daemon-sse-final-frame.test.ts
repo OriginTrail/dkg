@@ -18,8 +18,13 @@ function makeRes() {
   const res = new EventEmitter() as any;
   res.writableEnded = false;
   res.chunks = [] as string[];
+  // Raw bytes alongside the per-chunk decode: byte-level assertions are the
+  // only way to see re-sent lead bytes of a codepoint split across chunks.
+  res.byteChunks = [] as Buffer[];
   res.write = (chunk: Uint8Array | string) => {
-    res.chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk);
+    res.byteChunks.push(bytes);
+    res.chunks.push(bytes.toString('utf8'));
     return true;
   };
   res.end = () => { res.writableEnded = true; };
@@ -29,7 +34,7 @@ function makeRes() {
 /** Sentinel for "upstream really did reach EOF" in a frame list. */
 const EOF = Symbol('eof');
 
-function makeReader(frames: Array<string | typeof EOF>) {
+function makeReader(frames: Array<string | Uint8Array | typeof EOF>) {
   const state = { cancelled: 0, released: 0, reads: 0 };
   let index = 0;
   const reader = {
@@ -44,7 +49,7 @@ function makeReader(frames: Array<string | typeof EOF>) {
       }
       const frame = frames[index++];
       if (frame === EOF) return { done: true, value: undefined };
-      return { done: false, value: Buffer.from(frame) };
+      return { done: false, value: typeof frame === 'string' ? Buffer.from(frame) : frame };
     },
     cancel: async () => { state.cancelled += 1; return undefined; },
     releaseLock: () => { state.released += 1; },
@@ -135,6 +140,43 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
 
     expect(res.writableEnded).toBe(false);
     expect(state.cancelled).toBe(0);
+  });
+
+  it('forwards byte-identical output when the terminal chunk begins mid-UTF-8 codepoint', async () => {
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const frame1 = 'data: {"type":"delta","text":"hi 😀"}\n\n';
+    const frame2 = 'data: {"type":"final","text":"done"}\n\n';
+    const frame3 = 'data: {"type":"delta","text":"dropped"}\n\n';
+    const bytes = Buffer.from(frame1 + frame2 + frame3, 'utf8');
+    // Split 2 bytes into the 4-byte emoji: the first chunk ends with the
+    // codepoint's lead bytes. A decode-based scan re-encodes the completed
+    // character into the terminal chunk even though those lead bytes already
+    // went to the client, so the wire would carry them twice.
+    const splitAt = Buffer.byteLength('data: {"type":"delta","text":"hi ', 'utf8') + 2;
+    const { reader, state } = makeReader([bytes.subarray(0, splitAt), bytes.subarray(splitAt)]);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+    expect(Buffer.concat(res.byteChunks).equals(Buffer.from(frame1 + frame2, 'utf8'))).toBe(true);
+  });
+
+  it('terminates when the frame separator itself is split across chunks and drops post-final bytes', async () => {
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const { reader, state } = makeReader([
+      'data: {"type":"final","text":"done"}\n',
+      '\ndata: {"type":"delta","text":"dropped"}\n\n',
+    ]);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+    const forwarded = Buffer.concat(res.byteChunks);
+    expect(forwarded.equals(Buffer.from('data: {"type":"final","text":"done"}\n\n', 'utf8'))).toBe(true);
   });
 
   it('does not double-end a response the caller already closed', async () => {

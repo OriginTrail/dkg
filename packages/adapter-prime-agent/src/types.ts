@@ -111,6 +111,14 @@ export interface PrimeAgentSessionDescriptor {
   /** Owning worker pid; a descriptor whose pid is gone is stale. */
   pid: number;
   startedAt: string;
+  /**
+   * Re-stamped once per turn by the bridge. The election key: Prime Agent's
+   * daemon resumes sessions across terminal restarts, so several live sessions
+   * is a legitimate state and `startedAt` alone would follow the resumed one
+   * rather than the one the operator is typing into. Absent from descriptors
+   * written by older bridges, where `startedAt` substitutes.
+   */
+  lastActiveAt?: string;
   sessionName?: string;
 }
 

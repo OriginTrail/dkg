@@ -595,7 +595,10 @@ export async function connectLocalAgentIntegrationFromUi(
         integration,
         notice:
           health.sessionCount > 1
-            ? `${integration.name} is connected to session ${live.sessionId} (${health.sessionCount} sessions live).`
+            // Do not name a routed session here: `live` is the health-probe
+            // survivor (probe falls through on failure), while routing takes
+            // the election head unconditionally — the two can differ.
+            ? `${integration.name} is connected — ${health.sessionCount} sessions live; unaddressed chat routes to the most recently active one.`
             : `${integration.name} is connected and chat-ready.`,
       };
     }

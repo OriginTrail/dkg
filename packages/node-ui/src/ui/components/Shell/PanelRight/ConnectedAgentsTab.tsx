@@ -387,7 +387,7 @@ export function ConnectedAgentsTab(props: {
                 {integration.id === 'prime-agent' && (
                   <>
                     <p className="v10-local-agent-copy">
-                      Connect a local Prime Agent through the node, then this tab becomes the persistent chat surface for it. Unlike the other agents, Prime Agent publishes a bridge per live session, and the node talks to the most recently started one.
+                      Connect a local Prime Agent through the node, then this tab becomes the persistent chat surface for it. Unlike the other agents, Prime Agent publishes a bridge per live session, and the node talks to the most recently active one.
                     </p>
                     {/*
                       Sessions are ephemeral by nature, so "none live" is normal
@@ -403,7 +403,7 @@ export function ConnectedAgentsTab(props: {
                           ? 'No live session. Start a Prime Agent session, then refresh — the extension publishes its bridge on session start.'
                           : integration.sessionCount === 1
                           ? '1 live session.'
-                          : `${integration.sessionCount} live sessions — the most recently started one is used.`}
+                          : `${integration.sessionCount} live sessions — the most recently active one is used.`}
                       </p>
                     )}
                     {integration.connectSupported && (

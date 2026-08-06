@@ -471,7 +471,7 @@ session-discovery file.**
   the refresh route (`routes/local-agents.ts:400-408`) do not support.
 - **Discovery**: the extension writes
   `~/.prime/agent/.dkg-adapter-prime-agent/sessions/<sessionId>.json`
-  (`{ sessionId, port, pid, startedAt, sessionName? }`) on `session_start` and
+  (`{ sessionId, bridgeUrl, pid, startedAt, lastActiveAt?, sessionName? }`) on `session_start` and
   removes it on `session_shutdown` (both hooks exist and shutdown is awaited —
   `types.ts:514,553`; `runner.ts:178-187`). The daemon resolves the active
   bridge by reading that directory, ignoring entries whose `pid` is gone.

@@ -32,7 +32,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -60,6 +60,10 @@ interface ExtensionApiLike {
 
 const ADAPTER_STATE_DIRNAME = '.dkg-adapter-prime-agent';
 const TURN_IDLE_TIMEOUT_MS = 15 * 60_000; // matches the daemon's channel timeout
+// A dead-pid descriptor younger than this is never pruned: it may be a live
+// republication that landed (atomic rename, fresh mtime) between our read and
+// the rm. Mirrored in the daemon-side reader (`session-registry.ts`).
+const PRUNE_MIN_AGE_MS = 30_000;
 
 function agentDir(): string {
   return process.env.PRIME_AGENT_CODING_AGENT_DIR ?? join(homedir(), '.prime', 'agent');
@@ -99,6 +103,19 @@ function tokenMatches(provided: string | undefined, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
+/** Same liveness rule as the daemon-side reader (`session-registry.ts`). */
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    // Signal 0 performs permission and existence checks without delivering.
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the process exists but belongs to another user.
+    return (err as NodeJS.ErrnoException)?.code === 'EPERM';
+  }
+}
+
 /* ── per-session bridge ───────────────────────────────────────────────────── */
 
 interface PendingTurn {
@@ -121,6 +138,9 @@ class SessionBridge {
   readonly #sessionId: string;
   #server: Server | undefined;
   #descriptorPath: string | undefined;
+  #bridgeUrl: string | undefined;
+  /** Fixed for the bridge's lifetime; re-publications move only lastActiveAt. */
+  #startedAt: string | undefined;
   #turn: PendingTurn | undefined;
   #agentActive = false;
   #closed = false;
@@ -164,23 +184,51 @@ class SessionBridge {
       server.listen(0, '127.0.0.1', () => resolve());
     });
 
-    const address = server.address();
-    if (!address || typeof address === 'string') {
-      throw new Error('bridge failed to acquire a loopback port');
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('bridge failed to acquire a loopback port');
+      }
+      // A crashed worker never removes its file, and Prime Agent's daemon may
+      // not read the directory for a long time. Pruning at every session start
+      // makes crashes converge without waiting for a daemon read. Live
+      // descriptors are never touched: several live sessions is a legitimate
+      // state (the daemon resumes sessions across terminal restarts) resolved
+      // by election, not deletion.
+      this.#pruneDeadSiblingDescriptors();
+      this.#bridgeUrl = `http://127.0.0.1:${address.port}`;
+      this.#startedAt = new Date().toISOString();
+      this.#publishDescriptor(this.#startedAt);
+    } catch (err) {
+      // Descriptor publication can fail after listen() succeeded (EACCES,
+      // ENOSPC). The factory drops its bridge reference on a start failure, so
+      // an open listener here would hold its port until process exit; close it
+      // before the error propagates.
+      this.#server = undefined;
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.();
+      });
+      throw err;
     }
-    const bridgeUrl = `http://127.0.0.1:${address.port}`;
-    this.#publishDescriptor(bridgeUrl);
   }
 
-  #publishDescriptor(bridgeUrl: string): void {
+  /**
+   * Atomic (temp file + `wx` + same-directory rename) so readers see either the
+   * old descriptor or the new one, never a torn write. Re-published per turn
+   * with a fresh `lastActiveAt`; `startedAt` and the bridge URL never move.
+   */
+  #publishDescriptor(lastActiveAt: string): void {
+    if (!this.#bridgeUrl || !this.#startedAt) return;
     const dir = sessionsDir();
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `${this.#sessionId}.json`);
     const descriptor = {
       sessionId: this.#sessionId,
-      bridgeUrl,
+      bridgeUrl: this.#bridgeUrl,
       pid: process.pid,
-      startedAt: new Date().toISOString(),
+      startedAt: this.#startedAt,
+      lastActiveAt,
     };
     const temporaryPath = join(dir, `.${this.#sessionId}.${process.pid}.${randomUUID()}.tmp`);
     try {
@@ -193,6 +241,42 @@ class SessionBridge {
       rmSync(temporaryPath, { force: true });
     }
     this.#descriptorPath = path;
+  }
+
+  #pruneDeadSiblingDescriptors(): void {
+    try {
+      const dir = sessionsDir();
+      const own = `${this.#sessionId}.json`;
+      for (const entry of readdirSync(dir)) {
+        if (!entry.endsWith('.json') || entry === own) continue;
+        const full = join(dir, entry);
+        let pid: unknown;
+        try {
+          pid = (JSON.parse(readFileSync(full, 'utf8')) as { pid?: unknown })?.pid;
+        } catch {
+          // Same policy as the reader: a malformed file may be a concurrent or
+          // externally-managed write whose ownership is unknown. Leave it.
+          continue;
+        }
+        if (typeof pid !== 'number' || isProcessAlive(pid)) continue;
+        // A dead pid alone does not justify deleting by path: Prime Agent's
+        // daemon respawns sessions, and the respawned bridge republishes a
+        // LIVE descriptor at this exact path via atomic rename. If that rename
+        // lands between our read and the rm, path-based deletion would take
+        // out the live file — so only files old enough that no republication
+        // can explain their mtime are removed. If the race is ever lost
+        // anyway, the descriptor is republished on that session's next
+        // agent_start, so a wrong deletion self-heals.
+        try {
+          if (Date.now() - statSync(full).mtimeMs < PRUNE_MIN_AGE_MS) continue;
+        } catch {
+          continue; // already gone: nothing left to prune
+        }
+        rmSync(full, { force: true });
+      }
+    } catch {
+      /* best effort: pruning must never prevent the bridge from starting */
+    }
   }
 
   #cleanupDescriptor(): void {
@@ -376,6 +460,17 @@ class SessionBridge {
 
   onAgentStart(): void {
     this.#agentActive = true;
+    // Election stamp, once per turn — agent_start fires for locally-typed and
+    // bridge-injected turns alike, so whichever session the operator actually
+    // uses wins routing. Not per message_update: thousands of delta events per
+    // turn would turn a discovery file into a write amplifier. A failed stamp
+    // must never break the turn, hence best-effort.
+    if (this.#closed || !this.#descriptorPath) return;
+    try {
+      this.#publishDescriptor(new Date().toISOString());
+    } catch {
+      /* the previous descriptor is still valid, just less recent */
+    }
   }
 
   onAgentEnd(): void {

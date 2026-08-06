@@ -311,6 +311,30 @@ describe('/api/prime-agent-channel/send', () => {
     expect(bridge.seen).toBeNull();
   });
 
+  it('503s instead of delivering when the health echo names another session', async () => {
+    // A recycled port whose new owner answers ok:true would pass a gate that
+    // only reads `ok` — and the chat would land in the wrong conversation.
+    const bridge = await startStubBridge({ sessionId: 's1', healthSessionId: 'someone-else' });
+    writeDescriptor('s1', bridge.url);
+
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c1' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/send',
+    } as any);
+
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe('PRIME_AGENT_BRIDGE_OFFLINE');
+    expect(body.details).toContain('someone-else');
+    expect(body.details).toContain('s1');
+    // The gate must refuse BEFORE delivery: no /send reached the bridge.
+    expect(bridge.seen).toBeNull();
+  });
+
   it('surfaces the bridge one-turn guard as busy rather than as a fault', async () => {
     const bridge = await startStubBridge({ sessionId: 's1', sendStatus: 429, sendBody: { error: 'turn in progress' } });
     writeDescriptor('s1', bridge.url);
@@ -326,6 +350,30 @@ describe('/api/prime-agent-channel/send', () => {
 
     expect(res.statusCode).toBe(429);
     expect(JSON.parse(res.body).code).toBe('PRIME_AGENT_SESSION_BUSY');
+  });
+
+  it('propagates the bridge idle timeout with its partial text instead of a generic 502', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      sendStatus: 504,
+      sendBody: { error: 'idle', text: 'partial answer', timedOut: true, correlationId: 'c-t' },
+    });
+    writeDescriptor('s1', bridge.url);
+
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-t' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/send',
+    } as any);
+
+    expect(res.statusCode).toBe(504);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe('PRIME_AGENT_BRIDGE_RESPONSE_TIMEOUT');
+    expect(body.text).toBe('partial answer');
+    expect(body.timedOut).toBe(true);
   });
 });
 

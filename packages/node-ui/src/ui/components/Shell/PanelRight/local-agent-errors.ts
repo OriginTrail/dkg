@@ -18,6 +18,9 @@ export function formatLocalAgentErrorMessage(
     if (err.code === 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT') {
       return `${integration.name} gateway response timed out.`;
     }
+    if (err.code === 'PRIME_AGENT_SESSION_BUSY') {
+      return `${integration.name} session is busy — try again in a moment.`;
+    }
     if (err.code === 'SWM_SYNC_TIMEOUT' || err.source === 'background-sync') {
       return 'Background sync timed out. The chat request was not marked as failed by the local-agent bridge.';
     }

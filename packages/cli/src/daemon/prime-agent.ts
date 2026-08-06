@@ -22,6 +22,16 @@ import {
 } from '@origintrail-official/dkg-adapter-prime-agent';
 
 export const PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
+/**
+ * Absolute backstop for the /send and /stream fetches, deliberately far above
+ * the bridge's activity-based idle timeout (which equals the response-timeout
+ * constant above). The bridge is the authority on turn liveness — its 504
+ * preserves partial output — so the daemon-side abort exists only to reap a
+ * hung transport that will never deliver that 504. An abort at or below the
+ * bridge's window would race it, kill actively-streaming long turns mid-flight,
+ * and make the 504-propagation branch unreachable.
+ */
+export const PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS = 60 * 60_000;
 export const PRIME_AGENT_HEALTH_TIMEOUT_MS = 5_000;
 export const PRIME_AGENT_PRE_SEND_TIMEOUT_MS = 3_000;
 export const PRIME_AGENT_TRANSPORT_KIND = 'prime-agent-channel';
@@ -58,8 +68,11 @@ export function primeAgentSessionsDir(agentDir?: string): string {
 }
 
 /**
- * Live sessions, newest first. The adapter owns descriptor validation and
- * liveness so setup/verify and daemon routing cannot drift apart.
+ * Live sessions, most recently active first (`lastActiveAt`, stamped per turn,
+ * falling back to `startedAt`) — a session resumed by Prime Agent's daemon can
+ * have a newer descriptor than the one the operator is actually using. The
+ * adapter owns descriptor validation, liveness and ordering so setup/verify
+ * and daemon routing cannot drift apart.
  */
 export function readPrimeAgentSessions(sessionsDir?: string): PrimeAgentSessionDescriptor[] {
   return readLiveSessions(sessionsDir ?? primeAgentSessionsDir());
@@ -76,9 +89,10 @@ export function targetFromDescriptor(d: PrimeAgentSessionDescriptor): PrimeAgent
 }
 
 /**
- * Ordered target list. An explicit session id selects exactly one target and a
- * miss yields none — a silent fallback to "some other session" would deliver a
- * user's message to a conversation they were not looking at.
+ * Ordered target list, most recently active first. An explicit session id
+ * selects exactly one target and a miss yields none — a silent fallback to
+ * "some other session" would deliver a user's message to a conversation they
+ * were not looking at.
  */
 export function getPrimeAgentChannelTargets(opts: {
   sessionsDir?: string;
@@ -192,9 +206,20 @@ export async function ensurePrimeAgentBridgeAvailable(
       },
       PRIME_AGENT_PRE_SEND_TIMEOUT_MS,
     );
-    const parsed = body as { ok?: boolean };
+    const parsed = body as { ok?: boolean; sessionId?: string };
     if (!ok || parsed?.ok !== true) {
       return { ok: false, status, details: 'bridge did not report ok', offline: true };
+    }
+    // A recycled port can answer ok:true as some OTHER session; delivering
+    // there would silently reroute the chat. Same echo check the probe path
+    // applies.
+    if (parsed.sessionId && parsed.sessionId !== target.sessionId) {
+      return {
+        ok: false,
+        status,
+        details: `bridge reports session ${parsed.sessionId}, expected ${target.sessionId}`,
+        offline: true,
+      };
     }
     return { ok: true, status };
   } catch (err) {

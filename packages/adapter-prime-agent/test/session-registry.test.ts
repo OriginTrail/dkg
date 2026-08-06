@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -70,11 +70,25 @@ describe('descriptor lifecycle', () => {
 
   it('prunes a descriptor whose owning process is dead', () => {
     // pid 2^31-1 is effectively guaranteed not to exist.
-    writeSessionDescriptor(sessionsDir, descriptor({ sessionId: 'dead', pid: 2147483647 }));
+    const path = writeSessionDescriptor(sessionsDir, descriptor({ sessionId: 'dead', pid: 2147483647 }));
+    // Age the file past the prune threshold: deletion is age-gated because a
+    // fresh mtime could be a respawned session's republication.
+    const past = new Date(Date.now() - 120_000);
+    utimesSync(path, past, past);
     expect(readdirSync(sessionsDir)).toHaveLength(1);
     expect(readLiveSessions(sessionsDir)).toHaveLength(0);
     // pruned as a side effect, so a crash loop cannot grow the directory
     expect(readdirSync(sessionsDir)).toHaveLength(0);
+  });
+
+  it('keeps a dead-pid descriptor file whose mtime is fresh (republish race)', () => {
+    // The TOCTOU shape: between reading a dead pid and deleting by path, a
+    // respawned session can republish a LIVE descriptor at that path. A fresh
+    // mtime is indistinguishable from that republication, so the file must
+    // survive — while still being excluded from the live list.
+    writeSessionDescriptor(sessionsDir, descriptor({ sessionId: 'fresh-dead', pid: 2147483647 }));
+    expect(readLiveSessions(sessionsDir)).toHaveLength(0);
+    expect(existsSync(join(sessionsDir, 'fresh-dead.json'))).toBe(true);
   });
 
   it('skips a malformed descriptor without deleting another process\'s in-flight file', () => {
@@ -101,10 +115,56 @@ describe('descriptor lifecycle', () => {
     expect(readLiveSessions(join(dir, 'nope'))).toEqual([]);
   });
 
-  it('orders newest first', () => {
+  it('orders newest first when no descriptor carries an activity stamp', () => {
     writeSessionDescriptor(sessionsDir, descriptor({ sessionId: 'old', startedAt: '2020-01-01T00:00:00.000Z' }));
     writeSessionDescriptor(sessionsDir, descriptor({ sessionId: 'new', startedAt: '2030-01-01T00:00:00.000Z' }));
     expect(readLiveSessions(sessionsDir).map((s) => s.sessionId)).toEqual(['new', 'old']);
+  });
+});
+
+describe('session election', () => {
+  it('a resumed session with newer startedAt but older lastActiveAt loses', () => {
+    // The restart shape: Prime Agent's daemon resumed the old session, so its
+    // descriptor is newer — but the operator is typing into the other one.
+    writeSessionDescriptor(sessionsDir, descriptor({
+      sessionId: 'resumed',
+      startedAt: '2030-01-02T00:00:00.000Z',
+      lastActiveAt: '2030-01-02T00:00:00.000Z',
+    }));
+    writeSessionDescriptor(sessionsDir, descriptor({
+      sessionId: 'in-use',
+      startedAt: '2030-01-01T00:00:00.000Z',
+      lastActiveAt: '2030-01-03T00:00:00.000Z',
+    }));
+    const live = readLiveSessions(sessionsDir);
+    expect(live.map((s) => s.sessionId)).toEqual(['in-use', 'resumed']);
+    expect(selectSession(live).session?.sessionId).toBe('in-use');
+  });
+
+  it('round-trips lastActiveAt through write/read', () => {
+    writeSessionDescriptor(sessionsDir, descriptor({ lastActiveAt: '2030-06-01T00:00:00.000Z' }));
+    expect(readLiveSessions(sessionsDir)[0]!.lastActiveAt).toBe('2030-06-01T00:00:00.000Z');
+  });
+
+  it('falls back to startedAt for a descriptor without a stamp', () => {
+    // An older bridge's descriptor competes on startedAt and can still win.
+    writeSessionDescriptor(sessionsDir, descriptor({
+      sessionId: 'stamped',
+      startedAt: '2030-01-01T00:00:00.000Z',
+      lastActiveAt: '2030-01-02T00:00:00.000Z',
+    }));
+    writeSessionDescriptor(sessionsDir, descriptor({ sessionId: 'unstamped', startedAt: '2030-01-03T00:00:00.000Z' }));
+    expect(readLiveSessions(sessionsDir).map((s) => s.sessionId)).toEqual(['unstamped', 'stamped']);
+  });
+
+  it('a non-string lastActiveAt invalidates the field, not the descriptor', () => {
+    writeFileSync(
+      join(sessionsDir, 'odd.json'),
+      JSON.stringify(descriptor({ sessionId: 'odd', lastActiveAt: 42 })),
+    );
+    const live = readLiveSessions(sessionsDir);
+    expect(live).toHaveLength(1);
+    expect(live[0]!.lastActiveAt).toBeUndefined();
   });
 });
 

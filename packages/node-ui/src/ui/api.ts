@@ -49,6 +49,12 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
   }
 }
 
+/**
+ * Structured error from the local-agent chat/health endpoints. On a bridge
+ * idle-timeout (504) the daemon forwards any partial turn output as `text`
+ * (flagged by `timedOut`), so panel code can choose to render the partial
+ * reply alongside the timeout instead of dropping what the agent already said.
+ */
 export class LocalAgentApiError extends Error {
   status?: number;
   code?: string;
@@ -60,6 +66,9 @@ export class LocalAgentApiError extends Error {
   route?: string;
   integrationId?: string;
   retryable?: boolean;
+  /** Partial turn output preserved across a bridge timeout. */
+  text?: string;
+  timedOut?: boolean;
 
   constructor(message: string, metadata: Partial<LocalAgentApiError> = {}) {
     super(message);
@@ -2213,6 +2222,10 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     const value = record[key];
     return typeof value === 'boolean' ? value : undefined;
   };
+  // Partial turn output is payload, not metadata: forwarded untrimmed so a
+  // rendered partial reply is exactly what the agent produced before the
+  // cutoff.
+  const text = typeof record.text === 'string' && record.text.trim() ? record.text : undefined;
   return new LocalAgentApiError(message, {
     status,
     code: stringField('code'),
@@ -2224,6 +2237,8 @@ function buildLocalAgentApiError(body: unknown, fallback: string, status?: numbe
     route: stringField('route'),
     integrationId: stringField('integrationId'),
     retryable: booleanField('retryable'),
+    text,
+    timedOut: booleanField('timedOut'),
   });
 }
 
@@ -2374,8 +2389,8 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     chatSupported: true,
     // No synthesised default. A Prime Agent session id is a uuidv7 minted by the
     // agent itself, so the node cannot invent one — leaving it undefined makes
-    // the daemon route to the newest live session, which is what the operator
-    // means by "the session I'm in" until they pick another.
+    // the daemon route to the most recently active live session, which is what
+    // the operator means by "the session I'm in" until they pick another.
     resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,
