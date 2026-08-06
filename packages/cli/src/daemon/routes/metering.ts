@@ -27,7 +27,7 @@ const meterHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
  * Returns null when it cannot be resolved. Never a fallback constant: guessing
  * 8453 here would mean a misconfigured node silently accepts mainnet proofs.
  */
-function chainIdOf(ctx: RequestContext): number | null {
+export function chainIdOf(ctx: RequestContext): number | null {
   try {
     const c = resolveChainConfig(ctx.config, ctx.network) as { chainId?: number | string } | undefined;
     const raw = c?.chainId;

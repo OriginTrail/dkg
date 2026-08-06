@@ -177,6 +177,29 @@ export function recordReadLeg(home: string, args: {
   const after = before - cost;
   if (after < 0) throw new Error("E_INSUFFICIENT_FUNDS");
 
+  // D12 v1.1, applied consistently: EVERYTHING in the signed preimage is
+  // integer. `units` was converted to tenths when Bo found the float-divergence
+  // bug, but the breakdown was left carrying floats (egress/scope/marker
+  // weights), so canonicalize() threw E_CANON_NON_INTEGER on every real leg —
+  // which nothing noticed, because shadow mode never reached this line. The
+  // rule has to cover the whole preimage or it covers nothing.
+  const SCALE = 1000;
+  const scaleInt = (n: unknown) => Math.round(Number(n ?? 0) * SCALE);
+  const rawBreakdown = args.breakdown as Record<string, unknown>;
+  const scaledMarkers: Record<string, number> = {};
+  for (const [k, v] of Object.entries((rawBreakdown?.markers ?? {}) as Record<string, unknown>)) {
+    scaledMarkers[k] = scaleInt(v);
+  }
+  const breakdownScaled = {
+    scale: SCALE,
+    base: scaleInt(rawBreakdown?.base),
+    egress: scaleInt(rawBreakdown?.egress),
+    scope: scaleInt(rawBreakdown?.scope),
+    M: scaleInt(rawBreakdown?.M),
+    kib: Math.round(Number(rawBreakdown?.kib ?? 0)),
+    markers: scaledMarkers,
+  };
+
   const leg = {
     legType: "read" as const,
     schemaVersion: "receipt-v0.3",
@@ -191,7 +214,7 @@ export function recordReadLeg(home: string, args: {
       // D12 v1.1: integer tenths is the SIGNED representation. A decimal
       // `units` may be shown to humans but never enters the preimage.
       unitsTenths: Math.round(args.units * 10),
-      breakdown: args.breakdown,
+      breakdownScaled,
       scopeQuads: args.scopeQuads,
       coefficientsDigest: sha256(canonicalize(COEFFICIENTS_CANONICAL as unknown as Record<string, unknown>)),
     },

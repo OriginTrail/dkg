@@ -1,0 +1,232 @@
+// V2 Stage-3 — the metered read. The billing path the rest of this exists for.
+//
+// Found 2026-08-06, while quoting the first funded call: the whole Stage-3
+// apparatus — terms, handshake, deposit rail, capability verification, EIP-191
+// binding — gated access to a billing path it was never wired into. A funded
+// tab had nothing that could spend from it, because /api/query takes its
+// principal from the transport bearer token and accepts no delegation at all.
+// Four times now the surrounding machinery has been built and verified while
+// the outcome it exists for stayed unconnected.
+//
+// The load-bearing distinction here: **a bearer token identifies a connection,
+// a delegation identifies a payer.** Billing the token holder is how a provider
+// ends up charging whoever happens to hold a proxy credential — including
+// itself, which is exactly what the front would have done. The principal debited
+// below is the tabPrincipal from a delegation whose signature was verified
+// against a key anchored to that address, never the caller's transport identity.
+import { createHash } from "node:crypto";
+import { computeUnits, costMicroTrac, isExempt, SCHEDULE_VERSION, type MeterConfig } from "./read-meter.js";
+import { balance, recordReadLeg, recordShadowObservation } from "./ledger.js";
+import { verifyCapability, admissibleForSettlement, type SignedDelegation, type CapabilityState } from "./capability.js";
+import { anchorWalletKey } from "./buyer-registry.js";
+import { activeOpening } from "./deposit-rail.js";
+import type { BindingProof } from "./evm-binding.js";
+
+const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
+
+export interface MeteredReadRequest {
+  delegation: SignedDelegation;
+  bindingProof?: BindingProof;
+  sparql: string;
+  contextGraphId?: string;
+  view?: string;
+  /** Buyer's declared ceiling for THIS call. Fail closed above it. */
+  maxMicroTrac?: number;
+  revocationCheckpoint?: { observedAt: number | null; maxCheckpointAgeMs: number };
+}
+
+export type MeteredReadOutcome =
+  | { ok: false; status: number; code: string; detail?: string }
+  | {
+      ok: true;
+      status: 200;
+      principal: string;
+      /** The signed leg, pending the buyer's countersignature. */
+      leg: Record<string, unknown>;
+      billed: boolean;
+      costMicroTrac: number;
+      tab: { before: number; after: number };
+      settlement: { admissible: false; reason: string };
+    };
+
+/**
+ * Authorise a metered read and produce the leg. Does NOT execute the query —
+ * the caller runs it and passes the body in, so this module stays free of the
+ * daemon's store dependencies and remains independently testable.
+ */
+export function authoriseMeteredRead(args: {
+  home: string;
+  chainId: number;
+  cfg: MeterConfig;
+  request: MeteredReadRequest;
+  /** Per-capability state, owned by the caller (home-keyed). */
+  state: CapabilityState;
+  route: string;
+  nodeClass: string;
+  settlementId: string;
+  scheduleDigest: string;
+  priceVectorDigest: string;
+  now?: number;
+}): { ok: false; status: number; code: string; detail?: string } | { ok: true; principal: string; label: string } {
+  const { request: r, cfg, home, chainId } = args;
+  const now = args.now ?? Date.now();
+
+  if (!r?.delegation || typeof r.sparql !== "string" || !r.sparql.trim()) {
+    return { ok: false, status: 400, code: "E_MISSING_FIELD", detail: "delegation and sparql are required" };
+  }
+
+  // 1. Anchor: resolve the verifying key from a self-proving binding or the
+  //    operator registry. Caller-supplied keys are never consulted.
+  const anchor = anchorWalletKey(home, r.delegation.tabPrincipal, { proof: r.bindingProof, chainId, now });
+  if (!anchor.ok) {
+    return { ok: false, status: 403, code: anchor.bindingCode ?? anchor.code, detail: anchor.detail };
+  }
+
+  // 2. Capability: the delegation must authorise THIS route, at this price.
+  const v = verifyCapability({
+    delegation: r.delegation,
+    walletPublicKeyPem: anchor.walletPublicKeyPem,
+    state: args.state,
+    now,
+    request: {
+      route: args.route,
+      nodeClass: args.nodeClass,
+      settlementId: args.settlementId,
+      scheduleDigest: args.scheduleDigest,
+      priceVectorDigest: args.priceVectorDigest,
+      sequence: args.state.sequence + 1,
+      estimatedMicroTrac: 0,
+    },
+    revocationCheckpoint: r.revocationCheckpoint ?? { observedAt: null, maxCheckpointAgeMs: 0 },
+  });
+  if (!v.ok) return { ok: false, status: 403, code: v.code };
+
+  // 3. A tab must be open for the principal the DELEGATION names. Enforcement
+  //    is per-principal, so this can be live for one buyer while every other
+  //    production read stays in shadow.
+  const principal = r.delegation.tabPrincipal;
+  const willBill = !isExempt(principal, cfg);
+  if (willBill && !activeOpening(home, principal)) {
+    return { ok: false, status: 402, code: "E_NO_OPEN_TAB", detail: "This principal has no open tab to bill against." };
+  }
+
+  return { ok: true, principal, label: anchor.label };
+}
+
+/**
+ * Record the leg for an executed read. Separated from authorisation so a
+ * failure here can never be mistaken for an authorisation failure, and so the
+ * caller cannot bill without having first passed every check above.
+ */
+export function settleMeteredRead(args: {
+  home: string;
+  cfg: MeterConfig;
+  principal: string;
+  requesterKeyRef?: string;
+  sparql: string;
+  responseBody: string;
+  scopeQuads: number;
+  contextGraphId?: string;
+  view?: string;
+  maxMicroTrac?: number;
+  wallMs?: number;
+}): MeteredReadOutcome {
+  const u = computeUnits({
+    sparql: args.sparql,
+    scopeQuads: args.scopeQuads,
+    responseBytes: Buffer.byteLength(args.responseBody, "utf8"),
+  });
+  const cost = costMicroTrac(u.units, args.cfg.readAskMicroPer1k);
+  const billable = !isExempt(args.principal, args.cfg);
+
+  // The buyer's per-call ceiling is checked BEFORE the debit, and exceeding it
+  // is a refusal rather than a clamp: silently charging less than asked would
+  // hide a pricing disagreement that the buyer explicitly wanted surfaced.
+  if (billable && args.maxMicroTrac !== undefined && cost > args.maxMicroTrac) {
+    return {
+      ok: false, status: 402, code: "E_OVER_BUYER_CEILING",
+      detail: `this read prices at ${cost} µTRAC, above your declared ceiling of ${args.maxMicroTrac}`,
+    };
+  }
+
+  recordShadowObservation(args.home, {
+    units: u.units,
+    breakdown: u.breakdown as unknown as Record<string, unknown>,
+    scopeQuads: args.scopeQuads,
+    responseBytes: Buffer.byteLength(args.responseBody, "utf8"),
+    sparql: args.sparql,
+    askMicroPer1k: args.cfg.readAskMicroPer1k,
+    costMicroTrac: cost,
+    mode: args.cfg.mode,
+    billable,
+    wallMs: args.wallMs,
+    contextGraphId: args.contextGraphId,
+    view: args.view,
+  });
+
+  if (!billable) {
+    // Honest zero: a receipt-shaped response that does NOT claim to be a leg.
+    // A shadow read must never look like a billed one to the buyer.
+    return {
+      ok: true, status: 200, principal: args.principal, billed: false,
+      costMicroTrac: 0,
+      leg: {
+        legType: "read-shadow", schemaVersion: "receipt-v0.3",
+        meter: { scheduleVersion: SCHEDULE_VERSION, unitsTenths: Math.round(u.units * 10), scopeQuads: args.scopeQuads },
+        pricing: { askMicroPer1k: args.cfg.readAskMicroPer1k, wouldHaveCostMicroTrac: cost, unit: "mockTRAC-u" },
+        evidence: { queryDigest: "sha256:" + sha256(args.sparql), resultDigest: "sha256:" + sha256(args.responseBody) },
+        note: "Metering only. This node is not billing this principal; no ledger entry was made.",
+      },
+      tab: { before: balance(args.home, args.principal).balance, after: balance(args.home, args.principal).balance },
+      settlement: { admissible: false, reason: "shadow mode — nothing to settle" },
+    };
+  }
+
+  let leg: Record<string, unknown>;
+  try {
+    leg = recordReadLeg(args.home, {
+      principal: args.principal,
+      units: u.units,
+      breakdown: u.breakdown as unknown as Record<string, unknown>,
+      scopeQuads: args.scopeQuads,
+      sparql: args.sparql,
+      responseBody: args.responseBody,
+      contextGraphId: args.contextGraphId,
+      view: args.view,
+      askMicroPer1k: args.cfg.readAskMicroPer1k,
+      requesterKeyRef: args.requesterKeyRef,
+    }) as unknown as Record<string, unknown>;
+  } catch (e: unknown) {
+    const m = String((e as Error)?.message ?? e);
+    const status = m.includes("INSUFFICIENT") ? 402 : m.includes("EXPIRED") ? 402 : 500;
+    return { ok: false, status, code: m.slice(0, 64) };
+  }
+
+  const tab = leg.tab as { before: number; after: number };
+  return {
+    ok: true, status: 200, principal: args.principal, billed: true,
+    costMicroTrac: (leg.pricing as { costMicroTrac: number }).costMicroTrac,
+    leg,
+    tab,
+    // D14, restated at the point of billing so it cannot be forgotten: the
+    // debit is provisional until the buyer countersigns. The provider holds a
+    // signed claim, not a settled payment.
+    settlement: { admissible: false, reason: "pending buyer countersignature (D14)" },
+  };
+}
+
+/** Verify a buyer's countersignature over a leg and mark it settleable. */
+export function countersignLeg(args: {
+  leg: Record<string, unknown>;
+  countersignature: string;
+  sessionPublicKeyPem: string;
+  now?: number;
+}): { ok: boolean; code: string } {
+  const r = admissibleForSettlement({
+    leg: args.leg,
+    sessionPublicKeyPem: args.sessionPublicKeyPem,
+    countersignature: args.countersignature,
+    now: args.now ?? Date.now(),
+  });
+  return { ok: r.ok, code: r.code };
+}

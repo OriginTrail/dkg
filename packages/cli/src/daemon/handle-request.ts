@@ -313,6 +313,7 @@ import {
 import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleMeteringRoutes } from './routes/metering.js';
+import { handleMeteredQueryRoutes } from './routes/metered-query.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -365,6 +366,11 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
 
   // V2 Stage-3 provider endpoint. Early in the chain so /api/metering/* is
   // never shadowed by a broader matcher downstream.
+  // Capability-authenticated metered read. BEFORE handleMeteringRoutes so its
+  // /api/metering/* default-deny cannot swallow these two paths.
+  await handleMeteredQueryRoutes(ctx);
+  if (res.writableEnded) return;
+
   await handleMeteringRoutes(ctx);
   if (res.writableEnded) return;
 
