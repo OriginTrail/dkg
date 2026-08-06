@@ -86,9 +86,9 @@ Three counts sit on every lane row beside the two ceilings, and they differ only
 | `pressureInflight` | The count that belongs with `inflightLimit`: this lane's own under a `partitioned` allocation, and on a `shared` row the pool's occupancy, **always** — it has none of `pressureQueued`'s fallbacks, because no state is ever classified on concurrency, so a shared row's ratio is a pool ratio by construction and cannot contradict the row's own state. |
 
 So compute utilization from **`pressureQueued / queueLimit`**, never from `queued`, and no consumer has
-to special-case the model. Both fields are optional on the type, so a scheduler written against an older
+to special-case the model. All three are optional on the type, so a scheduler written against an older
 `dkg-core` still satisfies it: absent `capacityModel` means `partitioned`, absent `pressureQueued` means
-`queued`.
+`queued`, and absent `pressureInflight` means `inflight`.
 
 ### Attributing `sync-global` pressure to a trigger
 
