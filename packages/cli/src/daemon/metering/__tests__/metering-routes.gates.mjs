@@ -40,7 +40,7 @@ const server = createServer(async (req, res) => {
   try {
     const handled = await handleMetering({
       method: req.method, path: url.pathname, searchParams: url.searchParams,
-      providerAddress: wallets.publisher.address,
+      providerAddress: req.headers["x-test-no-wallet"] ? null : wallets.publisher.address,
       requestAgentAddress: "0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba",
       safeHeadBlock: null,
       home: process.env.DKG_HOME,
@@ -89,6 +89,20 @@ ok("terms echo the buyer-set rules (12 confirmations, 1 TRAC min, no rollover)",
   terms.body?.terms?.confirmationDepth === 12 && terms.body?.terms?.minimumCreditTrac === "1" && terms.body?.terms?.rolloverPolicy === "none");
 ok("provider address is the node's real publisher wallet, not a placeholder",
   terms.body?.terms?.providerAddress === wallets.publisher.address);
+// Deployment-found: the first live quote advertised 0x0 as the deposit address
+// because the wallet lookup silently missed. A quote is an instruction to send
+// money; there is no safe default, so no-wallet must REFUSE, not substitute.
+ok("a quote NEVER advertises the zero address",
+  !/^0x0+$/i.test(terms.body?.terms?.providerAddress ?? ""));
+{
+  const noWallet = await fetch(base + "/api/metering/terms", { headers: { "x-test-no-wallet": "1" } });
+  const nb = await noWallet.json().catch(() => null);
+  ok("a node with no resolvable wallet refuses to quote (503), rather than naming 0x0",
+    noWallet.status === 503 && nb?.error === "E_NO_PROVIDER_WALLET", `${noWallet.status} ${JSON.stringify(nb)}`);
+  const nt = await fetch(base + "/api/metering/tab", { headers: { "x-test-no-wallet": "1" } });
+  ok("...and refuses every other metering route too, not just the quote",
+    nt.status === 503, `${nt.status}`);
+}
 
 // ── 2. the honesty rule, over the wire ────────────────────────────────────
 console.log("\nhonesty (a shadow node must not look like it bills):");

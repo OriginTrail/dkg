@@ -11,10 +11,22 @@ import { handleMetering } from "../metering/http-core.js";
 
 const meterHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
 
-/** The provider wallet this node deposits to. Read-only; never a key. */
-function providerAddress(ctx: RequestContext): string {
-  const w = ctx.opWallets as unknown as Record<string, { address?: string }>;
-  return w?.publisher?.address ?? w?.operational?.address ?? "0x0000000000000000000000000000000000000000";
+/**
+ * The provider wallet a buyer deposits TRAC to. Read-only; never a key.
+ *
+ * Deployment-found, 2026-08-06: this previously guessed `opWallets.publisher`
+ * / `opWallets.operational`, neither of which exists — the real shape is
+ * `{ adminWallet?, wallets[] }`. Both lookups missed and the function returned
+ * its zero-address fallback, so the FIRST live quote advertised
+ * 0x0000…0000 as the deposit destination. A buyer following that quote burns
+ * their TRAC. There is no safe default for "where should you send money", so
+ * this returns null and the caller refuses to quote at all.
+ */
+function providerAddress(ctx: RequestContext): string | null {
+  const w = ctx.opWallets as unknown as { wallets?: Array<{ address?: string }> };
+  const addr = w?.wallets?.[0]?.address;
+  if (!addr || /^0x0+$/i.test(addr)) return null;
+  return addr;
 }
 
 /** Observed head. Null when the chain is unreachable — never a guess. */

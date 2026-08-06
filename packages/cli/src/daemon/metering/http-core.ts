@@ -31,8 +31,12 @@ export interface MeteringRequest {
   method: string;
   path: string;
   searchParams: URLSearchParams;
-  /** Provider wallet address advertised in the quote. */
-  providerAddress: string;
+  /**
+   * Provider wallet address advertised in the quote, or null when the node
+   * cannot resolve one. Null is never substituted with a placeholder: telling a
+   * buyer to send TRAC to 0x0 is worse than refusing to quote.
+   */
+  providerAddress: string | null;
   /** Caller identity resolved by the daemon, if any. */
   requestAgentAddress?: string;
   /** Observed safe head, or null when the chain is unreachable. */
@@ -50,6 +54,18 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
   if (!path.startsWith("/api/metering/")) return false;
 
   const cfg = loadMeterConfig(home);
+
+  // Fail closed on the money question. Every route below either advertises the
+  // deposit address or binds a delegation to it, so a node that cannot name its
+  // own wallet must not serve any of them.
+  if (!req.providerAddress || /^0x0+$/i.test(req.providerAddress)) {
+    io.json(503, {
+      error: "E_NO_PROVIDER_WALLET",
+      detail: "This node cannot resolve its provider wallet, so it will not quote, open a tab, or accept a deposit.",
+    });
+    return true;
+  }
+
   const coefficientsDigest = sha256(canonicalize(COEFFICIENTS_CANONICAL as unknown as Record<string, unknown>));
 
   // ── GET /api/metering/terms ────────────────────────────────────────────
