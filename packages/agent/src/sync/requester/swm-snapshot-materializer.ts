@@ -20,6 +20,11 @@ import {
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  invalidateSwmMaterializationWitness,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+} from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -162,6 +167,28 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return false;
       const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
       if (!Number.isFinite(present) || present !== expected) return false;
+      // 1b) Witness fast path (#2079): a bound-subject ASK recording that THIS
+      // node already read this graph back and matched this exact digest. It is
+      // a memo of the measurement in step 2 — never an independent claim — so
+      // it is only reachable in a state where step 2 would also return true.
+      //
+      // Deliberately AFTER the count gate, not instead of it. Three paths
+      // remove an assertion graph outside this lock — the SWM TTL sweep, VM
+      // promote/publish/update (a different lock map), and the chain-reset
+      // wipe, whose scoped delete spares `urn:dkg:local:*` and so leaves the
+      // witness standing over a wiped store. The count catches all three for
+      // free. Measured, also skipping the count buys a further 1.5–10.5%,
+      // which is not worth trading self-healing for. Do not reorder these.
+      if (
+        await readSwmMaterializationWitness(
+          deps.store,
+          descriptor.assertionGraph,
+          descriptor.publicQuadsDigest,
+          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessAsk' },
+        )
+      ) {
+        return true;
+      }
       // 2) Content binding: a matching count does not prove the stored graph
       // is THIS descriptor's content — all versions of a graph-scoped KA share
       // one graph URI, so an older version of equal size would otherwise pass
@@ -175,7 +202,26 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       );
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
-      return workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      if (matches) {
+        // Written HERE — from the branch that just computed the digest over
+        // this node's own store content and matched it — and nowhere else.
+        // That is what makes the witness sound: it cannot record anything a
+        // peer asserted, and there is no crash window in which a witness
+        // exists for content that was never verified, because the content was
+        // read before this line runs.
+        //
+        // Best-effort: a failed or unsupported write costs one recomputation
+        // next round, so it must never fail the check that just succeeded.
+        await writeSwmMaterializationWitness(
+          deps.store,
+          descriptor.assertionGraph,
+          descriptor.publicQuadsDigest,
+          Date.now(),
+          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessWrite' },
+        ).catch(() => false);
+      }
+      return matches;
     },
 
     replaceGraph: async (graphUri, quads) => {
@@ -189,6 +235,27 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot',
       });
+      // #2079: the content just changed, so any witness for it now describes
+      // bytes that are gone. Defence in depth, NOT the thing that makes an
+      // equal-count replace safe — be precise about this, because the
+      // difference decides whether the read may ever stop binding the digest.
+      //
+      // What actually makes v1 → v2 safe is that the witness READ binds the
+      // digest as well as the subject: a standing v1 row cannot match an ASK
+      // for v2's digest, so the check falls through to the CONSTRUCT and the
+      // write then evicts v1 atomically. That holds with or without this call,
+      // and it is the property the tests pin.
+      //
+      // This call exists so the witness graph does not accumulate claims about
+      // content that no longer exists — including after a replace whose digest
+      // nothing subsequently verifies. Both orderings are safe for the same
+      // reason (the digest is bound either way); after the replace is chosen so
+      // a crash between the two leaves a stale row that misses rather than no
+      // row at all, which is identical in effect and cheaper to reason about.
+      await invalidateSwmMaterializationWitness(deps.store, graphUri, {
+        priority: 'background',
+        source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
+      }).catch(() => {});
       deps.invalidateListContextGraphsCache();
     },
 

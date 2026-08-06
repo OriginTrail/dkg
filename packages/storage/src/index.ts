@@ -143,6 +143,17 @@ export {
   type KnowledgeAssetPrivateReadOptions,
 } from './private-store.js';
 export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
+// #2079 — node-local memo of an already-verified SWM assertion graph. Read only
+// AFTER a count gate has matched; see the module doc for why the count cannot
+// be dropped.
+export {
+  SWM_MATERIALIZATION_WITNESS_GRAPH,
+  swmMaterializationWitnessSubject,
+  isSwmMaterializationWitnessGraph,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+  invalidateSwmMaterializationWitness,
+} from './swm-materialization-witness.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';
