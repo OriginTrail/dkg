@@ -27,7 +27,7 @@ class RecordingHandoff implements SystemRecordChildHandoffV1 {
   failAt: string | null = null;
   barrier: RecordingBarrier | null = null;
 
-  private async step(name: string): Promise<void> {
+  protected async step(name: string): Promise<void> {
     this.calls.push(name);
     this.barrier?.note(name);
     if (this.failAt === name) throw new Error(`handoff failed at ${name}`);
@@ -93,9 +93,28 @@ class StubExecutor {
   calls: Array<{ childGeneration: string }> = [];
   onDispatch?: () => void;
 
+  /** Park the dispatch so a whole lifecycle transition can run underneath it. */
+  private gate: Promise<void> | null = null;
+  private releaseGate: (() => void) | null = null;
+  private reachedGate: (() => void) | null = null;
+  dispatched: Promise<void> = Promise.resolve();
+
+  park(): void {
+    this.gate = new Promise<void>((r) => { this.releaseGate = r; });
+    this.dispatched = new Promise<void>((r) => { this.reachedGate = r; });
+  }
+
+  release(): void {
+    this.releaseGate?.();
+  }
+
   async applyVerified(_proof: unknown, childGeneration: string): Promise<SystemRecordApplyOutcomeV1> {
     this.calls.push({ childGeneration });
     this.onDispatch?.();
+    if (this.gate) {
+      this.reachedGate?.();
+      await this.gate;
+    }
     return this.outcome;
   }
 }
@@ -344,6 +363,86 @@ describe('system-record lane session lifecycle V1', () => {
       };
     }
 
+    /**
+     * A handoff that can be paused at ANY named step, with several gates live
+     * at once.
+     *
+     * `StallingHandoff` above can only stall `startAndProveCleanGeneration`, and
+     * only one at a time. That limitation is not cosmetic — it is why the suite
+     * could express "shutdown behind a stalled open" but not "a second caller
+     * arrives while the TEARDOWN is stalled", and the second shape is where both
+     * review rounds found their blockers. Every test below needs a gate on a
+     * step `StallingHandoff` cannot reach.
+     */
+    class GatedHandoff extends RecordingHandoff {
+      private readonly gates = new Map<string, Promise<void>>();
+      private readonly releases = new Map<string, () => void>();
+      private readonly arrivals = new Map<string, Promise<void>>();
+      private readonly arrived = new Map<string, () => void>();
+
+      /** Arm a gate on `step`; the handoff blocks there until `release(step)`. */
+      gate(step: string): void {
+        let release!: () => void;
+        this.gates.set(step, new Promise<void>((r) => { release = r; }));
+        this.releases.set(step, release);
+        let arrive!: () => void;
+        this.arrivals.set(step, new Promise<void>((r) => { arrive = r; }));
+        this.arrived.set(step, arrive);
+      }
+
+      /** Resolves once the handoff has ENTERED `step` and is parked there. */
+      reached(step: string): Promise<void> {
+        return this.arrivals.get(step) ?? Promise.resolve();
+      }
+
+      release(step: string): void {
+        this.releases.get(step)?.();
+      }
+
+      protected override async step(name: string): Promise<void> {
+        this.calls.push(name);
+        this.barrier?.note(name);
+        if (this.failAt === name) throw new Error(`handoff failed at ${name}`);
+        const gate = this.gates.get(name);
+        if (gate) {
+          this.arrived.get(name)?.();
+          await gate;
+        }
+      }
+    }
+
+    const buildGated = () => {
+      const gated = new GatedHandoff();
+      gated.barrier = barrier;
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: gated,
+        executor,
+        barrier: barrier.run,
+      });
+      return { gated, controller };
+    };
+
+    /**
+     * "Has not resolved yet" as an ASSERTION rather than a timing hope.
+     *
+     * A test that merely awaits and finds the right answer cannot distinguish
+     * "correctly blocked" from "resolved early and happened to look the same".
+     */
+    const track = <T>(p: Promise<T>) => {
+      const state = { settled: false, rejected: false, value: undefined as unknown };
+      const done = p.then(
+        (v) => { state.settled = true; state.value = v; },
+        (e) => { state.settled = true; state.rejected = true; state.value = e; },
+      );
+      return { state, done };
+    };
+
+    const drain = async (turns = 25) => {
+      for (let i = 0; i < turns; i += 1) await new Promise((r) => setImmediate(r));
+    };
+
     const buildStalling = () => {
       const stalling = new StallingHandoff();
       stalling.barrier = barrier;
@@ -356,6 +455,303 @@ describe('system-record lane session lifecycle V1', () => {
       });
       return { stalling, controller };
     };
+
+    /**
+     * Terminality is committed at INTENT, not at completion.
+     *
+     * Round 1 of the review found concurrent shutdowns each running a teardown;
+     * the fix made the `transition` pointer install synchronously. Round 2 then
+     * found that an older transition's `finally` erases that pointer, so a later
+     * `disable` revived the terminal session — executed, ending `disabled` after
+     * `close('shutdown')` had resolved, with a fresh child spawned and a record
+     * write dispatched.
+     *
+     * Two blockers from one root: the pointer was the only carrier of shutdown
+     * intent, and any transition could erase it. These tests pin the carrier
+     * change — `current` goes terminal synchronously and refuses to move — and
+     * every one of them fails against the shipped model.
+     */
+    it('commits terminal state SYNCHRONOUSLY, before the teardown can suspend', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+      gated.gate('destroyClient');
+
+      const shutdown = track(session.close('shutdown'));
+      // No await between the call and this read: the latch must already be
+      // visible. Under the shipped model `current` was written only in the
+      // teardown's `finally`, so this read returned `enabled`.
+      expect(session.state).toBe('shutdown');
+
+      await gated.reached('destroyClient');
+      expect(session.state).toBe('shutdown');
+      expect(shutdown.state.settled).toBe(false);
+
+      gated.release('destroyClient');
+      await shutdown.done;
+      expect(session.state).toBe('shutdown');
+    });
+
+    it('refuses a dispatch issued while the teardown is stopping the child', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+      gated.gate('stopAndProveOwnedChildDead');
+
+      const shutdown = track(session.close('shutdown'));
+      await gated.reached('stopAndProveOwnedChildDead');
+
+      // The child is being signalled RIGHT NOW. Shipped, this returned
+      // `{outcome:'applied'}` — a record write admitted mid-teardown, because
+      // the admission ladder reads `current` and `current` still said `enabled`.
+      const before = executor.calls.length;
+      expect(await session.applyVerified({})).toEqual({ outcome: 'capability-lost' });
+      expect(executor.calls.length).toBe(before);
+
+      gated.release('stopAndProveOwnedChildDead');
+      await shutdown.done;
+    });
+
+    it('refuses to publish an enable that a shutdown superseded mid-handoff', async () => {
+      const { gated, controller } = buildGated();
+      const first = await controller.open(ACTIVATION);
+      await first.close('disable');
+      const generationBefore = first.activationGeneration;
+
+      gated.gate('startAndProveCleanGeneration');
+      const reopen = track(controller.open(ACTIVATION));
+      await gated.reached('startAndProveCleanGeneration');
+
+      const shutdown = track(first.close('shutdown'));
+      gated.release('startAndProveCleanGeneration');
+      await shutdown.done;
+      await reopen.done;
+
+      // The superseded open must REJECT, not resolve with a terminal session.
+      expect(reopen.state.rejected).toBe(true);
+      expect(String((reopen.state.value as Error).message)).toMatch(/terminal/);
+      expect(first.state).toBe('shutdown');
+      // And it must not publish its activation: a terminal lane advertising a
+      // fresh generation is the resurrection the latch exists to prevent.
+      expect(first.activationGeneration).toBe(generationBefore);
+    });
+
+    it('refuses to publish a disable that a shutdown superseded mid-section', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+
+      gated.gate('rotateMaterializationEpoch');
+      const disable = track(session.close('disable'));
+      await gated.reached('rotateMaterializationEpoch');
+
+      const shutdown = track(session.close('shutdown'));
+      gated.release('rotateMaterializationEpoch');
+      await disable.done;
+      await shutdown.done;
+
+      // Shipped, `runDisable`'s tail wrote `disabled` over the terminal state.
+      expect(session.state).toBe('shutdown');
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+    });
+
+    it('opens NO disable section for a disable requested after shutdown latched', async () => {
+      const { gated, controller } = buildGated();
+      const first = await controller.open(ACTIVATION);
+      await first.close('disable');
+
+      gated.gate('startAndProveCleanGeneration');
+      const reopen = track(controller.open(ACTIVATION));
+      await gated.reached('startAndProveCleanGeneration');
+
+      const shutdown = track(first.close('shutdown'));
+      const disable = track(first.close('disable'));
+
+      gated.release('startAndProveCleanGeneration');
+      await shutdown.done;
+      await disable.done;
+      await reopen.done;
+
+      expect(first.state).toBe('shutdown');
+      // Shipped: ['…enable', '…shutdown', '…disable'] — a scheduler control
+      // barrier ran, and committed, after shutdown was terminal.
+      expect(barrier.purposes).toEqual([
+        'system-record.enable',
+        'system-record.disable',
+        'system-record.enable',
+        'system-record.shutdown',
+      ]);
+    });
+
+    it('makes a second shutdown JOIN the teardown rather than resolve early', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+      gated.gate('destroyClient');
+      gated.failAt = 'stopAndProveOwnedChildDead';
+
+      const first = track(session.close('shutdown'));
+      await gated.reached('destroyClient');
+
+      // The latch makes `current` terminal already. If `runShutdown` checked
+      // state before joining, this caller would get a RESOLVED promise while
+      // the child was still being stopped, and would never learn the teardown
+      // failed.
+      const second = track(session.close('shutdown'));
+      await drain();
+      expect(second.state.settled).toBe(false);
+
+      gated.release('destroyClient');
+      await Promise.allSettled([first.done, second.done]);
+      expect(first.state.rejected).toBe(true);
+      expect(second.state.rejected).toBe(true);
+      expect(String((second.state.value as Error).message)).toMatch(/handoff failed/);
+      expect(gated.calls.filter((c) => c === 'stopAndProveOwnedChildDead')).toHaveLength(2);
+    });
+
+    it('runs ONE teardown when a superseded open settles under a stalled shutdown', async () => {
+      const { gated, controller } = buildGated();
+      const first = await controller.open(ACTIVATION);
+      await first.close('disable');
+
+      gated.gate('startAndProveCleanGeneration');
+      const reopen = track(controller.open(ACTIVATION));
+      await gated.reached('startAndProveCleanGeneration');
+
+      gated.gate('destroyClient');
+      const shutdownA = track(first.close('shutdown'));
+      // Release the open: its `finally` runs here. Unconditionally clearing the
+      // pointer erased the shutdown entry, and the next caller built a SECOND
+      // teardown — 4 destroy / 4 stop where 3 of each were expected.
+      gated.release('startAndProveCleanGeneration');
+      await gated.reached('destroyClient');
+
+      const stopsBefore = gated.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length;
+      const shutdownB = track(first.close('shutdown'));
+      await drain();
+      expect(shutdownB.state.settled).toBe(false);
+
+      gated.release('destroyClient');
+      await Promise.allSettled([shutdownA.done, shutdownB.done, reopen.done]);
+
+      expect(gated.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length).toBe(
+        stopsBefore + 1,
+      );
+      expect(first.state).toBe('shutdown');
+    });
+
+    it('keeps the terminal state when a parked dispatch resolves indeterminate', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+
+      executor.park();
+      executor.outcome = {
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      } as SystemRecordApplyOutcomeV1;
+      const apply = track(session.applyVerified({}));
+      await executor.dispatched;
+
+      // A COMPLETE shutdown runs underneath the parked dispatch.
+      await session.close('shutdown');
+      expect(session.state).toBe('shutdown');
+
+      executor.release();
+      await apply.done;
+      // The seal is the fourth writer of `current` and the only one that never
+      // touches `this.transition`, so no pointer discipline can reach it.
+      // Shipped, it wrote `reconciling` over the terminal state.
+      expect((apply.state.value as SystemRecordApplyOutcomeV1).outcome).toBe('indeterminate');
+      expect(session.state).toBe('shutdown');
+    });
+
+    it('runs ONE disable section for two disables queued behind one open', async () => {
+      const { gated, controller } = buildGated();
+      const first = await controller.open(ACTIVATION);
+      await first.close('disable');
+
+      gated.gate('startAndProveCleanGeneration');
+      const reopen = track(controller.open(ACTIVATION));
+      await gated.reached('startAndProveCleanGeneration');
+
+      const a = track(first.close('disable'));
+      const b = track(first.close('disable'));
+      gated.release('startAndProveCleanGeneration');
+      await Promise.allSettled([a.done, b.done, reopen.done]);
+
+      // Both joined the same open, both re-read `enabled`, and both installed:
+      // two disable sections and two epoch rotations for one disable.
+      expect(barrier.purposes.slice(2)).toEqual([
+        'system-record.enable',
+        'system-record.disable',
+      ]);
+      expect(barrier.maxDepth).toBe(1);
+      expect(first.state).toBe('disabled');
+    });
+
+    it('does not re-run a disable on an already-unavailable lane', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+
+      gated.failAt = 'rotateMaterializationEpoch';
+      await expect(session.close('disable')).rejects.toThrow(/handoff failed/);
+      expect(session.state).toBe('unavailable');
+
+      gated.failAt = null;
+      const callsBefore = gated.calls.length;
+      const sectionsBefore = barrier.purposes.length;
+      await session.close('disable');
+      expect(gated.calls.length).toBe(callsBefore);
+      expect(barrier.purposes.length).toBe(sectionsBefore);
+      expect(session.state).toBe('unavailable');
+    });
+
+    it('rejects an open that joined a disable when a shutdown latched under the join', async () => {
+      // This one exists because its guard's solo mutant SURVIVED the first
+      // sweep. Removing the post-join `assertNotTerminal()` in `open()` left
+      // every test green while a superseded open ran a FULL generation handoff
+      // — destroy, stop, start — on an already-terminal lane. The guard was
+      // load-bearing and the suite simply could not see the path.
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+
+      gated.gate('rotateMaterializationEpoch');
+      const disable = track(session.close('disable'));
+      await gated.reached('rotateMaterializationEpoch');
+
+      const reopen = track(controller.open(ACTIVATION));
+      await drain(3);
+
+      const shutdown = track(session.close('shutdown'));
+      const startsBefore = gated.calls.filter((c) => c === 'startAndProveCleanGeneration').length;
+
+      gated.release('rotateMaterializationEpoch');
+      await Promise.allSettled([disable.done, reopen.done, shutdown.done]);
+
+      expect(reopen.state.rejected).toBe(true);
+      expect(String((reopen.state.value as Error).message)).toMatch(/terminal/);
+      // The decisive assertion: no replacement child was started for an open
+      // the shutdown had already superseded.
+      expect(gated.calls.filter((c) => c === 'startAndProveCleanGeneration').length).toBe(
+        startsBefore,
+      );
+      expect(session.state).toBe('shutdown');
+    });
+
+    it('rejects an open issued while the teardown is still running', async () => {
+      const { gated, controller } = buildGated();
+      const session = await controller.open(ACTIVATION);
+      gated.gate('destroyClient');
+
+      const shutdown = track(session.close('shutdown'));
+      await gated.reached('destroyClient');
+
+      // Shipped, this HUNG on the teardown and then resolved with a live lane.
+      const reopen = track(controller.open(ACTIVATION));
+      await drain();
+      expect(reopen.state.settled).toBe(true);
+      expect(reopen.state.rejected).toBe(true);
+      expect(String((reopen.state.value as Error).message)).toMatch(/terminal/);
+
+      gated.release('destroyClient');
+      await shutdown.done;
+    });
 
     it('shutdown outlives a stalled re-open instead of being overwritten by it', async () => {
       const { stalling, controller } = buildStalling();

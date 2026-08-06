@@ -263,12 +263,14 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
         return this;
       }
       if (this.transition.kind !== 'open') {
-        // Disable and shutdown both outrank open. Awaiting is correct, but the
-        // state we validated BEFORE the await is stale afterwards — a shutdown
-        // that completes here makes the lane terminal, and proceeding would
-        // start a fresh child after shutdown already proved the old one dead
-        // and its port released. An executed exploit reached exactly that:
-        // state `enabled`, activation generation 2, and a subsequent
+        // Only a DISABLE can be here now: a shutdown makes `current` terminal at
+        // intent, so `assertNotTerminal()` above has already thrown.
+        //
+        // Awaiting is correct, but the state validated BEFORE the await is stale
+        // afterwards — a shutdown latching here makes the lane terminal, and
+        // proceeding would start a fresh child after shutdown had proved the old
+        // one dead and its port released. An executed exploit reached exactly
+        // that: state `enabled`, activation generation 2, and a subsequent
         // `applyVerified` dispatched to the executor on a lane the process had
         // already shut down.
         await this.transition.work.catch(() => undefined);
@@ -286,13 +288,18 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       throw new SystemRecordLaneActivationConflictError(this.descriptor ?? 'unknown', wanted);
     }
 
-    const work = this.runEnable(wanted);
-    this.transition = { kind: 'open', descriptor: wanted, work };
+    const entry = { kind: 'open' as const, descriptor: wanted, work: this.runEnable(wanted) };
+    this.transition = entry;
     try {
-      await work;
+      await entry.work;
     } finally {
-      this.transition = null;
+      this.release(entry);
     }
+    // A shutdown can latch while our OWN handoff runs. `runEnable` then refuses
+    // to publish `enabled`, so without this we would hand the caller back a
+    // session whose `state` is already `shutdown`, as though the open had
+    // succeeded.
+    this.assertNotTerminal();
     return this;
   }
 
@@ -312,7 +319,7 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
    */
   private async runEnable(descriptor: string): Promise<void> {
     this.assertLeaseLive();
-    this.current = 'enabling';
+    this.commitState('enabling');
     try {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
@@ -325,7 +332,7 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
         await this.deps.handoff.rotateMaterializationEpoch();
       });
     } catch (error) {
-      this.current = 'unavailable';
+      this.commitState('unavailable');
       this.descriptor = null;
       throw error;
     }
@@ -336,7 +343,7 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
     // "enabled" lane over a child that was not the proven listener.
     const bound = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
     if (!bound || bound.terminal || !bound.ready) {
-      this.current = 'unavailable';
+      this.commitState('unavailable');
       this.descriptor = null;
       throw new Error(
         'system-record lane enable completed without a proven-ready child generation ' +
@@ -344,9 +351,15 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       );
     }
 
+    // Publish as ONE commit. A shutdown that latched under the handoff outranks
+    // this enable: the state write is refused, and the activation generation
+    // must not be published either — a terminal lane advertising a fresh
+    // activation is exactly the resurrection the latch exists to prevent.
+    // State first, then the rest: no await separates them, so no observer can
+    // see half a commit.
+    if (!this.commitState('enabled')) return;
     this.activation += 1n;
     this.descriptor = descriptor;
-    this.current = 'enabled';
   }
 
   /* -------------------------------------------------------------- */
@@ -359,21 +372,33 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
 
     if (this.transition) {
       if (this.transition.kind === 'disable') return this.transition.work;
-      if (this.transition.kind === 'shutdown') return this.transition.work;
+      // A `kind === 'shutdown'` branch used to sit here. Under the latch it is
+      // unreachable: a shutdown makes `current` terminal at intent, so the
+      // `current === 'shutdown'` check above has already returned. Deleted
+      // rather than kept, because a branch that can no longer change an outcome
+      // reads as protection.
+      //
       // Disable outranks an in-flight open: join it, then disable the result.
       await this.transition.work.catch(() => undefined);
-      // The joined open may have ended terminal, or a shutdown may have won
-      // the race while we waited. Re-read rather than acting on stale state.
+      // The joined open may have ended terminal, or a shutdown may have latched
+      // while we waited. Re-read rather than acting on stale state.
       const after = this.readState();
       if (after === 'shutdown' || after === 'disabled' || after === 'unavailable') return;
+      // Another disable that joined the SAME open may have resumed first and
+      // already installed itself. `current` is then `disabling`, which none of
+      // the three states above excludes, so installing anyway opened a SECOND
+      // `system-record.disable` section and rotated the materialization epoch
+      // twice for one disable.
+      const raced = this.readTransition();
+      if (raced?.kind === 'disable') return raced.work;
     }
 
-    const work = this.runDisable();
-    this.transition = { kind: 'disable', descriptor: null, work };
+    const entry = { kind: 'disable' as const, descriptor: null, work: this.runDisable() };
+    this.transition = entry;
     try {
-      await work;
+      await entry.work;
     } finally {
-      this.transition = null;
+      this.release(entry);
     }
   }
 
@@ -384,18 +409,18 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
    * commit after legacy work has already read around it.
    */
   private async runDisable(): Promise<void> {
-    this.current = 'disabling';
+    this.commitState('disabling');
     try {
       await this.deps.barrier('system-record.disable', async () => {
         await this.deps.handoff.awaitRetiredWork();
         await this.deps.handoff.rotateMaterializationEpoch();
       });
     } catch (error) {
-      this.current = 'unavailable';
+      this.commitState('unavailable');
       throw error;
     }
     this.descriptor = null;
-    this.current = 'disabled';
+    this.commitState('disabled');
   }
 
   /**
@@ -420,8 +445,32 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
    * the first, whatever it is awaiting.
    */
   private runShutdown(): Promise<void> {
-    if (this.readState() === 'shutdown') return Promise.resolve();
+    // ORDER IS LOAD-BEARING, and it is the reverse of what it was.
+    //
+    // The latch below makes `current === 'shutdown'` true from the instant of
+    // intent. With the state check first, every caller after the first would
+    // get a RESOLVED promise while the child was still being stopped, and would
+    // never see the teardown's failure. Joining first keeps "close('shutdown')
+    // resolved" meaning "the teardown finished".
     if (this.transition?.kind === 'shutdown') return this.transition.work;
+    if (this.readState() === 'shutdown') return Promise.resolve();
+
+    // THE LATCH. Shutdown intent becomes the committed state SYNCHRONOUSLY —
+    // before this method can suspend, and therefore before any other caller can
+    // run a single statement.
+    //
+    // Every precedence decision in this class already re-reads `current` after
+    // its awaits. Until now `current` could not carry shutdown intent at all:
+    // it was written only in the teardown's `finally`, so for the whole teardown
+    // the lane still read `enabled`. The only thing that DID carry the intent
+    // was `this.transition`, a pointer any other transition's `finally` was
+    // allowed to erase — which is exactly what round 2 of the review found.
+    //
+    // Moving terminality onto the state field is a change of CARRIER, not a
+    // third patch to the pointer. It is what makes `applyVerified` correct with
+    // no change to `applyVerified`: a dispatch during the teardown now sees a
+    // terminal lane and returns `capability-lost` instead of being admitted.
+    this.current = 'shutdown';
 
     const work = (async () => {
       // JOIN an in-flight open/disable rather than clobbering it. Overwriting
@@ -435,7 +484,11 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       // expected outcome, and shutdown must reach terminal regardless.
       const inFlight = this.transition?.work;
       if (inFlight) await inFlight.catch(() => undefined);
-      if (this.readState() === 'shutdown') return;
+      // A `if (this.readState() === 'shutdown') return;` used to sit here. Under
+      // the latch it is ALWAYS true, so keeping it would skip every teardown —
+      // the child would never be stopped and the lane would report a clean
+      // shutdown. Deleted rather than adapted: the check it performed (has
+      // someone else already shut down?) is the join two lines above.
 
       try {
         // Shutdown stops the child too, so it is sealed like the others.
@@ -457,7 +510,9 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
         });
       } finally {
         this.descriptor = null;
-        this.current = 'shutdown';
+        // `this.current = 'shutdown'` used to be here. The latch already
+        // committed it and `commitState` refuses to move off it, so a second
+        // write would be a redundant mechanism for the same fact.
         this.transition = null;
         // Release the process-global registration. Holding it past shutdown
         // made a replacement controller unconstructable for the process
@@ -544,8 +599,57 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
     // One seal, on the final outcome, however it was reached. The lane must not
     // accept further work against a generation whose last write may or may not
     // have committed.
-    if (final.outcome === 'indeterminate') this.current = 'reconciling';
+    // `commitState`, not a raw write: this is the fourth writer of `current` and
+    // the only one that never touches `this.transition`, so no amount of
+    // pointer discipline can reach it. A dispatch parked in the executor across
+    // a COMPLETED shutdown resumed here and wrote `reconciling` over the
+    // terminal state, after which the lane reopened and dispatched again.
+    if (final.outcome === 'indeterminate') this.commitState('reconciling');
     return final;
+  }
+
+  /**
+   * Clear the in-flight pointer ONLY if it is still ours.
+   *
+   * `runShutdown` deliberately REPLACES the pointer so that later callers join
+   * its teardown instead of building a second one. An unconditional clear erased
+   * that entry the moment the superseded transition settled, and the teardown
+   * became invisible: a later `close('shutdown')` had nothing to join, built its
+   * own, and two child signals plus two port assertions ran for one session.
+   *
+   * The pointer is now only a coalescing hint — it decides who joins whom, never
+   * whether a transition runs or what state results. A stale one degrades to a
+   * redundant join rather than a wrong transition.
+   */
+  private release(entry: object): void {
+    if (this.transition === entry) this.transition = null;
+  }
+
+  /**
+   * The only writer of `current` apart from the shutdown latch itself.
+   *
+   * Because shutdown latches synchronously at intent, every other transition can
+   * be mid-flight when it lands, and each one ends by writing its own outcome —
+   * `enabled`, `disabled`, `unavailable`, `reconciling` — from a continuation
+   * that resumes AFTER the latch. Refusing those writes here makes "terminal is
+   * final" a property of the FIELD rather than of an await ordering that has now
+   * been audited wrong twice.
+   *
+   * Returns false so a caller that publishes more than the state (`runEnable`
+   * also publishes the activation generation and descriptor) can abandon the
+   * whole commit rather than half of it.
+   *
+   * Note on the two synchronous call sites: `commitState('enabling')` and
+   * `commitState('disabling')` are reached with no await between them and their
+   * caller's terminal check, so their refusal is currently unreachable. They go
+   * through here anyway, because the property being relied on is "`commitState`
+   * is the only writer of `current`" — a raw write at those two sites
+   * reintroduces exactly the await-placement audit that has been wrong twice.
+   */
+  private commitState(next: SystemRecordLaneStateV1): boolean {
+    if (this.readState() === 'shutdown') return false;
+    this.current = next;
+    return true;
   }
 
   /**
@@ -575,6 +679,19 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
    */
   private readState(): SystemRecordLaneStateV1 {
     return this.current;
+  }
+
+  /**
+   * Widened read of `transition`, for the same reason as {@link readState}.
+   *
+   * TypeScript narrows `this.transition.kind` from the checks earlier in
+   * `close()` and does not invalidate that narrowing across the `await` — so a
+   * post-await re-read of the very field a concurrent caller is expected to have
+   * changed is reported as an impossible comparison. That report is the compiler
+   * asserting the assumption this class exists to break.
+   */
+  private readTransition(): SystemRecordLaneSession['transition'] {
+    return this.transition;
   }
 
   private assertLeaseLive(): void {
