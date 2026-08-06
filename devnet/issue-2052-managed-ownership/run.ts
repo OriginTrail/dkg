@@ -166,7 +166,7 @@ interface Manifest {
 async function main(): Promise<void> {
   // Delete any previous artifact FIRST. Without this, a run that throws part
   // way through leaves the last successful result on disk, and the standalone
-  // `verify` script will cheerfully re-verify it and exit 0 � certifying a run
+  // `verify` script will cheerfully re-verify it and exit 0 — certifying a run
   // that crashed. Demonstrated: a malformed manifest crashed the generator and
   // the stale artifact still verified as PASS.
   await rm(ARTIFACT, { force: true });

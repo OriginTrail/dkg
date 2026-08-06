@@ -140,6 +140,27 @@ describe('internal graph policy V1', () => {
     ).not.toThrow();
   });
 
+  it('refuses UNKNOWN names in the internal namespace, not just the reserved pair', () => {
+    // The guard used to reject only the two known-reserved names, so a
+    // near-miss or future name was writable AND hidden by the prefix-wide
+    // enumeration filter — invisible durable state, plus a namespace-confusion
+    // risk against whatever a later stack reserves for real. This is the
+    // assertion that makes the module docstring's "not writable" claim true.
+    for (const unknown of [
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}system-record-v1:future-reserved`,
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}system-record-v1:state-evil`,
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}system-record-v2:state`,
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}anything-at-all`,
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}:not-quite`,
+    ]) {
+      expect(isInternalGraphUriV1(unknown)).toBe(true);
+      expect(isEphemeralInternalStagingGraphUriV1(unknown)).toBe(false);
+      expect(() =>
+        assertNotReservedInternalGraphV1(unknown, 'insert', 'TestStore'),
+      ).toThrow(ReservedInternalGraphWriteError);
+    }
+  });
+
   it('hides every internal graph from the predicate the production filters use', () => {
     // Asserted against `isAtomicGraphReplaceStagingGraph` rather than a helper
     // of this module's own: that is the function the three adapters and the

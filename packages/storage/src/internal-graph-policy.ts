@@ -149,9 +149,23 @@ export function assertNotReservedInternalGraphV1(
   operation: string,
   storeName: string,
 ): void {
-  if (isReservedInternalGraphUriV1(graphUri)) {
-    throw new ReservedInternalGraphWriteError(graphUri, operation, storeName);
-  }
+  // Refuse the WHOLE internal namespace except canonical UUID staging graphs,
+  // not merely the two names known today.
+  //
+  // Rejecting only the known-reserved pair left a hole that contradicted this
+  // module's own docstring: a near-miss or future name such as
+  // `…:system-record-v1:future-reserved` was ACCEPTED by generic mutation while
+  // being hidden by the prefix-wide enumeration filter. That is the worst
+  // possible combination — invisible durable state, writable by anyone who can
+  // spell the prefix, and a standing namespace-confusion risk against whatever
+  // name a later stack reserves for real.
+  //
+  // Ephemeral staging graphs stay writable because the atomic-replace builders
+  // must be able to drop their own; they are identified by canonical UUID
+  // shape, so nothing else in the namespace inherits that permission.
+  if (!isInternalGraphUriV1(graphUri)) return;
+  if (isEphemeralInternalStagingGraphUriV1(graphUri)) return;
+  throw new ReservedInternalGraphWriteError(graphUri, operation, storeName);
 }
 
 /*

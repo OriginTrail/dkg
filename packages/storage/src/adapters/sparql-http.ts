@@ -1,5 +1,5 @@
-﻿/**
- * SparqlHttpStore â€” TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
+/**
+ * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
  * Uses standard W3C SPARQL 1.1 Protocol "direct POST":
  * - Query: POST to queryEndpoint (Content-Type: application/sparql-query, raw body)
@@ -10,7 +10,7 @@
  * otherwise rejects large queries/updates with HTTP 400.
  *
  * Works with Oxigraph server, Apache Jena Fuseki, GraphDB, Blazegraph,
- * Amazon Neptune, Stardog, and any SPARQL 1.1â€“compliant server.
+ * Amazon Neptune, Stardog, and any SPARQL 1.1–compliant server.
  *
  * Example (Oxigraph server):
  *   queryEndpoint: 'http://127.0.0.1:7878/query'
@@ -192,7 +192,7 @@ export class SparqlHttpStore implements TripleStore {
    * symbol-keyed option, so no persisted configuration can supply one.
    */
   private readonly ownershipLease: ManagedOxigraphOwnershipLeaseV1 | null;
-  /** Supervisor half of the handoff. Absent â‡’ the lane is never advertised. */
+  /** Supervisor half of the handoff. Absent ⇒ the lane is never advertised. */
   private readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 | null;
   /** Lazily built so a store that is never asked for the lane allocates nothing. */
   private systemRecordLane: SystemRecordLaneControllerV1 | null | undefined;
@@ -255,7 +255,7 @@ export class SparqlHttpStore implements TripleStore {
     return externalStorePriorityScheduler.snapshot;
   }
 
-  /** {@link GraphWriteGenSource} capability (#1609) â€” see graph-write-gen.ts. */
+  /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
   getWriteGen(graphPrefix: string): number {
     return this.writeGen.getWriteGen(graphPrefix);
   }
@@ -266,7 +266,7 @@ export class SparqlHttpStore implements TripleStore {
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
   ): Promise<T> {
-    // Direct POST (W3C SPARQL 1.1 Protocol Â§2.1.3): the query is the raw
+    // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
     // form handler, which on Jetty-backed stores (Blazegraph) caps at
@@ -309,14 +309,14 @@ export class SparqlHttpStore implements TripleStore {
     options?: QueryOptions,
     operation = 'update',
   ): Promise<void> {
-    // Direct POST (W3C SPARQL 1.1 Protocol Â§2.2.2): the update is the raw
+    // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
       const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
       const signal = signalScope.signal ?? timeoutSignal;
-      // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery â€”
+      // charset=utf-8: same ISO-8859-1 default-decode hazard as postQuery —
       // without it a Jetty-backed store corrupts non-ASCII INSERT DATA
       // literals and DELETE DATA patterns silently stop matching.
       try {
@@ -351,8 +351,8 @@ export class SparqlHttpStore implements TripleStore {
    * reserved state (#2052 B2).
    *
    * This lives on the ADAPTER rather than on a decorator on purpose. Every
-   * decorator is optional â€” the changelog defaults off, and the graph-set index
-   * and blob store are conditional â€” but all of them delegate downward, so the
+   * decorator is optional — the changelog defaults off, and the graph-set index
+   * and blob store are conditional — but all of them delegate downward, so the
    * adapter is the only always-on choke point for the managed endpoint that
    * actually holds reserved state.
    *
@@ -445,8 +445,8 @@ export class SparqlHttpStore implements TripleStore {
    *
    * The adapter owns exactly the connection pool: it is the only component that
    * can destroy the retired generation's sockets and await the requests issued
-   * over them. Process facts â€” the child exited, the port was released, a
-   * replacement is the proven listener â€” belong to the supervisor, which holds
+   * over them. Process facts — the child exited, the port was released, a
+   * replacement is the proven listener — belong to the supervisor, which holds
    * the `ChildProcess`. Splitting them here keeps the ORDER in one place while
    * letting each half assert only what it can actually observe.
    */
@@ -457,7 +457,7 @@ export class SparqlHttpStore implements TripleStore {
       // `destroyClient` moves the live client to `retiredClient` rather than
       // dropping it, so `awaitRetiredWork` still has something to drain. The
       // previous shape nulled the field and then re-read that same null, which
-      // made step 3 of the sequence a structural no-op â€” harmless only because
+      // made step 3 of the sequence a structural no-op — harmless only because
       // step 1 happened to await settlement, and actively wrong in `disable`,
       // which calls `awaitRetiredWork` with no preceding `destroyClient` and so
       // would have destroyed the CURRENT client and left the field pointing at
@@ -550,12 +550,12 @@ export class SparqlHttpStore implements TripleStore {
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
     this.assertGenericMutationQuadScope(quads, 'delete');
-    // SPARQL forbids blank nodes in `DELETE DATA` â€” a spec-compliant endpoint
-    // (Oxigraph, Fuseki, â€¦) rejects the whole statement with HTTP 400 if any
+    // SPARQL forbids blank nodes in `DELETE DATA` — a spec-compliant endpoint
+    // (Oxigraph, Fuseki, …) rejects the whole statement with HTTP 400 if any
     // quad's subject or object is a blank node. `buildBlankNodeSafeDelete`
     // keeps ground quads on the fast `DELETE DATA` path and removes
-    // blank-node quads with `DELETE { â€¦ } WHERE { â€¦ }` (blank nodes rewritten
-    // to variables) â€” the only spec-legal way to target existing blank-node
+    // blank-node quads with `DELETE { … } WHERE { … }` (blank nodes rewritten
+    // to variables) — the only spec-legal way to target existing blank-node
     // structure over the SPARQL protocol. See the helper for details.
     const update = buildBlankNodeSafeDelete(quads);
     if (!update) return;
@@ -582,7 +582,7 @@ export class SparqlHttpStore implements TripleStore {
     if (graphUri) {
       update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ${triple} } } WHERE { GRAPH <${escapeUri(graphUri)}> { ${triple} } }`;
     } else {
-      // The DELETE template must use the `GRAPH` keyword â€” `{ ?g_ctx { â€¦ } }`
+      // The DELETE template must use the `GRAPH` keyword — `{ ?g_ctx { … } }`
       // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
       // An unscoped pattern binds `?g_ctx` across EVERY named graph, so it
       // reaches reserved system-record state while sailing past
@@ -631,8 +631,8 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   /**
-   * Server-side SPARQL UPDATE over the SPARQL 1.1 protocol â€” the endpoint
-   * (oxigraph-server) executes graph-to-graph `INSERTâ€¦WHERE` copies internally,
+   * Server-side SPARQL UPDATE over the SPARQL 1.1 protocol — the endpoint
+   * (oxigraph-server) executes graph-to-graph `INSERT…WHERE` copies internally,
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
@@ -642,7 +642,7 @@ export class SparqlHttpStore implements TripleStore {
     }, 'update');
     this.invalidateListGraphsCache();
     // `touchedGraphs` hints only membership changes, not every graph whose
-    // CONTENT a raw UPDATE mutates â€” an unscoped bump is the only sound scope.
+    // CONTENT a raw UPDATE mutates — an unscoped bump is the only sound scope.
     this.writeGen.recordUnscopedWrite();
   }
 
@@ -659,7 +659,7 @@ export class SparqlHttpStore implements TripleStore {
     if (!this.atomicUpdates) {
       // A generic SPARQL endpoint may apply the staged DROP/INSERT/MOVE
       // operations non-transactionally, which can strand the target graph in a
-      // partial state â€” the one outcome replaceGraph must never produce. Fail
+      // partial state — the one outcome replaceGraph must never produce. Fail
       // closed (before any request) so callers take their non-atomic fallback.
       throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'SparqlHttpStore');
     }
@@ -752,7 +752,7 @@ export class SparqlHttpStore implements TripleStore {
       // Indeterminate remote failure: a timeout / lost response can occur AFTER
       // the endpoint committed the DELETE/INSERT (which may have added the graph's
       // first row or removed its last). Invalidate the graph-list cache before
-      // rethrowing so a direct managed caller never serves stale membership â€”
+      // rethrowing so a direct managed caller never serves stale membership —
       // mirrors replaceGraph / replaceGraphAndSubject.
       this.invalidateListGraphsCache();
       throw error;
@@ -884,7 +884,7 @@ export class SparqlHttpStore implements TripleStore {
 
   private async listGraphsDirect(options?: QueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
-    // Index-read enumeration shared with OxigraphStore â€” see the rationale on
+    // Index-read enumeration shared with OxigraphStore — see the rationale on
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY (O(#graphs) vs the legacy O(#quads)
     // scan; FILTER EXISTS preserves the non-empty-only contract).
     const r = await this.query(
@@ -1096,11 +1096,11 @@ export function isBlankNodeTerm(term: string): boolean {
  * connected when they share a blank-node label (directly or transitively). A
  * union-find over the blank-node labels does the grouping.
  *
- * Each component is later deleted as ONE `DELETE â€¦ WHERE â€¦` so its shared
+ * Each component is later deleted as ONE `DELETE … WHERE …` so its shared
  * blank-node variables join correctly and any ground terms anchor the match.
  * Disjoint components must be emitted as SEPARATE statements: a single WHERE
  * holding two independent patterns is a cross-product, so if one pattern has
- * no match the whole row is empty and NOTHING is deleted â€” a silent
+ * no match the whole row is empty and NOTHING is deleted — a silent
  * data-retention bug. Splitting by component avoids that.
  */
 function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
@@ -1139,11 +1139,11 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * whose subject or object is a blank node. Returns `null` for empty input.
  *
  * Strategy:
- *  - Ground quads (no blank nodes) â†’ a single `DELETE DATA { â€¦ }` block â€”
+ *  - Ground quads (no blank nodes) → a single `DELETE DATA { … }` block —
  *    exact and fast (identical to the legacy behaviour for the common case).
- *  - Blank-node quads â†’ grouped into connected components ({@link
+ *  - Blank-node quads → grouped into connected components ({@link
  *    connectedBlankNodeComponents}); each component becomes a
- *    `DELETE { â€¦ } WHERE { â€¦ }` with every blank node rewritten to a fresh
+ *    `DELETE { … } WHERE { … }` with every blank node rewritten to a fresh
  *    query variable. This is the only spec-legal way to remove existing
  *    blank-node structure over the SPARQL protocol (`DELETE DATA` forbids
  *    blank nodes outright).
@@ -1154,7 +1154,7 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * lone `_:b <p> <o>`) matches every subject with that predicate/object; in
  * practice such triples are part of a larger entity component anchored by a
  * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
- * components are indistinguishable in RDF and both delete â€” which is correct.
+ * components are indistinguishable in RDF and both delete — which is correct.
  *
  * Exported for unit testing of the generated SPARQL.
  */
@@ -1179,7 +1179,7 @@ export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
   }
 
   if (bnode.length > 0) {
-    // Group by graph first â€” never join components across graphs.
+    // Group by graph first — never join components across graphs.
     const byGraph = new Map<string, DKGQuad[]>();
     for (const q of bnode) {
       const g = q.graph || '';

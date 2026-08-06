@@ -367,6 +367,103 @@ describe('system-record lane session lifecycle V1', () => {
       expect(executor.calls.length).toBe(before);
     });
 
+    it('seals admission on a SYNTHESIZED indeterminate, not just an executor one', async () => {
+      // Review repro: the lane sealed only when the EXECUTOR returned
+      // indeterminate. A success whose generation changed under the dispatch
+      // was synthesized into indeterminate and returned while the lane stayed
+      // `enabled`, so a second apply was admitted — two dispatches, both
+      // ambiguous. The second must never have been admitted.
+      const { stalling, controller } = buildStalling();
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+
+      executor.outcome = { outcome: 'applied', stateRevision: '1', appliedStateDigest: `0x${'c'.repeat(64)}` };
+      executor.onDispatch = () => {
+        ownership.invalidate('child-exit');
+        ownership.bindReadyGeneration();
+      };
+
+      const first = await session.applyVerified({});
+      expect(first.outcome).toBe('indeterminate');
+      expect(session.state).toBe('reconciling');
+
+      const callsAfterFirst = executor.calls.length;
+      const second = await session.applyVerified({});
+      expect(second).toEqual({ outcome: 'deferred', reason: 'generation-changed' });
+      expect(executor.calls.length).toBe(callsAfterFirst);
+    });
+
+    it('treats a not-ready lease under dispatch as unattributable, not just a changed generation', async () => {
+      const { stalling, controller } = buildStalling();
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+
+      executor.outcome = { outcome: 'applied', stateRevision: '1', appliedStateDigest: `0x${'d'.repeat(64)}` };
+      // Generation string is UNCHANGED; only readiness is lost. Reading just
+      // `childGeneration` would have called this attributable and returned a
+      // success for a write it cannot account for.
+      executor.onDispatch = () => ownership.invalidate('listener-ownership-lost');
+
+      expect((await session.applyVerified({})).outcome).toBe('indeterminate');
+      expect(session.state).toBe('reconciling');
+    });
+
+    it('coalesces concurrent shutdowns into ONE teardown', async () => {
+      // Review repro: both callers passed the "already shutting down?" check
+      // before awaiting the in-flight open, then both ran a teardown —
+      // 4 destroy / 4 stop where 3 of each were expected. Double
+      // stop-and-prove-release is not harmless at a process-ownership
+      // boundary; each one signals a child and asserts a port fact.
+      const { stalling, controller } = buildStalling();
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+      const baseline = {
+        destroy: stalling.calls.filter((c) => c === 'destroyClient').length,
+        stop: stalling.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length,
+      };
+
+      await Promise.all([session.close('shutdown'), session.close('shutdown'), session.close('shutdown')]);
+
+      expect(stalling.calls.filter((c) => c === 'destroyClient').length).toBe(baseline.destroy + 1);
+      expect(stalling.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length).toBe(baseline.stop + 1);
+      expect(session.state).toBe('shutdown');
+    });
+
+    it('coalesces concurrent shutdowns issued behind a STALLED open', async () => {
+      // This is the reviewer's exact shape, and it is the one that produced
+      // 4 destroy / 4 stop: both callers passed the "already shutting down?"
+      // check while the in-flight transition was still the OPEN, both awaited
+      // it, and both then ran a teardown. Coalescing only matters here — with
+      // the open already finished, the state re-check alone suffices, which is
+      // why a weaker test could not discriminate.
+      const { stalling, controller } = buildStalling();
+      stalling.release();
+      const session = await controller.open(ACTIVATION);
+      await session.close('disable');
+
+      const reopened = new StallingHandoff();
+      (stalling as unknown as { startAndProveCleanGeneration: () => Promise<void> })
+        .startAndProveCleanGeneration = reopened.startAndProveCleanGeneration;
+
+      const opening = controller.open(ACTIVATION).catch(() => undefined);
+      await reopened.reachedStart;
+
+      const baseline = {
+        destroy: stalling.calls.filter((c) => c === 'destroyClient').length,
+        stop: stalling.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length,
+      };
+      const shutdowns = Promise.all([session.close('shutdown'), session.close('shutdown')]);
+      reopened.release();
+      await shutdowns;
+      await opening;
+
+      expect(stalling.calls.filter((c) => c === 'destroyClient').length).toBe(baseline.destroy + 1);
+      expect(stalling.calls.filter((c) => c === 'stopAndProveOwnedChildDead').length).toBe(
+        baseline.stop + 1,
+      );
+      expect(session.state).toBe('shutdown');
+    });
+
     it('releases the process-global registration on shutdown', async () => {
       const { stalling, controller } = buildStalling();
       stalling.release();

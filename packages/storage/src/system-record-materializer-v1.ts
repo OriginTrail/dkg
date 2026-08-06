@@ -368,24 +368,40 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
    * idempotent and always reaches the terminal state even if a step throws:
    * a process that is going away cannot be left believing the lane is live.
    */
-  private async runShutdown(): Promise<void> {
-    if (this.current === 'shutdown') return;
+  /**
+   * NOT `async`, deliberately.
+   *
+   * Shutdown intent has to be established SYNCHRONOUSLY, before any await, or
+   * concurrent callers each build their own teardown. Previously both callers
+   * passed the "is a shutdown already running?" check (the in-flight transition
+   * was still the open), both awaited it, both resumed, and both ran the
+   * teardown while overwriting `this.transition`. Observed with two concurrent
+   * shutdowns behind a stalled open: 4 destroy and 4 stop calls where 3 of each
+   * were expected. Double stop-and-prove-release is not a harmless idempotency
+   * assumption at a process-ownership boundary — each one signals a child and
+   * asserts a port fact.
+   *
+   * Assigning `shutdownWork` before returning makes the second caller join the
+   * first, whatever it is awaiting.
+   */
+  private runShutdown(): Promise<void> {
+    if (this.readState() === 'shutdown') return Promise.resolve();
     if (this.transition?.kind === 'shutdown') return this.transition.work;
 
-    // JOIN an in-flight open/disable rather than clobbering it. Overwriting
-    // `this.transition` left the other transition running concurrently, so a
-    // stalled enable would resume AFTER shutdown completed and set the lane
-    // back to `enabled` — starting a replacement child after shutdown had
-    // already proved the old one dead. Shutdown supersedes, which means it
-    // must outlive the transition it supersedes, not race it.
-    //
-    // Failures are absorbed: the other transition losing to a teardown is an
-    // expected outcome, and shutdown must reach terminal regardless.
-    const inFlight = this.transition?.work;
-    if (inFlight) await inFlight.catch(() => undefined);
-    if (this.readState() === 'shutdown') return;
-
     const work = (async () => {
+      // JOIN an in-flight open/disable rather than clobbering it. Overwriting
+      // `this.transition` left the other transition running concurrently, so a
+      // stalled enable would resume AFTER shutdown completed and set the lane
+      // back to `enabled` — starting a replacement child after shutdown had
+      // already proved the old one dead. Shutdown supersedes, which means it
+      // must outlive the transition it supersedes, not race it.
+      //
+      // Failures are absorbed: the other transition losing to a teardown is an
+      // expected outcome, and shutdown must reach terminal regardless.
+      const inFlight = this.transition?.work;
+      if (inFlight) await inFlight.catch(() => undefined);
+      if (this.readState() === 'shutdown') return;
+
       try {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
@@ -393,6 +409,7 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       } finally {
         this.descriptor = null;
         this.current = 'shutdown';
+        this.transition = null;
         // Release the process-global registration. Holding it past shutdown
         // made a replacement controller unconstructable for the process
         // lifetime — and because the adapter calls the factory inside an
@@ -402,12 +419,23 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
       }
     })();
 
+    // THE fix, and it is this one line's PLACEMENT rather than its content:
+    // the assignment happens synchronously, before any await, so a second
+    // shutdown caller sees `kind === 'shutdown'` at the top and joins instead
+    // of building its own teardown. Previously this method was `async` and the
+    // assignment landed AFTER the join, so both callers passed the check while
+    // the in-flight transition was still the OPEN and both ran a teardown —
+    // 4 destroy / 4 stop where 3 of each were expected.
+    //
+    // It also makes the shutdown visible to `open()` and `close('disable')`,
+    // which join `this.transition.work` and then re-check terminal state.
+    //
+    // A separate `shutdownWork` field was tried here and removed: with this
+    // assignment synchronous it never changed an outcome, and mutating it away
+    // left all 36 tests green. An inert guard reads as protection, so it is
+    // worse than none.
     this.transition = { kind: 'shutdown', descriptor: null, work };
-    try {
-      await work;
-    } finally {
-      this.transition = null;
-    }
+    return work;
   }
 
   /* -------------------------------------------------------------- */
@@ -436,20 +464,39 @@ class SystemRecordLaneSession implements SystemRecordLaneSessionV1 {
     const boundGeneration = snapshot.childGeneration;
     const result = await this.deps.executor.applyVerified(proof, boundGeneration);
 
-    // An indeterminate dispatch seals admission and hands ownership to
-    // recovery; the lane must not accept further work against a generation
-    // whose last write may or may not have committed.
-    if (result.outcome === 'indeterminate') this.current = 'reconciling';
-
-    // A generation that changed UNDER the dispatch means the response we just
-    // read cannot be attributed to the child we addressed.
+    // Derive the FINAL outcome first, then seal on it.
+    //
+    // The previous order sealed only on the executor's own `indeterminate` and
+    // then synthesized a second one below without sealing — so a success whose
+    // generation changed under the dispatch returned `indeterminate` to the
+    // caller while leaving the lane `enabled`, and the very next apply was
+    // admitted. Reproduced: two dispatches, both returning `indeterminate`,
+    // state `enabled` throughout. The second must never have been admitted.
+    //
+    // Attribution is checked on the WHOLE ownership snapshot, not just the
+    // generation string: a lease that has gone not-ready or terminal under the
+    // dispatch is equally unable to attribute the response, and reading only
+    // `childGeneration` would miss both.
     const after = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
-    if (!after || after.childGeneration !== boundGeneration) {
-      if (result.outcome === 'applied' || result.outcome === 'already-applied') {
-        return { outcome: 'indeterminate', recoveryGeneration: after?.childGeneration ?? boundGeneration };
-      }
-    }
-    return result;
+    const attributable =
+      after !== null &&
+      !after.terminal &&
+      after.ready &&
+      after.childGeneration === boundGeneration;
+
+    const final: SystemRecordApplyOutcomeV1 =
+      !attributable && (result.outcome === 'applied' || result.outcome === 'already-applied')
+        ? {
+            outcome: 'indeterminate',
+            recoveryGeneration: after?.childGeneration ?? boundGeneration,
+          }
+        : result;
+
+    // One seal, on the final outcome, however it was reached. The lane must not
+    // accept further work against a generation whose last write may or may not
+    // have committed.
+    if (final.outcome === 'indeterminate') this.current = 'reconciling';
+    return final;
   }
 
   /**
