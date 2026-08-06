@@ -14,6 +14,7 @@ import {
   computeSystemRecordInventoryInternalDigestV1,
   computeSystemRecordRootDescriptorDigestV1,
   computeSystemRecordStableKeyHashV1,
+  decodeInventoryRowBase64UrlV1,
   decodeSystemRecordInventoryRowV1,
   encodeInventoryRowBase64UrlV1,
   encodeSystemRecordInventoryRowV1,
@@ -32,6 +33,8 @@ import {
   SYSTEM_RECORD_MAX_EVIDENCE_ROW_BYTES,
   SYSTEM_RECORD_MAX_INVENTORY_RECORDS,
   SYSTEM_RECORD_MAX_ORDINARY_ROW_BYTES,
+  SYSTEM_RECORD_MAX_ROW_BYTES,
+  SYSTEM_RECORD_SLICE_TIMEOUT_MS,
 } from '../src/system-record-limits-v1.js';
 
 const NETWORK = 'otp:20430' as const;
@@ -54,6 +57,24 @@ describe('system-record compact inventory rows', () => {
       .toEqual(evidence);
   });
 
+  it('normalizes row objects and bytes through intrinsic snapshots', () => {
+    const value = row(PEER_A);
+    const encoded = encodeSystemRecordInventoryRowV1(NETWORK, value);
+    const hostileRow = new Proxy(value, {
+      get(target, property, receiver) {
+        if (property === 'peerId') return PEER_B;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(encodeSystemRecordInventoryRowV1(NETWORK, hostileRow)).toEqual(encoded);
+
+    class MisleadingRowBytes extends Uint8Array {
+      override get byteLength(): number { return 1; }
+      override subarray(): Uint8Array { return new Uint8Array(); }
+    }
+    expect(decodeSystemRecordInventoryRowV1(NETWORK, new MisleadingRowBytes(encoded))).toEqual(value);
+  });
+
   it('rejects mismatched stable keys and evidence without quarantine', () => {
     expect(() => encodeSystemRecordInventoryRowV1(NETWORK, {
       ...row(PEER_A), quarantined: false, conflictEvidenceDigest: EVIDENCE,
@@ -61,6 +82,10 @@ describe('system-record compact inventory rows', () => {
     const encoded = encodeSystemRecordInventoryRowV1(NETWORK, row(PEER_A));
     expect(() => decodeSystemRecordInventoryRowV1('other:network' as typeof NETWORK, encoded))
       .toThrow(/stable key/);
+    expect(() => decodeInventoryRowBase64UrlV1(
+      NETWORK,
+      'A'.repeat(Math.ceil(SYSTEM_RECORD_MAX_ROW_BYTES * 4 / 3) + 1),
+    )).toThrow(/base64url/);
   });
 
   it('accepts authority sequence 14 and rejects sequence 15', () => {
@@ -179,6 +204,234 @@ describe('system-record immutable B+tree objects', () => {
     })).rejects.toThrow(/aborted-after-load/);
   });
 
+  it('pins slice admission while an awaited loader mutates its source object', async () => {
+    const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, deterministicPeers(513).map(row));
+    const requestBoundTraversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    const requestBoundSlice = {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    };
+    const requestBound = await requestBoundTraversal.advance(async (digest) => {
+      requestBoundSlice.maxRequests = 12;
+      const stored = snapshot.objects.get(digest)!;
+      return loadedInventoryObject(stored);
+    }, requestBoundSlice);
+    expect(requestBound).toMatchObject({ status: 'paused', requests: 1 });
+
+    const deadlineTraversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    let nowMs = 0;
+    const deadlineSlice = {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: 1,
+      nowMs: () => nowMs,
+    };
+    await expect(deadlineTraversal.advance(async (digest) => {
+      nowMs = 2;
+      deadlineSlice.deadlineMs = 3;
+      const stored = snapshot.objects.get(digest)!;
+      return loadedInventoryObject(stored);
+    }, deadlineSlice)).rejects.toThrow(/deadline expired during load/);
+
+    const abortTraversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    const admitted = new AbortController();
+    const replacement = new AbortController();
+    const abortSlice = {
+      signal: admitted.signal,
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    };
+    await expect(abortTraversal.advance(async (digest) => {
+      admitted.abort(new Error('admitted-signal-aborted'));
+      abortSlice.signal = replacement.signal;
+      const stored = snapshot.objects.get(digest)!;
+      return loadedInventoryObject(stored);
+    }, abortSlice)).rejects.toThrow(/admitted-signal-aborted/);
+  });
+
+  it('latches traversal admission before invoking a reentrant clock', async () => {
+    const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, [row(PEER_A)]);
+    const traversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    let nested: Promise<unknown> | undefined;
+    let nestedLoads = 0;
+    let reentered = false;
+    const outer = traversal.advance(async (digest) => (
+      loadedInventoryObject(snapshot.objects.get(digest)!)
+    ), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: SYSTEM_RECORD_SLICE_TIMEOUT_MS,
+      nowMs: () => {
+        if (!reentered) {
+          reentered = true;
+          nested = traversal.advance(async () => {
+            nestedLoads += 1;
+            throw new Error('nested loader must not run');
+          }, {
+            maxRequests: 1,
+            maxWireBytes: 2 * 1024 * 1024,
+            deadlineMs: SYSTEM_RECORD_SLICE_TIMEOUT_MS,
+            nowMs: () => 0,
+          });
+        }
+        return 0;
+      },
+    });
+    await expect(nested).rejects.toThrow(/already has an active slice/);
+    expect(nestedLoads).toBe(0);
+    await expect(outer).resolves.toMatchObject({ status: 'complete', requests: 1 });
+  });
+
+  it('enforces the three-second admitted slice ceiling', async () => {
+    const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, [row(PEER_A)]);
+    const overlong = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    let loads = 0;
+    await expect(overlong.advance(async (digest) => {
+      loads += 1;
+      return loadedInventoryObject(snapshot.objects.get(digest)!);
+    }, {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: SYSTEM_RECORD_SLICE_TIMEOUT_MS + 1,
+      nowMs: () => 0,
+    })).rejects.toThrow(/slice budget/);
+    expect(loads).toBe(0);
+
+    const boundary = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(boundary.advance(async (digest) => (
+      loadedInventoryObject(snapshot.objects.get(digest)!)
+    ), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: SYSTEM_RECORD_SLICE_TIMEOUT_MS,
+      nowMs: () => 0,
+    })).resolves.toMatchObject({ status: 'complete', requests: 1 });
+  });
+
+  it('times out a stalled loader and permits a later retry on the same traversal', async () => {
+    const leaf = leafFor([row(PEER_A)]);
+    const digest = computeSystemRecordInventoryLeafDigestV1(leaf, NETWORK, true);
+    const descriptor = {
+      objectType: 'root-descriptor', kind: 'agents', networkId: NETWORK,
+      epoch: '0', version: '0', treeRootDigest: digest, totalRows: '1',
+    } as const;
+    const traversal = createSystemRecordInventoryTraversalV1(descriptor);
+    await expect(traversal.advance(
+      async () => new Promise(() => undefined),
+      {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 20,
+      },
+    )).rejects.toThrow(/deadline expired during load/);
+
+    const recovered = await traversal.advance(
+      async () => loadedInventoryObject({
+        objectKind: 'inventory-leaf',
+        object: leaf,
+        canonicalBytes: canonicalizeSystemRecordInventoryLeafObjectV1(leaf, NETWORK, true),
+      }),
+      {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 1_000,
+      },
+    );
+    expect(recovered.status).toBe('complete');
+  });
+
+  it('does not dispatch loader work when the admitted signal aborts before its microtask', async () => {
+    const leaf = leafFor([row(PEER_A)]);
+    const digest = computeSystemRecordInventoryLeafDigestV1(leaf, NETWORK, true);
+    const traversal = createSystemRecordInventoryTraversalV1({
+      objectType: 'root-descriptor', kind: 'agents', networkId: NETWORK,
+      epoch: '0', version: '0', treeRootDigest: digest, totalRows: '1',
+    });
+    const controller = new AbortController();
+    let clockReads = 0;
+    let loaderCalls = 0;
+    await expect(traversal.advance(async () => {
+      loaderCalls += 1;
+      return undefined;
+    }, {
+      signal: controller.signal,
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: 1_000,
+      nowMs: () => {
+        clockReads += 1;
+        if (clockReads === 3) controller.abort(new Error('test abort'));
+        return 0;
+      },
+    })).rejects.toThrow(/test abort/);
+    expect(loaderCalls).toBe(0);
+  });
+
+  it('exact-snapshots loader unions and does not retain caller-mutable completion sets', async () => {
+    class MisleadingSliceBytes extends Uint8Array {
+      override slice(): Uint8Array { return new Uint8Array(); }
+    }
+    const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, [row(PEER_A)]);
+    const slice = {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: SYSTEM_RECORD_SLICE_TIMEOUT_MS,
+      nowMs: () => 0,
+    };
+    const invalidOutcome = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(invalidOutcome.advance(async () => ({
+      outcome: 'unexpected', wireBytes: 128,
+    } as never), slice)).rejects.toThrow(/invalid outcome/);
+
+    const extraField = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(extraField.advance(async (digest) => ({
+      ...loadedInventoryObject(snapshot.objects.get(digest)!),
+      unexpected: true,
+    }), slice)).rejects.toThrow(/unknown or missing fields/);
+
+    const accessor = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(accessor.advance(async (digest) => {
+      const loaded = loadedInventoryObject(snapshot.objects.get(digest)!);
+      return Object.defineProperty({ ...loaded }, 'canonicalBytes', {
+        enumerable: true,
+        get: () => loaded.canonicalBytes,
+      });
+    }, slice)).rejects.toThrow(/data properties/);
+
+    const undercounted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(undercounted.advance(async (digest) => {
+      const stored = snapshot.objects.get(digest)!;
+      return {
+        outcome: 'ok' as const,
+        objectKind: stored.objectKind,
+        canonicalBytes: stored.canonicalBytes,
+        wireBytes: 4 + stored.canonicalBytes.byteLength,
+      };
+    }, slice)).rejects.toThrow(/over-cap object/);
+
+    const subclassBytes = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(subclassBytes.advance(async (digest) => {
+      const loaded = loadedInventoryObject(snapshot.objects.get(digest)!);
+      return {
+        ...loaded,
+        canonicalBytes: new MisleadingSliceBytes(loaded.canonicalBytes),
+      };
+    }, slice)).resolves.toMatchObject({ status: 'complete', requests: 1 });
+
+    const completed = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    const first = await completed.advance(async (digest) => (
+      loadedInventoryObject(snapshot.objects.get(digest)!)
+    ), slice);
+    expect(first.status).toBe('complete');
+    (first.result!.objectDigests as Set<string>).clear();
+    const repeated = await completed.advance(async () => {
+      throw new Error('completed traversal must not load again');
+    }, slice);
+    expect(repeated.result?.objectDigests.size).toBe(1);
+  });
+
   it('rejects mixed child kinds before traversal', () => {
     expect(() => canonicalizeSystemRecordInventoryInternalObjectV1({
       objectType: 'inventory-internal',
@@ -189,6 +442,32 @@ describe('system-record immutable B+tree objects', () => {
         { separatorKeyHash: `0x${'02'.repeat(32)}`, childDigest: EVIDENCE, childKind: 'inventory-internal' },
       ],
     }, true)).toThrow(/mix/);
+  });
+
+  it('rejects caller-owned behavior on persisted inventory arrays', () => {
+    const encoded = encodeInventoryRowBase64UrlV1(NETWORK, row(PEER_A));
+    const rows = Object.assign([encoded], { map: () => [] });
+    expect(() => canonicalizeSystemRecordInventoryLeafObjectV1({
+      objectType: 'inventory-leaf',
+      firstKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, PEER_A),
+      lastKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, PEER_A),
+      rows,
+    }, NETWORK, true)).toThrow(/closed|non-index/);
+
+    const entries = [{}, {}];
+    Object.defineProperty(entries, Symbol.iterator, { value: function* () { yield {}; } });
+    expect(() => canonicalizeSystemRecordInventoryInternalObjectV1({
+      objectType: 'inventory-internal',
+      firstKeyHash: HEAD,
+      lastKeyHash: EVIDENCE,
+      entries,
+    } as unknown as SystemRecordInventoryInternalObjectV1, true)).toThrow(/dense closed array/);
+
+    const builderRows = [row(PEER_A)];
+    Object.defineProperty(builderRows, Symbol.iterator, {
+      value: function* () { yield row(PEER_A); yield row(PEER_B); },
+    });
+    expect(() => buildSystemRecordInventoryTreeV1(NETWORK, builderRows)).toThrow(/dense closed array/);
   });
 
   it('uses deterministic split/rebalance choices and enforces the COW budget', () => {
@@ -204,6 +483,25 @@ describe('system-record immutable B+tree objects', () => {
       leafObjects: 3, internalObjects: 2, rootObjects: 1, descriptorObjects: 1,
       encodedBytes: 1024 * 1024,
     })).toThrow(/six-object/);
+
+    class MisleadingLengths extends Array<number> {
+      override some(): boolean { return true; }
+      override reduce(): number { return Number.MAX_VALUE; }
+      override slice(): this { return new MisleadingLengths() as this; }
+    }
+    expect(chooseSystemRecordByteAwareSplitIndexV1(
+      new MisleadingLengths(10, 10, 80, 10, 10),
+      2,
+      2,
+    )).toBe(2);
+    const accounting = {
+      leafObjects: 2, internalObjects: 2, rootObjects: 1, descriptorObjects: 1,
+      encodedBytes: 1024 * 1024,
+    };
+    const hostileAccounting = new Proxy(accounting, {
+      get: () => Number.MAX_SAFE_INTEGER,
+    });
+    expect(() => assertSystemRecordInventoryCowUpdateBoundV1(hostileAccounting)).not.toThrow();
   });
 
   it('performs localized immutable upsert/update/delete publications', async () => {
@@ -236,6 +534,62 @@ describe('system-record immutable B+tree objects', () => {
       async (digest) => deletionSnapshot.objects.get(digest)?.object,
     );
     expect(validated.totalRows).toBe(519);
+  });
+
+  it('pins the COW snapshot shell and ignores overridden map methods', () => {
+    const peers = deterministicPeers(3);
+    const source = buildSystemRecordInventoryTreeV1(NETWORK, peers.slice(0, 2).map(row));
+    class MisleadingObjectMap extends Map<
+      `0x${string}`,
+      SystemRecordInventoryStoredObjectV1
+    > {
+      override has(): boolean { return true; }
+      override get(): SystemRecordInventoryStoredObjectV1 | undefined { return undefined; }
+    }
+    const hostileMap = new MisleadingObjectMap(source.objects);
+    const hostileSnapshot = new Proxy({ ...source, objects: hostileMap }, {
+      get() { throw new Error('COW updater must not invoke snapshot getters'); },
+    });
+    const update = updateSystemRecordInventoryTreeV1(hostileSnapshot, {
+      operation: 'upsert', row: row(peers[2]),
+    });
+    expect(update.changed).toBe(true);
+    expect(update.writes.length).toBeGreaterThan(0);
+  });
+
+  it('rejects a corrupt untouched sibling before publishing a reused root range', () => {
+    const peers = deterministicPeers(520);
+    const source = buildSystemRecordInventoryTreeV1(NETWORK, peers.map(row));
+    const objects = new Map(source.objects);
+    const rootObject = objects.get(source.descriptor.treeRootDigest)?.object;
+    if (rootObject?.objectType !== 'inventory-internal') throw new Error('expected a multi-leaf root');
+    const siblingDigest = rootObject.entries.at(-1)!.childDigest;
+    const sibling = objects.get(siblingDigest);
+    if (sibling?.object.objectType !== 'inventory-leaf') throw new Error('expected a leaf sibling');
+    objects.set(siblingDigest, Object.freeze({
+      ...sibling,
+      object: Object.freeze({
+        ...sibling.object,
+        lastKeyHash: `0x${'ff'.repeat(32)}`,
+      }),
+    }));
+    const target = peers.map(row).sort((left, right) =>
+      left.stableKeyHash.localeCompare(right.stableKeyHash))[0];
+    expect(() => updateSystemRecordInventoryTreeV1({ ...source, objects }, {
+      operation: 'upsert',
+      row: { ...target, version: '1', headDigest: EVIDENCE },
+    })).toThrow(/key range|digest/);
+
+    const mismatchedBytes = new Map(source.objects);
+    const validSibling = mismatchedBytes.get(siblingDigest)!;
+    mismatchedBytes.set(siblingDigest, Object.freeze({
+      ...validSibling,
+      canonicalBytes: Uint8Array.of(0),
+    }));
+    expect(() => updateSystemRecordInventoryTreeV1({ ...source, objects: mismatchedBytes }, {
+      operation: 'upsert',
+      row: { ...target, version: '1', headDigest: EVIDENCE },
+    })).toThrow(/canonical bytes/);
   });
 
   it('keeps unchanged mutations path-bounded without enumerating the snapshot', () => {

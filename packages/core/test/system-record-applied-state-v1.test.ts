@@ -60,6 +60,32 @@ describe('system-record applied-state codecs', () => {
     } as SystemRecordAppliedStatePresentV1)).toThrow(/slots/);
   });
 
+  it('requires closed persisted arrays and returns owned frozen snapshots', () => {
+    const lineage = Object.assign([], { map: () => [{ unexpected: true }] });
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), transitionLineage: lineage,
+    } as unknown as SystemRecordAppliedStatePresentV1)).toThrow(/closed|non-index/);
+
+    const rootAccessor = Object.defineProperty([ROOT_B], '0', {
+      enumerable: true,
+      get: () => ROOT_B,
+    });
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), historicalRoots: rootAccessor,
+    } as unknown as SystemRecordAppliedStatePresentV1)).toThrow(/data elements/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), conflictDigestSlots: new Array(1),
+    } as unknown as SystemRecordAppliedStatePresentV1)).toThrow(/dense/);
+
+    const parsed = parseCanonicalSystemRecordAppliedStateV1(
+      canonicalizeSystemRecordAppliedStateV1(activeState()),
+    );
+    if (parsed.state !== 'present') throw new Error('expected present state');
+    expect(Object.isFrozen(parsed.transitionLineage)).toBe(true);
+    expect(Object.isFrozen(parsed.historicalRoots)).toBe(true);
+    expect(Object.isFrozen(parsed.conflictDigestSlots)).toBe(true);
+  });
+
   it('enforces tombstone zero accounting and capacity aggregate arithmetic', () => {
     expect(() => canonicalizeSystemRecordAppliedStateV1({
       ...activeState(), status: 'tombstone', projectionBytes: '1', projectionQuads: '0',
@@ -118,6 +144,9 @@ describe('system-record applied-state codecs', () => {
     expect(() => canonicalizeSystemRecordAppliedStateV1({
       ...activeState(), historicalRoots: [ROOT_B],
     })).toThrow(/lineage/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), status: 'quarantined',
+    })).toThrow(/installed conflict evidence|resumable sidecar intent/);
 
     const publish = {
       ...activeState(), status: 'quarantined' as const,

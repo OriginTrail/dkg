@@ -10,6 +10,63 @@ export interface SnapshotDataRecordOptions {
   readonly rejectNullValues?: boolean;
 }
 
+export interface SnapshotDataArrayOptions {
+  readonly minLength?: number;
+  readonly maxLength: number;
+}
+
+/**
+ * Snapshot one bounded, dense array without invoking accessors or caller-owned methods.
+ *
+ * Protocol arrays are closed containers: only their native length and enumerable own
+ * data elements are accepted. The returned copy always uses the local Array prototype,
+ * so later iteration cannot be redirected by a caller-owned prototype or method.
+ */
+export function snapshotDataArray(
+  value: unknown,
+  label: string,
+  options: SnapshotDataArrayOptions,
+): readonly unknown[] {
+  const minLength = options.minLength ?? 0;
+  const maxLength = options.maxLength;
+  if (!Number.isSafeInteger(minLength) || minLength < 0
+    || !Number.isSafeInteger(maxLength) || maxLength < minLength) {
+    throw new Error(`${label} has invalid snapshot bounds`);
+  }
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+    || lengthDescriptor.enumerable === true
+    || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < minLength
+    || lengthDescriptor.value > maxLength) {
+    throw new Error(`${label} length is outside its bound`);
+  }
+  const length = lengthDescriptor.value as number;
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1) throw new Error(`${label} must be a dense closed array`);
+
+  const snapshot = new Array<unknown>(length);
+  let elements = 0;
+  for (const key of keys) {
+    if (key === 'length') continue;
+    if (typeof key !== 'string') throw new Error(`${label} must not contain symbol properties`);
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= length || String(index) !== key) {
+      throw new Error(`${label} must not contain non-index properties`);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error(`${label} must contain only enumerable data elements`);
+    }
+    snapshot[index] = descriptor.value;
+    elements += 1;
+  }
+  if (elements !== length) throw new Error(`${label} must be dense`);
+  return Object.freeze(snapshot);
+}
+
 /**
  * Snapshot every enumerable string data property without invoking accessors.
  *

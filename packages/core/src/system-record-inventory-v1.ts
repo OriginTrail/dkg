@@ -10,6 +10,7 @@ import {
 } from './canonical-json.js';
 import {
   assertCanonicalSystemRecordPeerIdV1,
+  copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   digestSystemRecordBytesV1,
   type SystemRecordPeerPublicKeyV1,
@@ -47,6 +48,7 @@ import {
   SYSTEM_RECORD_ROOT_MAX_ENTRIES,
   SYSTEM_RECORD_ROOT_MIN_ENTRIES,
   SYSTEM_RECORD_SIGNATURE_DOMAINS_V1,
+  SYSTEM_RECORD_SLICE_TIMEOUT_MS,
 } from './system-record-limits-v1.js';
 import { assertNetworkIdV1, type NetworkIdV1 } from './sync-wire-identifiers.js';
 import {
@@ -58,11 +60,14 @@ import {
 } from './sync-wire-scalars.js';
 import {
   hasOwnDataProperty,
+  snapshotDataArray,
   snapshotDataRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
 
 const UTF8 = new TextEncoder();
+const MAP_GET = Map.prototype.get;
+const MAP_HAS = Map.prototype.has;
 const ROW_FLAG_TOMBSTONE = 1;
 const ROW_FLAG_QUARANTINED = 2;
 const ROW_FLAG_CONFLICT_EVIDENCE = 4;
@@ -144,24 +149,24 @@ export function encodeSystemRecordInventoryRowV1(
   networkId: NetworkIdV1,
   row: SystemRecordInventoryRowV1,
 ): Uint8Array {
-  validateInventoryRow(row, networkId);
-  const peer = UTF8.encode(row.peerId);
-  const hasEvidence = row.conflictEvidenceDigest !== undefined;
+  const validated = validateInventoryRow(row, networkId);
+  const peer = UTF8.encode(validated.peerId);
+  const hasEvidence = validated.conflictEvidenceDigest !== undefined;
   const bytes = new Uint8Array(1 + 32 + 2 + peer.byteLength + 8 + 8 + 32 + (hasEvidence ? 32 : 0) + 1);
   let offset = 0;
   bytes[offset++] = SYSTEM_RECORD_INVENTORY_ROW_VERSION;
-  bytes.set(hexDigestBytes(row.stableKeyHash), offset); offset += 32;
+  bytes.set(hexDigestBytes(validated.stableKeyHash), offset); offset += 32;
   bytes[offset++] = peer.byteLength >>> 8;
   bytes[offset++] = peer.byteLength & 0xff;
   bytes.set(peer, offset); offset += peer.byteLength;
-  writeU64(bytes, offset, parseCanonicalDecimalU64(row.authoritySequence)); offset += 8;
-  writeU64(bytes, offset, parseCanonicalDecimalU64(row.version)); offset += 8;
-  bytes.set(hexDigestBytes(row.headDigest), offset); offset += 32;
+  writeU64(bytes, offset, parseCanonicalDecimalU64(validated.authoritySequence)); offset += 8;
+  writeU64(bytes, offset, parseCanonicalDecimalU64(validated.version)); offset += 8;
+  bytes.set(hexDigestBytes(validated.headDigest), offset); offset += 32;
   if (hasEvidence) {
-    bytes.set(hexDigestBytes(row.conflictEvidenceDigest!), offset); offset += 32;
+    bytes.set(hexDigestBytes(validated.conflictEvidenceDigest!), offset); offset += 32;
   }
-  bytes[offset] = (row.tombstone ? ROW_FLAG_TOMBSTONE : 0)
-    | (row.quarantined ? ROW_FLAG_QUARANTINED : 0)
+  bytes[offset] = (validated.tombstone ? ROW_FLAG_TOMBSTONE : 0)
+    | (validated.quarantined ? ROW_FLAG_QUARANTINED : 0)
     | (hasEvidence ? ROW_FLAG_CONFLICT_EVIDENCE : 0);
   const cap = hasEvidence ? SYSTEM_RECORD_MAX_EVIDENCE_ROW_BYTES : SYSTEM_RECORD_MAX_ORDINARY_ROW_BYTES;
   if (bytes.byteLength > cap || bytes.byteLength > SYSTEM_RECORD_MAX_ROW_BYTES) {
@@ -185,28 +190,33 @@ export function decodeSystemRecordInventoryRowV1(
   bytes: Uint8Array,
 ): SystemRecordInventoryRowV1 {
   assertNetworkIdV1(networkId);
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 84 || bytes.byteLength > SYSTEM_RECORD_MAX_ROW_BYTES) {
+  const encoded = copyBoundedSystemRecordBytesV1(
+    bytes,
+    SYSTEM_RECORD_MAX_ROW_BYTES,
+    'inventory row bytes',
+  );
+  if (encoded.byteLength < 84) {
     throw new Error('inventory row has an invalid encoded length');
   }
   let offset = 0;
-  if (bytes[offset++] !== SYSTEM_RECORD_INVENTORY_ROW_VERSION) throw new Error('inventory row version is invalid');
-  const stableKeyHash = bytesDigest(bytes.subarray(offset, offset + 32)); offset += 32;
-  const peerLength = (bytes[offset++] << 8) | bytes[offset++];
-  const hasEvidence = bytes.byteLength === 1 + 32 + 2 + peerLength + 8 + 8 + 32 + 32 + 1;
-  const ordinary = bytes.byteLength === 1 + 32 + 2 + peerLength + 8 + 8 + 32 + 1;
+  if (encoded[offset++] !== SYSTEM_RECORD_INVENTORY_ROW_VERSION) throw new Error('inventory row version is invalid');
+  const stableKeyHash = bytesDigest(encoded.subarray(offset, offset + 32)); offset += 32;
+  const peerLength = (encoded[offset++] << 8) | encoded[offset++];
+  const hasEvidence = encoded.byteLength === 1 + 32 + 2 + peerLength + 8 + 8 + 32 + 32 + 1;
+  const ordinary = encoded.byteLength === 1 + 32 + 2 + peerLength + 8 + 8 + 32 + 1;
   if (peerLength < 1 || peerLength > SYSTEM_RECORD_MAX_PEER_ID_BYTES || (!ordinary && !hasEvidence)) {
     throw new Error('inventory row peer/evidence length is invalid');
   }
-  const peerId = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(offset, offset + peerLength));
+  const peerId = new TextDecoder('utf-8', { fatal: true }).decode(encoded.subarray(offset, offset + peerLength));
   offset += peerLength;
-  const authoritySequence = readU64(bytes, offset).toString() as DecimalU64V1; offset += 8;
-  const version = readU64(bytes, offset).toString() as DecimalU64V1; offset += 8;
-  const headDigest = bytesDigest(bytes.subarray(offset, offset + 32)); offset += 32;
+  const authoritySequence = readU64(encoded, offset).toString() as DecimalU64V1; offset += 8;
+  const version = readU64(encoded, offset).toString() as DecimalU64V1; offset += 8;
+  const headDigest = bytesDigest(encoded.subarray(offset, offset + 32)); offset += 32;
   const conflictEvidenceDigest = hasEvidence
-    ? bytesDigest(bytes.subarray(offset, offset + 32))
+    ? bytesDigest(encoded.subarray(offset, offset + 32))
     : undefined;
   if (hasEvidence) offset += 32;
-  const flags = bytes[offset];
+  const flags = encoded[offset];
   if ((flags & ~ROW_ALLOWED_FLAGS) !== 0
     || Boolean(flags & ROW_FLAG_CONFLICT_EVIDENCE) !== hasEvidence) {
     throw new Error('inventory row flags are invalid');
@@ -221,8 +231,7 @@ export function decodeSystemRecordInventoryRowV1(
     tombstone: Boolean(flags & ROW_FLAG_TOMBSTONE),
     quarantined: Boolean(flags & ROW_FLAG_QUARANTINED),
   };
-  validateInventoryRow(row, networkId);
-  return Object.freeze(row);
+  return validateInventoryRow(row, networkId);
 }
 
 export function encodeInventoryRowBase64UrlV1(
@@ -233,7 +242,10 @@ export function encodeInventoryRowBase64UrlV1(
 }
 
 export function decodeInventoryRowBase64UrlV1(networkId: NetworkIdV1, value: string): SystemRecordInventoryRowV1 {
-  if (typeof value !== 'string' || value.includes('=') || !/^[A-Za-z0-9_-]+$/.test(value)) {
+  if (typeof value !== 'string'
+    || value.length > Math.ceil(SYSTEM_RECORD_MAX_ROW_BYTES * 4 / 3)
+    || value.includes('=')
+    || !/^[A-Za-z0-9_-]+$/.test(value)) {
     throw new Error('inventory row must be unpadded base64url');
   }
   const bytes = Uint8Array.from(Buffer.from(value, 'base64url'));
@@ -288,19 +300,20 @@ function validateLeaf(
 ): SystemRecordInventoryLeafObjectV1 {
   assertNetworkIdV1(networkId);
   const probe = snapshotDataRecord(value, 'inventory leaf', { rejectNullValues: true });
-  if (!Array.isArray(probe.rows)) throw new Error('inventory leaf rows must be an array');
-  const empty = probe.rows.length === 0;
+  const encodedRows = snapshotDataArray(probe.rows, 'inventory leaf rows', {
+    maxLength: SYSTEM_RECORD_LEAF_MAX_ROWS,
+  });
+  const empty = encodedRows.length === 0;
   const expected = empty
     ? ['objectType', 'rows'] as const
     : ['objectType', 'firstKeyHash', 'lastKeyHash', 'rows'] as const;
   const leaf = snapshotExactDataRecord(probe, expected, 'inventory leaf');
   if (leaf.objectType !== 'inventory-leaf') throw new Error('inventory leaf tag is invalid');
-  const encodedRows = leaf.rows as unknown as string[];
   const minimum = root ? 0 : SYSTEM_RECORD_LEAF_MIN_ROWS;
   if (encodedRows.length < minimum || encodedRows.length > SYSTEM_RECORD_LEAF_MAX_ROWS) {
     throw new Error('inventory leaf occupancy is outside its V1 bound');
   }
-  const rows = encodedRows.map((encoded) => decodeInventoryRowBase64UrlV1(networkId, encoded));
+  const rows = encodedRows.map((encoded) => decodeInventoryRowBase64UrlV1(networkId, encoded as string));
   for (let index = 1; index < rows.length; index += 1) {
     if (compareRows(rows[index - 1], rows[index]) >= 0) {
       throw new Error('inventory leaf rows must be sorted and stable-key unique');
@@ -315,12 +328,12 @@ function validateLeaf(
     }
   }
   const validated = empty
-    ? { objectType: 'inventory-leaf' as const, rows: Object.freeze([...encodedRows]) }
+    ? { objectType: 'inventory-leaf' as const, rows: encodedRows as readonly string[] }
     : {
         objectType: 'inventory-leaf' as const,
         firstKeyHash: leaf.firstKeyHash as Digest32V1,
         lastKeyHash: leaf.lastKeyHash as Digest32V1,
-        rows: Object.freeze([...encodedRows]),
+        rows: encodedRows as readonly string[],
       };
   const bytes = canonicalizeJsonBytes(validated as unknown as CanonicalJsonValue, {
     maxBytes: SYSTEM_RECORD_OBJECT_CAPS_V1['inventory-leaf'],
@@ -373,19 +386,18 @@ function validateInternal(value: unknown, root: boolean): SystemRecordInventoryI
     ['objectType', 'firstKeyHash', 'lastKeyHash', 'entries'],
     'inventory internal node',
   );
-  if (internal.objectType !== 'inventory-internal' || !Array.isArray(internal.entries)) {
-    throw new Error('inventory internal node tag/entries are invalid');
-  }
+  if (internal.objectType !== 'inventory-internal') throw new Error('inventory internal node tag is invalid');
   assertCanonicalDigest(internal.firstKeyHash);
   assertCanonicalDigest(internal.lastKeyHash);
   const min = root ? SYSTEM_RECORD_ROOT_MIN_ENTRIES : SYSTEM_RECORD_INTERNAL_MIN_ENTRIES;
   const max = root ? SYSTEM_RECORD_ROOT_MAX_ENTRIES : SYSTEM_RECORD_INTERNAL_MAX_ENTRIES;
-  if (internal.entries.length < min || internal.entries.length > max) {
-    throw new Error('inventory internal occupancy is outside its V1 bound');
-  }
+  const internalEntries = snapshotDataArray(internal.entries, 'inventory internal entries', {
+    minLength: min,
+    maxLength: max,
+  });
   let previousSeparator: string | undefined;
   let childKind: SystemRecordInventoryInternalEntryV1['childKind'] | undefined;
-  const entries = internal.entries.map((candidate, index) => {
+  const entries = internalEntries.map((candidate, index) => {
     const entry = snapshotExactDataRecord(
       candidate,
       ['separatorKeyHash', 'childDigest', 'childKind'],
@@ -519,11 +531,11 @@ export function buildSystemRecordProviderSignatureMessageV1(
   descriptorObjectDigest: Digest32V1,
   providerPeerId: string,
 ): Uint8Array {
-  validateRootDescriptor(descriptor);
+  const validatedDescriptor = validateRootDescriptor(descriptor);
   assertCanonicalDigest(descriptorObjectDigest);
   const tuple: CanonicalJsonValue = [
-    descriptor.kind,
-    descriptor.networkId,
+    validatedDescriptor.kind,
+    validatedDescriptor.networkId,
     providerPeerId,
     descriptorObjectDigest,
   ];
@@ -661,7 +673,12 @@ export function createSystemRecordInventoryTraversalV1(
   let maximumDepth = 0;
   let leafDepth: number | undefined;
   let advancing = false;
-  let completed: ValidatedSystemRecordInventoryTreeV1 | undefined;
+  let completed: Readonly<{
+    totalRows: number;
+    leaves: number;
+    height: number;
+    objectDigests: readonly string[];
+  }> | undefined;
 
   return Object.freeze({ advance });
 
@@ -675,63 +692,109 @@ export function createSystemRecordInventoryTraversalV1(
   ): Promise<SystemRecordInventoryTraversalSliceResultV1> {
     if (advancing) throw new Error('inventory traversal already has an active slice');
     if (completed !== undefined) {
-      return Object.freeze({ status: 'complete', requests: 0, wireBytes: 0, result: completed });
+      return Object.freeze({ status: 'complete', requests: 0, wireBytes: 0, result: completedResult() });
     }
-    const now = slice.nowMs ?? Date.now;
-    if (!Number.isSafeInteger(slice.maxRequests) || slice.maxRequests < 1
-      || slice.maxRequests > SYSTEM_RECORD_MAX_SLICE_REQUESTS
-      || !Number.isSafeInteger(slice.maxWireBytes)
-      || slice.maxWireBytes < framedObjectMaximum('inventory-leaf')
-      || slice.maxWireBytes > SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES
-      || !Number.isFinite(slice.deadlineMs)) {
-      throw new Error('inventory traversal slice budget is invalid');
-    }
-    let requests = 0;
-    let wireBytes = 0;
     advancing = true;
     try {
+      // Pin the admitted budget before the first await. Callers commonly reuse mutable
+      // scheduler state; re-reading it after load() would let one slice grow in flight.
+      const signal = slice.signal;
+      const maxRequests = slice.maxRequests;
+      const maxWireBytes = slice.maxWireBytes;
+      const deadlineMs = slice.deadlineMs;
+      const now = slice.nowMs ?? Date.now;
+      if (typeof now !== 'function') throw new Error('inventory traversal slice budget is invalid');
+      const readNow = (): number => {
+        const current = now();
+        if (!Number.isSafeInteger(current) || current < 0) {
+          throw new Error('inventory traversal clock is invalid');
+        }
+        return current;
+      };
+      const admittedAtMs = readNow();
+      if (!Number.isSafeInteger(maxRequests) || maxRequests < 1
+        || maxRequests > SYSTEM_RECORD_MAX_SLICE_REQUESTS
+        || !Number.isSafeInteger(maxWireBytes)
+        || maxWireBytes < framedObjectMaximum('inventory-leaf')
+        || maxWireBytes > SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES
+        || !Number.isSafeInteger(deadlineMs)
+        || !Number.isSafeInteger(admittedAtMs)
+        || admittedAtMs < 0
+        || deadlineMs > admittedAtMs + SYSTEM_RECORD_SLICE_TIMEOUT_MS) {
+        throw new Error('inventory traversal slice budget is invalid');
+      }
+      let requests = 0;
+      let wireBytes = 0;
       while (pending.length > 0) {
-        abortIfNeeded(slice.signal);
-        if (now() >= slice.deadlineMs) break;
+        abortIfNeeded(signal);
+        if (readNow() >= deadlineMs) break;
         const work = pending[pending.length - 1];
         const maximumNextBytes = framedObjectMaximum(
           work.expectedKind === 'inventory-internal' ? 'inventory-internal' : 'inventory-leaf',
         );
-        if (requests >= slice.maxRequests || wireBytes + maximumNextBytes > slice.maxWireBytes) break;
+        if (requests >= maxRequests || wireBytes + maximumNextBytes > maxWireBytes) break;
         if (work.depth > SYSTEM_RECORD_MAX_TREE_HEIGHT) throw new Error('inventory tree exceeds height three');
         if (seen.has(work.digest)) throw new Error('inventory tree must not contain a cycle or duplicate path');
         if (seen.size >= SYSTEM_RECORD_MAX_INVENTORY_OBJECTS) {
           throw new Error('inventory traversal exceeds its object budget');
         }
-        const artifact = await load(work.digest, work.expectedKind, slice.signal);
+        const remainingMs = deadlineMs - readNow();
+        if (remainingMs <= 0) break;
+        const loaded = await loadInventoryObjectWithinDeadlineV1(
+          (loadSignal) => load(work.digest, work.expectedKind, loadSignal),
+          signal,
+          remainingMs,
+        );
         requests += 1;
-        abortIfNeeded(slice.signal);
-        if (now() >= slice.deadlineMs) throw new Error('inventory traversal slice deadline expired during load');
-        if (artifact === undefined) throw new Error(`inventory tree is missing ${work.digest}`);
-        if (!Number.isSafeInteger(artifact.wireBytes)
-          || artifact.wireBytes < 4
-          || artifact.wireBytes > maximumNextBytes
-          || wireBytes + artifact.wireBytes > slice.maxWireBytes) {
-          throw new Error('inventory loader returned invalid actual wire accounting');
-        }
-        wireBytes += artifact.wireBytes;
-        if (artifact.outcome === 'rejected') {
-          if (artifact.rejection !== 'not-found'
-            && artifact.rejection !== 'invalid-response'
-            && artifact.rejection !== 'busy'
-            && artifact.rejection !== 'transport') {
+        abortIfNeeded(signal);
+        if (readNow() >= deadlineMs) throw new Error('inventory traversal slice deadline expired during load');
+        if (loaded === undefined) throw new Error(`inventory tree is missing ${work.digest}`);
+        const probe = snapshotDataRecord(loaded, 'inventory loader result', { rejectNullValues: true });
+        if (probe.outcome === 'rejected') {
+          const rejected = snapshotExactDataRecord(
+            probe,
+            ['outcome', 'wireBytes', 'rejection'],
+            'rejected inventory loader result',
+          );
+          if (!Number.isSafeInteger(rejected.wireBytes)
+            || (rejected.wireBytes as number) < 6
+            || (rejected.wireBytes as number) > maximumNextBytes
+            || wireBytes + (rejected.wireBytes as number) > maxWireBytes) {
+            throw new Error('inventory loader returned invalid actual wire accounting');
+          }
+          wireBytes += rejected.wireBytes as number;
+          if (rejected.rejection !== 'not-found'
+            && rejected.rejection !== 'invalid-response'
+            && rejected.rejection !== 'busy'
+            && rejected.rejection !== 'transport') {
             throw new Error('inventory loader returned an invalid rejection');
           }
           return Object.freeze({
-            status: 'rejected', requests, wireBytes, rejection: artifact.rejection,
-          });
+            status: 'rejected', requests, wireBytes, rejection: rejected.rejection,
+          }) as SystemRecordInventoryTraversalSliceResultV1;
         }
+        if (probe.outcome !== 'ok') throw new Error('inventory loader returned an invalid outcome');
+        const artifact = snapshotExactDataRecord(
+          probe,
+          ['outcome', 'objectKind', 'canonicalBytes', 'wireBytes'],
+          'successful inventory loader result',
+        );
+        if (!Number.isSafeInteger(artifact.wireBytes)
+          || (artifact.wireBytes as number) < 6
+          || (artifact.wireBytes as number) > maximumNextBytes
+          || wireBytes + (artifact.wireBytes as number) > maxWireBytes) {
+          throw new Error('inventory loader returned invalid actual wire accounting');
+        }
+        wireBytes += artifact.wireBytes as number;
         if (artifact.objectKind !== 'inventory-leaf' && artifact.objectKind !== 'inventory-internal') {
           throw new Error('inventory loader returned an invalid object kind');
         }
-        if (!(artifact.canonicalBytes instanceof Uint8Array)
-          || artifact.canonicalBytes.byteLength > SYSTEM_RECORD_OBJECT_CAPS_V1[artifact.objectKind]
-          || artifact.wireBytes < 4 + artifact.canonicalBytes.byteLength) {
+        const canonicalBytes = copyBoundedSystemRecordBytesV1(
+          artifact.canonicalBytes,
+          SYSTEM_RECORD_OBJECT_CAPS_V1[artifact.objectKind],
+          'inventory loader canonical bytes',
+        );
+        if ((artifact.wireBytes as number) < 6 + canonicalBytes.byteLength) {
           throw new Error('inventory loader returned an over-cap object');
         }
         if (work.expectedKind !== undefined && artifact.objectKind !== work.expectedKind) {
@@ -739,8 +802,8 @@ export function createSystemRecordInventoryTraversalV1(
         }
         const root = work.depth === 1;
         const object = artifact.objectKind === 'inventory-leaf'
-          ? parseCanonicalSystemRecordInventoryLeafObjectV1(artifact.canonicalBytes, pinned.networkId, root)
-          : parseCanonicalSystemRecordInventoryInternalObjectV1(artifact.canonicalBytes, root);
+          ? parseCanonicalSystemRecordInventoryLeafObjectV1(canonicalBytes, pinned.networkId, root)
+          : parseCanonicalSystemRecordInventoryInternalObjectV1(canonicalBytes, root);
         const actualDigest = artifact.objectKind === 'inventory-leaf'
           ? computeSystemRecordInventoryLeafDigestV1(object as SystemRecordInventoryLeafObjectV1, pinned.networkId, root)
           : computeSystemRecordInventoryInternalDigestV1(object as SystemRecordInventoryInternalObjectV1, root);
@@ -801,12 +864,22 @@ export function createSystemRecordInventoryTraversalV1(
         totalRows: rows,
         leaves,
         height: maximumDepth,
-        objectDigests: new Set(seen),
+        objectDigests: Object.freeze([...seen]),
       });
-      return Object.freeze({ status: 'complete', requests, wireBytes, result: completed });
+      return Object.freeze({ status: 'complete', requests, wireBytes, result: completedResult() });
     } finally {
       advancing = false;
     }
+  }
+
+  function completedResult(): ValidatedSystemRecordInventoryTreeV1 {
+    if (completed === undefined) throw new Error('inventory traversal is not complete');
+    return Object.freeze({
+      totalRows: completed.totalRows,
+      leaves: completed.leaves,
+      height: completed.height,
+      objectDigests: new Set(completed.objectDigests),
+    });
   }
 }
 
@@ -818,26 +891,91 @@ function abortIfNeeded(signal?: AbortSignal): void {
   if (signal?.aborted) throw signal.reason ?? new Error('inventory traversal aborted');
 }
 
+async function loadInventoryObjectWithinDeadlineV1<T>(
+  load: (signal: AbortSignal) => Promise<T>,
+  admittedSignal: AbortSignal | undefined,
+  remainingMs: number,
+): Promise<T> {
+  if (!Number.isSafeInteger(remainingMs) || remainingMs < 1
+    || remainingMs > SYSTEM_RECORD_SLICE_TIMEOUT_MS) {
+    throw new Error('inventory traversal load deadline is invalid');
+  }
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let rejectBoundary: ((reason?: unknown) => void) | undefined;
+  const boundary = new Promise<never>((_resolve, reject) => {
+    rejectBoundary = reject;
+    timeout = setTimeout(() => {
+      const reason = new Error('inventory traversal slice deadline expired during load');
+      controller.abort(reason);
+      reject(reason);
+    }, remainingMs);
+  });
+  const onAbort = (): void => {
+    let reason: unknown;
+    try {
+      reason = admittedSignal?.reason;
+    } catch {
+      reason = undefined;
+    }
+    reason ??= new Error('inventory traversal aborted');
+    controller.abort(reason);
+    rejectBoundary?.(reason);
+  };
+  try {
+    if (admittedSignal?.aborted) onAbort();
+    else admittedSignal?.addEventListener('abort', onAbort, { once: true });
+    return await Promise.race([
+      Promise.resolve().then(() => {
+        abortIfNeeded(controller.signal);
+        return load(controller.signal);
+      }),
+      boundary,
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    admittedSignal?.removeEventListener('abort', onAbort);
+  }
+}
+
 /** Pick the deterministic split nearest half encoded bytes while preserving minima. */
 export function chooseSystemRecordByteAwareSplitIndexV1(
   encodedEntryBytes: readonly number[],
   minimumLeft: number,
   minimumRight: number,
 ): number {
+  const lengths = snapshotDataArray(encodedEntryBytes, 'split byte lengths', {
+    maxLength: SYSTEM_RECORD_LEAF_MAX_ROWS + 1,
+  }) as readonly number[];
   if (!Number.isInteger(minimumLeft) || !Number.isInteger(minimumRight)
     || minimumLeft < 1 || minimumRight < 1
-    || encodedEntryBytes.length < minimumLeft + minimumRight) {
+    || lengths.length < minimumLeft + minimumRight) {
     throw new Error('split cardinality cannot preserve occupancy');
   }
-  if (encodedEntryBytes.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+  const maximumEntryBytes = Math.max(
+    SYSTEM_RECORD_MAX_ROW_BYTES,
+    SYSTEM_RECORD_MAX_INTERNAL_ENTRY_BYTES,
+  );
+  if (lengths.some((value) => !Number.isSafeInteger(value)
+    || value <= 0
+    || value > maximumEntryBytes)) {
     throw new Error('split byte lengths must be positive safe integers');
   }
-  const total = encodedEntryBytes.reduce((sum, value) => sum + value, 0);
-  let prefix = encodedEntryBytes.slice(0, minimumLeft).reduce((sum, value) => sum + value, 0);
+  let total = 0;
+  for (const value of lengths) {
+    total += value;
+    if (!Number.isSafeInteger(total)) throw new Error('split byte-length total is unsafe');
+  }
+  let prefix = 0;
+  for (let index = 0; index < minimumLeft; index += 1) {
+    prefix += lengths[index];
+    if (!Number.isSafeInteger(prefix)) throw new Error('split byte-length prefix is unsafe');
+  }
   let best = minimumLeft;
   let bestDistance = Math.abs(total - 2 * prefix);
-  for (let index = minimumLeft + 1; index <= encodedEntryBytes.length - minimumRight; index += 1) {
-    prefix += encodedEntryBytes[index - 1];
+  for (let index = minimumLeft + 1; index <= lengths.length - minimumRight; index += 1) {
+    prefix += lengths[index - 1];
+    if (!Number.isSafeInteger(prefix)) throw new Error('split byte-length prefix is unsafe');
     const distance = Math.abs(total - 2 * prefix);
     if (distance < bestDistance) {
       best = index;
@@ -872,22 +1010,27 @@ export interface SystemRecordInventoryCowUpdateAccountingV1 {
 export function assertSystemRecordInventoryCowUpdateBoundV1(
   accounting: SystemRecordInventoryCowUpdateAccountingV1,
 ): void {
+  const validated = snapshotExactDataRecord(
+    accounting,
+    ['leafObjects', 'internalObjects', 'rootObjects', 'descriptorObjects', 'encodedBytes'],
+    'COW accounting',
+  );
   const values = [
-    accounting.leafObjects,
-    accounting.internalObjects,
-    accounting.rootObjects,
-    accounting.descriptorObjects,
-    accounting.encodedBytes,
+    validated.leafObjects,
+    validated.internalObjects,
+    validated.rootObjects,
+    validated.descriptorObjects,
+    validated.encodedBytes,
   ];
-  if (values.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+  if (values.some((value) => !Number.isSafeInteger(value) || (value as number) < 0)) {
     throw new Error('COW accounting values must be non-negative safe integers');
   }
-  const objects = accounting.leafObjects + accounting.internalObjects
-    + accounting.rootObjects + accounting.descriptorObjects;
-  if (accounting.leafObjects > 2 || accounting.internalObjects > 2
-    || accounting.rootObjects > 1 || accounting.descriptorObjects !== 1
+  const objects = (validated.leafObjects as number) + (validated.internalObjects as number)
+    + (validated.rootObjects as number) + (validated.descriptorObjects as number);
+  if ((validated.leafObjects as number) > 2 || (validated.internalObjects as number) > 2
+    || (validated.rootObjects as number) > 1 || validated.descriptorObjects !== 1
     || objects > SYSTEM_RECORD_MAX_TREE_UPDATE_OBJECTS
-    || accounting.encodedBytes > SYSTEM_RECORD_MAX_TREE_UPDATE_BYTES) {
+    || (validated.encodedBytes as number) > SYSTEM_RECORD_MAX_TREE_UPDATE_BYTES) {
     throw new Error('inventory update exceeds the six-object/1-MiB COW bound');
   }
 }
@@ -938,11 +1081,10 @@ export function buildSystemRecordInventoryTreeV1(
 ): SystemRecordInventoryTreeSnapshotV1 {
   assertNetworkIdV1(networkId);
   assertCanonicalDecimalU64(epoch);
-  if (!Array.isArray(rows) || rows.length > SYSTEM_RECORD_MAX_INVENTORY_RECORDS) {
-    throw new Error('initial inventory exceeds the V1 row bound');
-  }
-  const sorted = [...rows];
-  for (const row of sorted) validateInventoryRow(row, networkId);
+  const inputRows = snapshotDataArray(rows, 'initial inventory rows', {
+    maxLength: SYSTEM_RECORD_MAX_INVENTORY_RECORDS,
+  }) as readonly SystemRecordInventoryRowV1[];
+  const sorted = inputRows.map((row) => validateInventoryRow(row, networkId));
   sorted.sort(compareRows);
   for (let index = 1; index < sorted.length; index += 1) {
     if (compareRows(sorted[index - 1], sorted[index]) >= 0) {
@@ -989,7 +1131,7 @@ export function buildSystemRecordInventoryTreeV1(
     epoch,
     version: '0' as DecimalU64V1,
     treeRootDigest: rootDigest,
-    totalRows: rows.length.toString() as DecimalU64V1,
+    totalRows: inputRows.length.toString() as DecimalU64V1,
   };
   return Object.freeze({
     networkId,
@@ -1038,21 +1180,63 @@ export function updateSystemRecordInventoryTreeV1(
   snapshot: SystemRecordInventoryTreeSnapshotV1,
   mutation: SystemRecordInventoryMutationV1,
 ): SystemRecordInventoryCowUpdateV1 {
-  const descriptor = validateRootDescriptor(snapshot.descriptor);
-  if (descriptor.networkId !== snapshot.networkId
-    || computeSystemRecordRootDescriptorDigestV1(descriptor) !== snapshot.descriptorDigest) {
+  const pinnedSnapshot = snapshotExactDataRecord(
+    snapshot,
+    ['networkId', 'descriptor', 'descriptorDigest', 'objects'],
+    'inventory tree snapshot',
+  );
+  const descriptor = validateRootDescriptor(pinnedSnapshot.descriptor);
+  const networkId = pinnedSnapshot.networkId as NetworkIdV1;
+  const pinnedDescriptorDigest = pinnedSnapshot.descriptorDigest as Digest32V1;
+  const objects = pinnedSnapshot.objects;
+  assertNetworkIdV1(networkId);
+  assertCanonicalDigest(pinnedDescriptorDigest);
+  if (!(objects instanceof Map)) throw new Error('inventory snapshot objects must be a native map');
+  try {
+    Reflect.apply(MAP_HAS, objects, [descriptor.treeRootDigest]);
+  } catch {
+    throw new Error('inventory snapshot objects must be a native map');
+  }
+  if (descriptor.networkId !== networkId
+    || computeSystemRecordRootDescriptorDigestV1(descriptor) !== pinnedDescriptorDigest) {
     throw new Error('inventory snapshot descriptor binding is invalid');
   }
-  const targetKey = mutation.operation === 'upsert' ? mutation.row.stableKeyHash : mutation.stableKeyHash;
-  const targetPeer = mutation.operation === 'upsert' ? mutation.row.peerId : mutation.peerId;
+  const mutationProbe = snapshotDataRecord(mutation, 'inventory mutation', { rejectNullValues: true });
+  const normalizedMutation: SystemRecordInventoryMutationV1 = mutationProbe.operation === 'upsert'
+    ? Object.freeze({
+        operation: 'upsert',
+        row: validateInventoryRow(
+          snapshotExactDataRecord(mutationProbe, ['operation', 'row'], 'inventory upsert mutation').row,
+          networkId,
+        ),
+      })
+    : mutationProbe.operation === 'delete'
+      ? Object.freeze({
+          ...snapshotExactDataRecord(
+            mutationProbe,
+            ['operation', 'stableKeyHash', 'peerId'],
+            'inventory delete mutation',
+          ),
+          operation: 'delete' as const,
+        }) as unknown as SystemRecordInventoryMutationV1
+      : (() => { throw new Error('inventory mutation operation is invalid'); })();
+  const targetKey = normalizedMutation.operation === 'upsert'
+    ? normalizedMutation.row.stableKeyHash
+    : normalizedMutation.stableKeyHash;
+  const targetPeer = normalizedMutation.operation === 'upsert'
+    ? normalizedMutation.row.peerId
+    : normalizedMutation.peerId;
   assertCanonicalDigest(targetKey);
   assertCanonicalSystemRecordPeerIdV1(targetPeer);
-  if (targetKey !== computeSystemRecordStableKeyHashV1(snapshot.networkId, targetPeer)) {
+  if (targetKey !== computeSystemRecordStableKeyHashV1(networkId, targetPeer)) {
     throw new Error('inventory mutation key does not bind networkId/peerId');
   }
-  if (mutation.operation === 'upsert') validateInventoryRow(mutation.row, snapshot.networkId);
 
   const loaded = new Set<Digest32V1>();
+  const validatedStoredObjects = new Map<
+    string,
+    Pick<SystemRecordInventoryStoredObjectV1, 'objectKind' | 'object'>
+  >();
   const path: CowPathFrame[] = [];
   let currentDigest = descriptor.treeRootDigest;
   let depth = 1;
@@ -1070,16 +1254,16 @@ export function updateSystemRecordInventoryTreeV1(
     depth += 1;
     if (depth > SYSTEM_RECORD_MAX_TREE_HEIGHT) throw new Error('inventory mutation path exceeds height bound');
   }
-  const rows = leaf.rows.map((encoded) => decodeInventoryRowBase64UrlV1(snapshot.networkId, encoded));
+  const rows = leaf.rows.map((encoded) => decodeInventoryRowBase64UrlV1(networkId, encoded));
   const index = findRowIndex(rows, targetKey, targetPeer);
   const exists = index < rows.length && rows[index].stableKeyHash === targetKey;
   if (exists && rows[index].peerId !== targetPeer) throw new Error('stable-key hash collision');
-  if (mutation.operation === 'delete' && !exists) return unchanged();
-  if (mutation.operation === 'upsert' && exists
-    && Buffer.from(encodeSystemRecordInventoryRowV1(snapshot.networkId, rows[index])).equals(
-      Buffer.from(encodeSystemRecordInventoryRowV1(snapshot.networkId, mutation.row)),
+  if (normalizedMutation.operation === 'delete' && !exists) return unchanged();
+  if (normalizedMutation.operation === 'upsert' && exists
+    && Buffer.from(encodeSystemRecordInventoryRowV1(networkId, rows[index])).equals(
+      Buffer.from(encodeSystemRecordInventoryRowV1(networkId, normalizedMutation.row)),
     )) return unchanged();
-  if (mutation.operation === 'upsert') rows.splice(index, exists ? 1 : 0, mutation.row);
+  if (normalizedMutation.operation === 'upsert') rows.splice(index, exists ? 1 : 0, normalizedMutation.row);
   else rows.splice(index, 1);
 
   const writes: SystemRecordInventoryCowWriteV1[] = [];
@@ -1096,7 +1280,7 @@ export function updateSystemRecordInventoryTreeV1(
       return finish(replacement[0].digest, rows.length);
     }
     const split = chooseSystemRecordByteAwareSplitIndexV1(
-      rows.map((row) => encodeSystemRecordInventoryRowV1(snapshot.networkId, row).byteLength),
+      rows.map((row) => encodeSystemRecordInventoryRowV1(networkId, row).byteLength),
       SYSTEM_RECORD_LEAF_MIN_ROWS,
       SYSTEM_RECORD_LEAF_MIN_ROWS,
     );
@@ -1107,7 +1291,7 @@ export function updateSystemRecordInventoryTreeV1(
 
   if (rows.length > SYSTEM_RECORD_LEAF_MAX_ROWS) {
     const split = chooseSystemRecordByteAwareSplitIndexV1(
-      rows.map((row) => encodeSystemRecordInventoryRowV1(snapshot.networkId, row).byteLength),
+      rows.map((row) => encodeSystemRecordInventoryRowV1(networkId, row).byteLength),
       SYSTEM_RECORD_LEAF_MIN_ROWS,
       SYSTEM_RECORD_LEAF_MIN_ROWS,
     );
@@ -1152,7 +1336,7 @@ export function updateSystemRecordInventoryTreeV1(
       const siblingEntry = parent.object.entries[index];
       if (siblingEntry?.childKind !== 'inventory-leaf') throw new Error('leaf rebalance sibling is unavailable');
       const sibling = loadObject(siblingEntry.childDigest, false).object as SystemRecordInventoryLeafObjectV1;
-      return sibling.rows.map((encoded) => decodeInventoryRowBase64UrlV1(snapshot.networkId, encoded));
+      return sibling.rows.map((encoded) => decodeInventoryRowBase64UrlV1(networkId, encoded));
     }
   }
 
@@ -1230,18 +1414,53 @@ export function updateSystemRecordInventoryTreeV1(
 
   function rowsDelta(): number {
     return Number(parseCanonicalDecimalU64(descriptor.totalRows))
-      + (mutation.operation === 'upsert' && !exists ? 1 : mutation.operation === 'delete' ? -1 : 0);
+      + (normalizedMutation.operation === 'upsert' && !exists
+        ? 1
+        : normalizedMutation.operation === 'delete' ? -1 : 0);
   }
 
-  function loadObject(digest: Digest32V1, root: boolean): SystemRecordInventoryStoredObjectV1 {
-    const stored = snapshot.objects.get(digest);
-    if (stored === undefined) throw new Error(`inventory snapshot is missing ${digest}`);
-    const actual = stored.objectKind === 'inventory-leaf'
-      ? computeSystemRecordInventoryLeafDigestV1(stored.object as SystemRecordInventoryLeafObjectV1, snapshot.networkId, root)
-      : computeSystemRecordInventoryInternalDigestV1(stored.object as SystemRecordInventoryInternalObjectV1, root);
+  function loadObject(
+    digest: Digest32V1,
+    root: boolean,
+  ): Pick<SystemRecordInventoryStoredObjectV1, 'objectKind' | 'object'> {
+    const cacheKey = `${root ? 'root' : 'child'}:${digest}`;
+    const cached = validatedStoredObjects.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const candidate = Reflect.apply(MAP_GET, objects, [digest]) as unknown;
+    if (candidate === undefined) throw new Error(`inventory snapshot is missing ${digest}`);
+    const stored = snapshotExactDataRecord(
+      candidate,
+      ['objectKind', 'object', 'canonicalBytes'],
+      'inventory snapshot stored object',
+    );
+    if (stored.objectKind !== 'inventory-leaf' && stored.objectKind !== 'inventory-internal') {
+      throw new Error('inventory snapshot object kind is invalid');
+    }
+    const object = stored.objectKind === 'inventory-leaf'
+      ? validateLeaf(stored.object, networkId, root)
+      : validateInternal(stored.object, root);
+    const canonicalBytes = canonicalizeJsonBytes(object as unknown as CanonicalJsonValue, {
+      maxBytes: SYSTEM_RECORD_OBJECT_CAPS_V1[stored.objectKind],
+    });
+    const retainedCanonicalBytes = copyBoundedSystemRecordBytesV1(
+      stored.canonicalBytes,
+      SYSTEM_RECORD_OBJECT_CAPS_V1[stored.objectKind],
+      'inventory snapshot stored canonical bytes',
+    );
+    if (!sameBytes(canonicalBytes, retainedCanonicalBytes)) {
+      throw new Error('inventory snapshot stored object does not match its canonical bytes');
+    }
+    const actual = digestSystemRecordBytesV1(
+      stored.objectKind === 'inventory-leaf'
+        ? SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf
+        : SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryInternal,
+      canonicalBytes,
+    );
     if (actual !== digest) throw new Error('inventory snapshot object digest is invalid');
     loaded.add(digest);
-    return stored;
+    const validated = Object.freeze({ objectKind: stored.objectKind, object });
+    validatedStoredObjects.set(cacheKey, validated);
+    return validated;
   }
 
   function persistLeaf(
@@ -1249,9 +1468,9 @@ export function updateSystemRecordInventoryTreeV1(
     root: boolean,
     role: SystemRecordInventoryCowWriteV1['role'],
   ): CowChildRef {
-    const object = makeLeafObject(snapshot.networkId, nextRows);
-    const bytes = canonicalizeSystemRecordInventoryLeafObjectV1(object, snapshot.networkId, root);
-    const digest = computeSystemRecordInventoryLeafDigestV1(object, snapshot.networkId, root);
+    const object = makeLeafObject(networkId, nextRows);
+    const bytes = canonicalizeSystemRecordInventoryLeafObjectV1(object, networkId, root);
+    const digest = computeSystemRecordInventoryLeafDigestV1(object, networkId, root);
     persist(digest, 'inventory-leaf', object, bytes, role);
     return { digest, objectKind: 'inventory-leaf', first: object.firstKeyHash, last: object.lastKeyHash };
   }
@@ -1299,15 +1518,24 @@ export function updateSystemRecordInventoryTreeV1(
   ): void {
     const stored = Object.freeze({ objectKind, object, canonicalBytes });
     nextObjects.set(digest, stored);
-    if (!snapshot.objects.has(digest) && !writes.some((write) => write.digest === digest)) {
+    const existsInSnapshot = Reflect.apply(MAP_HAS, objects, [digest]) as boolean;
+    if (existsInSnapshot) {
+      const existing = loadObject(digest, role === 'root');
+      if (existing.objectKind !== objectKind) {
+        throw new Error('inventory snapshot reuses a digest under a different object kind');
+      }
+    }
+    if (!existsInSnapshot && !writes.some((write) => write.digest === digest)) {
       writes.push(Object.freeze({ digest, objectKind, object, canonicalBytes, role }));
     }
   }
 
   function childRef(entry: SystemRecordInventoryInternalEntryV1): CowChildRef {
-    const stored = nextObjects.get(entry.childDigest) ?? snapshot.objects.get(entry.childDigest);
-    if (stored === undefined) throw new Error('updated inventory references a missing child');
-    if (snapshot.objects.has(entry.childDigest)) loaded.add(entry.childDigest);
+    const overlay = nextObjects.get(entry.childDigest);
+    const stored = overlay ?? loadObject(entry.childDigest, false);
+    if (stored.objectKind !== entry.childKind) {
+      throw new Error('updated inventory child kind does not match its reference');
+    }
     const object = stored.object;
     return {
       digest: entry.childDigest,
@@ -1340,9 +1568,9 @@ export function updateSystemRecordInventoryTreeV1(
     const nextVersion = parseCanonicalDecimalU64(descriptor.version) + 1n;
     if (nextVersion > 0xffff_ffff_ffff_ffffn) throw new Error('root descriptor version overflow');
     const nextDescriptor: SystemRecordRootDescriptorObjectV1 = {
-      objectType: 'root-descriptor', kind: SYSTEM_RECORD_KIND_V1, networkId: snapshot.networkId,
+      objectType: 'root-descriptor', kind: SYSTEM_RECORD_KIND_V1, networkId,
       epoch: descriptor.epoch, version: nextVersion.toString() as DecimalU64V1,
-      priorRootDigest: snapshot.descriptorDigest, treeRootDigest: rootDigest,
+      priorRootDigest: pinnedDescriptorDigest, treeRootDigest: rootDigest,
       totalRows: totalRows.toString() as DecimalU64V1,
     };
     const descriptorBytes = canonicalizeSystemRecordRootDescriptorObjectV1(nextDescriptor);
@@ -1355,28 +1583,36 @@ export function updateSystemRecordInventoryTreeV1(
     };
     assertSystemRecordInventoryCowUpdateBoundV1(accounting);
     const reused = new Set<Digest32V1>();
-    if (snapshot.objects.has(rootDigest)) reused.add(rootDigest);
+    if (Reflect.apply(MAP_HAS, objects, [rootDigest])) reused.add(rootDigest);
     for (const write of writes) {
       if (write.objectKind !== 'inventory-internal') continue;
       for (const entry of (write.object as SystemRecordInventoryInternalObjectV1).entries) {
-        if (snapshot.objects.has(entry.childDigest)) reused.add(entry.childDigest);
+        if (Reflect.apply(MAP_HAS, objects, [entry.childDigest])) reused.add(entry.childDigest);
       }
     }
     const validatedDescriptor = validateRootDescriptor(nextDescriptor);
-    const descriptorDigest = computeSystemRecordRootDescriptorDigestV1(nextDescriptor);
-    return Object.freeze({ changed: true, descriptor: validatedDescriptor, descriptorDigest,
+    const nextDescriptorDigest = computeSystemRecordRootDescriptorDigestV1(nextDescriptor);
+    return Object.freeze({ changed: true, descriptor: validatedDescriptor, descriptorDigest: nextDescriptorDigest,
       writes: Object.freeze(writes),
       descriptorBytes, accounting: Object.freeze(accounting), reusedObjectDigests: reused, loadedObjectDigests: loaded });
   }
 
   function unchanged(): SystemRecordInventoryCowUpdateV1 {
-    return Object.freeze({ changed: false, descriptor, descriptorDigest: snapshot.descriptorDigest,
+    return Object.freeze({ changed: false, descriptor, descriptorDigest: pinnedDescriptorDigest,
       writes: Object.freeze([]),
       accounting: Object.freeze({ leafObjects: 0, internalObjects: 0, rootObjects: 0, descriptorObjects: 0, encodedBytes: 0 }),
       // A no-op publishes no descriptor, so it has no reuse closure to report. Enumerating the
       // complete snapshot here would turn an otherwise path-bounded lookup into O(tree size).
       reusedObjectDigests: new Set<Digest32V1>(), loadedObjectDigests: loaded });
   }
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 function makeLeafObject(
@@ -1468,34 +1704,37 @@ function partitionByTarget<T>(
 }
 
 
-function validateInventoryRow(row: SystemRecordInventoryRowV1, networkId?: NetworkIdV1): void {
+function validateInventoryRow(row: unknown, networkId?: NetworkIdV1): SystemRecordInventoryRowV1 {
+  const probe = snapshotDataRecord(row, 'inventory row', { rejectNullValues: true });
   const expected = [
     'stableKeyHash', 'peerId', 'authoritySequence', 'version', 'headDigest',
-    ...(row.conflictEvidenceDigest === undefined ? [] : ['conflictEvidenceDigest']),
+    ...(hasOwnDataProperty(probe, 'conflictEvidenceDigest') ? ['conflictEvidenceDigest'] : []),
     'tombstone', 'quarantined',
   ];
-  snapshotExactDataRecord(row, expected, 'inventory row');
-  assertCanonicalDigest(row.stableKeyHash);
+  const validated = snapshotExactDataRecord(probe, expected, 'inventory row');
+  assertCanonicalDigest(validated.stableKeyHash);
   try {
-    assertCanonicalSystemRecordPeerIdV1(row.peerId);
+    assertCanonicalSystemRecordPeerIdV1(validated.peerId);
   } catch {
     throw new Error('inventory row peerId is not canonical');
   }
-  if (parseCanonicalDecimalU64(row.authoritySequence) > SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX) {
+  if (parseCanonicalDecimalU64(validated.authoritySequence) > SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX) {
     throw new Error('inventory row authoritySequence exceeds the V1 cap');
   }
-  assertCanonicalDecimalU64(row.version);
-  assertCanonicalDigest(row.headDigest);
-  if (row.conflictEvidenceDigest !== undefined) {
-    assertCanonicalDigest(row.conflictEvidenceDigest);
-    if (!row.quarantined) throw new Error('conflict evidence may appear only on quarantined rows');
+  assertCanonicalDecimalU64(validated.version);
+  assertCanonicalDigest(validated.headDigest);
+  if (hasOwnDataProperty(validated, 'conflictEvidenceDigest')) {
+    assertCanonicalDigest(validated.conflictEvidenceDigest);
+    if (!validated.quarantined) throw new Error('conflict evidence may appear only on quarantined rows');
   }
-  if (typeof row.tombstone !== 'boolean' || typeof row.quarantined !== 'boolean') {
+  if (typeof validated.tombstone !== 'boolean' || typeof validated.quarantined !== 'boolean') {
     throw new Error('inventory row flags must be booleans');
   }
-  if (networkId !== undefined && row.stableKeyHash !== computeSystemRecordStableKeyHashV1(networkId, row.peerId)) {
+  if (networkId !== undefined && validated.stableKeyHash
+    !== computeSystemRecordStableKeyHashV1(networkId, validated.peerId as string)) {
     throw new Error('inventory row stable key hash does not bind networkId/peerId');
   }
+  return Object.freeze({ ...validated }) as unknown as SystemRecordInventoryRowV1;
 }
 
 function compareRows(left: SystemRecordInventoryRowV1, right: SystemRecordInventoryRowV1): number {

@@ -42,6 +42,7 @@ import {
 } from './sync-wire-scalars.js';
 import {
   hasOwnDataProperty,
+  snapshotDataArray,
   snapshotDataRecord,
   snapshotExactDataRecord,
 } from './sync-wire-objects.js';
@@ -256,6 +257,11 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
   } else if (hasOwnDataProperty(state, 'conflictEvidenceDigest')
     && state.status !== 'quarantined') {
     throw new Error('installed conflict evidence requires quarantine or an active remove intent');
+  }
+  if (state.status === 'quarantined'
+    && !hasOwnDataProperty(state, 'conflictEvidenceDigest')
+    && !hasOwnDataProperty(state, 'conflictSidecarIntentOperation')) {
+    throw new Error('quarantine requires installed conflict evidence or a resumable sidecar intent');
   }
   validateAllOrNoneGroup(state, [
     'pendingDeletionTableDigest', 'pendingDeletionSubjectCount', 'pendingDeletionTableBytes',
@@ -511,11 +517,11 @@ export function computeSystemRecordAccountedBytesV1(
 }
 
 function validateTransitionLineage(value: unknown): readonly AgentProfileAppliedTransitionV1[] {
-  if (!Array.isArray(value) || value.length > Number(SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX)) {
-    throw new Error('transition lineage exceeds the V1 authority bound');
-  }
+  const lineage = snapshotDataArray(value, 'transition lineage', {
+    maxLength: Number(SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX),
+  });
   let expectedPrior = 0n;
-  return Object.freeze(value.map((candidate) => {
+  return Object.freeze(lineage.map((candidate) => {
     const entry = snapshotExactDataRecord(
       candidate,
       ['priorAuthoritySequence', 'nextAuthoritySequence', 'transitionDigest'],
@@ -533,11 +539,11 @@ function validateTransitionLineage(value: unknown): readonly AgentProfileApplied
 }
 
 function validateRootArray(value: unknown, currentRoot: string): readonly string[] {
-  if (!Array.isArray(value) || value.length > SYSTEM_RECORD_MAX_ROOT_CLAIMS - 1) {
-    throw new Error('historical roots exceed the V1 authority bound');
-  }
+  const values = snapshotDataArray(value, 'historical roots', {
+    maxLength: SYSTEM_RECORD_MAX_ROOT_CLAIMS - 1,
+  });
   const seen = new Set([currentRoot]);
-  const roots = value.map((candidate) => {
+  const roots = values.map((candidate) => {
     assertAgentRootV1(candidate as string);
     if (seen.has(candidate as string)) throw new Error('root claims must be duplicate-free');
     seen.add(candidate as string);
@@ -547,12 +553,12 @@ function validateRootArray(value: unknown, currentRoot: string): readonly string
 }
 
 function validateDigestSlots(value: unknown): readonly Digest32V1[] {
-  if (!Array.isArray(value) || value.length > SYSTEM_RECORD_MAX_CONFLICT_DIGESTS) {
-    throw new Error('conflict digest slots exceed the V1 bound');
-  }
-  const slots = value.map((candidate, index) => {
+  const values = snapshotDataArray(value, 'conflict digest slots', {
+    maxLength: SYSTEM_RECORD_MAX_CONFLICT_DIGESTS,
+  });
+  const slots = values.map((candidate, index) => {
     assertCanonicalDigest(candidate);
-    if (index > 0 && value[index - 1] >= candidate) {
+    if (index > 0 && (values[index - 1] as string) >= candidate) {
       throw new Error('conflict digest slots must be sorted and duplicate-free');
     }
     return candidate;
