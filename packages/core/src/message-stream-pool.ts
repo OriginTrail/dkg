@@ -574,6 +574,28 @@ export class MessageStreamPool {
   }
 
   /**
+   * Close the stream held for `peerIdStr` once it is quiescent.
+   * Returns `true` when a live stream existed and was closed;
+   * `false` when the peer holds no stream OR the stream still has
+   * in-flight / queued work.
+   *
+   * The busy case is deliberately left alone rather than force-
+   * aborted: rejecting live requests here would reproduce the exact
+   * all-in-flight-requests-die failure the caller is trying to route
+   * around. Callers that want the stream gone stop feeding it new
+   * sends and invoke this again on their next pass — an active
+   * stream drains naturally (or hits the pool's own idle/reset
+   * teardown) and the retire lands then.
+   */
+  async closePeerIfIdle(peerIdStr: string, reason = 'peer stream retired'): Promise<boolean> {
+    const state = this.peers.get(peerIdStr);
+    if (!state || state.closed) return false;
+    if (state.inFlight !== null || state.queue.length > 0) return false;
+    await this.closePeer(state, reason);
+    return true;
+  }
+
+  /**
    * Close every pooled stream and reject all pending requests.
    * Safe to call multiple times. After close, further `send()` calls
    * throw {@link PooledStreamResetError}.
