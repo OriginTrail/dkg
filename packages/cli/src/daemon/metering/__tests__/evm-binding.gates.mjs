@@ -138,6 +138,10 @@ console.log("\nno registration oracle (buyer-requested):");
   const badSig = { ...good, evmSignature: "0xdead" };
   const regBad = R.anchorWalletKey(home, PRINCIPAL, { proof: badSig, chainId: CHAIN });
   const unregBad = R.anchorWalletKey(home, unknownAddr, { proof: { ...badSig, principal: unknownAddr }, chainId: CHAIN });
+  // Buyer-found: the specific reason must reach the caller, AND must still be
+  // identical across registration states.
+  ok("a binding failure surfaces its SPECIFIC code, not a collapsed one",
+    R.anchorWalletKey(home, PRINCIPAL, { proof: { ...good, chainId: 84532 }, chainId: CHAIN }).bindingCode === "E_BINDING_WRONG_CHAIN");
   ok("a bad signature fails IDENTICALLY for registered and unregistered principals",
     JSON.stringify(regBad) === JSON.stringify(unregBad), `${JSON.stringify(regBad)} vs ${JSON.stringify(unregBad)}`);
 

@@ -56,7 +56,22 @@ export function loadBuyerRegistry(home: string): BuyerRegistry {
 
 export type AnchorResult =
   | { ok: true; walletPublicKeyPem: string; label: string }
-  | { ok: false; code: "E_PRINCIPAL_NOT_REGISTERED"; detail: string };
+  | {
+      ok: false;
+      code: "E_PRINCIPAL_NOT_REGISTERED";
+      detail: string;
+      /**
+       * The specific binding failure, when a proof WAS presented.
+       *
+       * Buyer-found (Hermes/Bo): a wrong-chain proof surfaced as an outer
+       * E_PRINCIPAL_NOT_REGISTERED with the real reason buried in prose, so a
+       * caller could not branch on it. Collapsing every anchor failure to one
+       * code is only necessary where the code would reveal registration state —
+       * and binding failures never touch the registry, so they reveal nothing.
+       * The collapse conflated two unrelated things for no security benefit.
+       */
+      bindingCode?: string;
+    };
 
 /**
  * Resolve the operator-approved key for a principal.
@@ -84,10 +99,16 @@ export function anchorWalletKey(
       // A PRESENTED-but-invalid proof is a hard failure, never a silent
       // downgrade to the registry: falling back would let an attacker strip a
       // proof they cannot forge and land on the weaker check instead.
-      return { ok: false, code: "E_PRINCIPAL_NOT_REGISTERED", detail: `binding proof rejected: ${v.code}${v.detail ? " — " + v.detail : ""}` };
+      return {
+        ok: false, code: "E_PRINCIPAL_NOT_REGISTERED", bindingCode: v.code,
+        detail: `binding proof rejected: ${v.code}${v.detail ? " — " + v.detail : ""}`,
+      };
     }
     if (v.principal.toLowerCase() !== norm(tabPrincipal)) {
-      return { ok: false, code: "E_PRINCIPAL_NOT_REGISTERED", detail: "binding proof is for a different principal than the delegation claims" };
+      return {
+        ok: false, code: "E_PRINCIPAL_NOT_REGISTERED", bindingCode: "E_BINDING_PRINCIPAL_MISMATCH",
+        detail: "binding proof is for a different principal than the delegation claims",
+      };
     }
     return { ok: true, walletPublicKeyPem: binding.proof.walletPublicKeyPem, label: `self-proved:${v.principal}` };
   }

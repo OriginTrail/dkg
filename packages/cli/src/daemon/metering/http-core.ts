@@ -117,8 +117,13 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
     // A caller cannot supply the evidence that validates its own claim.
     const anchor = anchorWalletKey(home, delegation.tabPrincipal, { proof: body.bindingProof, chainId: req.chainId });
     if (!anchor.ok) {
+      // Surface the SPECIFIC binding failure as the verdict when a proof was
+      // presented, so callers can branch on it. Safe because binding checks
+      // never consult the registry and so cannot reveal registration state.
       io.json(200, {
-        preflight: "zero-value", estimatedMicroTrac: 0, verdict: anchor.code,
+        preflight: "zero-value", estimatedMicroTrac: 0,
+        verdict: anchor.bindingCode ?? anchor.code,
+        anchorCode: anchor.code,
         ok: false, ledgerTouched: false,
         capabilityId: delegation.capabilityId ?? null, detail: anchor.detail,
       });
@@ -148,7 +153,7 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
     }
     const openAnchor = anchorWalletKey(home, b.delegation.tabPrincipal, { proof: b.bindingProof, chainId: req.chainId });
     if (!openAnchor.ok) {
-      io.json(403, { opened: false, code: openAnchor.code, detail: openAnchor.detail });
+      io.json(403, { opened: false, code: openAnchor.bindingCode ?? openAnchor.code, anchorCode: openAnchor.code, detail: openAnchor.detail });
       return true;
     }
     try {
