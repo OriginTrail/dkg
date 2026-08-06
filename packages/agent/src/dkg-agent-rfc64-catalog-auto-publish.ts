@@ -56,8 +56,33 @@ import {
   maintainRfc64SwmAuthorInventoryV1,
   removeRfc64SwmAuthorInventoryRowV1,
 } from './rfc64/swm-author-inventory-producer-v1.js';
+import {
+  RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1,
+  Rfc64SwmInventoryShadowRuntimeV1,
+  type Rfc64SwmAuthorInventoryShadowMutationResultV1,
+  type Rfc64SwmAuthorInventoryShadowStatusV1,
+} from './rfc64/swm-inventory-shadow-runtime-v1.js';
 
-const RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1 = 16;
+export type {
+  Rfc64SwmAuthorInventoryShadowMutationResultV1,
+  Rfc64SwmAuthorInventoryShadowStatusV1,
+} from './rfc64/swm-inventory-shadow-runtime-v1.js';
+
+const rfc64SwmInventoryShadowRuntimesV1 = new WeakMap<
+  DKGAgent,
+  Rfc64SwmInventoryShadowRuntimeV1
+>();
+
+function rfc64SwmInventoryShadowRuntimeV1(
+  agent: DKGAgent,
+): Rfc64SwmInventoryShadowRuntimeV1 {
+  let runtime = rfc64SwmInventoryShadowRuntimesV1.get(agent);
+  if (runtime === undefined) {
+    runtime = new Rfc64SwmInventoryShadowRuntimeV1();
+    rfc64SwmInventoryShadowRuntimesV1.set(agent, runtime);
+  }
+  return runtime;
+}
 
 /** Internal normal-publication handoff after VM confirmation is durable locally. */
 export interface RecordConfirmedRfc64PublicCatalogAssetParamsV1 {
@@ -115,30 +140,6 @@ export interface ObserveRfc64ConfirmedVmParamsV1 {
   readonly publicationLabel: 'publish' | 'queued publish';
 }
 
-export type Rfc64SwmAuthorInventoryShadowMutationResultV1 = Readonly<{
-  status: 'dormant' | 'applied' | 'existing' | 'absent' | 'failed';
-  action: 'upsert' | 'remove';
-  attempts: number;
-  headObjectDigest: string | null;
-  error: string | null;
-}>;
-
-export interface Rfc64SwmAuthorInventoryShadowStatusV1 {
-  readonly attemptedUpserts: number;
-  readonly appliedUpserts: number;
-  readonly existingUpserts: number;
-  readonly attemptedRemovals: number;
-  readonly appliedRemovals: number;
-  readonly absentRemovals: number;
-  readonly failed: number;
-  readonly casRetries: number;
-  readonly lastAction: 'upsert' | 'remove' | null;
-  readonly lastContextGraphId: string | null;
-  readonly lastKaUal: string | null;
-  readonly lastHeadDigest: string | null;
-  readonly lastError: string | null;
-}
-
 interface ResolvedRfc64AcceptedPublicRootLaneV1 {
   readonly networkId: NetworkIdV1;
   readonly service: Rfc64PublicCatalogServiceV1;
@@ -188,34 +189,26 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */
   async awaitInFlightRfc64SwmInventoryObserversV1(this: DKGAgent): Promise<void> {
-    await Promise.allSettled([...this.inFlightRfc64SwmInventoryObserversV1]);
+    await rfc64SwmInventoryShadowRuntimeV1(this).drain();
   }
 
   inFlightRfc64SwmInventoryObserverCountV1(this: DKGAgent): number {
-    return this.inFlightRfc64SwmInventoryObserversV1.size;
+    return rfc64SwmInventoryShadowRuntimeV1(this).inFlightCount;
   }
 
   private scheduleRfc64SwmInventoryObserverV1(
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): void {
-    if (
-      this.inFlightRfc64SwmInventoryObserversV1.size
-      >= RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1
-    ) {
+    const admitted = rfc64SwmInventoryShadowRuntimeV1(this).schedule(
+      () => this.observeRfc64DurableSwmPromotionV1(params),
+    );
+    if (!admitted) {
       this.log.warn(
         params.ctx,
         `RFC-64 SWM inventory shadow observer skipped at bounded concurrency ${RFC64_SWM_INVENTORY_MAX_IN_FLIGHT_OBSERVERS_V1}`,
       );
-      return;
     }
-    const observer = this.observeRfc64DurableSwmPromotionV1(params);
-    let tracked: Promise<void>;
-    tracked = observer.finally(() => {
-      this.inFlightRfc64SwmInventoryObserversV1.delete(tracked);
-    });
-    this.inFlightRfc64SwmInventoryObserversV1.add(tracked);
-    void tracked.catch(() => undefined);
   }
 
   /** Canonical non-blocking observer for catalog advancement and exact SWM removal. */
@@ -284,7 +277,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       authorAddress: EvmAddressV1;
     }>,
   ): SwmAuthorInventorySnapshotV1 | null {
-    return this.rfc64PersistenceV1?.inventory.readSwmAuthorInventorySnapshotV1(
+    return this.rfc64PersistenceV1?.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
       params.inventoryScopeDigest,
       params.authorAddress,
     ) ?? null;
@@ -294,7 +287,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   rfc64SwmAuthorInventoryShadowStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64SwmAuthorInventoryShadowStatusV1> {
-    return Object.freeze({ ...this.rfc64SwmAuthorInventoryShadowStatsV1 });
+    return rfc64SwmInventoryShadowRuntimeV1(this).status();
   }
 
   /**
@@ -403,7 +396,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       const signer = this.createRfc64CatalogAuthorSignerV1(canonicalSeal.authorAddress);
       const issuedAt = Math.max(Date.now(), Number(sharedAt)).toString() as TimestampMsV1;
       const maintained = await maintainRfc64SwmAuthorInventoryV1(
-        persistence.inventory,
+        persistence.swmAuthorInventory,
         {
           scope,
           row: Object.freeze({
@@ -473,7 +466,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       const persistence = this.rfc64PersistenceV1;
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(seal.authorAddress);
-      const removed = await removeRfc64SwmAuthorInventoryRowV1(persistence.inventory, {
+      const removed = await removeRfc64SwmAuthorInventoryRowV1(
+        persistence.swmAuthorInventory,
+        {
         scope,
         expectedRow: Object.freeze({
           kaUal: seal.kaUal,
@@ -485,7 +480,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           issuer: signer.address as EvmAddressV1,
           signDigest: signer.signMessage,
         }),
-      });
+        },
+      );
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         shadowResult(
           removed.status,
@@ -626,25 +622,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     kaUal: string | null,
   ): Rfc64SwmAuthorInventoryShadowMutationResultV1 {
     if (result.status === 'dormant') return result;
-    const stats = this.rfc64SwmAuthorInventoryShadowStatsV1;
-    if (result.action === 'upsert') stats.attemptedUpserts += 1;
-    else stats.attemptedRemovals += 1;
-    stats.casRetries += Math.max(0, result.attempts - 1);
-    if (result.status === 'applied') {
-      if (result.action === 'upsert') stats.appliedUpserts += 1;
-      else stats.appliedRemovals += 1;
-    } else if (result.status === 'existing') {
-      stats.existingUpserts += 1;
-    } else if (result.status === 'absent') {
-      stats.absentRemovals += 1;
-    } else {
-      stats.failed += 1;
-    }
-    stats.lastAction = result.action;
-    stats.lastContextGraphId = contextGraphId;
-    stats.lastKaUal = kaUal;
-    if (result.status !== 'failed') stats.lastHeadDigest = result.headObjectDigest;
-    stats.lastError = result.error;
+    rfc64SwmInventoryShadowRuntimeV1(this).record(result, contextGraphId, kaUal);
     return result;
   }
 

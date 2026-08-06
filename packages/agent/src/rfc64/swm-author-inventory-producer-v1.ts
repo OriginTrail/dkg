@@ -33,7 +33,7 @@ import {
 } from './control-envelope-signer-v1.js';
 import {
   InventoryV1CandidateError,
-  type Rfc64InventoryV1OperationsV1,
+  type Rfc64SwmAuthorInventoryOperationsV1,
   type SwmAuthorInventoryCasResultV1,
 } from './inventory-v1/index.js';
 import { applySwmAuthorInventoryMutationV1 } from './inventory-v1/swm-author-inventory-mutation.js';
@@ -99,10 +99,7 @@ export interface RemoveRfc64SwmAuthorInventoryResultV1 {
  * replay returns without advancing the version.
  */
 export async function maintainRfc64SwmAuthorInventoryV1(
-  inventory: Pick<
-    Rfc64InventoryV1OperationsV1,
-    'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
-  >,
+  inventory: Rfc64SwmAuthorInventoryOperationsV1,
   input: MaintainRfc64SwmAuthorInventoryInputV1,
 ): Promise<MaintainRfc64SwmAuthorInventoryResultV1> {
   const prepared = prepareInput(input);
@@ -147,10 +144,7 @@ export async function maintainRfc64SwmAuthorInventoryV1(
 
 /** Remove one KA after it leaves the active SWM-only set (normally VM confirmation). */
 export async function removeRfc64SwmAuthorInventoryRowV1(
-  inventory: Pick<
-    Rfc64InventoryV1OperationsV1,
-    'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
-  >,
+  inventory: Rfc64SwmAuthorInventoryOperationsV1,
   input: RemoveRfc64SwmAuthorInventoryInputV1,
 ): Promise<RemoveRfc64SwmAuthorInventoryResultV1> {
   const prepared = prepareRemovalInput(input);
@@ -241,10 +235,7 @@ interface SwmAuthorInventoryMutationPolicyV1<TResult> {
 }
 
 async function mutateRfc64SwmAuthorInventoryV1<TResult>(
-  inventory: Pick<
-    Rfc64InventoryV1OperationsV1,
-    'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
-  >,
+  inventory: Rfc64SwmAuthorInventoryOperationsV1,
   prepared: PreparedMutationInputV1,
   policy: SwmAuthorInventoryMutationPolicyV1<TResult>,
 ): Promise<TResult> {
