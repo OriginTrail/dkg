@@ -651,7 +651,11 @@ export interface DkgConfig {
   syncGlobalQueueLimit?: number;
   /** Retained sync responder snapshot limits (rows and estimated bytes). */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
-  /** Local sync scheduling priority by Context Graph ID. */
+  /**
+   * Local sync scheduling priority by Context Graph ID. Higher runs first.
+   * System Context Graphs default to a deprioritized priority so they run
+   * last; an explicit entry here (including 0) overrides that default.
+   */
   syncContextGraphPriorities?: SyncContextGraphPriorityConfig;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;

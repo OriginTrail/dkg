@@ -218,7 +218,7 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import {
-  normalizeSyncContextGraphPriorities,
+  resolveSyncContextGraphPriorities,
   validateSyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
@@ -748,7 +748,7 @@ export class DKGAgent extends DKGAgentBase {
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
-      syncContextGraphPriorities: normalizeSyncContextGraphPriorities(
+      syncContextGraphPriorities: resolveSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,
       ),
     });

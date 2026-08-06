@@ -312,7 +312,7 @@ import {
   createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
   createIncompleteDurableSyncResult,
-  durableSyncAccumulatorHasBackoffWorthyFailure,
+  durableSyncAccumulatorHasPeerTransportFailure,
   durableSyncAccumulatorHasTerminalBoundary,
   durableSyncAccumulatorFromResult,
   finalizeDurableSyncCompletion,
@@ -4832,9 +4832,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return markDurableTerminalBoundary(summary, false);
         },
         shouldContinue: () => !operationBoundary.signal?.aborted,
-        shouldStop: (part) => Boolean(
+        // One CG's backoff-worthy round stays in the merged summary (its
+        // terminal boundary is false, so the aggregate cannot finalize
+        // complete, and the peer is not stamped fresh) while the remaining
+        // CGs still get their turn. Only peer-never-responded rounds may
+        // stop the batch, via the ordered fanout's consecutive-failure guard.
+        isPeerTransportFailure: (part) => Boolean(
           stopOnBackoffWorthyFailure
-          && durableSyncAccumulatorHasBackoffWorthyFailure(part),
+          && durableSyncAccumulatorHasPeerTransportFailure(part),
         ),
         onDeferred: (item, error) => this.log.info(
           ctx,
@@ -6155,8 +6160,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
         }),
-        shouldStop: (part) => Boolean(
-          stopOnBackoffWorthyFailure && (part.backoffWorthyFailures ?? 0) > 0,
+        // Mirrors the durable fanout: a failed CG round is already recorded in
+        // the merged counters and must not cost the remaining CGs their turn.
+        // `failedPeers` is the peer-never-responded signal on the public lane;
+        // the private curator-recovery lane also reports it for its whole-round
+        // failures, which the consecutive-failure guard bounds instead of
+        // aborting on the first one.
+        isPeerTransportFailure: (part) => Boolean(
+          stopOnBackoffWorthyFailure && part.failedPeers > 0,
         ),
         onDeferred: (item, error) => this.log.info(
           ctx,
