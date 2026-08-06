@@ -3,6 +3,7 @@ import {
   STORE_ADMISSION_DEFAULT_DOMAIN,
   STORE_ADMISSION_EXCLUSIVE_WAIT_BOUND_MS,
   STORE_ADMISSION_SHARED_BYPASS_LIMIT,
+  StoreControlBarrierTimeoutError,
   StorePriorityScheduler,
   type StoreAdmissionV1,
 } from '../src/store-priority-scheduler.js';
@@ -927,6 +928,125 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     await expect(heldWrite).resolves.toBe('held');
     expect(heldStarted).toBe(true);
     expect(scheduler.snapshot.admissionTrackedStores).toBe(0);
+  });
+
+  it('bounds a transition that deadlocks against its own quiescence gate', async () => {
+    // The exact shape that hung: blocking untagged work is only released from
+    // INSIDE the transition, and the transition cannot start until that work
+    // drains. Circular wait — the contract working as documented, but silently.
+    const scheduler = openScheduler();
+    const storeId = {};
+    let transitionRan = false;
+    let releaseBlocker!: () => void;
+
+    const blocker = scheduler.run('normal', 'legacy.blocker', async () => {
+      await new Promise<void>((resolve) => {
+        releaseBlocker = resolve;
+      });
+    });
+    await settle(() => scheduler.snapshot.normalInflight === 1, 'blocking work in flight');
+
+    const barrier = scheduler.runControlBarrier(storeId, 'oxigraph.restart', async () => {
+      transitionRan = true;
+      // Never reached: the barrier cannot start while the blocker is in flight.
+      releaseBlocker();
+      return 'restarted';
+    }, 'gen-1', 25);
+
+    const error = await barrier.then(
+      () => { throw new Error('barrier resolved instead of timing out'); },
+      (err: unknown) => err as StoreControlBarrierTimeoutError,
+    );
+
+    expect(error).toBeInstanceOf(StoreControlBarrierTimeoutError);
+    expect(error).toMatchObject({
+      code: 'STORE_CONTROL_BARRIER_TIMEOUT',
+      phase: 'wait',
+      purpose: 'oxigraph.restart',
+    });
+    // Diagnostics name the cause instead of leaving an operator to guess.
+    expect(error.blockedBy.untaggedInflight).toBe(1);
+    expect(error.message).toContain('issues store work through the scheduler');
+    expect(transitionRan).toBe(false);
+    expect(scheduler.snapshot.barrierTimeouts).toBe(1);
+
+    // A wait-phase timeout is fully recoverable: nothing was disrupted, so the
+    // barrier withdraws and the store resumes rather than staying frozen.
+    expect(scheduler.snapshot).toMatchObject({
+      barrierPending: 0,
+      barrierInflight: 0,
+      admissionSealedStores: 0,
+      admissionHeldRuns: 0,
+    });
+    await expect(scheduler.run('normal', 'legacy.after', async () => 'ok')).resolves.toBe('ok');
+
+    releaseBlocker();
+    await blocker;
+  });
+
+  it('bounds a transition that re-enters the scheduler for its own store', async () => {
+    // The other half: the transition DID start, then issued scheduled work for
+    // the store it owns. Its own seal holds that call until it returns, and it
+    // cannot return until the call completes.
+    const scheduler = openScheduler();
+    const storeId = {};
+    let reentrantStarted = false;
+
+    const barrier = scheduler.runControlBarrier(storeId, 'profile.apply', async () => {
+      await scheduler.run('normal', 'agents.write.reentrant', async () => {
+        reentrantStarted = true;
+        return 'written';
+      }, undefined, admission(storeId, 'shared'));
+      return 'applied';
+    }, 'gen-1', 25);
+
+    const error = await barrier.then(
+      () => { throw new Error('barrier resolved instead of timing out'); },
+      (err: unknown) => err as StoreControlBarrierTimeoutError,
+    );
+
+    expect(error).toMatchObject({
+      code: 'STORE_CONTROL_BARRIER_TIMEOUT',
+      phase: 'transition',
+      purpose: 'profile.apply',
+    });
+    expect(error.blockedBy.heldRuns).toBe(1);
+    expect(reentrantStarted).toBe(false);
+    expect(scheduler.snapshot.barrierTimeouts).toBe(1);
+
+    // Reported, deliberately not force-recovered: the transition may be part-way
+    // through stopping a child, so the seal outlives the rejection.
+    expect(scheduler.snapshot).toMatchObject({
+      barrierInflight: 1,
+      admissionSealedStores: 1,
+      admissionHeldRuns: 1,
+    });
+  });
+
+  it('does not arm the bound against an ordinary slow transition', async () => {
+    // The bound must catch a circular wait, not police a slow restart. A
+    // transition that simply takes a while and then finishes must be untouched.
+    const scheduler = openScheduler();
+    const storeId = {};
+    let releaseTransition!: () => void;
+
+    const barrier = scheduler.runControlBarrier(storeId, 'oxigraph.restart', async () => {
+      await new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      return 'restarted';
+    }, 'gen-1', 10_000);
+    await settle(() => scheduler.snapshot.barrierInflight === 1, 'transition running');
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    releaseTransition();
+    await expect(barrier).resolves.toBe('restarted');
+    expect(scheduler.snapshot).toMatchObject({
+      barrierTimeouts: 0,
+      barrierPending: 0,
+      barrierInflight: 0,
+      admissionSealedStores: 0,
+    });
   });
 
   it('propagates a failing transition and still releases the seal', async () => {

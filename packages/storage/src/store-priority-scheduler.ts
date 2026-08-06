@@ -61,6 +61,12 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   barrierInflight: number;
   /** Cumulative same-purpose barriers folded into an already-pending one. */
   barrierCoalesced: number;
+  /**
+   * Cumulative transitions that exceeded their bound. Non-zero is always a bug
+   * worth alerting on — most often a transition issuing store work through the
+   * scheduler, which deadlocks against its own barrier.
+   */
+  barrierTimeouts: number;
   /** Cumulative barrier wait. Proves a measured wait actually happened. */
   barrierWaitMs: number;
   /**
@@ -120,6 +126,47 @@ export interface StoreAdmissionV1 {
    */
   readonly domain?: string;
   readonly mode: StoreAdmissionMode;
+}
+
+export type StoreControlBarrierPhase = 'wait' | 'transition';
+
+/** What a control barrier was still waiting on when it gave up. */
+export interface StoreControlBarrierBlockers {
+  /** Inflight work carrying no store identity, so it cannot be ruled out. */
+  untaggedInflight: number;
+  taggedInflightForStore: number;
+  generationsInflight: number;
+  heldRuns: number;
+}
+
+/**
+ * A control transition that did not complete within its bound.
+ *
+ * The quiescence gate traded one failure mode for another: a transition that
+ * issues store work through the scheduler no longer produces a burst of
+ * transport errors, it produces a circular wait — the transition waits for work
+ * to drain, and that work waits for the transition. Silent and indefinite is a
+ * worse operational outcome than loud and wrong, so the wait is bounded and
+ * reports exactly what it was blocked on.
+ */
+export class StoreControlBarrierTimeoutError extends Error {
+  readonly code = 'STORE_CONTROL_BARRIER_TIMEOUT' as const;
+
+  constructor(
+    readonly phase: StoreControlBarrierPhase,
+    readonly purpose: string,
+    readonly elapsedMs: number,
+    readonly blockedBy: StoreControlBarrierBlockers,
+  ) {
+    super(
+      `Store control barrier "${purpose || 'unknown'}" timed out after ${elapsedMs} ms in the `
+      + `${phase} phase (untagged inflight ${blockedBy.untaggedInflight}, tagged inflight for this `
+      + `store ${blockedBy.taggedInflightForStore}, held runs ${blockedBy.heldRuns}). The usual `
+      + 'cause is a transition that issues store work through the scheduler: a barrier owns the '
+      + 'store exclusively, so work issued from inside one waits for the barrier waiting for it.',
+    );
+    this.name = 'StoreControlBarrierTimeoutError';
+  }
 }
 
 /** Handle returned by {@link StorePriorityScheduler.sealStoreGeneration}. */
@@ -239,6 +286,9 @@ interface BarrierEntry {
   waitStartedAt: number;
   coalesced: number;
   running: boolean;
+  /** Guards the caller promise so a timeout and a late settle cannot both fire. */
+  settled: boolean;
+  timer?: ReturnType<typeof setTimeout>;
   seal: StoreGenerationSeal;
 }
 
@@ -305,6 +355,15 @@ export const STORE_ADMISSION_EXCLUSIVE_WAIT_BOUND_MS = 250;
 
 /** Seal generation recorded for a barrier that drains ALL tagged work. */
 const BARRIER_ANY_GENERATION = '*';
+
+/**
+ * Default bound on a whole control transition, wait plus execution.
+ *
+ * Comfortably above the managed child's 30 s `readyTimeoutMs` so a genuinely
+ * slow Oxigraph restart is never mistaken for a deadlock — this exists to catch
+ * a circular wait, not to police a slow disk.
+ */
+export const DEFAULT_STORE_CONTROL_BARRIER_TIMEOUT_MS = 60_000;
 
 function parsePositiveIntegerEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -462,6 +521,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly barriers: BarrierEntry[] = [];
   private barrierRunning: BarrierEntry | undefined;
   private barrierCoalescedTotal = 0;
+  private barrierTimeoutsTotal = 0;
+  private readonly barrierTimeoutMs: number;
   private barrierWaitMsTotal = 0;
   private barrierWaitOccupiedSlotMsTotal = 0;
   /**
@@ -547,6 +608,10 @@ export class StorePriorityScheduler extends ObservableScheduler {
       requestedBackgroundFloor,
     );
     this.queueWaitTimeoutMs = resolvedQueueWaitTimeoutMs;
+    this.barrierTimeoutMs = parsePositiveIntegerEnv(
+      'DKG_STORE_BARRIER_TIMEOUT_MS',
+      DEFAULT_STORE_CONTROL_BARRIER_TIMEOUT_MS,
+    );
     this.now = resolvedNow;
     this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
     const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
@@ -606,6 +671,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       barrierPending: this.barriers.length,
       barrierInflight: this.barrierRunning ? 1 : 0,
       barrierCoalesced: this.barrierCoalescedTotal,
+      barrierTimeouts: this.barrierTimeoutsTotal,
       barrierWaitMs: this.barrierWaitMsTotal,
       barrierWaitOccupiedSlotMs: this.barrierWaitOccupiedSlotMsTotal,
     };
@@ -980,14 +1046,33 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * duration — with tagged admission for this `storeId` (held by its own seal)
    * or untagged (held by its own barrier). It does not need to: it already owns
    * the store, so it issues its work directly.
+   *
+   * Re-entering anyway is a circular wait, so the whole transition is bounded
+   * and rejects with {@link StoreControlBarrierTimeoutError} — naming that cause
+   * and reporting what it was blocked on — rather than hanging silently. The
+   * bound is deliberately NOT exact re-entry detection: telling "the transition
+   * called us" apart from "an unrelated caller is legitimately waiting" needs
+   * `AsyncLocalStorage`, which on Node 22 latches async_hooks on for the rest of
+   * the process once entered. Taxing every async operation in the daemon
+   * forever, to diagnose a caller bug faster, is the wrong trade for a
+   * process-global scheduler.
+   *
+   * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(
     storeId: object,
     purpose: string,
     transition: () => Promise<T>,
     generation?: string,
+    timeoutMs?: number,
   ): Promise<T> {
-    return this.enqueueControlBarrier(storeId, purpose, transition, generation) as Promise<T>;
+    return this.enqueueControlBarrier(
+      storeId,
+      purpose,
+      transition,
+      generation,
+      timeoutMs,
+    ) as Promise<T>;
   }
 
   private isSealed(storeId: object): boolean {
@@ -1296,6 +1381,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     purpose: string,
     transition: () => Promise<unknown>,
     generation?: string,
+    timeoutMs?: number,
   ): Promise<unknown> {
     const existing = this.barriers.find(
       (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
@@ -1322,14 +1408,66 @@ export class StorePriorityScheduler extends ObservableScheduler {
       waitStartedAt: this.now(),
       coalesced: 0,
       running: false,
+      settled: false,
       // Sealing here is what makes the wait below terminate: without it a busy
       // store keeps admitting tagged work and never quiesces.
       seal: this.sealStoreGeneration(storeId, generation ?? BARRIER_ANY_GENERATION),
     };
+    barrier.timer = setTimeout(
+      () => this.failBarrier(barrier),
+      timeoutMs ?? this.barrierTimeoutMs,
+    );
+    if (typeof barrier.timer.unref === 'function') barrier.timer.unref();
     this.barriers.push(barrier);
     this.observeDepths();
     this.pumpBarriers();
     return promise;
+  }
+
+  /**
+   * Bound expired. Recovery differs by phase, and the difference matters:
+   *
+   * - **wait** — the transition never started, so nothing has been disrupted.
+   *   The barrier is withdrawn completely and the store resumes. Fully
+   *   recoverable, and this is the phase a circular wait actually lands in.
+   * - **transition** — the transition is mid-flight and may be part-way through
+   *   stopping a child. Releasing the seal here would admit work into a store
+   *   that no longer exists, so the caller is told and the seal is left in
+   *   place. If the transition ever settles, its own `finally` still cleans up,
+   *   so this reports without permanently freezing the lane.
+   */
+  private failBarrier(barrier: BarrierEntry): void {
+    barrier.timer = undefined;
+    if (barrier.settled) return;
+    barrier.settled = true;
+    this.barrierTimeoutsTotal += 1;
+    barrier.reject(new StoreControlBarrierTimeoutError(
+      barrier.running ? 'transition' : 'wait',
+      barrier.purpose,
+      Math.max(0, this.now() - barrier.waitStartedAt),
+      this.describeBarrierBlockers(barrier),
+    ));
+    if (barrier.running) {
+      this.observeDepths();
+      return;
+    }
+    const index = this.barriers.indexOf(barrier);
+    if (index >= 0) this.barriers.splice(index, 1);
+    barrier.seal.commit();
+    this.observeDepths();
+    this.pumpBarriers();
+  }
+
+  private describeBarrierBlockers(barrier: BarrierEntry): StoreControlBarrierBlockers {
+    const totalInflight = this.ackInflight + this.healthInflight
+      + this.normalInflight + this.backgroundInflight;
+    const state = this.storeStates.get(barrier.storeId);
+    return {
+      untaggedInflight: Math.max(0, totalInflight - this.countTaggedInflight()),
+      taggedInflightForStore: state?.taggedInflight ?? 0,
+      generationsInflight: this.countGenerationsInflight(),
+      heldRuns: this.heldRunCount,
+    };
   }
 
   /**
@@ -1392,8 +1530,25 @@ export class StorePriorityScheduler extends ObservableScheduler {
       result = Promise.reject(err);
     }
     result
-      .then(barrier.resolve, barrier.reject)
+      .then(
+        (value) => {
+          if (barrier.settled) return;
+          barrier.settled = true;
+          barrier.resolve(value);
+        },
+        (err) => {
+          if (barrier.settled) return;
+          barrier.settled = true;
+          barrier.reject(err);
+        },
+      )
+      // Cleanup runs unconditionally, even for a transition already rejected by
+      // the bound — a late settle must still unfreeze the lane.
       .finally(() => {
+        if (barrier.timer !== undefined) {
+          clearTimeout(barrier.timer);
+          barrier.timer = undefined;
+        }
         this.barrierRunning = undefined;
         const index = this.barriers.indexOf(barrier);
         if (index >= 0) this.barriers.splice(index, 1);
