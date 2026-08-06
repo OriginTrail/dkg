@@ -216,6 +216,12 @@ export interface DkgMetrics {
   backpressureQueueLimit: Gauge;
   /** current admitted work; scheduler and lane are bounded static labels */
   backpressureInflight: Gauge;
+  /**
+   * admitted count the lane's `backpressureInflightLimit` bounds — this lane's
+   * own under a private allocation, the pool's under a shared one; scheduler
+   * and lane are bounded static labels
+   */
+  backpressurePressureInflight: Gauge;
   /** configured concurrent-work capacity; scheduler and lane are bounded static labels */
   backpressureInflightLimit: Gauge;
   /** age of the oldest queued item; scheduler and lane are bounded static labels */
@@ -410,6 +416,10 @@ function buildMetrics(): DkgMetrics {
     }),
     backpressureInflight: meter.createGauge('dkg.backpressure.inflight', {
       description: 'Current admitted scheduler work by bounded scheduler and lane',
+    }),
+    backpressurePressureInflight: meter.createGauge('dkg.backpressure.pressure_inflight', {
+      description:
+        'Admitted work the lane inflight limit bounds, by bounded scheduler and lane',
     }),
     backpressureInflightLimit: meter.createGauge('dkg.backpressure.inflight_limit', {
       description: 'Configured scheduler concurrent-work capacity by bounded scheduler and lane',

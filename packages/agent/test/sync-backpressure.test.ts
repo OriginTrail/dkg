@@ -1384,11 +1384,24 @@ describe('sync global backpressure', () => {
       // The scheduler-level ceilings are what a shared lane's ceiling resolves
       // to, so dropping either one from the publish would silently take the
       // depth branches back out of service.
-      expect(snapshot).toMatchObject({ totals: { queueLimit: 2, inflightLimit: 1 } });
-      expect(snapshot?.lanes.find((lane) => lane.lane === 'durable')).toMatchObject({
+      expect(snapshot).toMatchObject({
         capacityModel: 'shared',
-        queueLimit: 2,
-        inflightLimit: 1,
+        totals: { queueLimit: 2, inflightLimit: 1 },
+      });
+      // Scoping this to one lane would be decorative: under `shared` every
+      // field below resolves from scheduler-level capacity, so it is identical
+      // on every row — and `this.lanes` is never pruned, so a `find` can match
+      // a stale row an earlier test left on the module singleton. Assert the
+      // property over ALL rows instead, plus the one genuinely lane-scoped
+      // fact: the admission just made is active in the lane it was sent to.
+      expect(snapshot!.lanes.length).toBeGreaterThan(0);
+      for (const lane of snapshot!.lanes) {
+        expect(lane).toMatchObject({ capacityModel: 'shared', queueLimit: 2, inflightLimit: 1 });
+      }
+      const durable = snapshot!.lanes.find((lane) => lane.lane === 'durable');
+      expect(durable).toMatchObject({
+        inflight: 1,
+        activeOperations: [expect.objectContaining({ operation: 'durable:catchup-foreground' })],
       });
     } finally {
       releaseRunning();

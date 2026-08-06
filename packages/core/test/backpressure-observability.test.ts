@@ -155,6 +155,10 @@ describe('SchedulerPressureTracker', () => {
 
     expect(tracker.snapshot()).toMatchObject({
       state: 'saturated',
+      // The scheduler-level field is the authoritative one; assert it from a
+      // real tracker, not only inside a lane row, or deleting it goes unnoticed
+      // while the API reports `partitioned` above rows that all say `shared`.
+      capacityModel: 'shared',
       totals: { queued: 4, queueLimit: 4, inflightLimit: 2 },
       lanes: [
         // `queued` is the lane's own share; `pressureQueued` is the pool depth
@@ -193,10 +197,13 @@ describe('SchedulerPressureTracker', () => {
 
     expect(tracker.snapshot()).toMatchObject({
       state: 'saturated',
+      capacityModel: 'shared',
       lanes: [{
         lane: 'durable',
         state: 'saturated',
+        capacityModel: 'shared',
         queued: 4,
+        pressureQueued: 4,
         queueLimit: 4,
         oldestQueuedAgeMs: 0,
         rejectedTotal: 0,
@@ -236,6 +243,32 @@ describe('SchedulerPressureTracker', () => {
     }
   });
 
+  it('reports each lane its own backlog when a shared pool has no ceiling', () => {
+    const now = 1_000;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global',
+      now: () => now,
+      capacity: { capacityModel: 'shared' },
+    });
+
+    // An unbounded shared pool: no ceiling, so no depth applies and no lane is
+    // classified on it. The published numerator falls back to the lane's own
+    // backlog — not 0, which would put a fabricated `pressureQueued: 0` beside
+    // `queued: 2` on the row and on every log line.
+    tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
+    tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
+    tracker.enqueue({ lane: 'changelog', operation: 'changelog:reconcile' });
+
+    expect(tracker.snapshot()).toMatchObject({
+      state: 'healthy',
+      totals: { queued: 3, queueLimit: null },
+      lanes: [
+        { lane: 'changelog', state: 'healthy', queued: 1, pressureQueued: 1, queueLimit: null },
+        { lane: 'durable', state: 'healthy', queued: 2, pressureQueued: 2, queueLimit: null },
+      ],
+    });
+  });
+
   it('leaves a shared-pool lane with nothing waiting out of the pool pressure', () => {
     const now = 1_000;
     const tracker = new SchedulerPressureTracker({
@@ -255,7 +288,11 @@ describe('SchedulerPressureTracker', () => {
     tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
 
     expect(tracker.snapshot()).toMatchObject({
-      totals: { queued: 3, queueLimit: 4 },
+      // `inflightLimit` is asserted, not merely exercised: a shared pool's
+      // ceiling must never become a summand. Relax `sumLaneLimits` to skip
+      // nulls and sum the rest — a plausible future "improvement" — and this
+      // reads 2x the pool while every other assertion stays green.
+      totals: { queued: 3, queueLimit: 4, inflightLimit: 2 },
       lanes: [
         // 3/4 of the pool is the documented 75% early-warning band.
         { lane: 'durable', state: 'degraded', capacityModel: 'shared', queued: 3, pressureQueued: 3 },
@@ -300,6 +337,7 @@ describe('SchedulerPressureTracker', () => {
 
     expect(tracker.snapshot()).toMatchObject({
       state: 'saturated',
+      capacityModel: 'partitioned',
       totals: { queued: 3, queueLimit: 4 },
       lanes: [
         // A private allocation is judged against its own backlog, so the two
@@ -531,6 +569,49 @@ describe('BackpressureMonitor', () => {
     // own `all` record is no longer emitted — which is why the pool depth had
     // to move onto the lane records.
     expect(line('all')).toBeUndefined();
+  });
+
+  it('drives a real shared tracker past the point where the rollup outranks its lanes', () => {
+    // The assertion above feeds the monitor hand-built rows whose equal states
+    // this test chose, so it cannot fail if the identity it claims to prove
+    // breaks. This one derives the states from a real tracker: mutate the
+    // shared numerator and a lane drops below the rollup, `sync-global` starts
+    // emitting `"lane":"all"` again — the opposite of what is documented — and
+    // only this test notices.
+    const now = 1_000;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global',
+      now: () => now,
+      capacity: { queueLimit: 4, inflightLimit: 2, capacityModel: 'shared' },
+    });
+    tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
+    tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
+    tracker.enqueue({ lane: 'changelog', operation: 'changelog:reconcile' });
+    tracker.enqueue({ lane: 'shared_memory', operation: 'shared-memory:on-connect' });
+
+    const registry = new BackpressureRegistry();
+    registry.register({
+      backpressureId: 'sync-global',
+      getBackpressureSnapshot: () => tracker.snapshot(),
+    });
+    const messages: string[] = [];
+    new BackpressureMonitor({
+      registry,
+      now: () => now,
+      emit: (_level, message) => messages.push(message),
+    }).sample();
+
+    const snapshot = tracker.snapshot();
+    expect(snapshot.state).toBe('saturated');
+    // Every lane holding work reaches the rollup's own state — the identity the
+    // suppression depends on — so no rollup record is emitted…
+    expect(snapshot.lanes.every((lane) => lane.state === snapshot.state)).toBe(true);
+    expect(messages.some((m) => m.includes('"lane":"all"'))).toBe(false);
+    // …and each lane record carries the pool depth that classified it.
+    for (const lane of ['changelog', 'durable', 'shared_memory']) {
+      const record = messages.find((m) => m.includes(`"lane":"${lane}"`));
+      expect(record).toContain('"pressureQueued":4');
+    }
   });
 
   it('exports a depth a metric consumer can divide by the limit beside it', () => {

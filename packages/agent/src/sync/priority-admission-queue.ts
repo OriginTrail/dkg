@@ -119,6 +119,13 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       scheduler: hooks.observability?.scheduler ?? 'priority-admission',
       thresholds: hooks.observability?.thresholds,
       now,
+      // Registration happens here, but capacity is only published on the first
+      // acquire — so without this a freshly booted daemon advertises
+      // `partitioned` on the field documented as authoritative, permanently so
+      // when sync admission is disabled and no acquire ever runs. The limits
+      // themselves still arrive with the first acquire; this declares only the
+      // model, which is a property of this queue rather than of a call.
+      capacity: { capacityModel: 'shared' },
     });
     this.hooks = hooks;
     this.now = now;

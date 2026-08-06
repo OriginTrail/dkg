@@ -74,7 +74,7 @@ reported under in its `capacityModel` field:
 
 | `capacityModel` | Meaning | Source |
 | --- | --- | --- |
-| `partitioned` | The lane holds a private queue allocation and fills independently of its neighbours. Lane allocations add up to the scheduler's capacity. | `store` |
+| `partitioned` | The lane holds a private queue allocation and fills independently of its neighbours. The scheduler-level limit is an independent rollup ceiling — lane allocations are **not** summed into it and are not validated against it. | `store` |
 | `shared` | Every lane draws on one queue and one concurrency pool. The lane's `queueLimit`/`inflightLimit` **are** that pool's ceilings — the same number on every lane, never to be summed. | `sync-global` |
 
 Two depths sit on every lane row, and they differ only under `shared`:
@@ -82,7 +82,8 @@ Two depths sit on every lane row, and they differ only under `shared`:
 | Field | Meaning |
 | --- | --- |
 | `queued` | This lane's own backlog — *who* is waiting. The attribution signal. |
-| `pressureQueued` | The depth the lane's `state` was classified against, and the numerator that belongs with `queueLimit`. Equal to `queued` for a `partitioned` lane, and the whole pool's depth for a `shared` lane **that has work waiting**. A lane with an empty backlog was not classified on depth at all, so it reports `0` and never reads as utilized. |
+| `pressureQueued` | The depth the lane's `state` was classified against, and the numerator that belongs with `queueLimit`. Equal to `queued` for a `partitioned` lane, and the whole pool's depth for a `shared` lane **that has work waiting against a ceiling**. Where no depth applies — an empty backlog, or a pool with no `queueLimit` — nothing was classified on depth and the lane reports its own `queued`, so it never reads as utilized. |
+| `pressureInflight` | The same rule for concurrency: the count that belongs with `inflightLimit`. Pairing a lane's own `inflight` with a shared pool's ceiling reads as idle concurrency while the pool is the reason nothing drains. |
 
 So compute utilization from **`pressureQueued / queueLimit`**, never from `queued`, and no consumer has
 to special-case the model. Both fields are optional on the type, so a scheduler written against an older
@@ -122,7 +123,7 @@ So `{"operation":"durable:catchup-foreground","count":4,"oldestAgeMs":109000}`
 in a `queuedOperations` summary reads as "four explicit catch-up durable
 admissions are queued, the oldest for 109 seconds", and the matching
 `activeOperations` entry gives the same view for admitted work. Both halves are
-closed sets, so the label space stays bounded (5 × 7) and, as before, no Context
+closed sets, so the label space stays bounded (5 × 8) and, as before, no Context
 Graph id or peer id ever reaches a metric, log line, or diagnostics response —
 an unrecognized source is clamped to `unspecified`.
 
@@ -227,7 +228,8 @@ attributes:
 | `dkg.backpressure.queue_depth` | gauge | Current waiting work in this lane — the attribution signal |
 | `dkg.backpressure.pressure_depth` | gauge | The depth this lane's state was classified against. **Divide this by `queue_limit` for utilization**, not `queue_depth`: on a `shared` lane the limit is the pool's, so pairing it with the lane's own backlog underreports. Equal to `queue_depth` on a `partitioned` lane |
 | `dkg.backpressure.queue_limit` | gauge | Configured queue capacity |
-| `dkg.backpressure.inflight` | gauge | Current admitted work |
+| `dkg.backpressure.inflight` | gauge | Current admitted work in this lane — attribution |
+| `dkg.backpressure.pressure_inflight` | gauge | The admitted count `inflight_limit` bounds, on the same rule as `pressure_depth` |
 | `dkg.backpressure.inflight_limit` | gauge | Configured concurrency |
 | `dkg.backpressure.oldest_queued_age_ms` | gauge | Head-of-line age |
 | `dkg.backpressure.oldest_active_age_ms` | gauge | Oldest admitted duration |
