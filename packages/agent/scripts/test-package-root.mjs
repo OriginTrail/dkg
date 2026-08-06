@@ -27,6 +27,9 @@ if (
   || typeof root.FinalizedVmCompositionErrorV1 !== 'function'
   || typeof root.assertRecoverableAuthorAttestationV1 !== 'function'
   || typeof root.RecoverableAuthorAttestationErrorV1 !== 'function'
+  || typeof root.maintainRfc64SwmAuthorInventoryV1 !== 'function'
+  || typeof root.removeRfc64SwmAuthorInventoryRowV1 !== 'function'
+  || typeof root.Rfc64SwmAuthorInventoryProducerErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
@@ -113,6 +116,7 @@ const publicRfc64Modules = [
   'inventory-v1/sql.js',
   'inventory-v1/statements.js',
   'public-catalog-activation-config-v1.js',
+  'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
   'catalog-access-policy-v1.js',
@@ -120,6 +124,7 @@ const blockedRfc64Modules = [
   'catalog-peers-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
+  'control-envelope-signer-v1.js',
   'control-object-store-v1-internal.js',
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
@@ -155,6 +160,7 @@ const blockedRfc64Modules = [
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
+  'swm-inventory-shadow-runtime-v1.js',
 ];
 const packageExports = packageManifest.exports;
 const emittedRfc64Modules = await listEmittedRfc64Modules();

@@ -44,6 +44,7 @@ export {
 } from './catalog-trust.js';
 export {
   resolveKnowledgeAssetWorkspaceHead,
+  resolvePublishedKnowledgeAssetWorkspaceHead,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveLiftWorkspaceSlice,
   storeKnowledgeAssetWorkspaceHead,
@@ -51,6 +52,8 @@ export {
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   KnowledgeAssetWorkspaceHeadCorruptError,
   type KnowledgeAssetWorkspaceHead,
+  type PublishedKnowledgeAssetWorkspaceHead,
+  type ResolveKnowledgeAssetWorkspaceHeadParams,
   type KnowledgeAssetOperationPublicSnapshot,
 } from './workspace-resolution.js';
 export {

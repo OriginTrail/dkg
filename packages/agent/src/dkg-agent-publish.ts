@@ -98,9 +98,6 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
-  assertAssertionCoordinateV1,
-  assertContextGraphIdV1,
-  assertSubGraphNameV1,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   withSpan,
@@ -1549,12 +1546,14 @@ export class PublishMethods extends DKGAgentBase {
         promoted.shareOperationId,
       );
     }
-    await this._stampSwmPointer(
+    await this.afterDurableSwmPromotionV1({
       contextGraphId,
-      assertionName,
+      subGraphName: opts?.subGraphName,
+      assertionCoordinate: assertionName,
       lifecycleAgentAddress,
-      opts?.subGraphName,
-    );
+      shareOperationId: promoted.shareOperationId,
+      ctx,
+    });
 
     const intent = await this.resolveFinalizedAssertionVmPublishIntent(
       contextGraphId,
@@ -6199,33 +6198,7 @@ export class PublishMethods extends DKGAgentBase {
     }>,
   ): Promise<void> {
     if (input.status !== 'confirmed') return;
-    try {
-      const contextGraphId = input.contextGraphId;
-      const assertionCoordinate = input.assertionCoordinate;
-      const subGraphName = input.subGraphName ?? null;
-      assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
-      assertAssertionCoordinateV1(
-        assertionCoordinate,
-        'confirmed publish assertionCoordinate',
-      );
-      if (subGraphName !== null) {
-        assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
-      }
-      await this.recordConfirmedRfc64PublicCatalogAssetV1({
-        contextGraphId,
-        subGraphName,
-        assertionCoordinate,
-        publicQuads: input.publicQuads,
-        seal: input.seal,
-      });
-    } catch (err) {
-      this.log.warn(
-        input.ctx,
-        `Confirmed ${input.publicationLabel} for <${input.assertionUri}> but `
-          + `RFC-64 catalog advancement failed: `
-          + (err instanceof Error ? err.message : String(err)),
-      );
-    }
+    await this.observeRfc64ConfirmedVmV1(input);
   }
 
   /**

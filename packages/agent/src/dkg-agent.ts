@@ -2801,7 +2801,14 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). Best-effort; never blocks the share result.
-        await agent._stampSwmPointer(contextGraphId, name, promoteAgentAddress, opts?.subGraphName);
+        await agent.afterDurableSwmPromotionV1({
+          contextGraphId,
+          subGraphName: opts?.subGraphName,
+          assertionCoordinate: name,
+          lifecycleAgentAddress: promoteAgentAddress,
+          shareOperationId: shareOperationId ?? null,
+          ctx: createOperationContext('share'),
+        });
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
         // same isFullCompletePromote), so it stays in lockstep with the rows for
