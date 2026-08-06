@@ -197,6 +197,40 @@ describe('sync requester bailout', () => {
     ))).toBe(false);
   });
 
+  it('uses the reserved data window after a meta phase timeout', async () => {
+    const fetchSyncPages = recorder(async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { completed: false, timedOut: true })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['slow-cg', 'next-cg'],
+      stopOnBackoffWorthyFailure: true,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.timedOutPhases).toBe(1);
+    expect(fetchSyncPages.calls.map(([request]) => ({
+      contextGraphId: request.contextGraphId,
+      phase: request.phase,
+    }))).toEqual([
+      { contextGraphId: 'slow-cg', phase: 'meta' },
+      { contextGraphId: 'slow-cg', phase: 'data' },
+    ]);
+  });
+
   it('stops shared-memory context-graph fanout after a backoff-worthy transport failure', async () => {
     const fetchSyncPages = recorder(async (
       _ctx: OperationContext,

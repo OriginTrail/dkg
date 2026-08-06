@@ -387,12 +387,10 @@ async function runDurableSyncWithBudget(
           }
         : await fetchPhase('meta', metaGraph);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
-      if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
-        markDurableTerminalBoundary(accumulator, false);
-        recordPhaseOutcome(metaResult, { updateCheckpoint: false });
-        endPhase();
-        break;
-      }
+      // A meta timeout can be the intentional phase boundary assigned by the
+      // per-phase budget. Keep going so data can use the time reserved for it;
+      // the post-processing timeout gate below still prevents fanout to the
+      // next context graph when stopOnBackoffWorthyFailure is enabled.
       throwIfOperationAborted();
       const sinceBatchId = sinceBatchIdFor?.(pid);
       const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
