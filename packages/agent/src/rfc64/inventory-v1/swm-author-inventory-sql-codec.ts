@@ -31,12 +31,13 @@ export function swmAuthorKeyParametersV1(
 export function swmAuthorHeadParametersV1(
   head: PreparedSwmAuthorInventoryCommitV1,
 ): SqlParametersV1 {
+  const payload = head.snapshot.head.payload;
   return {
     ...swmAuthorKeyParametersV1(head),
-    nextHead: head.nextHead,
-    inventoryVersion: head.inventoryVersion,
-    totalRows: head.totalRows,
-    rowsDigest: head.rowsDigest,
+    nextHead: digest32ToSqlBlobV1(head.snapshot.head.objectDigest as Digest32V1),
+    inventoryVersion: decimalU64ToSqlBlobV1(payload.version),
+    totalRows: decimalU64ToSqlBlobV1(payload.totalRows),
+    rowsDigest: digest32ToSqlBlobV1(payload.rowsDigest),
     signedHeadEnvelope: head.signedHeadEnvelope,
     expectedHead: head.expectedHead,
     canonicalMutation: head.canonicalMutation,

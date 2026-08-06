@@ -7,7 +7,6 @@ import {
   deriveSwmAuthorInventoryScopeFromHeadV1,
   parseCanonicalSignedSwmAuthorInventoryHeadEnvelopeV1,
   parseCanonicalSwmAuthorInventoryRowsV1,
-  type Digest32V1,
   type EvmAddressV1,
   type SwmAuthorInventorySnapshotV1,
 } from '@origintrail-official/dkg-core';
@@ -20,7 +19,6 @@ import {
 } from './swm-author-inventory-contracts.js';
 import { snapshotExactPlainDataRecordV1 } from './exact-record.js';
 import {
-  decimalU64ToSqlBlobV1,
   digest32ToSqlBlobV1,
   evmAddressToSqlBlobV1,
 } from './scalars.js';
@@ -46,10 +44,6 @@ export interface PreparedSwmAuthorInventoryCommitV1
   readonly snapshot: SwmAuthorInventorySnapshotV1;
   readonly mutation: SwmAuthorInventoryMutationV1;
   readonly expectedHead: Uint8Array | null;
-  readonly nextHead: Uint8Array;
-  readonly inventoryVersion: Uint8Array;
-  readonly totalRows: Uint8Array;
-  readonly rowsDigest: Uint8Array;
   readonly signedHeadEnvelope: Uint8Array;
   readonly canonicalMutation: Uint8Array;
 }
@@ -114,10 +108,6 @@ export function prepareSwmAuthorInventoryCommitV1(
       snapshot,
       mutation,
       expectedHead,
-      nextHead: digest32ToSqlBlobV1(head.objectDigest as Digest32V1),
-      inventoryVersion: decimalU64ToSqlBlobV1(head.payload.version),
-      totalRows: decimalU64ToSqlBlobV1(head.payload.totalRows),
-      rowsDigest: digest32ToSqlBlobV1(head.payload.rowsDigest),
       signedHeadEnvelope: canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(head),
       canonicalMutation: encodeSwmAuthorInventoryMutationV1(mutation),
     });

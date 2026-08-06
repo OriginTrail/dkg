@@ -50,6 +50,10 @@ const ROW_A = row('7', 'draft-a', 'share-a', '11', '22');
 const ROW_B = row('8', 'draft-b', 'share-b', '33', '44');
 const ROW_2 = row('2', 'draft-2', 'share-2', '12', '23');
 const ROW_10 = row('10', 'draft-10', 'share-10', '13', '24');
+const ROW_EXPIRING = Object.freeze({
+  ...row('11', 'draft-expiring', 'share-expiring', '14', '25'),
+  expiresAt: '1700000001000',
+}) as SwmAuthorInventoryRowV1;
 const MIGRATION_HEAD = `0x${'55'.repeat(32)}` as const;
 const MIGRATION_ROWS = `0x${'66'.repeat(32)}` as const;
 const directories: string[] = [];
@@ -143,6 +147,36 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(
       successor,
     );
+  });
+
+  it('persists a canonical non-null expiry and rejects an invalid expiry before writing', async () => {
+    const directory = temporaryDirectory();
+    let inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+
+    const genesis = snapshot([ROW_EXPIRING]);
+    expect(inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis,
+      mutation: { kind: 'upsert', row: ROW_EXPIRING },
+      expectedCurrentHeadDigest: null,
+    })).toEqual({ status: 'applied', snapshot: genesis });
+
+    inventory.close();
+    foundations.splice(foundations.indexOf(inventory), 1);
+    inventory = await openInventoryV1(directory);
+    foundations.push(inventory);
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(genesis);
+
+    const invalid = Object.freeze({
+      ...row('12', 'draft-invalid-expiry', 'share-invalid-expiry', '15', '26'),
+      expiresAt: '1700000000000',
+    }) as SwmAuthorInventoryRowV1;
+    expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: snapshot([invalid]),
+      mutation: { kind: 'upsert', row: invalid },
+      expectedCurrentHeadDigest: null,
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-scalar' }));
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(genesis);
   });
 
   for (const commitLanded of [false, true]) {

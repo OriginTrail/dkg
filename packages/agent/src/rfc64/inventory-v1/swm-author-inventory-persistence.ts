@@ -23,7 +23,8 @@ import type {
   PreparedSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import {
-  applySwmAuthorInventoryMutationV1,
+  requireAppliedSwmAuthorInventoryMutationV1,
+  SwmAuthorInventoryMutationNoopErrorV1,
   decodeSwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-mutation.js';
 import {
@@ -338,25 +339,29 @@ export class SwmAuthorInventoryPersistenceV1 {
         'SWM author inventory successor must increment version and bind the exact predecessor',
       );
     }
-    let transition;
+    let rows;
     try {
-      transition = applySwmAuthorInventoryMutationV1(current?.rows ?? [], next.mutation);
+      rows = requireAppliedSwmAuthorInventoryMutationV1(
+        current?.rows ?? [],
+        next.mutation,
+      );
     } catch (cause) {
+      if (cause instanceof SwmAuthorInventoryMutationNoopErrorV1) {
+        throw this.host.error(
+          'swm-inventory-input',
+          cause.status === 'existing'
+            ? 'SWM author inventory mutation must change the exact row set'
+            : 'SWM author inventory removal target is absent',
+          { cause },
+        );
+      }
       throw this.host.error(
         'swm-inventory-input',
         'SWM author inventory mutation cannot produce a canonical row set',
         { cause },
       );
     }
-    if (transition.status !== 'applied') {
-      throw this.host.error(
-        'swm-inventory-input',
-        transition.status === 'existing'
-          ? 'SWM author inventory mutation must change the exact row set'
-          : 'SWM author inventory removal target is absent',
-      );
-    }
-    if (!swmAuthorInventoryRowsEqualV1(transition.rows, next.snapshot.rows)) {
+    if (!swmAuthorInventoryRowsEqualV1(rows, next.snapshot.rows)) {
       throw this.host.error(
         'swm-inventory-input',
         'signed SWM author inventory row set is not the exact requested mutation',

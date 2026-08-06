@@ -21,6 +21,16 @@ export type SwmAuthorInventoryMutationPlanV1 = Readonly<{
   rows: readonly SwmAuthorInventoryRowV1[];
 }>;
 
+export class SwmAuthorInventoryMutationNoopErrorV1 extends Error {
+  readonly status: 'existing' | 'absent';
+
+  constructor(status: 'existing' | 'absent') {
+    super(`SWM author inventory mutation resolved as ${status}`);
+    this.name = 'SwmAuthorInventoryMutationNoopErrorV1';
+    this.status = status;
+  }
+}
+
 /** Snapshot one caller-owned mutation into its canonical protocol shape. */
 export function snapshotSwmAuthorInventoryMutationV1(
   mutation: unknown,
@@ -97,6 +107,18 @@ export function applySwmAuthorInventoryMutationV1(
     rows.splice(index, 1);
   }
   return Object.freeze({ status: 'applied' as const, rows: canonicalRows(rows) });
+}
+
+/** Persistence projector: require one mutation to change the canonical row set. */
+export function requireAppliedSwmAuthorInventoryMutationV1(
+  current: readonly SwmAuthorInventoryRowV1[],
+  mutation: SwmAuthorInventoryMutationV1,
+): readonly SwmAuthorInventoryRowV1[] {
+  const plan = applySwmAuthorInventoryMutationV1(current, mutation);
+  if (plan.status !== 'applied') {
+    throw new SwmAuthorInventoryMutationNoopErrorV1(plan.status);
+  }
+  return plan.rows;
 }
 
 function canonicalRows(
