@@ -27,22 +27,61 @@ export interface PredecessorEntryResultV1 {
 }
 
 /**
- * IMPORTANT — what this gate does and does not measure.
+ * One real generation handoff, driven end to end.
  *
- * An earlier revision declared thirteen counters here (foreign-process signals,
- * old-generation dispatches, stale-facade dispatches, barrier slot-ms, healthy
- * deadline recoveries, indeterminate/recovery latencies …) and asserted each
- * `=== 0`. Every one was a constant the generator hardcoded: `run.ts` never
- * restarted a child, never opened a lane session and never ran a barrier, so no
- * code path could have made any of them non-zero. Thirteen of eighteen "checks"
- * were assertions about literals, printed as `PASS: 18 checks`.
+ * Every field here is MEASURED from a live run: the real CLI supervisor
+ * (`startOxigraphServer`), the real owned child process, the real store
+ * scheduler and its control barrier, and a genuinely in-flight ordinary write.
+ * Nothing in this section is stubbed — the supervisor handoff is wrapped only to
+ * timestamp when each half was entered, and the delegate underneath is the
+ * production one.
  *
- * They are deleted rather than left in place. A verdict that overclaims is
- * worse than a smaller one, because the smaller one does not stop anyone
- * looking. Those properties belong to the generation-handoff and lane-session
- * behaviour that lands with the CAS stack; the rows return when something
- * actually drives them.
+ * This section exists because the gate previously could not have caught the
+ * defect it was named after: it minted ownership by hand, injected no-op
+ * supervisor methods, and so never restarted a child, never opened a lane and
+ * never ran a barrier. A lane that stopped its child while ordinary requests
+ * were in flight passed it cleanly.
  */
+export interface LiveHandoffMeasurementV1 {
+  /** Child generations observed on the lease, before and after the handoff. */
+  readonly generationBefore: string;
+  readonly generationAfter: string;
+  /** PIDs of every process the supervisor actually spawned, in order. */
+  readonly spawnedPids: readonly number[];
+  /** Liveness of the first and last spawned PID, read after the handoff. */
+  readonly retiredPidAlive: boolean;
+  readonly replacementPidAlive: boolean;
+  /**
+   * The ordinary write was STILL RUNNING when the lane was asked to open.
+   *
+   * Without this the ordering check below is vacuous: a write that had already
+   * finished would satisfy "stop came after it settled" no matter what the
+   * barrier did.
+   */
+  readonly ordinaryInflightAtOpen: boolean;
+  /** The in-flight ordinary write completed rather than failing across the restart. */
+  readonly ordinaryWriteFailure: string | null;
+  /**
+   * Total store-scheduler inflight work at the instant the supervisor was asked
+   * to kill the child. Must be zero: that is the quantity the barrier waits on.
+   *
+   * This replaced a wall-clock "stop happened after the write settled"
+   * comparison, which was subtly wrong — the scheduler releases admission when
+   * the store work resolves, and the caller's promise settles a few microtasks
+   * later, so a CORRECT handoff measured as 0.09 ms too early and would have
+   * needed a magic tolerance to pass. Against the pre-fix build the same probe
+   * read -49 ms, so the tolerance would have had to be chosen to sit between
+   * two numbers rather than to mean anything.
+   */
+  readonly inflightWhenChildStopped: number;
+  /** Lane state after the handoff. */
+  readonly laneState: string;
+  /** Quads readable from the replacement generation; proves it reopened the same location. */
+  readonly quadsVisibleAfterHandoff: number;
+  readonly quadsWrittenBeforeHandoff: number;
+  /** An ordinary request issued AFTER the handoff succeeded against the replacement. */
+  readonly servedAfterHandoff: boolean;
+}
 export interface ManagedOwnershipRawResultV1 {
   readonly schemaVersion: typeof MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION;
   readonly oxigraphVersion: string;
@@ -62,6 +101,9 @@ export interface ManagedOwnershipRawResultV1 {
   readonly manifestEntryCount: number;
   /** Every manifest commit resolved to a real object in this repository. */
   readonly manifestCommitsResolved: boolean;
+
+  /** One real supervisor-driven generation handoff under the control barrier. */
+  readonly liveHandoff: LiveHandoffMeasurementV1;
 
   /** Sockets still held by the owned pool BEFORE it was destroyed. */
   readonly ownedSocketsBeforeDestroy: number;
@@ -101,7 +143,68 @@ export function evaluateManagedOwnership(
     detail: value === 0 ? undefined : `expected 0, got ${value}`,
   });
 
+  const live = raw.liveHandoff;
+
   const checks: { name: string; pass: boolean; detail?: string }[] = [
+    // ---- One real generation handoff, driven by the real supervisor. ----
+    //
+    // The ordering check is the one that matters, and it is stated as a PAIR
+    // for the same reason the socket check is: on its own it cannot fail. If
+    // the ordinary write had already finished, "the stop came after it" is
+    // true however the lane behaved. `ordinaryInflightAtOpen` is what makes the
+    // measurement live.
+    {
+      name: 'ordinaryWriteStillInflightWhenLaneOpened',
+      pass: live.ordinaryInflightAtOpen,
+      detail: live.ordinaryInflightAtOpen ? undefined : 'the probe write finished before the lane opened',
+    },
+    {
+      name: 'childStoppedOnlyAfterOrdinaryWorkDrained',
+      pass: live.inflightWhenChildStopped === 0,
+      detail: `${live.inflightWhenChildStopped} store request(s) inflight when the child was stopped`,
+    },
+    {
+      name: 'inflightOrdinaryWriteSurvivedTheHandoff',
+      pass: live.ordinaryWriteFailure === null,
+      detail: live.ordinaryWriteFailure ?? undefined,
+    },
+    {
+      name: 'childGenerationAdvanced',
+      pass: live.generationBefore !== live.generationAfter,
+      detail: `${live.generationBefore} -> ${live.generationAfter}`,
+    },
+    // A separate OS process, not merely a new string. The gate's whole reason
+    // for being live is that these are process facts.
+    {
+      name: 'aSecondChildProcessWasSpawned',
+      pass: live.spawnedPids.length >= 2
+        && live.spawnedPids[0] !== live.spawnedPids[live.spawnedPids.length - 1],
+      detail: `pids ${live.spawnedPids.join(', ')}`,
+    },
+    { name: 'retiredChildIsDead', pass: live.retiredPidAlive === false },
+    { name: 'replacementChildIsAlive', pass: live.replacementPidAlive === true },
+    {
+      name: 'laneEnabledAfterHandoff',
+      pass: live.laneState === 'enabled',
+      detail: live.laneState,
+    },
+    // Durability across the restart: the replacement reopened the SAME store
+    // location. A handoff that silently produced an empty store would otherwise
+    // satisfy every check above.
+    {
+      name: 'replacementServesTheSameData',
+      pass:
+        live.quadsWrittenBeforeHandoff > 0
+        && live.quadsVisibleAfterHandoff === live.quadsWrittenBeforeHandoff,
+      detail: `${live.quadsVisibleAfterHandoff}/${live.quadsWrittenBeforeHandoff} quads`,
+    },
+    {
+      name: 'storeResumedAgainstTheReplacement',
+      pass: live.servedAfterHandoff,
+      detail: live.servedAfterHandoff ? undefined : 'a post-handoff request did not succeed',
+    },
+
+
     // The socket check is a PAIR on purpose. Asserting only the post-destroy
     // zero was unfalsifiable: `destroyAndSettle` loops until the count reaches
     // zero and throws otherwise, so the value it returns is necessarily 0 and

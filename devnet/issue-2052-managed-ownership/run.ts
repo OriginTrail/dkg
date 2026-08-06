@@ -36,9 +36,13 @@ import {
   OXIGRAPH_VERSION,
   ensureOxigraphBinary,
 } from '../../packages/cli/src/daemon/oxigraph-binary.js';
+// The REAL supervisor. Driving it is the difference between proving the handoff
+// and asserting that a hand-minted lease still looks the way it was minted.
+import { startOxigraphServer } from '../../packages/cli/src/daemon/oxigraph-server.js';
 
 import {
   MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION,
+  type LiveHandoffMeasurementV1,
   type ManagedOwnershipRawResultV1,
   type PredecessorEntryResultV1,
 } from './model.js';
@@ -145,6 +149,171 @@ async function countQuadsInGraph(endpoint: string, graph: string): Promise<numbe
   return Number(json.results?.bindings?.[0]?.c?.value ?? '0');
 }
 
+const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Drive ONE real generation handoff and measure it.
+ *
+ * Everything here is production wiring: `startOxigraphServer` owns and spawns
+ * the child, its `ownership.lease` and `supervisorHandoff` travel to the adapter
+ * under the symbol key exactly as the daemon composes them, and the lane's
+ * transition runs through the process-global store scheduler's control barrier.
+ * The only interposition is a timestamp around each supervisor half, which
+ * delegates straight through.
+ *
+ * The probe workload is a LARGE ordinary insert rather than a synthetic hold:
+ * it is a single scheduler admission and a single HTTP request over the store's
+ * own path, it takes long enough to still be running when the lane is asked to
+ * open, and interrupting it is precisely the harm the barrier prevents.
+ */
+async function measureLiveHandoff(binaryPath: string): Promise<LiveHandoffMeasurementV1> {
+  const spawnedPids: number[] = [];
+  const location = join(tmpdir(), 'dkg-managed-ownership-gate', `handoff-${process.pid}`);
+  await rm(location, { recursive: true, force: true });
+  await mkdir(location, { recursive: true });
+
+  const handle = await startOxigraphServer({
+    binaryPath,
+    location,
+    port: await freePort(),
+    log: () => {},
+    io: {
+      // An observer, not a stub: the real `spawn` runs and its child is
+      // returned untouched. Recording the PIDs is what turns "the generation
+      // string changed" into "a different OS process serves the socket".
+      spawn: ((...args: Parameters<typeof spawn>) => {
+        const child = spawn(...args);
+        if (typeof child.pid === 'number') spawnedPids.push(child.pid);
+        return child;
+      }) as typeof spawn,
+    },
+  });
+
+  // Read at the exact instant the supervisor is asked to kill the child, from
+  // the scheduler's own counters.
+  //
+  // Deliberately NOT a wall-clock comparison against the probe write's promise.
+  // That was the first shape and it is subtly wrong: the scheduler releases
+  // admission when the store work resolves, and the caller's promise settles a
+  // few microtasks LATER, through `workLifecycle` and `insert`'s own tail. A
+  // correct handoff therefore measured as "stop came 0.09 ms too early" — a
+  // check that would have to be given a magic tolerance to pass. The inflight
+  // count has no such boundary: it is the very quantity the barrier waits on.
+  let inflightWhenChildStopped = -1;
+  const observedHandoff: ManagedOxigraphSupervisorHandoffV1 = {
+    stopAndProveOwnedChildDead: async () => {
+      // Optional on the interface; absent here would leave the reading at its
+      // -1 sentinel, which the verdict rejects rather than treating as zero.
+      const p = store.getPressureSnapshot?.();
+      if (p) {
+        inflightWhenChildStopped =
+          p.ackInflight + (p.healthInflight ?? 0) + p.normalInflight + p.backgroundInflight;
+      }
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+    },
+    startAndProveCleanGeneration: () => handle.supervisorHandoff.startAndProveCleanGeneration(),
+  };
+
+  const store = await createTripleStore({
+    backend: 'sparql-http',
+    options: attachManagedOxigraphLeaseV1(
+      {
+        queryEndpoint: handle.queryEndpoint,
+        updateEndpoint: handle.updateEndpoint,
+        managedByDkg: true,
+        // Generous: the probe write is deliberately large, and cutting it short
+        // on the adapter's own deadline would prove nothing about the barrier.
+        timeout: 120_000,
+      },
+      handle.ownership.lease,
+      observedHandoff,
+    ) as Record<string, unknown>,
+    graphSetIndex: false,
+  });
+
+  const lane = store.getSystemRecordLaneControllerV1?.();
+  if (!lane) throw new Error('managed store did not advertise the system-record lane');
+
+  const LOAD_GRAPH = 'urn:dkg:gate:handoff-load';
+  const LOAD_QUADS = 60_000;
+  const quads = Array.from({ length: LOAD_QUADS }, (_, i) => ({
+    graph: LOAD_GRAPH,
+    subject: `urn:dkg:gate:s:${i}`,
+    predicate: 'urn:dkg:gate:p',
+    object: `payload-${i}-${'x'.repeat(24)}`,
+  }));
+
+  let ordinarySettled = false;
+  let ordinaryWriteFailure: string | null = null;
+  const inflight = store.insert(quads).then(
+    () => {
+      ordinarySettled = true;
+    },
+    (error: unknown) => {
+      ordinarySettled = true;
+      ordinaryWriteFailure = error instanceof Error ? error.message : String(error);
+    },
+  );
+
+  // Let the write reach the wire. The `ordinaryInflightAtOpen` reading below is
+  // what makes the ordering check falsifiable, so it is RECORDED rather than
+  // assumed — if the box is fast enough that the write finished anyway, the
+  // gate reports that and fails rather than passing on a vacuous ordering.
+  await sleep(250);
+  const ordinaryInflightAtOpen = !ordinarySettled;
+
+  const generationBefore = handle.ownership.snapshot().childGeneration;
+  const session = await lane.open({
+    networkId: 'testnet',
+    kinds: ['agents'],
+    mode: 'shadow',
+  });
+  await inflight;
+
+  const generationAfter = handle.ownership.snapshot().childGeneration;
+  const quadsVisibleAfterHandoff = await countQuadsInGraph(handle.queryEndpoint, LOAD_GRAPH);
+  let servedAfterHandoff = false;
+  try {
+    await store.query('ASK { ?s ?p ?o }');
+    servedAfterHandoff = true;
+  } catch {
+    servedAfterHandoff = false;
+  }
+
+  const measurement: LiveHandoffMeasurementV1 = {
+    generationBefore,
+    generationAfter,
+    spawnedPids: [...spawnedPids],
+    retiredPidAlive: pidAlive(spawnedPids[0]!),
+    replacementPidAlive: pidAlive(spawnedPids[spawnedPids.length - 1]!),
+    ordinaryInflightAtOpen,
+    ordinaryWriteFailure,
+    inflightWhenChildStopped,
+    laneState: session.state,
+    quadsVisibleAfterHandoff,
+    quadsWrittenBeforeHandoff: ordinaryWriteFailure === null ? LOAD_QUADS : 0,
+    servedAfterHandoff,
+  };
+
+  // Shutdown releases the process-global lane registration, which the capability
+  // matrix below needs in order to build its own controller. Ordering the live
+  // section first — rather than resetting state through a test-only hook — keeps
+  // the gate on production entry points end to end.
+  await session.close('shutdown').catch(() => undefined);
+  await store.close().catch(() => undefined);
+  await handle.stop();
+  await rm(location, { recursive: true, force: true }).catch(() => undefined);
+
+  return measurement;
+}
+
 interface Manifest {
   reservedGraphs: string[];
   entries: {
@@ -184,6 +353,11 @@ async function main(): Promise<void> {
   const binarySha256 = createHash('sha256')
     .update(await readFile(binaryPath))
     .digest('hex');
+
+  // FIRST, because it drives the real supervisor end to end and its lane
+  // shutdown is what releases the process-global controller registration the
+  // capability matrix below needs.
+  const liveHandoff = await measureLiveHandoff(binaryPath);
 
   const location = join(tmpdir(), 'dkg-managed-ownership-gate', `store-${process.pid}`);
   await mkdir(location, { recursive: true });
@@ -381,6 +555,7 @@ async function main(): Promise<void> {
     predecessors,
     manifestEntryCount: manifest.entries.length,
     manifestCommitsResolved,
+    liveHandoff,
     ownedSocketsBeforeDestroy,
     leakedOwnedSockets,
     capability,

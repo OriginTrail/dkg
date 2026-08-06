@@ -1,10 +1,25 @@
 name: System-record managed ownership evidence
 
-# Live conformance gate for issue #2052 Stack B2. This launches the
-# checksum-pinned Oxigraph v0.5.8 server and drives the real production store
-# stack against it. Unit tests and the embedded adapter explicitly cannot
-# satisfy this gate: the properties proven here are about a separate OS process,
-# its listen socket, and what a supported predecessor binary can observe.
+# Live conformance gate for issue #2052 Stack B2, against the checksum-pinned
+# Oxigraph v0.5.8 binary. Unit tests and the embedded adapter explicitly cannot
+# satisfy it: the properties are about separate OS processes and their listen
+# sockets.
+#
+# What it proves, precisely — the artifact is the authority, not this comment:
+#
+#   1. ONE real generation handoff, driven by the production supervisor
+#      (`startOxigraphServer`) with a genuinely in-flight ordinary write:
+#      the child is stopped only after that write drains, the write survives,
+#      a second OS process is spawned, the first is dead and the second alive,
+#      the replacement serves the same data, and the store resumes on it.
+#   2. The capability fail-closed matrix over the real store composition.
+#   3. Owned-pool socket ownership: destroy leaves nothing behind.
+#   4. Reserved internal state is invisible to enumeration and undeletable by
+#      generic mutation, as a supported predecessor binary would see it.
+#
+# What it does NOT prove: predecessor entries run against the CURRENT binary,
+# not against each pinned commit — no predecessor is checked out or built. The
+# full-state CAS has not landed, so no verified apply is dispatched here.
 
 on:
   push:
@@ -91,7 +106,9 @@ jobs:
             test/managed-oxigraph-ownership-v1.test.ts \
             test/reserved-internal-graph-mutation-guard.test.ts \
             test/system-record-materializer-lifecycle-v1.test.ts \
-            test/system-record-capability-discovery-v1.test.ts
+            test/system-record-control-barrier-integration-v1.test.ts \
+            test/system-record-capability-discovery-v1.test.ts \
+            test/store-scheduler-system-record-admission.test.ts
 
       - name: Run live managed-ownership gate
         # Downloads and checksum-verifies the pinned v0.5.8 binary, then runs
