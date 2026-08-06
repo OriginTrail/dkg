@@ -334,7 +334,7 @@ describe('sync-on-connect churn gates', () => {
     });
   });
 
-  it('records progress before stopping post-durable sync-on-connect fanout after backoff-worthy durable pressure', async () => {
+  it('continues post-durable sync-on-connect fanout past backoff-worthy per-CG durable pressure', async () => {
     const refreshMetaSyncedFlags = recorder(async () => undefined);
     const discoverContextGraphsFromStore = recorder(async () => 0);
     const syncSharedMemoryFromPeer = recorder(async () => 0);
@@ -363,14 +363,50 @@ describe('sync-on-connect churn gates', () => {
       },
     });
 
+    // The peer answered (failedPeers: 0), so one CG's backoff-worthy round may
+    // not starve CG discovery or shared-memory sync; only peer accounting
+    // remembers the pressure (fresh: false).
+    expect(outcome).toBe('synced');
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([[PEER_A, ['cg-a']]]);
+    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: false, progress: true }]);
+  });
+
+  it('stops post-durable sync-on-connect fanout when the peer never answered and nothing progressed', async () => {
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncSharedMemoryFromPeer = recorder(async () => 0);
+    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['cg-a'],
+      syncFromPeer: async () => emptyDetailedSync({
+        failedPeers: 1,
+        backoffWorthyFailures: 1,
+      }),
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      syncSharedMemoryFromPeer,
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => {
+        syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
+      },
+    });
+
+    // A dead/unreachable peer must not be re-dialed by every later lane.
     expect(outcome).toBe('synced');
     expect(refreshMetaSyncedFlags.calls).toEqual([]);
     expect(discoverContextGraphsFromStore.calls).toEqual([]);
     expect(syncSharedMemoryFromPeer.calls).toEqual([]);
-    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: false, progress: true }]);
+    expect(syncedPeers).toEqual([]);
   });
 
-  it('records progress before stopping newly discovered CG fanout after durable pressure', async () => {
+  it('continues newly discovered CG fanout past per-CG durable pressure with progress', async () => {
     let contextGraphs = ['cg-a'];
     const refreshMetaSyncedFlags = recorder(async () => undefined);
     const discoverContextGraphsFromStore = recorder(async () => {
@@ -411,9 +447,9 @@ describe('sync-on-connect churn gates', () => {
 
     expect(outcome).toBe('synced');
     expect(syncFromPeer.calls).toEqual([[PEER_A], [PEER_A, ['cg-b']]]);
-    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(2);
     expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
-    expect(syncSharedMemoryFromPeer.calls).toEqual([]);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([[PEER_A, ['cg-a', 'cg-b']]]);
     expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: false, progress: true }]);
   });
 
