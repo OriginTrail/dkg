@@ -353,10 +353,13 @@ CREATE TABLE rfc64_swm_author_inventory_heads_v1 (
       typeof(expected_head_digest) = 'blob' AND length(expected_head_digest) = 32
     )
   ),
-  canonical_mutation BLOB NOT NULL CHECK (
-    typeof(canonical_mutation) = 'blob'
-    AND length(canonical_mutation) >= 2
-    AND length(canonical_mutation) <= 8388609
+  replay_mutation_kind TEXT NOT NULL COLLATE BINARY CHECK (
+    replay_mutation_kind IN ('upsert', 'remove')
+  ),
+  replay_mutation_ka_ual TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(replay_mutation_ka_ual) = 'text'
+    AND length(replay_mutation_ka_ual) > 0
+    AND length(replay_mutation_ka_ual) <= 1024
   ),
   PRIMARY KEY (inventory_scope_digest, author_address)
 ) WITHOUT ROWID, STRICT`;

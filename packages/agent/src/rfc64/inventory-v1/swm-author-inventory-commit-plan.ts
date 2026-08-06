@@ -32,7 +32,6 @@ import {
   evmAddressToSqlBlobV1,
 } from './scalars.js';
 import {
-  encodeSwmAuthorInventoryMutationV1,
   snapshotSwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-mutation.js';
 
@@ -52,9 +51,10 @@ export interface PreparedSwmAuthorInventoryCommitV1
   extends EncodedSwmAuthorInventoryKeyV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
   readonly mutation: SwmAuthorInventoryMutationV1;
+  readonly mutationKind: SwmAuthorInventoryMutationV1['kind'];
+  readonly mutationKaUal: string;
   readonly expectedHead: Uint8Array | null;
   readonly signedHeadEnvelope: Uint8Array;
-  readonly canonicalMutation: Uint8Array;
 }
 
 export function encodeSwmAuthorInventoryKeyV1(
@@ -137,9 +137,10 @@ export function prepareSwmAuthorInventoryCommitV1(
       ...key,
       snapshot,
       mutation,
+      mutationKind: mutation.kind,
+      mutationKaUal: mutation.kind === 'upsert' ? mutation.row.kaUal : mutation.kaUal,
       expectedHead,
       signedHeadEnvelope: canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1(head),
-      canonicalMutation: encodeSwmAuthorInventoryMutationV1(mutation),
     });
   } catch (cause) {
     if (isSwmAuthorInventoryErrorV1(cause)) throw cause;

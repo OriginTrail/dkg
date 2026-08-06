@@ -37,6 +37,7 @@ import {
 } from '../src/rfc64/inventory-v1/index.js';
 import { CandidateInventoryV1 } from '../src/rfc64/inventory-v1/candidate.js';
 import { INVENTORY_V1_STATEMENT_SQL } from '../src/rfc64/inventory-v1/statements.js';
+import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'33'.repeat(32)}`);
 const OTHER_WALLET = new ethers.Wallet(`0x${'44'.repeat(32)}`);
@@ -179,11 +180,35 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
       expiresAt: '1700000000000',
     }) as SwmAuthorInventoryRowV1;
     expect(() => inventory.compareAndSwapSwmAuthorInventoryV1({
-      snapshot: snapshot([invalid]),
+      snapshot: genesis,
       mutation: { kind: 'upsert', row: invalid },
       expectedCurrentHeadDigest: null,
-    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-scalar' }));
+    })).toThrowError(expect.objectContaining({ code: 'swm-inventory-input' }));
     expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toEqual(genesis);
+  });
+
+  it('commits, reads, and fences SWM state through the public persistence facade', async () => {
+    const persistence = await openRfc64PersistenceV1(temporaryDirectory(), {
+      yieldAfterPurgeBatch: async () => {},
+    });
+    const genesis = snapshot([ROW_A]);
+    try {
+      expect(persistence.swmAuthorInventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: genesis,
+        mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      })).toEqual({ status: 'applied', snapshot: genesis });
+      expect(persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+        SCOPE_DIGEST,
+        AUTHOR,
+      )).toEqual(genesis);
+    } finally {
+      await persistence.close();
+    }
+    expect(() => persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+      SCOPE_DIGEST,
+      AUTHOR,
+    )).toThrow('RFC-64 persistence owner is closed');
   });
 
   for (const commitLanded of [false, true]) {

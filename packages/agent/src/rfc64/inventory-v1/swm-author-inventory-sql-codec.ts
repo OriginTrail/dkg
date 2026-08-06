@@ -39,7 +39,8 @@ export function swmAuthorHeadParametersV1(
     rowsDigest: digest32ToSqlBlobV1(payload.rowsDigest),
     signedHeadEnvelope: head.signedHeadEnvelope,
     expectedHead: head.expectedHead,
-    canonicalMutation: head.canonicalMutation,
+    mutationKind: head.mutationKind,
+    mutationKaUal: head.mutationKaUal,
   };
 }
 

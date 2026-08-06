@@ -1,7 +1,7 @@
 import type { StatementSync } from 'node:sqlite';
 
 import {
-  MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+  assertCanonicalDeterministicUalV1,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
@@ -25,7 +25,6 @@ import type {
 import {
   requireAppliedSwmAuthorInventoryMutationV1,
   SwmAuthorInventoryMutationNoopErrorV1,
-  decodeSwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-mutation.js';
 import {
   sqlBlobToDecimalU64V1,
@@ -61,7 +60,8 @@ export type SwmAuthorInventoryCommitResolutionV1 = 'committed' | 'not-committed'
 interface StoredSwmAuthorInventoryCommitV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
   readonly expectedHead: Uint8Array | null;
-  readonly canonicalMutation: Uint8Array;
+  readonly mutationKind: 'upsert' | 'remove';
+  readonly mutationKaUal: string;
 }
 
 type SwmAuthorInventoryCommitPlanV1 =
@@ -185,20 +185,20 @@ export class SwmAuthorInventoryPersistenceV1 {
           32,
           'stored expected head',
         );
-      const canonicalMutation = assertBoundedSqlBlobV1(
-        headRow.canonical_mutation,
-        2,
-        MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1 + 1,
-        'stored SWM author inventory mutation',
-      );
-      decodeSwmAuthorInventoryMutationV1(canonicalMutation);
+      const mutationKind = headRow.replay_mutation_kind;
+      if (mutationKind !== 'upsert' && mutationKind !== 'remove') {
+        throw new Error('stored replay mutation kind is invalid');
+      }
+      const mutationKaUal = assertCanonicalDeterministicUalV1(
+        headRow.replay_mutation_ka_ual,
+      ).ual;
       if (
         (expectedHead === null ? null : sqlBlobToDigest32V1(expectedHead))
         !== head.payload.previousHeadDigest
       ) {
         throw new Error('stored replay predecessor does not match the signed head');
       }
-      return Object.freeze({ snapshot, expectedHead, canonicalMutation });
+      return Object.freeze({ snapshot, expectedHead, mutationKind, mutationKaUal });
     } catch (cause) {
       if (isSwmAuthorInventoryErrorV1(cause, 'swm-inventory-database-corrupt')) throw cause;
       throw this.host.error(
@@ -403,5 +403,6 @@ function swmAuthorInventoryReplayEvidenceEqualV1(
   requested: PreparedSwmAuthorInventoryCommitV1,
 ): boolean {
   return nullableSqlBlobsEqualV1(stored.expectedHead, requested.expectedHead)
-    && sqlBlobsEqualV1(stored.canonicalMutation, requested.canonicalMutation);
+    && stored.mutationKind === requested.mutationKind
+    && stored.mutationKaUal === requested.mutationKaUal;
 }
