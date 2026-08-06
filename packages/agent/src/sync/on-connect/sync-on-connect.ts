@@ -102,11 +102,23 @@ function classifySyncResult(
   }
 
   const progress = classifyDurableProgress(result, { complete });
+  // `failedPeers` is folded across every Context Graph in this lane. It says
+  // at least one round never got a response; it does not mean the peer failed
+  // to answer every round. Preserve any response evidence from sibling CGs so
+  // one unreachable/poisoned CG cannot suppress discovery and SWM fanout from
+  // a peer that demonstrably answered elsewhere.
+  const peerRespondedInLane = progress.madeReconnectProgress
+    || progress.denied
+    || progress.phaseFailed
+    || progress.integrityRejected
+    || progress.timedOut
+    || progress.hasMetadataEvidence
+    || progress.hasVerifiedPrivateOnlyResponse;
   return {
     insertedTriples: result.insertedTriples,
     madeProgress: progress.madeReconnectProgress,
     backoffWorthyFailure: progress.backoffWorthyFailure,
-    peerUnreachable: progress.transportFailed,
+    peerUnreachable: progress.transportFailed && !peerRespondedInLane,
     denied: progress.denied,
     failed: progress.phaseFailed || progress.integrityRejected,
     deferredByBackpressure: progress.deferredByBackpressure,

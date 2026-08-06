@@ -406,6 +406,38 @@ describe('sync-on-connect churn gates', () => {
     expect(syncedPeers).toEqual([]);
   });
 
+  it('continues sync-on-connect when a sibling CG proves the peer answered', async () => {
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncSharedMemoryFromPeer = recorder(async () => 0);
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['unreachable-cg', 'denied-cg'],
+      syncFromPeer: async () => emptyDetailedSync({
+        failedPeers: 1,
+        deniedPhases: 1,
+        backoffWorthyFailures: 1,
+      }),
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      syncSharedMemoryFromPeer,
+      logInfo: noopLog,
+    });
+
+    // `failedPeers` came from one unanswered CG, but the denial proves this
+    // peer answered another round. Discovery and SWM must still get a turn.
+    expect(outcome).toBe('synced');
+    expect(refreshMetaSyncedFlags.calls).toHaveLength(1);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([
+      [PEER_A, ['unreachable-cg', 'denied-cg']],
+    ]);
+  });
+
   it('continues newly discovered CG fanout past per-CG durable pressure with progress', async () => {
     let contextGraphs = ['cg-a'];
     const refreshMetaSyncedFlags = recorder(async () => undefined);
