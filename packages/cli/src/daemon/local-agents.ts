@@ -128,6 +128,25 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
       setupEntry: './setup-entry.mjs',
     },
   },
+  'prime-agent': {
+    id: 'prime-agent',
+    name: 'Prime Agent',
+    description: 'Connect a local Prime Intellect Prime Agent through the DKG node.',
+    transportKind: 'prime-agent-channel',
+    capabilities: {
+      localChat: true,
+      connectFromUi: true,
+      installNode: true,
+      // Memory election is advisory here: Prime Agent has no provider slot, so
+      // the adapter registers a hook set rather than claiming exclusivity.
+      dkgPrimaryMemory: true,
+      nodeServedSkill: true,
+    },
+    manifest: {
+      packageName: '@origintrail-official/dkg-adapter-prime-agent',
+      setupEntry: './setup-entry.mjs',
+    },
+  },
 };
 
 
