@@ -219,8 +219,19 @@ describe('SchedulerPressureTracker', () => {
       totals: { queued: 3, queueLimit: 4 },
       lanes: [
         // 3/4 of the pool is the documented 75% early-warning band.
-        { lane: 'durable', state: 'degraded', capacityModel: 'shared', queued: 3 },
-        { lane: 'swm_recovery', state: 'healthy', capacityModel: 'shared', queued: 0, inflight: 1 },
+        { lane: 'durable', state: 'degraded', capacityModel: 'shared', queued: 3, pressureQueued: 3 },
+        // …and the idle lane reports the depth it was actually judged on,
+        // which is none. Publishing the pool's 3 here would make a `healthy`
+        // lane with nothing waiting read as 75% utilized to anyone following
+        // the documented `pressureQueued / queueLimit` rule.
+        {
+          lane: 'swm_recovery',
+          state: 'healthy',
+          capacityModel: 'shared',
+          queued: 0,
+          pressureQueued: 0,
+          inflight: 1,
+        },
       ],
     });
   });

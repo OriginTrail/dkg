@@ -1328,8 +1328,16 @@ describe('sync global backpressure', () => {
           { lane: 'changelog', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 2, queueLimit: 2 },
           { lane: 'durable', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 2, queueLimit: 2 },
           // Admitted work, nothing waiting: a full queue is not evidence that
-          // this lane is being held back.
-          { lane: 'swm_recovery', state: 'healthy', capacityModel: 'shared', queued: 0, inflight: 1 },
+          // this lane is being held back, and it publishes no pressure depth
+          // either — a `healthy` lane must not read as 100% utilized.
+          {
+            lane: 'swm_recovery',
+            state: 'healthy',
+            capacityModel: 'shared',
+            queued: 0,
+            pressureQueued: 0,
+            inflight: 1,
+          },
         ],
       });
       for (const lane of snapshot.lanes) {

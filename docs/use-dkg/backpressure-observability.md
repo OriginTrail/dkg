@@ -82,7 +82,7 @@ Two depths sit on every lane row, and they differ only under `shared`:
 | Field | Meaning |
 | --- | --- |
 | `queued` | This lane's own backlog — *who* is waiting. The attribution signal. |
-| `pressureQueued` | The depth the lane's `state` was classified against, and the numerator that belongs with `queueLimit`. Equal to `queued` for a `partitioned` lane; the whole pool's depth for a `shared` one. |
+| `pressureQueued` | The depth the lane's `state` was classified against, and the numerator that belongs with `queueLimit`. Equal to `queued` for a `partitioned` lane, and the whole pool's depth for a `shared` lane **that has work waiting**. A lane with an empty backlog was not classified on depth at all, so it reports `0` and never reads as utilized. |
 
 So compute utilization from **`pressureQueued / queueLimit`**, never from `queued`, and no consumer has
 to special-case the model. Both fields are optional on the type, so a scheduler written against an older

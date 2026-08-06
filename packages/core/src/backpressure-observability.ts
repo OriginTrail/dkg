@@ -425,22 +425,29 @@ export class SchedulerPressureTracker {
     const queueLimit = shared
       ? normalizeLimit(this.capacity.queueLimit)
       : normalizeLimit(this.capacity.lanes?.[lane]?.queueLimit);
+    // A lane with nothing waiting is not held back by a full queue, whoever
+    // filled it. Under `partitioned` this guard is implied by the comparisons
+    // it guards, so it changes nothing there; under `shared` it is what keeps
+    // an idle lane out of a pool's saturation.
+    const depthCeiling = queueLimit !== null && queueLimit > 0 && laneQueued > 0
+      ? queueLimit
+      : null;
     return {
       capacityModel: shared ? 'shared' : 'partitioned',
       queueLimit,
       inflightLimit: shared
         ? normalizeLimit(this.capacity.inflightLimit)
         : normalizeLimit(this.capacity.lanes?.[lane]?.inflightLimit),
-      // Depth is measured against whatever the lane's ceiling bounds: its own
-      // backlog when the allocation is private, the whole pool when the ceiling
-      // is shared. Under `partitioned` this is exactly `laneQueued`, which is
-      // why every scheduler that owns its lanes is unaffected.
-      pressureQueued: shared ? this.queued.size : laneQueued,
-      // A lane with nothing waiting is not held back by a full queue, whoever
-      // filled it. Under `partitioned` this guard is implied by the comparisons
-      // it guards, so it changes nothing there; under `shared` it is what keeps
-      // an idle lane out of a pool's saturation.
-      depthCeiling: queueLimit !== null && queueLimit > 0 && laneQueued > 0 ? queueLimit : null,
+      // Exactly the depth the classifier used, so `pressureQueued / queueLimit`
+      // is always the utilization behind this lane's own state. Depth is
+      // measured against whatever the lane's ceiling bounds — its own backlog
+      // when the allocation is private, the whole pool when the ceiling is
+      // shared — and against nothing at all when no depth applies, which is why
+      // a lane with an empty backlog reports its own 0 rather than the pool's
+      // depth. Publishing the pool there would read as 100% utilization on a
+      // lane that is `healthy` and waiting for nothing.
+      pressureQueued: depthCeiling === null || !shared ? laneQueued : this.queued.size,
+      depthCeiling,
     };
   }
 
