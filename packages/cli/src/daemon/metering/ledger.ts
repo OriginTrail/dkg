@@ -131,6 +131,14 @@ export function balance(home: string, principal: string) {
  * Assemble + sign a read leg and atomically debit the tab.
  * Returns the signed leg. Throws E_INSUFFICIENT_FUNDS without mutating state.
  */
+/**
+ * Debit gate hook. Injected by the deposit rail so the ledger cannot bill a
+ * tab whose opening has expired (Bo's amendment). Default: permissive, so
+ * environments without a tab rail (Stage-1 mock tabs) keep working.
+ */
+let debitGate: ((home: string, principal: string, now: number) => { ok: boolean; code?: string }) | null = null;
+export function setDebitGate(fn: typeof debitGate) { debitGate = fn; }
+
 export function recordReadLeg(home: string, args: {
   principal: string;
   units: number;
@@ -144,6 +152,11 @@ export function recordReadLeg(home: string, args: {
   requesterKeyRef?: string;
 }) {
   replay(home);
+  // Bo's amendment: NO debit path after expiry.
+  if (debitGate) {
+    const g = debitGate(home, args.principal, Date.now());
+    if (!g.ok) throw new Error(g.code ?? "E_TAB_EXPIRED");
+  }
   const t = entry(home, args.principal);
   const cost = costMicroTrac(args.units, args.askMicroPer1k);
   const before = t.balance;
@@ -219,4 +232,34 @@ export function loadMeterConfig(home: string): MeterConfig {
     exemptPrincipals: new Set(raw.exemptPrincipals),
     enforcedPrincipals: new Set(raw.enforcedPrincipals),
   };
+}
+
+/**
+ * Idempotent, observable refund (Bo's amendment). Appending twice is a no-op:
+ * the journal records exactly one refund per (principal, tabDigest), and the
+ * balance goes to zero. Observability = the refund record itself, replayable
+ * by the buyer's verifier.
+ */
+export function refundOnExpiry(home: string, principal: string, refundAddress: string, termsDigest: string) {
+  replay(home);
+  const p = journalPath(home);
+  if (existsSync(p)) {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const rec = JSON.parse(line);
+        if (rec.kind === "refund" && rec.principal === principal && rec.termsDigest === termsDigest) {
+          return { alreadyRefunded: true, refundedMicroTrac: rec.amountMicroTrac, at: rec.at };
+        }
+      } catch { /* skip */ }
+    }
+  }
+  const t = entry(home, principal);
+  const amount = Math.max(0, t.balance);
+  durableAppend(home, {
+    kind: "refund", principal, amountMicroTrac: amount, refundAddress, termsDigest,
+    reason: "tab-expiry", at: new Date().toISOString(),
+  });
+  t.balance = 0;
+  return { alreadyRefunded: false, refundedMicroTrac: amount, at: new Date().toISOString() };
 }

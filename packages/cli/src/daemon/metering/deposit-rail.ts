@@ -143,3 +143,35 @@ export function evaluateExpiry(home: string, artifact: OpeningArtifact, credited
     rollover: "none",
   };
 }
+
+// ── Bo's amendment (2026-08-06): expiry must be ENFORCED, IDEMPOTENT and
+// OBSERVABLE — "no debit path after expiry; any later payment requires a new
+// tab and digest". The pure evaluator above was not enough: the ledger had no
+// notion of expiry, so a read could still debit a dead tab. These two
+// functions close that.
+
+/** Registry of live tab openings, keyed by principal, per DKG_HOME. */
+const openingsByHome = new Map<string, Map<string, OpeningArtifact>>();
+
+export function registerOpening(home: string, artifact: OpeningArtifact) {
+  if (!openingsByHome.has(home)) openingsByHome.set(home, new Map());
+  openingsByHome.get(home)!.set(artifact.tabPrincipal.toLowerCase(), artifact);
+  return artifact;
+}
+
+export function activeOpening(home: string, principal: string): OpeningArtifact | undefined {
+  return openingsByHome.get(home)?.get(String(principal).toLowerCase());
+}
+
+/**
+ * Debit gate: called before any charge. Returns a stable code when the tab is
+ * expired or absent so the caller can refuse service rather than bill a dead
+ * tab. Any later payment requires a NEW tab + digest (Bo).
+ */
+export function debitAllowed(home: string, principal: string, now = Date.now()):
+  { ok: true; artifact: OpeningArtifact } | { ok: false; code: "E_TAB_EXPIRED" | "E_NO_OPEN_TAB" } {
+  const a = activeOpening(home, principal);
+  if (!a) return { ok: false, code: "E_NO_OPEN_TAB" };
+  if (now > Date.parse(a.expiresAt)) return { ok: false, code: "E_TAB_EXPIRED" };
+  return { ok: true, artifact: a };
+}
