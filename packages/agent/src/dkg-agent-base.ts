@@ -470,7 +470,11 @@ export function createListContextGraphsCacheInvalidatingStore(
      * silent wrong answer.
      */
     getSystemRecordLaneControllerV1() {
-      if (systemRecordLaneMemo !== undefined) return systemRecordLaneMemo ?? undefined;
+      // Memoize only a PRESENT controller — absence is re-probed. The adapter
+      // reports undefined during any window in which the managed child is not
+      // the proven-ready listener, so latching that would disable the lane for
+      // the whole process on one probe landing inside an ordinary revive.
+      if (systemRecordLaneMemo) return systemRecordLaneMemo;
       const inner = innerStore.getSystemRecordLaneControllerV1?.();
       if (!inner) {
         systemRecordLaneMemo = null;

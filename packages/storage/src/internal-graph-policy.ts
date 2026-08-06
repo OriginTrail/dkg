@@ -154,16 +154,18 @@ export function assertNotReservedInternalGraphV1(
   }
 }
 
-/**
- * Filter helper for the many `listGraphs()`-shaped call sites.
+/*
+ * Deliberately NOT provided: a `excludeInternalGraphsV1(graphs)` filter helper.
  *
- * Returns the graphs a caller outside storage is allowed to observe. Kept here
- * so adding a reserved name later updates every enumeration surface at once.
+ * It existed briefly and had zero production callers, because every
+ * enumeration surface already filters through `isAtomicGraphReplaceStagingGraph`
+ * — which, being prefix-wide, hides the reserved names correctly today (pinned
+ * by a test in `internal-graph-policy.test.ts`). Shipping a second, unused
+ * filter would have been dead surface implying a migration that has not
+ * happened.
+ *
+ * When the enumeration sites do migrate to this module, the honest move is to
+ * invert the dependency — move the prefix constant here and have
+ * `atomic-graph-replace.ts` re-export it — so there is genuinely ONE predicate
+ * rather than two that must be kept in agreement.
  */
-export function excludeInternalGraphsV1(
-  graphs: readonly (string | undefined | null)[],
-): string[] {
-  return graphs.filter(
-    (graph): graph is string => Boolean(graph) && !isInternalGraphUriV1(graph as string),
-  );
-}

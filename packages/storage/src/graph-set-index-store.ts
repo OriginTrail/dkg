@@ -230,9 +230,11 @@ export class GraphSetIndexStore implements TripleStore {
    * is the same escape hatch used for an indeterminate `replaceGraph`.
    */
   getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
-    if (this.systemRecordLaneMemo !== undefined) {
-      return this.systemRecordLaneMemo ?? undefined;
-    }
+    // Memoize only a PRESENT controller — absence is re-probed. The adapter
+    // returns undefined during any window in which the managed child is not the
+    // proven-ready listener, so latching that would disable the lane for the
+    // whole process on one probe that happened to land inside a revive.
+    if (this.systemRecordLaneMemo) return this.systemRecordLaneMemo;
     const inner = this.inner.getSystemRecordLaneControllerV1?.();
     if (!inner) {
       this.systemRecordLaneMemo = null;

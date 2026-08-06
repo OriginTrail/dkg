@@ -1,4 +1,5 @@
 import { Agent, request as httpRequest, type IncomingMessage } from 'node:http';
+import { SYSTEM_RECORD_MAX_MATERIALIZER_WRITE_CONCURRENCY } from '@origintrail-official/dkg-core/system-record-v1';
 
 /**
  * A connection pool the managed lane actually OWNS (#2052 Stack B2).
@@ -40,8 +41,12 @@ export class OwnedManagedHttpClient {
       // One socket: the materializer's write concurrency is pinned to 1 by
       // SYSTEM_RECORD_MAX_MATERIALIZER_WRITE_CONCURRENCY, so a larger pool
       // would only widen the set of sockets recovery has to prove dead.
-      maxSockets: 1,
-      maxFreeSockets: 1,
+      // Imported, not restated. The comment above cites this frozen limit as
+      // the justification for the pool size, so hardcoding `1` would let a
+      // future bump leave the pool pinned at one with a comment still claiming
+      // the two agree.
+      maxSockets: SYSTEM_RECORD_MAX_MATERIALIZER_WRITE_CONCURRENCY,
+      maxFreeSockets: SYSTEM_RECORD_MAX_MATERIALIZER_WRITE_CONCURRENCY,
     });
   }
 
@@ -218,10 +223,29 @@ export class OwnedManagedHttpClient {
    */
   async destroyAndSettle(timeoutMs = 5_000): Promise<void> {
     this.destroyed = true;
-    await Promise.allSettled([...this.inflight]);
+
+    // Destroy BEFORE settling, not after. Destroying the agent tears down
+    // in-use sockets, which forces every inflight request to reject promptly;
+    // awaiting first meant this method's duration was
+    // `max(callerTimeoutMs across inflight) + poll` and the `timeoutMs`
+    // parameter did not bound the phase it names. Measured: a caller with a
+    // 4 s request made `destroyAndSettle(5000)` take 3831 ms of pure waiting,
+    // and with a server dribbling one byte per 100 ms it did not return at all
+    // within 8 s, because the socket-inactivity timer kept being reset.
+    //
+    // That ordering mattered most exactly where it was least visible: this is
+    // step 1 of the enable handoff, so a slow or chatty endpoint could stall
+    // the transition, leave the seal uncommitted, and hang daemon teardown —
+    // on a HEALTHY-looking endpoint rather than a dead one.
     this.agent.destroy();
 
     const deadline = Date.now() + timeoutMs;
+    // The settle now shares the deadline too, so the terminal-failure branch
+    // below is reachable rather than being guarded by an unbounded await.
+    await Promise.race([
+      Promise.allSettled([...this.inflight]),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs).unref?.()),
+    ]);
     while (this.openSocketCount > 0) {
       if (Date.now() > deadline) {
         throw new Error(

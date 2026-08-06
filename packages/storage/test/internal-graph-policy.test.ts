@@ -12,7 +12,6 @@ import {
   SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
   SYSTEM_RECORD_V1_STATE_GRAPH,
   assertNotReservedInternalGraphV1,
-  excludeInternalGraphsV1,
   isEphemeralInternalStagingGraphUriV1,
   isInternalGraphUriV1,
   isReservedInternalGraphUriV1,
@@ -141,20 +140,27 @@ describe('internal graph policy V1', () => {
     ).not.toThrow();
   });
 
-  it('hides every internal graph from an enumeration result', () => {
+  it('hides every internal graph from the predicate the production filters use', () => {
+    // Asserted against `isAtomicGraphReplaceStagingGraph` rather than a helper
+    // of this module's own: that is the function the three adapters and the
+    // graph-set index actually call, so this is what makes "reserved state
+    // never enumerates" true in production and on every predecessor binary.
     const ephemeral = stagingGraph();
-    expect(
-      excludeInternalGraphsV1([
-        'did:dkg:context-graph:a',
-        SYSTEM_RECORD_V1_STATE_GRAPH,
-        ephemeral,
-        SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
-        `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}system-record-v1:unknown-future`,
-        undefined,
-        null,
-        '',
-        'did:dkg:context-graph:b',
-      ]),
-    ).toEqual(['did:dkg:context-graph:a', 'did:dkg:context-graph:b']);
+    const hidden = [
+      SYSTEM_RECORD_V1_STATE_GRAPH,
+      SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
+      ephemeral,
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}system-record-v1:unknown-future`,
+    ];
+    for (const graph of hidden) {
+      expect(isAtomicGraphReplaceStagingGraph(graph)).toBe(true);
+      expect(isInternalGraphUriV1(graph)).toBe(true);
+    }
+    // Positive control: ordinary graphs are NOT hidden, so a predicate that
+    // returned true for everything would fail here rather than pass.
+    for (const graph of ['did:dkg:context-graph:a', 'urn:dkg:changelog']) {
+      expect(isAtomicGraphReplaceStagingGraph(graph)).toBe(false);
+      expect(isInternalGraphUriV1(graph)).toBe(false);
+    }
   });
 });

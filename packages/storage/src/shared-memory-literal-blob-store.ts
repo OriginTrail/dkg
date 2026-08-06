@@ -56,10 +56,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
    * Memoized so repeated capability probes allocate nothing.
    */
   getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
-    if (this.systemRecordLaneMemo === undefined) {
-      this.systemRecordLaneMemo = this.inner.getSystemRecordLaneControllerV1?.() ?? null;
-    }
-    return this.systemRecordLaneMemo ?? undefined;
+    // Memoize only a PRESENT controller. Absence must be re-probed, because the
+    // adapter returns undefined for a merely transient condition — any window
+    // in which the managed child is not the proven-ready listener, i.e. every
+    // ordinary revive. Latching that would let one probe landing inside a
+    // one-second Oxigraph restart disable the lane for the entire process
+    // lifetime, silently, recoverable only by a daemon restart.
+    if (this.systemRecordLaneMemo) return this.systemRecordLaneMemo;
+    const inner = this.inner.getSystemRecordLaneControllerV1?.();
+    this.systemRecordLaneMemo = inner ?? null;
+    return inner;
   }
 
   readonly innerStore: TripleStore;
