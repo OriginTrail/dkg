@@ -152,7 +152,11 @@ export function canonicalGraphScopedAuthorSealFromAssertionSealV1(
     assertedAtChainId: seal.chainId.toString(),
     assertedAtKav10Address: seal.kav10Address.toLowerCase(),
     reservedKaId: seal.reservedKaId.toString(),
-    assertionFinalizedAt: seal.finalizedAtIso,
+    // RDF stores are allowed to canonicalize xsd:dateTime lexical values.
+    // Oxigraph, for example, round-trips `.000Z` as `Z`. Re-canonicalize the
+    // same UTC instant at this publication-seal -> RFC-64 boundary so an
+    // otherwise identical durable seal has stable bytes on every backend.
+    assertionFinalizedAt: canonicalizeAssertionSealFinalizedAtV1(seal.finalizedAtIso),
     contentScopeVersion: '2',
     kaUal: seal.kaUal,
     assertionVersion: seal.assertionVersion,
@@ -164,6 +168,25 @@ export function canonicalGraphScopedAuthorSealFromAssertionSealV1(
   };
   assertCanonicalGraphScopedAuthorSealV1(canonical);
   return Object.freeze(canonical);
+}
+
+const ASSERTION_SEAL_UTC_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|\+00:00)$/u;
+
+function canonicalizeAssertionSealFinalizedAtV1(value: string): CanonicalIsoUtcMillisV1 {
+  if (!ASSERTION_SEAL_UTC_DATE_TIME.test(value)) {
+    fail(
+      'canonical-seal-timestamp',
+      'publication assertion finalizedAt must be a bounded UTC xsd:dateTime lexical value',
+    );
+  }
+  const instant = Date.parse(value);
+  if (!Number.isFinite(instant)) {
+    fail('canonical-seal-timestamp', 'publication assertion finalizedAt is not a real UTC instant');
+  }
+  const canonical = new Date(instant).toISOString();
+  assertCanonicalIsoUtcMillisV1(canonical);
+  return canonical;
 }
 
 /** Authenticated catalog coordinate used to derive subject and physical metadata graph. */

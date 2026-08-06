@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { ASSERTION_SEAL_PREDICATES } from '../src/assertion-seal.js';
+import {
+  ASSERTION_SEAL_PREDICATES,
+  type AssertionSeal,
+} from '../src/assertion-seal.js';
 import {
   MAX_CANONICAL_GRAPH_SCOPED_AUTHOR_SEAL_BYTES_V1,
   assertCanonicalGraphScopedAuthorSealCoordinateV1,
   assertCanonicalGraphScopedAuthorSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   classifyCanonicalGraphScopedAuthorSealRowsV1,
@@ -76,6 +80,32 @@ const COORDINATE = validatedCoordinate({
 });
 
 describe('CanonicalGraphScopedAuthorSealV1 bytes and projection', () => {
+  it('canonicalizes equivalent xsd:dateTime lexical values from RDF stores', () => {
+    const publicationSeal: AssertionSeal = {
+      merkleRoot: new Uint8Array(32).fill(0xaa),
+      authorAddress: AUTHOR,
+      authorAttestationR: new Uint8Array(32).fill(0x11),
+      authorAttestationVS: new Uint8Array(32).fill(0x22),
+      authorSchemeVersion: 1,
+      chainId: 20430n,
+      kav10Address: '0x4444444444444444444444444444444444444444',
+      reservedKaId: BigInt(RESERVED_KA_ID),
+      finalizedAtIso: '2026-07-19T12:34:56Z',
+      contentScopeVersion: 2,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/7`,
+      assertionVersion: '2',
+      publicTripleCount: 12977,
+      privateTripleCount: 0,
+      rootEntities: [],
+    };
+
+    expect(canonicalGraphScopedAuthorSealFromAssertionSealV1(publicationSeal))
+      .toEqual({
+        ...PAYLOAD,
+        assertionFinalizedAt: '2026-07-19T12:34:56.000Z',
+      });
+  });
+
   it('pins the normative 803-byte payload, digest, placement, and ordered rows', () => {
     expect(canonicalizeCanonicalGraphScopedAuthorSealV1(PAYLOAD)).toBe(CANONICAL);
     expect(canonicalizeCanonicalGraphScopedAuthorSealBytesV1(PAYLOAD).byteLength).toBe(803);

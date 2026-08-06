@@ -21,7 +21,9 @@ import {
   sharedMemoryScopeForFinalizedLifecycle,
 } from '../src/finalized-lifecycle-scope.js';
 
-const CG = 'publish-agent-lane';
+// The confirmed-publication hook enters RFC-64's canonical control plane, so
+// this fixture must use the same owner/slug identity as a registered CG.
+const CG = '0x1111111111111111111111111111111111111111/publish-agent-lane';
 const NAME = 'asset';
 const DEFAULT_AGENT = `0x${'11'.repeat(20)}`;
 const AGENT_B = `0x${'22'.repeat(20)}`;
