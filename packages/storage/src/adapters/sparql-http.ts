@@ -48,6 +48,20 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from '../internal-graph-policy.js';
+import {
+  extractManagedOxigraphHandoffV1,
+  extractManagedOxigraphLeaseV1,
+  readManagedOxigraphOwnershipSnapshotV1,
+  type ManagedOxigraphOwnershipLeaseV1,
+  type ManagedOxigraphSupervisorHandoffV1,
+} from '../managed-oxigraph-ownership-v1-internal.js';
+import {
+  createSystemRecordLaneControllerV1,
+  type SystemRecordApplyOutcomeV1,
+  type SystemRecordChildHandoffV1,
+  type SystemRecordLaneControllerV1,
+} from '../system-record-materializer-v1.js';
+import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
@@ -171,6 +185,19 @@ export class SparqlHttpStore implements TripleStore {
   // reconcile negative memo via `asGraphWriteGenSource` / `getWriteGen`.
   private readonly writeGen = new GraphWriteGenTracker();
 
+  /**
+   * Supervisor-issued ownership lease (#2052 B2), or null on every store that
+   * is not a daemon-managed Oxigraph child. Recovered by object identity from a
+   * symbol-keyed option, so no persisted configuration can supply one.
+   */
+  private readonly ownershipLease: ManagedOxigraphOwnershipLeaseV1 | null;
+  /** Supervisor half of the handoff. Absent ⇒ the lane is never advertised. */
+  private readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 | null;
+  /** Lazily built so a store that is never asked for the lane allocates nothing. */
+  private systemRecordLane: SystemRecordLaneControllerV1 | null | undefined;
+  /** The owned pool for the CURRENT child generation. */
+  private managedClient: OwnedManagedHttpClient | null = null;
+
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
@@ -180,6 +207,12 @@ export class SparqlHttpStore implements TripleStore {
     this.timeout = options.timeout ?? 30_000;
     this.managedByDkg = options.managedByDkg === true;
     this.atomicUpdates = options.atomicUpdates === true || this.managedByDkg;
+    // Namespace ownership is INDEPENDENT of both booleans above. `managedByDkg`
+    // is rewritten to false by the storage factory on this very path, and
+    // `atomicUpdates` is synthesized as true by that same function, so neither
+    // can gate a capability. Only an identity-checked live lease can.
+    this.ownershipLease = extractManagedOxigraphLeaseV1(options);
+    this.supervisorHandoff = extractManagedOxigraphHandoffV1(options);
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -340,6 +373,101 @@ export class SparqlHttpStore implements TripleStore {
     for (const graph of graphs) {
       if (graph) assertNotReservedInternalGraphV1(graph, operation, 'SparqlHttpStore');
     }
+  }
+
+  /**
+   * Expose the system-record V1 lane iff this store is a daemon-managed child
+   * (#2052 B2).
+   *
+   * Advertising is gated on a LIVE lease, not merely on holding one: a store
+   * whose child has exited still holds the lease object, but its snapshot is
+   * not ready and the lane must not be advertised as usable. The controller
+   * itself is built lazily and memoized, so a store nobody asks allocates
+   * nothing and the default-off path stays free.
+   */
+  getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
+    // Fail-closed on all three preconditions. A store missing ANY of them is
+    // not merely degraded, it is a store on which the lane's guarantees cannot
+    // be stated, so it advertises nothing rather than something unusable.
+    if (!this.ownershipLease || !this.supervisorHandoff) return undefined;
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    if (!snapshot || snapshot.terminal) return undefined;
+
+    if (this.systemRecordLane === undefined) {
+      this.systemRecordLane = createSystemRecordLaneControllerV1({
+        lease: this.ownershipLease,
+        handoff: this.buildChildHandoff(this.supervisorHandoff),
+        executor: {
+          applyVerified: (proof, childGeneration) =>
+            this.executeSystemRecordApply(proof, childGeneration),
+        },
+      });
+    }
+    return this.systemRecordLane ?? undefined;
+  }
+
+  /**
+   * Compose the clean-generation handoff from its two owners.
+   *
+   * The adapter owns exactly the connection pool: it is the only component that
+   * can destroy the retired generation's sockets and await the requests issued
+   * over them. Process facts — the child exited, the port was released, a
+   * replacement is the proven listener — belong to the supervisor, which holds
+   * the `ChildProcess`. Splitting them here keeps the ORDER in one place while
+   * letting each half assert only what it can actually observe.
+   */
+  private buildChildHandoff(
+    supervisor: ManagedOxigraphSupervisorHandoffV1,
+  ): SystemRecordChildHandoffV1 {
+    return {
+      destroyClient: async () => {
+        const retired = this.managedClient;
+        this.managedClient = null;
+        if (retired) await retired.destroyAndSettle();
+      },
+      stopAndProveOwnedChildDead: () => supervisor.stopAndProveOwnedChildDead(),
+      awaitRetiredWork: async () => {
+        const retired = this.managedClient;
+        if (retired) await retired.destroyAndSettle();
+      },
+      startAndProveCleanGeneration: () => supervisor.startAndProveCleanGeneration(),
+      rotateMaterializationEpoch: async () => {
+        this.invalidateListGraphsCache();
+        this.writeGen.recordUnscopedWrite();
+      },
+    };
+  }
+
+  /**
+   * Dispatch one verified apply against an explicitly named child generation.
+   *
+   * The generation is rechecked immediately before any byte can leave, and the
+   * request goes through a pool owned by exactly that generation, so a stale
+   * facade cannot reach a replacement listener even if it somehow retained a
+   * reference.
+   */
+  private async executeSystemRecordApply(
+    _proof: unknown,
+    childGeneration: string,
+  ): Promise<SystemRecordApplyOutcomeV1> {
+    if (!this.ownershipLease) return { outcome: 'capability-lost' };
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    if (!snapshot || snapshot.terminal) return { outcome: 'capability-lost' };
+    if (!snapshot.ready || snapshot.childGeneration !== childGeneration) {
+      return { outcome: 'deferred', reason: 'generation-changed' };
+    }
+
+    if (!this.managedClient || this.managedClient.childGeneration !== childGeneration) {
+      // A pool is bound to one generation for its whole life; a mismatch means
+      // the caller is holding a facade from a retired generation.
+      if (this.managedClient) return { outcome: 'capability-lost' };
+      this.managedClient = new OwnedManagedHttpClient(childGeneration);
+    }
+
+    // The verified-replacement command construction and the full-state CAS
+    // transaction are the next increment of this stack; until they land the
+    // lane refuses rather than dispatching an unproven write.
+    return { outcome: 'deferred', reason: 'validation-mismatch' };
   }
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {

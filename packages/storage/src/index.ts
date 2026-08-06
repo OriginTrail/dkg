@@ -50,6 +50,7 @@ export {
   MANAGED_OXIGRAPH_LEASE_OPTION_KEY,
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
+  extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLeaseV1,
   readManagedOxigraphOwnershipSnapshotV1,
@@ -57,7 +58,9 @@ export {
   type ManagedOxigraphOwnershipInvalidationV1,
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphOwnershipSnapshotV1,
+  type ManagedOxigraphSupervisorHandoffV1,
 } from './managed-oxigraph-ownership-v1-internal.js';
+export { OwnedManagedHttpClient } from './adapters/managed-http-client.js';
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,

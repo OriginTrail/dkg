@@ -16,6 +16,7 @@ import {
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
+import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -596,6 +597,31 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   getPressureSnapshot(): StorePressureSnapshot | undefined {
     return this.inner.getPressureSnapshot?.();
+  }
+
+  /**
+   * Explicitly DENY the system-record V1 lane while the changelog is enabled
+   * (#2052 B2).
+   *
+   * The lane's contract is that one record apply is a single durability unit:
+   * projection, applied state, root claims, accounting and receipt commit or
+   * roll back together. This decorator cannot honour that. Every mutation other
+   * than `insert()` appends its marker in a SECOND transaction
+   * (`markPostMutation` -> `appendMarkers`), and that split is exactly the
+   * "benign lost-marker window" documented at the top of this file. Benign for a
+   * derived log; not benign for a CAS whose whole purpose is to make partial
+   * application impossible.
+   *
+   * Denying is safe in practice because the changelog is default-off, so such a
+   * node simply stays on the legacy lane. Returning `undefined` (rather than
+   * throwing) is deliberate: capability absence is the established way a store
+   * declines an optional feature, and it keeps `createTripleStore` composable.
+   *
+   * A disabled changelog is a pure passthrough decorator, so it forwards.
+   */
+  getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
+    if (this.enabled) return undefined;
+    return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
   async flush(options?: QueryOptions): Promise<void> {

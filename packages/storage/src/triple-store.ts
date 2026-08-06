@@ -5,6 +5,9 @@
  */
 
 import { dirname, join } from 'node:path';
+// Type-only: erased at runtime, so declaring the capability on TripleStore adds
+// no module-load cost to the default-off path.
+import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
@@ -116,6 +119,23 @@ export interface TripleStore {
    * reaching into a specific adapter's process-global scheduler.
    */
   getPressureSnapshot?(): StorePressureSnapshot | undefined;
+
+  /**
+   * Optional system-record V1 materialization lane (#2052 Stack B2).
+   *
+   * Returns `undefined` on every store that is not a daemon-managed,
+   * checksum-pinned Oxigraph endpoint holding a live supervisor-issued
+   * ownership lease — which is every store today, because nothing mints a lease
+   * unless the daemon started the child and proved it owns the listen socket.
+   *
+   * Discovery is EXPLICIT rather than structural: each decorator forwards this
+   * getter itself. A resolver that walked `.inner`/`.innerStore` the way
+   * `asGraphWriteGenSource` does would reach PAST a wrapper whose cache the lane
+   * must invalidate, handing out a capability that silently desynchronises that
+   * wrapper's index. Merely calling this performs no store, epoch, queue, permit
+   * or scheduler work.
+   */
+  getSystemRecordLaneControllerV1?(): SystemRecordLaneControllerV1 | undefined;
 
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;

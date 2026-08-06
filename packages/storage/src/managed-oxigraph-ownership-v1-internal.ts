@@ -159,19 +159,60 @@ export function createManagedOxigraphOwnershipControllerV1(): ManagedOxigraphOwn
 }
 
 /**
- * Attach a lease to an adapter-options object.
+ * Supervisor-owned half of the clean-generation handoff.
  *
- * The property is own, enumerable and symbol-keyed on purpose: object spread
- * copies it (so `resolveAdapterOptions`' `{ ...config.options, … }` rewrite does
- * not silently drop capability) while `JSON.stringify` omits it (so a lease can
- * never be persisted and replayed). Returns a new object rather than mutating
- * the caller's config.
+ * These steps assert PROCESS facts — a child exited, a port was released, a
+ * replacement is the proven listener — which only the component holding the
+ * `ChildProcess` can establish. The storage adapter deliberately cannot
+ * implement them, so a store that has not been given a handoff must not
+ * advertise the lane at all rather than advertise one that can never open.
+ */
+export interface ManagedOxigraphSupervisorHandoffV1 {
+  stopAndProveOwnedChildDead(): Promise<void>;
+  startAndProveCleanGeneration(): Promise<void>;
+}
+
+const MANAGED_OXIGRAPH_HANDOFF_OPTION_KEY: unique symbol = Symbol(
+  'dkg.managedOxigraphSupervisorHandoffV1',
+);
+
+/**
+ * Attach a lease — and, when the caller is the supervisor, its handoff — to an
+ * adapter-options object.
+ *
+ * The properties are own, enumerable and symbol-keyed on purpose: object spread
+ * copies them (so `resolveAdapterOptions`' `{ ...config.options, … }` rewrite
+ * does not silently drop capability) while `JSON.stringify` omits them (so
+ * neither can be persisted and replayed). Returns a new object rather than
+ * mutating the caller's config.
+ *
+ * A lease WITHOUT a handoff is valid and useful — it still proves ownership for
+ * diagnostics — but it does not advertise the lane, because no component could
+ * then prove the retired child dead before a replacement binds.
  */
 export function attachManagedOxigraphLeaseV1<T extends Record<string | symbol, unknown>>(
   options: T,
   lease: ManagedOxigraphOwnershipLeaseV1,
+  handoff?: ManagedOxigraphSupervisorHandoffV1,
 ): T {
-  return { ...options, [MANAGED_OXIGRAPH_LEASE_OPTION_KEY]: lease };
+  const withLease = { ...options, [MANAGED_OXIGRAPH_LEASE_OPTION_KEY]: lease };
+  return handoff
+    ? { ...withLease, [MANAGED_OXIGRAPH_HANDOFF_OPTION_KEY]: handoff }
+    : withLease;
+}
+
+/** Recover the supervisor handoff, or `null` when none was supplied. */
+export function extractManagedOxigraphHandoffV1(
+  options: unknown,
+): ManagedOxigraphSupervisorHandoffV1 | null {
+  if (typeof options !== 'object' || options === null) return null;
+  const candidate = (options as Record<symbol, unknown>)[MANAGED_OXIGRAPH_HANDOFF_OPTION_KEY];
+  if (typeof candidate !== 'object' || candidate === null) return null;
+  const handoff = candidate as Partial<ManagedOxigraphSupervisorHandoffV1>;
+  return typeof handoff.stopAndProveOwnedChildDead === 'function' &&
+    typeof handoff.startAndProveCleanGeneration === 'function'
+    ? (handoff as ManagedOxigraphSupervisorHandoffV1)
+    : null;
 }
 
 /**

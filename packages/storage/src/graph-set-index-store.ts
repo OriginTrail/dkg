@@ -17,6 +17,12 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import type {
+  SystemRecordApplyOutcomeV1,
+  SystemRecordLaneActivationV1,
+  SystemRecordLaneControllerV1,
+  SystemRecordLaneSessionV1,
+} from './system-record-materializer-v1.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -47,7 +53,19 @@ type TouchedGraphMutationSource =
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
   | 'update';
-type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
+/**
+ * `system-record.*` (#2052 B2) are dirty-sources rather than touched-graph
+ * sources: the lane's reserved graphs are never listed, so there is no exact
+ * membership delta to apply incrementally, and the shadow projection becomes
+ * authoritative content at cutover. A full refresh is the only sound answer.
+ */
+type GraphSetRefreshSource =
+  | 'seed'
+  | 'revalidate'
+  | TouchedGraphMutationSource
+  | 'query'
+  | 'system-record.applied'
+  | 'system-record.indeterminate';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
@@ -196,7 +214,68 @@ export class GraphSetIndexStore implements TripleStore {
     return this.inner.getPressureSnapshot?.();
   }
 
+  /**
+   * Memoized outcome-mapping facade for the system-record V1 lane (#2052 B2).
+   *
+   * The lane writes reserved graphs that this index deliberately never lists,
+   * so a naive passthrough would be harmless for membership — but NOT for the
+   * shadow projection, whose rows land in a reserved graph today and become
+   * authoritative graph content at cutover. The facade therefore mirrors the
+   * discipline this class already applies to `replace*`: advance only on a
+   * definite success, and mark dirty when the result is indeterminate.
+   *
+   * `indeterminate` specifically must dirty rather than no-op. It means the
+   * endpoint may or may not have committed, which is exactly the state in which
+   * a stale membership set becomes a silent wrong answer; `scheduleFullRefresh`
+   * is the same escape hatch used for an indeterminate `replaceGraph`.
+   */
+  getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
+    if (this.systemRecordLaneMemo !== undefined) {
+      return this.systemRecordLaneMemo ?? undefined;
+    }
+    const inner = this.inner.getSystemRecordLaneControllerV1?.();
+    if (!inner) {
+      this.systemRecordLaneMemo = null;
+      return undefined;
+    }
+    this.systemRecordLaneMemo = Object.freeze({
+      open: async (activation: SystemRecordLaneActivationV1) => {
+        const session = await inner.open(activation);
+        return this.wrapSystemRecordSession(session);
+      },
+    });
+    return this.systemRecordLaneMemo;
+  }
+
+  private wrapSystemRecordSession(session: SystemRecordLaneSessionV1): SystemRecordLaneSessionV1 {
+    const owner = this;
+    return {
+      get state() {
+        return session.state;
+      },
+      get activationGeneration() {
+        return session.activationGeneration;
+      },
+      async applyVerified(proof: unknown): Promise<SystemRecordApplyOutcomeV1> {
+        const outcome = await session.applyVerified(proof);
+        if (outcome.outcome === 'applied') {
+          owner.bumpMutation();
+          owner.scheduleFullRefresh('system-record.applied');
+        } else if (outcome.outcome === 'indeterminate') {
+          owner.scheduleFullRefresh('system-record.indeterminate');
+        }
+        // Every other outcome (`already-applied`, `stale`, `root-collision`,
+        // `capacity-exhausted`, `deferred`, `capability-lost`) provably wrote
+        // nothing, so dirtying the index on them would force a full-store scan
+        // for no reason — the exact cost this class exists to avoid.
+        return outcome;
+      },
+      close: (mode: 'disable' | 'shutdown') => session.close(mode),
+    };
+  }
+
   private readonly inner: TripleStore;
+  private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;

@@ -110,7 +110,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SystemRecordApplyOutcomeV1, type SystemRecordLaneActivationV1, type SystemRecordLaneControllerV1 } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -445,6 +445,7 @@ export function createListContextGraphsCacheInvalidatingStore(
     }
     return result;
   };
+  let systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
   const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
@@ -452,6 +453,56 @@ export function createListContextGraphsCacheInvalidatingStore(
     },
     getPressureSnapshot() {
       return innerStore.getPressureSnapshot?.();
+    },
+    /**
+     * Memoized outcome-mapping facade for the system-record V1 lane (#2052 B2).
+     *
+     * This wrapper rebuilds a fresh object literal, so an unforwarded optional
+     * capability is silently absent — the same failure mode already documented
+     * for `replaceGraph` below, where omission made every capable backend look
+     * unsupported and the publisher fell back for no reason.
+     *
+     * The lane must invalidate this wrapper's caches for the same reason every
+     * other mutation here does: a materialized profile changes agent-visible
+     * projection rows. Applied and quarantined outcomes invalidate; an
+     * indeterminate outcome dirties the projection, because the endpoint may
+     * have committed and a cache that still answers from before that write is a
+     * silent wrong answer.
+     */
+    getSystemRecordLaneControllerV1() {
+      if (systemRecordLaneMemo !== undefined) return systemRecordLaneMemo ?? undefined;
+      const inner = innerStore.getSystemRecordLaneControllerV1?.();
+      if (!inner) {
+        systemRecordLaneMemo = null;
+        return undefined;
+      }
+      systemRecordLaneMemo = Object.freeze({
+        open: async (activation: SystemRecordLaneActivationV1) => {
+          const session = await inner.open(activation);
+          return {
+            get state() {
+              return session.state;
+            },
+            get activationGeneration() {
+              return session.activationGeneration;
+            },
+            async applyVerified(proof: unknown): Promise<SystemRecordApplyOutcomeV1> {
+              const outcome = await session.applyVerified(proof);
+              if (outcome.outcome === 'applied' || outcome.outcome === 'root-collision') {
+                // root-collision durably quarantines and rewrites state, so it
+                // changes what a reader should observe just as an apply does.
+                invalidate();
+                markProjectionDirty?.();
+              } else if (outcome.outcome === 'indeterminate') {
+                markProjectionDirty?.();
+              }
+              return outcome;
+            },
+            close: (mode: 'disable' | 'shutdown') => session.close(mode),
+          };
+        },
+      });
+      return systemRecordLaneMemo;
     },
     insert(quads, options) {
       return invalidateAfterMutation(
