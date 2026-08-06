@@ -2341,7 +2341,7 @@ interface LocalAgentSurface {
     integrationId: string;
     record?: LocalAgentIntegrationRecord;
     health?: LocalAgentHealthResponse | null;
-  }) => string;
+  }) => string | undefined;
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
@@ -2387,10 +2387,11 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   'prime-agent': {
     connectSupported: true,
     chatSupported: true,
-    // No synthesised default. A Prime Agent session id is a uuidv7 minted by the
-    // agent itself, so the node cannot invent one — leaving it undefined makes
-    // the daemon route to the most recently active live session, which is what
-    // the operator means by "the session I'm in" until they pick another.
+    // A Prime Agent session id is a uuidv7 minted by the agent itself, so the
+    // node must not synthesise one. The integrations endpoint already elects a
+    // live session; pin the UI conversation to that exact id instead of asking
+    // the daemon to run a second most-recently-active election on every turn.
+    defaultSessionId: ({ record }) => firstTrimmedString(record?.metadata?.activeSessionId),
     resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,

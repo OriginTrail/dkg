@@ -171,6 +171,37 @@ describe('ui local-agent stream api', () => {
     }
   });
 
+  it('forwards the pinned Prime Agent session through the generic chat transport', async () => {
+    const savedFetch = globalThis.fetch;
+    let payload: Record<string, unknown> = {};
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      payload = JSON.parse(String(init?.body ?? '{}'));
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"type":"final","text":"Prime","correlationId":"p-pinned","sessionId":"019f-session-a"}\n\n',
+          ));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    try {
+      const result = await streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: '019f-session-a',
+      });
+      expect(result.sessionId).toBe('019f-session-a');
+      expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
   it('parses Hermes SSE frames and resolves the final payload', async () => {
     requestLog.length = 0;
 

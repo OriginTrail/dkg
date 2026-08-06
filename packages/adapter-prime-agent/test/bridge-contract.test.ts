@@ -443,6 +443,51 @@ describe('/send', () => {
 });
 
 describe('/stream', () => {
+  it('keeps a non-text turn alive without exposing thinking or tool-call content', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(
+      stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never,
+      'sess-keepalive',
+      { sseKeepaliveIntervalMs: 20 },
+    );
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const res = await fetch(`${base}/stream`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'work silently', correlationId: 'c-keepalive' }),
+    });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    expect(decoder.decode(first.value)).toContain(': open');
+
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'thinking_delta', delta: 'hidden reasoning' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'toolcall_delta', delta: 'secret tool args' } });
+
+    const heartbeat = await Promise.race([
+      reader.read(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 150)),
+    ]);
+    expect(heartbeat).toBeDefined();
+    const heartbeatText = decoder.decode(heartbeat?.value);
+    expect(heartbeatText).toContain(': keepalive');
+    expect(heartbeatText).not.toContain('hidden reasoning');
+    expect(heartbeatText).not.toContain('secret tool args');
+
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'visible' } });
+    bridge.onAgentEnd();
+    const remainder: string[] = [];
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      remainder.push(decoder.decode(chunk.value));
+    }
+    expect(remainder.join('')).toContain('"type":"final"');
+    expect(remainder.join('')).toContain('visible');
+  });
+
   it('emits data: <json> frames of delta then final', async () => {
     const res = await fetch(`${base}/stream`, {
       method: 'POST',

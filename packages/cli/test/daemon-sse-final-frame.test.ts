@@ -62,6 +62,7 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     const req = new EventEmitter() as any;
     const res = makeRes();
     const { reader, state } = makeReader([
+      ': keepalive\n\n',
       'data: {"type":"delta","text":"He"}\n\n',
       'data: {"type":"final","text":"Hello!","correlationId":"c1"}\n\n',
     ]);
@@ -77,6 +78,7 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     // Every byte still reached the browser before we closed.
     expect(res.chunks.join('')).toContain('"type":"final"');
     expect(res.chunks.join('')).toContain('"type":"delta"');
+    expect(res.chunks.join('')).toContain(': keepalive');
   });
 
   it('detects a final frame split across chunk boundaries', async () => {
