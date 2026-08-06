@@ -44,8 +44,12 @@ export interface MeteringRequest {
   safeHeadBlock: number | null;
   /** Metering home (DKG_HOME). */
   home: string;
-  /** EVM chain id, so a testnet binding proof cannot authorise mainnet. */
-  chainId: number;
+  /**
+   * EVM chain id, so a testnet binding proof cannot authorise mainnet.
+   * Null when unresolvable — the node then refuses to serve rather than
+   * comparing against NaN, which fails every proof with a baffling message.
+   */
+  chainId: number | null;
 }
 
 /**
@@ -57,6 +61,17 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
   if (!path.startsWith("/api/metering/")) return false;
 
   const cfg = loadMeterConfig(home);
+
+  // Fail closed on chain identity. A node that cannot say which chain it is on
+  // must not verify a proof that names one. (Buyer-found: this compared against
+  // NaN and rejected every valid proof.)
+  if (req.chainId === null || !Number.isFinite(req.chainId)) {
+    io.json(503, {
+      error: "E_CHAIN_UNRESOLVED",
+      detail: "This node cannot resolve its own EVM chain id, so it will not verify wallet bindings or quote terms.",
+    });
+    return true;
+  }
 
   // Fail closed on the money question. Every route below either advertises the
   // deposit address or binds a delegation to it, so a node that cannot name its
@@ -82,6 +97,7 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
       coefficientsDigest,
       meterMode: cfg.mode,
       safeHeadBlock: req.safeHeadBlock,
+      chainId: req.chainId,
     }));
     return true;
   }

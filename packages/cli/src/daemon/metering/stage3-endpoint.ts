@@ -26,10 +26,14 @@ import { MAX_BINDING_LIFETIME_MS, BINDING_DOMAIN } from "./evm-binding.js";
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
 
 /** Buyer-set terms (decision KA d10-tab-terms). Provider does not get to soften these. */
-export function stage3Terms(providerAddress: string, refundAddress: string, askMicroPer1k: number, scheduleVersion: string): TabTerms {
+export function stage3Terms(providerAddress: string, refundAddress: string, askMicroPer1k: number, scheduleVersion: string, chainId = 8453): TabTerms {
   return {
     termsVersion: "tab-terms/v1",
-    chain: "base:8453",
+    // Derived from the SAME resolved chain id the binding verifier uses.
+    // Buyer-found: this was a hardcoded "base:8453" while verification read the
+    // config, so the advertised chain and the enforced chain could disagree —
+    // and did. Advertise what you enforce, from one source.
+    chain: `eip155:${chainId}`,
     tracContract: "0xA81a52B4dda010896cDd386C7fBdc5CDc835ba23",
     providerAddress,
     refundAddress,
@@ -66,9 +70,9 @@ export function storedDelegation(home: string, capabilityId: string) {
 export function termsQuote(args: {
   providerAddress: string; refundAddressHint?: string; askMicroPer1k: number;
   scheduleVersion: string; coefficientsDigest: string; policyDigest?: string;
-  meterMode: string; safeHeadBlock: number | null;
+  meterMode: string; safeHeadBlock: number | null; chainId?: number;
 }) {
-  const terms = stage3Terms(args.providerAddress, args.refundAddressHint ?? "<buyer-supplied, locked at tab open>", args.askMicroPer1k, args.scheduleVersion);
+  const terms = stage3Terms(args.providerAddress, args.refundAddressHint ?? "<buyer-supplied, locked at tab open>", args.askMicroPer1k, args.scheduleVersion, args.chainId ?? 8453);
   // Buyer-found: a quote WITH ?refundAddress binds that address, so its digest
   // legitimately differs from the unbound placeholder quote. Two digests for
   // "the terms" with no signal which is which reads as drift, or worse as
@@ -90,6 +94,7 @@ export function termsQuote(args: {
       domain: BINDING_DOMAIN,
       maxLifetimeMs: MAX_BINDING_LIFETIME_MS,
       maxLifetimeDays: MAX_BINDING_LIFETIME_MS / 86_400_000,
+      chainId: args.chainId ?? 8453,
       note: "A binding proof is checked against this ceiling before signature recovery. Rejections never reveal whether a principal is registered.",
     },
     meterMode: args.meterMode,

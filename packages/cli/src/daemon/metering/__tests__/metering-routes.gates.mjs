@@ -43,6 +43,7 @@ const server = createServer(async (req, res) => {
       providerAddress: req.headers["x-test-no-wallet"] ? null : wallets.publisher.address,
       requestAgentAddress: "0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba",
       safeHeadBlock: null,
+      chainId: req.headers["x-test-no-chain"] ? null : 8453,
       home: process.env.DKG_HOME,
     }, io);
     if (!handled && !res.writableEnded) { res.writeHead(404); res.end("not a metering route"); }
@@ -119,6 +120,17 @@ ok("a quote NEVER advertises the zero address",
 }
 
 // ── 2. the honesty rule, over the wire ────────────────────────────────────
+console.log("\nchain identity (buyer-found: 'this node is NaN'):");
+{
+  ok("the advertised chain is DERIVED from the enforced chain id — one source",
+    terms.body?.terms?.chain === "eip155:8453" && terms.body?.bindingPolicy?.chainId === 8453,
+    JSON.stringify({ chain: terms.body?.terms?.chain, policy: terms.body?.bindingPolicy?.chainId }));
+  const noChain = await fetch(base + "/api/metering/terms", { headers: { "x-test-no-chain": "1" } });
+  const nb = await noChain.json().catch(() => null);
+  ok("a node that cannot resolve its chain id refuses to serve (503), never compares against NaN",
+    noChain.status === 503 && nb?.error === "E_CHAIN_UNRESOLVED", `${noChain.status} ${JSON.stringify(nb)}`);
+}
+
 console.log("\nhonesty (a shadow node must not look like it bills):");
 ok("meterMode is reported verbatim",
   typeof terms.body?.meterMode === "string");

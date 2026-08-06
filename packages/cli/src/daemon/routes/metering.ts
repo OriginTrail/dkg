@@ -14,12 +14,29 @@ import { resolveChainConfig } from "../../config.js";
 
 const meterHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
 
-/** Base mainnet unless the node says otherwise. Never guessed silently. */
-function chainIdOf(ctx: RequestContext): number {
+/**
+ * The numeric EVM chain id.
+ *
+ * Buyer-found, 2026-08-06 (Hermes/Bo): this returned NaN on the production
+ * node, so every binding proof was refused with "proof is for chain 8453, this
+ * node is NaN". The DKG network overlay stores `chainId` as a CAIP-2 STRING
+ * ("base:8453"), not a number, and `Number("base:8453")` is NaN. I assumed the
+ * numeric form and defaulted `?? 8453`, which never fires because the value is
+ * present — just not a number.
+ *
+ * Returns null when it cannot be resolved. Never a fallback constant: guessing
+ * 8453 here would mean a misconfigured node silently accepts mainnet proofs.
+ */
+function chainIdOf(ctx: RequestContext): number | null {
   try {
-    const c = resolveChainConfig(ctx.config, ctx.network) as { chainId?: number } | undefined;
-    return Number(c?.chainId ?? 8453);
-  } catch { return 8453; }
+    const c = resolveChainConfig(ctx.config, ctx.network) as { chainId?: number | string } | undefined;
+    const raw = c?.chainId;
+    if (raw === undefined || raw === null) return null;
+    // CAIP-2 ("base:8453" / "eip155:8453") or a plain number.
+    const tail = String(raw).split(":").pop() ?? "";
+    const n = Number(tail);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch { return null; }
 }
 
 /**
