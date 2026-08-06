@@ -1425,6 +1425,21 @@ export class StorePriorityScheduler extends ObservableScheduler {
       () => this.failBarrier(barrier),
       timeoutMs ?? this.barrierTimeoutMs,
     );
+    // Unref'd on purpose: a safety timer that kept a daemon alive through its
+    // own shutdown would be worse than the deadlock it guards against.
+    //
+    // The consequence, which is NOT obvious and was found by an independent
+    // re-run rather than by reasoning: this bound can only fire while something
+    // else holds the event loop open. A daemon always qualifies — a listening
+    // server holds a ref'd handle — but a process that has quiesced down to
+    // nothing but the deadlock exits silently instead, which is the pre-bound
+    // behaviour in the one situation nobody is watching.
+    //
+    // Practical consequence for tests: a real-timer test of this bound must
+    // hold the loop open itself, or the process exits before the timer fires
+    // and the run is recorded as a failure with a thoroughly misleading cause
+    // (a bare non-zero exit and no output). The tests here use fake timers, so
+    // they are unaffected.
     if (typeof barrier.timer.unref === 'function') barrier.timer.unref();
     this.barriers.push(barrier);
     this.observeDepths();
