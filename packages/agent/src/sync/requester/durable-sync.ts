@@ -41,8 +41,11 @@ import {
 
 export {
   createContextGraphSyncDeadline,
+  createDurableMetaPhaseFetchDeadline,
   createDurableSyncBudget,
   createGraphScopedAuthenticationDeadline,
+  DURABLE_DATA_PHASE_MIN_BUDGET_MS,
+  DURABLE_META_PHASE_BUDGET_FRACTION,
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
   normalizeDurableSyncTimeoutMs,
@@ -332,12 +335,24 @@ async function runDurableSyncWithBudget(
       throwIfOperationAborted();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
+      const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
       const contextGraphBudget = durableSyncBudget.createContextGraphBudget({
         contextGraphId: pid,
         remainingContextGraphs: contextGraphIds.length - contextGraphIndex,
       });
       const deadline = contextGraphBudget.fetchDeadline;
-      const activeFetchContext = fetchContext(deadline);
+      // Meta may never outlive the CG window even if a budget hands out a
+      // later phase deadline, so both phases combined stay inside the per-CG
+      // wall clock. The data phase runs to the full CG deadline, which is how
+      // a meta phase that finishes early rolls its unused time into data.
+      // System CGs accept unverified payloads, so a capped partial meta page
+      // can persist and resume. Verified CGs require joint meta/data
+      // verification before either cursor advances; giving their meta phase an
+      // earlier cap could make the same incomplete descriptor page repeat
+      // forever.
+      const metaFetchDeadline = isSystemContextGraph
+        ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
+        : deadline;
       const exactAssetUals = exactAssetUalsFor?.(pid);
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
@@ -363,7 +378,7 @@ async function runDurableSyncWithBudget(
         graphUri,
         sinceBatchId,
         exactAssetUals,
-        fetchContext: activeFetchContext,
+        fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const metaResult: SyncPageResult = skipAgentsMeta
         ? {
@@ -377,12 +392,10 @@ async function runDurableSyncWithBudget(
           }
         : await fetchPhase('meta', metaGraph);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
-      if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
-        markDurableTerminalBoundary(accumulator, false);
-        recordPhaseOutcome(metaResult, { updateCheckpoint: false });
-        endPhase();
-        break;
-      }
+      // A meta timeout can be the intentional phase boundary assigned by the
+      // per-phase budget. Keep going so data can use the time reserved for it;
+      // the post-processing timeout gate below still prevents fanout to the
+      // next context graph when stopOnBackoffWorthyFailure is enabled.
       throwIfOperationAborted();
       const sinceBatchId = sinceBatchIdFor?.(pid);
       const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
@@ -390,8 +403,6 @@ async function runDurableSyncWithBudget(
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
-      const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
-
       let effectiveMetaResult = metaResult;
       let dataResult = rawDataResult;
       let exactAssetDescriptorCoverageComplete = true;

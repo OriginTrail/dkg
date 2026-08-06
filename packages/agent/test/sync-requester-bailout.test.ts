@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
@@ -201,6 +201,40 @@ describe('sync requester bailout', () => {
     expect(fetchSyncPages.calls.some(([request]) => (
       request.contextGraphId === 'next-cg'
     ))).toBe(false);
+  });
+
+  it('uses the reserved data window after a meta phase timeout', async () => {
+    const fetchSyncPages = recorder(async ({
+      contextGraphId,
+      phase,
+    }: DurableSyncFetchRequest) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { completed: false, timedOut: true })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'next-cg'],
+      stopOnBackoffWorthyFailure: true,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.timedOutPhases).toBe(1);
+    expect(fetchSyncPages.calls.map(([request]) => ({
+      contextGraphId: request.contextGraphId,
+      phase: request.phase,
+    }))).toEqual([
+      { contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, phase: 'meta' },
+      { contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, phase: 'data' },
+    ]);
   });
 
   it('stops shared-memory context-graph fanout after a backoff-worthy transport failure', async () => {
