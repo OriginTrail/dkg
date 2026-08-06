@@ -801,9 +801,12 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
       terminal: true,
       lastInvalidation: 'port-release-unproven',
     });
-    // And the replacement is refused outright, not merely discouraged.
+    // Refused outright, not merely discouraged. The message is the observable
+    // proxy for `state === 'closed'`: a failed retire must CLOSE the supervisor,
+    // not merely leave it ownership-terminal but open, because "open" is a
+    // state some later path could still spawn from.
     await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
-      .rejects.toThrow(/terminal/i);
+      .rejects.toThrow(/shutting down/i);
     expect(state.spawns.length, 'a replacement bound over an unaccounted listener').toBe(1);
   });
 
@@ -845,6 +848,121 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
       await handle.supervisorHandoff.startAndProveCleanGeneration();
       expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
       expect(state.spawns.length).toBe(2);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('recovers the phase when spawn throws SYNCHRONOUSLY during a clean-generation start', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const io = supervisorIo(state);
+    let failNextSpawnSynchronously = false;
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: {
+        ...io,
+        // `child_process.spawn` raises EACCES/EFTYPE/E2BIG/EINVAL synchronously
+        // rather than delivering them to the `error` event, so this is the real
+        // shape of a bad binary — not a contrived failure.
+        spawn: ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+          if (failNextSpawnSynchronously) {
+            failNextSpawnSynchronously = false;
+            throw Object.assign(new Error('spawn EACCES'), { code: 'EACCES' });
+          }
+          return io.spawn(command, args, options);
+        }) as typeof spawn,
+      },
+    }));
+    try {
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      failNextSpawnSynchronously = true;
+      await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+        .rejects.toThrow(/EACCES/);
+
+      // The throw must not escape past the recovery tail. If it does, the phase
+      // stays 'retired' for the life of the process: no replacement, no
+      // automatic revive, and a lease reporting "momentarily not ready" forever
+      // instead of failing closed — the daemon's triple store is simply dead.
+      await waitUntil(
+        () => handle.ownership.snapshot().childGeneration === '2',
+        'ordinary supervision to resume after the synchronous spawn failure',
+      );
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+      expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('does NOT accept an inconclusive probe as proof that the bind was released', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const realFetch = globalThis.fetch;
+    let probesTimeOut = false;
+    const handle = await startOxigraphServer(startOpts(port, {
+      stopGraceMs: 500,
+      io: {
+        ...supervisorIo(state),
+        // A loaded listener that misses the probe deadline. #2052 is a store
+        // PRESSURE issue, so this is the expected case, not an exotic one — and
+        // it is NOT evidence that the socket is gone, unlike ECONNREFUSED.
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (!probesTimeOut) return await realFetch(input, init);
+          throw Object.assign(new Error('The operation was aborted due to timeout'), {
+            name: 'TimeoutError',
+          });
+        }) as typeof globalThis.fetch,
+      },
+    }));
+
+    probesTimeOut = true;
+    await expect(handle.supervisorHandoff.stopAndProveOwnedChildDead())
+      .rejects.toThrow(/could not prove/i);
+    expect(handle.ownership.snapshot()).toMatchObject({
+      terminal: true,
+      lastInvalidation: 'port-release-unproven',
+    });
+    // A failed retire must not leave an open, childless supervisor that could
+    // still spawn against a listener it cannot account for.
+    await sleep(600);
+    expect(state.spawns.length, 'spawned after a retire that could not be proven').toBe(1);
+    await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+      .rejects.toThrow(/shutting down/i);
+    // stop() stays safe and idempotent on that path, and does not overwrite the
+    // more specific terminal reason.
+    await handle.stop();
+    expect(handle.ownership.snapshot().lastInvalidation).toBe('port-release-unproven');
+  });
+
+  it('resumes ordinary supervision when a lane retires and never binds a replacement', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      handoffAbandonMs: 400,
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: supervisorIo(state),
+    }));
+    try {
+      // Exactly what a lane SHUTDOWN does: destroy the client, retire the
+      // child, drain — and never come back. This child is the daemon's whole
+      // triple store, not the lane's private one, so one consumer's teardown
+      // must not park it childless for the life of the process.
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      expect(state.spawns.length).toBe(1);
+
+      await waitUntil(
+        () => handle.ownership.snapshot().ready,
+        'the abandoned handoff to be backstopped',
+      );
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+      expect(await portAnswers(port)).toBe(true);
+      // A lane that returns late is refused — fail-closed for the lane, alive
+      // for every other consumer of the store.
+      await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+        .rejects.toThrow(/proven-dead predecessor/i);
     } finally {
       await handle.stop();
     }

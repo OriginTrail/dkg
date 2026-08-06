@@ -128,6 +128,13 @@ export interface StartOxigraphServerOptions {
   restartBackoffBaseMs?: number;
   /** Cap for restart backoff. */
   restartBackoffMaxMs?: number;
+  /**
+   * How long the supervisor waits for a system-record lane to bind its
+   * replacement after `stopAndProveOwnedChildDead()` before resuming ordinary
+   * supervision (#2052 B2). Must comfortably exceed a legitimate handoff, which
+   * includes draining the retired generation's in-flight requests.
+   */
+  handoffAbandonMs?: number;
   /** Optional finite limits for an isolated systemd user scope (Linux only). */
   memoryLimits?: OxigraphMemoryLimits;
   /** Runtime platform. Injectable so command construction is portable in tests. */
@@ -311,6 +318,12 @@ export async function startOxigraphServer(
   const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
+  // Generous by default: the gap between the two handoff halves legitimately
+  // includes draining every in-flight request issued over the retired pool, so
+  // a tight bound would cut off healthy handoffs. Only an ABANDONED one should
+  // ever reach it.
+  const handoffAbandonMs = normalizePositiveInteger(opts.handoffAbandonMs)
+    ?? Math.max(readyTimeoutMs, DEFAULT_STOP_GRACE_MS) * 2;
   const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
 
   /**
@@ -386,6 +399,47 @@ export async function startOxigraphServer(
     if (reviveTimer === null) return;
     clearTimeout(reviveTimer);
     reviveTimer = null;
+  };
+
+  /**
+   * Backstop for a lane that retires the child and never binds the replacement.
+   *
+   * The `retired` phase suspends ordinary supervision, so an abandoned handoff
+   * leaves the daemon's triple store childless indefinitely. That is not
+   * hypothetical: a lane SHUTDOWN legitimately retires without a replacement.
+   *
+   * The resolution is to resume ordinary supervision, NOT to go terminal. This
+   * child is the daemon's whole triple store — every consumer's store, not the
+   * system-record lane's private one — so letting one consumer's teardown
+   * permanently kill it would be a far worse failure than the one being fixed.
+   * A lane that comes back late finds the phase cleared and is refused, which
+   * is fail-closed for the lane and alive for everyone else.
+   */
+  let handoffAbandonTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearHandoffAbandonBackstop = (): void => {
+    if (handoffAbandonTimer === null) return;
+    clearTimeout(handoffAbandonTimer);
+    handoffAbandonTimer = null;
+  };
+  const armHandoffAbandonBackstop = (): void => {
+    clearHandoffAbandonBackstop();
+    const timer = setTimeout(() => {
+      if (handoffAbandonTimer !== timer) return;
+      handoffAbandonTimer = null;
+      if (handoffPhase !== 'retired' || terminating || state === 'closed') return;
+      log(
+        `[oxigraph] no clean generation was bound within ${handoffAbandonMs}ms of retiring ` +
+          `the child on ${bind}; resuming ordinary supervision.`,
+      );
+      // Clear BEFORE reviving so the revive is an ordinary one; the lane's
+      // second half, if it ever arrives, is then correctly refused.
+      handoffPhase = 'none';
+      void runExclusive(reviveLocked).catch((err: unknown) => {
+        log(`[oxigraph] abandoned-handoff recovery failed: ${(err as Error).message}`);
+      });
+    }, handoffAbandonMs);
+    timer.unref?.();
+    handoffAbandonTimer = timer;
   };
 
   // ---------------------------------------------------------------------
@@ -514,12 +568,74 @@ export async function startOxigraphServer(
   // ---------------------------------------------------------------------
 
   /**
+   * What one probe of the bind actually established.
+   *
+   * The distinction matters because the two consumers read the SAME probe with
+   * OPPOSITE polarity. `probeReady()` asks "may I trust this?", so absence of
+   * evidence must mean no; `proveManagedPortRelease()` asks "is this socket
+   * gone?", so absence of evidence must ALSO mean no — and those are different
+   * booleans. Collapsing a timeout into the same `false` as a refused
+   * connection is fail-closed for the first and fail-OPEN for the second: a
+   * loaded listener that misses one 1.5s deadline would be reported as a
+   * released port. #2052 is a store-PRESSURE issue, so a slow listener is the
+   * expected case, not the exotic one.
+   */
+  type BindProbeResultV1 =
+    /** An HTTP response came back: something is listening and serving. */
+    | 'serving'
+    /** The connection was REFUSED: positive evidence that nothing is bound. */
+    | 'refused'
+    /** Timeout, abort, or transport failure: no evidence in either direction. */
+    | 'inconclusive';
+
+  /**
+   * True only when the connection was actively refused, walking `cause` and
+   * `AggregateError.errors` because `fetch` wraps the OS error at least one
+   * level deep. Only ECONNREFUSED counts: ECONNRESET or a hang mean something
+   * WAS there, which is the opposite of proof that the port is free.
+   */
+  const isConnectionRefused = (error: unknown): boolean => {
+    const seen = new Set<unknown>();
+    const walk = (candidate: unknown): boolean => {
+      if (typeof candidate !== 'object' || candidate === null || seen.has(candidate)) {
+        return false;
+      }
+      seen.add(candidate);
+      const node = candidate as { code?: unknown; cause?: unknown; errors?: unknown };
+      if (node.code === 'ECONNREFUSED') return true;
+      if (Array.isArray(node.errors) && node.errors.some(walk)) return true;
+      return walk(node.cause);
+    };
+    return walk(error);
+  };
+
+  const probeBind = async (): Promise<BindProbeResultV1> => {
+    try {
+      const res = await io.fetch(queryEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sparql-query',
+          Accept: 'application/sparql-results+json',
+        },
+        body: 'ASK { ?s ?p ?o }',
+        signal: AbortSignal.timeout(readyIntervalMs + 1_000),
+      });
+      // Even a non-2xx answer proves something is listening — which is exactly
+      // what the release proof must not mistake for a free port.
+      void res;
+      return 'serving';
+    } catch (error) {
+      return isConnectionRefused(error) ? 'refused' : 'inconclusive';
+    }
+  };
+
+  /**
    * "Something is serving SPARQL on our bind."
    *
    * Deliberately NOT evidence of ownership — a foreign local SPARQL server
    * answers this identically, which is the whole reason `probeReady()` exists.
-   * Used as the cheap first half of the readiness probe, and on the stop path
-   * as the port-release probe (there, an answer is bad news).
+   * The cheap first half of the readiness probe; anything short of a usable
+   * answer is a no.
    */
   const endpointAnswers = async (): Promise<boolean> => {
     try {
@@ -586,9 +702,17 @@ export async function startOxigraphServer(
    * port) never pegs the CPU.
    */
   const scheduleRevive = (reason: string): void => {
-    // Never arm a restart once shutdown has begun, or while a lane handoff owns
-    // the replacement.
-    if (terminating || state === 'closed' || handoffPhase === 'retired') return;
+    // Never arm a restart once shutdown has begun.
+    //
+    // There is deliberately NO `handoffPhase` clause here. Every caller of this
+    // function is unreachable while the phase is `retired` — the exit handler
+    // requires `state === 'ready'`, the retire itself transitions away from it
+    // and disarms the timer, and both recovery tails clear the phase before
+    // calling — so the clause could never fire. An inert guard is worse than no
+    // guard: it reads as protection and invites a later refactor to delete the
+    // real one. The phase is enforced where it can actually be violated, in
+    // `recoverLocked()` and `startCleanGenerationLocked()`.
+    if (terminating || state === 'closed') return;
     restarts += 1;
     const delay = Math.min(restartMax, restartBase * 2 ** (restarts - 1));
     log(`[oxigraph] ${reason}; restart #${restarts} in ${delay}ms`);
@@ -773,18 +897,31 @@ export async function startOxigraphServer(
    * so managed-store capability can never be revived against a socket we do
    * not own.
    *
+   * Release is proven ONLY by a refused connection. A probe that times out or
+   * fails in transport establishes nothing, and treating it as release would
+   * be fail-open on exactly the boundary this function exists to defend: the
+   * caller may bind a replacement over whatever is still listening. So the
+   * loop retries until it sees a refusal and returns false if it never does —
+   * "no evidence" and "evidence of absence" are not the same answer.
+   *
    * We only ever PROBE here. No pid observed on the port is ever signalled —
    * every kill in this module goes through the tracked `ChildProcess`.
    */
   const proveManagedPortRelease = async (exited: ChildProcess | null): Promise<boolean> => {
     const interval = Math.max(1, Math.floor(stopGraceMs / PORT_RELEASE_PROBE_ATTEMPTS));
+    let last: BindProbeResultV1 = 'inconclusive';
     for (let attempt = 1; attempt <= PORT_RELEASE_PROBE_ATTEMPTS; attempt += 1) {
-      // Nothing serves SPARQL on our bind any more: released, proven.
-      if (!(await endpointAnswers())) return true;
+      last = await probeBind();
+      // The socket is gone, positively: the OS refused the connection.
+      if (last === 'refused') return true;
       if (attempt === PORT_RELEASE_PROBE_ATTEMPTS) break;
       await sleep(interval);
     }
     const owner = exited === null ? null : await resolveListenOwner(exited);
+    log(
+      `[oxigraph] ${bind} release could not be proven after the managed child exited ` +
+        `(last probe: ${last}).`,
+    );
     log(
       `[oxigraph] ${bind} is still served after the managed child exited ` +
         `(${owner === null
@@ -825,6 +962,7 @@ export async function startOxigraphServer(
   const beginTermination = (): void => {
     terminating = true;
     clearReviveTimer();
+    clearHandoffAbandonBackstop();
   };
 
   const stopLocked = async (): Promise<void> => {
@@ -922,12 +1060,35 @@ export async function startOxigraphServer(
       await awaitChildExit(c);
     }
     if (!(await proveManagedPortRelease(c))) {
+      // We have no child and cannot account for whatever is still on the bind.
+      // Leaving the supervisor merely "open and childless" would keep it in a
+      // state where a later path could still spawn against that listener, so
+      // close it outright: this supervisor is finished, and only a restart of
+      // the node can make the port trustworthy again.
+      //
+      // NOTE for operators: ordinary `query`/`insert`/`delete` traffic does NOT
+      // consult the ownership lease — only the system-record lane does — so the
+      // daemon will keep issuing SPARQL to that endpoint until it is restarted.
+      // Refusing that traffic is an adapter-side concern this module cannot
+      // reach; all it can do is stop being a supervisor and say so loudly.
+      beginTermination();
+      state = 'closed';
+      log(
+        `[oxigraph] FATAL: could not prove ${bind} was released after retiring the managed ` +
+          'child. The supervisor is now closed and will never start another child, but ' +
+          'ordinary store traffic is still routed to that endpoint — restart the node.',
+      );
       throw new Error(
         `Managed Oxigraph could not prove ${bind} was released after retiring the child; ` +
           'managed-store capability is now terminal',
       );
     }
     handoffPhase = 'retired';
+    // Bound the window. The lane is expected to bind the replacement, but a
+    // caller that never returns — a lane shutdown, an exception between the two
+    // halves, a crashed consumer — must not park the daemon's triple store
+    // childless for the life of the process.
+    armHandoffAbandonBackstop();
   };
 
   /**
@@ -957,32 +1118,48 @@ export async function startOxigraphServer(
       );
     }
     state = 'recovering';
-    child = spawnChild();
-    const deadline = Date.now() + readyTimeoutMs;
-    while (Date.now() < deadline) {
-      if (terminating) break;
-      if (!childAlive()) break;
-      const listenerPid = await probeReady();
-      if (listenerPid !== null && childAlive()) {
-        handoffPhase = 'none';
-        const generation = bindProvenGeneration(child!, listenerPid);
-        log(`[oxigraph] clean child generation ${generation} bound on ${bind}.`);
-        return;
+    clearHandoffAbandonBackstop();
+    // EVERYTHING from here runs inside the recovery tail, because more than the
+    // ready loop can fail. `child_process.spawn` raises EACCES / EFTYPE / E2BIG
+    // / EINVAL SYNCHRONOUSLY — the `error` event only ever carries the async
+    // failures — and `spawnChild()`'s own shutdown assertion throws
+    // synchronously too. Either would escape past the tail and strand
+    // `handoffPhase` at 'retired' for the life of the process: no replacement,
+    // no automatic revive, and a lease reporting "momentarily not ready"
+    // forever instead of failing closed. `bindProvenGeneration()` can throw as
+    // well (terminal lease), which is the same class.
+    try {
+      child = spawnChild();
+      const deadline = Date.now() + readyTimeoutMs;
+      while (Date.now() < deadline) {
+        if (terminating) break;
+        if (!childAlive()) break;
+        const listenerPid = await probeReady();
+        if (listenerPid !== null && childAlive()) {
+          // Bind FIRST: clearing the phase before a call that can throw would
+          // leave the supervisor claiming a completed handoff it never made.
+          const generation = bindProvenGeneration(child!, listenerPid);
+          handoffPhase = 'none';
+          log(`[oxigraph] clean child generation ${generation} bound on ${bind}.`);
+          return;
+        }
+        await sleep(readyIntervalMs);
       }
-      await sleep(readyIntervalMs);
+      throw new Error(
+        `Managed Oxigraph could not prove a clean child generation on ${bind} ` +
+          `within ${readyTimeoutMs}ms`,
+      );
+    } catch (err) {
+      // The lane's replacement could not be proven. Reap the unproven child and
+      // hand the node back to ORDINARY supervision: a lane that abandons the
+      // handoff here must not leave the daemon's triple store childless. The
+      // backoff may later bind a generation of its own, which the lane observes
+      // as the ordinary stale-generation case.
+      signalTrackedChild('SIGKILL');
+      handoffPhase = 'none';
+      scheduleRevive(`clean-generation start failed on ${bind}`);
+      throw err;
     }
-    // The lane's replacement could not be proven. Reap the unproven child and
-    // hand the node back to ORDINARY supervision: a lane that abandons the
-    // handoff here must not leave the store permanently childless. The backoff
-    // may later bind a generation of its own, which the lane observes as the
-    // ordinary stale-generation case.
-    signalTrackedChild('SIGKILL');
-    handoffPhase = 'none';
-    scheduleRevive(`clean-generation start did not become ready on ${bind}`);
-    throw new Error(
-      `Managed Oxigraph could not prove a clean child generation on ${bind} ` +
-        `within ${readyTimeoutMs}ms`,
-    );
   };
 
   /**
