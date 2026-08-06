@@ -135,12 +135,14 @@ export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
 export {
+  DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY,
   SYNC_ADMISSION_SOURCES,
   contextGraphPriority,
   countSyncPriorityClasses,
   normalizeSyncAdmissionSource,
   normalizeSyncContextGraphPriorities,
   orderContextGraphIdsByPriority,
+  resolveSyncContextGraphPriorities,
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
   type SyncAdmissionSource,
