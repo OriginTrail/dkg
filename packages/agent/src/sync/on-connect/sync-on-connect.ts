@@ -69,6 +69,13 @@ interface SyncResultAccounting {
   insertedTriples: number;
   madeProgress: boolean;
   backoffWorthyFailure: boolean;
+  /**
+   * The peer never answered at least one Context Graph's round
+   * (`failedPeers`), as opposed to a round that failed after a response.
+   * Only this — combined with zero progress — may stop the on-connect
+   * fanout early; per-CG failures are isolated inside the sync itself.
+   */
+  peerUnreachable: boolean;
   denied: boolean;
   failed: boolean;
   deferredByBackpressure: boolean;
@@ -85,6 +92,7 @@ function classifySyncResult(
       insertedTriples: result,
       madeProgress: true,
       backoffWorthyFailure: false,
+      peerUnreachable: false,
       denied: false,
       failed: false,
       deferredByBackpressure: false,
@@ -94,10 +102,23 @@ function classifySyncResult(
   }
 
   const progress = classifyDurableProgress(result, { complete });
+  // `failedPeers` is folded across every Context Graph in this lane. It says
+  // at least one round never got a response; it does not mean the peer failed
+  // to answer every round. Preserve any response evidence from sibling CGs so
+  // one unreachable/poisoned CG cannot suppress discovery and SWM fanout from
+  // a peer that demonstrably answered elsewhere.
+  const peerRespondedInLane = progress.madeReconnectProgress
+    || progress.denied
+    || progress.phaseFailed
+    || progress.integrityRejected
+    || progress.timedOut
+    || progress.hasMetadataEvidence
+    || progress.hasVerifiedPrivateOnlyResponse;
   return {
     insertedTriples: result.insertedTriples,
     madeProgress: progress.madeReconnectProgress,
     backoffWorthyFailure: progress.backoffWorthyFailure,
+    peerUnreachable: progress.transportFailed && !peerRespondedInLane,
     denied: progress.denied,
     failed: progress.phaseFailed || progress.integrityRejected,
     deferredByBackpressure: progress.deferredByBackpressure,
@@ -230,9 +251,19 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
       return finishSyncAccounting();
     }
-    if (syncedAccounting.backoffWorthyFailure) {
-      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
+    // A backoff-worthy per-CG failure must NOT stop the remaining lanes: the
+    // failure is already recorded (the peer will not be stamped fresh), and
+    // stopping here starves CG discovery and shared-memory sync of a peer
+    // that is demonstrably reachable — the small-CG-behind-a-poison-transfer
+    // starvation this accounting exists to prevent. Only a peer that never
+    // answered any round and produced no progress stops the fanout, because
+    // every later lane would just re-dial the same dead peer.
+    if (syncedAccounting.peerUnreachable && !syncedAccounting.madeProgress) {
+      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer}: durable sync could not reach the peer`);
       return finishSyncAccounting();
+    }
+    if (syncedAccounting.backoffWorthyFailure) {
+      logInfo(ctx, `Durable sync from peer ${shortPeer} hit backoff-worthy pressure; continuing remaining sync-on-connect lanes`);
     }
 
     const syncScope = new Set<string>([
@@ -255,8 +286,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
         logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG admission deferral`);
         return finishSyncAccounting();
       }
-      if (discoverAccounting.backoffWorthyFailure) {
-        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG durable sync hit backoff-worthy pressure`);
+      // Same policy as the primary durable leg: per-CG pressure continues,
+      // only an unanswered round with no progress stops the fanout.
+      if (discoverAccounting.peerUnreachable && !discoverAccounting.madeProgress) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer}: discovered-CG durable sync could not reach the peer`);
         return finishSyncAccounting();
       }
       await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
