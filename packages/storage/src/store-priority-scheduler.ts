@@ -1000,6 +1000,15 @@ export class StorePriorityScheduler extends ObservableScheduler {
    *
    * Seals are refcounted, so a control transition nested inside another does
    * not un-seal the outer one when it commits.
+   *
+   * `generation` is a LABEL, carried on the returned seal and reported through
+   * `admissionGenerationsInflight` for diagnostics. It is deliberately not an
+   * enforcement key: the hold is `seals > 0` and the drain is this store's whole
+   * `taggedInflight`, both generation-blind, because the transition this seals
+   * is a child-process restart and the child it stops serves every generation.
+   * Narrowing either one to the sealed generation would be strictly weaker, and
+   * — since generations are decimal counters — trivially bypassable by any
+   * caller that can spell the next one.
    */
   sealStoreGeneration(storeId: object, generation: string): StoreGenerationSeal {
     const state = this.getOrCreateStoreState(storeId);
@@ -1029,9 +1038,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
   /**
    * Run a control transition behind a barrier for `storeId`.
    *
-   * The barrier seals the store for the duration, waits for the sealed
-   * generation's execution permits to drain, then runs `transition` in the
-   * single reserved controller slot that sits OUTSIDE `maxConcurrent`. It is
+   * The barrier seals the store for the duration, waits for the store to
+   * quiesce, then runs `transition` in the single reserved controller slot that
+   * sits OUTSIDE `maxConcurrent`. It is
    * never queued, never rejected by capacity or abort, and — critically — holds
    * ZERO execution slots while it waits, so the drain it is waiting for is not
    * competing with the barrier itself for capacity.
