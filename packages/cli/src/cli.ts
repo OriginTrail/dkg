@@ -31,7 +31,7 @@ import { registerOkfCommand } from './commands/okf.js';
 const program = new Command();
 program
   .name('dkg')
-  .description('DKG V10 testnet node CLI')
+  .description('DKG V10 node CLI')
   .version(getCliVersion());
 
 registerInitCommand(program);

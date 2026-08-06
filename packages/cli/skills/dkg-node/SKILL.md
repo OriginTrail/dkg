@@ -47,7 +47,7 @@ targets before writing so they cannot accidentally create shadow context graphs.
 - **Do not `git pull`.** Do not clone the repository. Do not edit files under `~/.dkg/releases/` (on Core nodes — Edge nodes have no `~/.dkg/releases/` at all under RFC-41).
 - If `dkg doctor` reports orphan clones at `~/dkg/`, `~/Projects/dkg/`, or similar, ask the operator before touching them — they are not the running daemon.
 - `dkg update --check` previews the available version without applying.
-- `dkg update --allow-prerelease` follows the `next` dist-tag for pre-release builds.
+- `dkg update --allow-prerelease` allows published prerelease channels when the network policy permits.
 - `dkg rollback` reverts to the previous version (Edge: re-installs the prior npm version recorded in `~/.dkg/previous-version`; Core: flips the blue-green slot symlink).
 
 **Detecting current install state:**
@@ -60,18 +60,17 @@ targets before writing so they cannot accidentally create shadow context graphs.
 
 - "There seem to be multiple DKG installations on this machine" → run `dkg doctor`; the `state.cli.globalPath`, `state.daemon.entryPoint`, and orphan-repos check together identify the canonical install and any stray clones.
 - "The UI shows an old version even after I updated" → run `dkg doctor`; the served-UI / source-mismatch check flags stale browser / PWA / service-worker caches.
-- "I ran `npm install -g @origintrail-official/dkg@latest` but the daemon still reports the old version" → on Edge nodes the daemon needs a restart to pick up the new install (`dkg restart`). On Core nodes, the slot mechanism gates the visible version on `dkg update`'s atomic swap, not on `npm install -g` directly — use `dkg update` for Core nodes.
+- "I ran `npm install -g @origintrail-official/dkg@latest` but the daemon still reports the old version" → on Edge nodes, run `dkg stop` and then `dkg start` so the daemon picks up the new install. On Core nodes, the slot mechanism gates the visible version on `dkg update`'s atomic swap, not on `npm install -g` directly — use `dkg update` for Core nodes.
 - "Publishing or context-graph registration intermittently fails with an RPC/503 error" → the node uses **multiple chain RPC endpoints with automatic failover**. Each supported network ships a curated set of public RPCs: `chain.rpcUrl` is the primary and `chain.rpcUrls` is an ordered list of backups. A transient failure (rate-limit/timeout/network) on one endpoint silently fails over to the next; on-chain reverts and other application errors do **not** trigger failover. A `503`/`504` from a publish/register/identity/PCA route means **every** configured endpoint was exhausted — retry, or add a faster/private endpoint. Configure backups via `chain.rpcUrls` in `~/.dkg/config.json` or the **"Backup RPC URLs"** prompt in `dkg init`. Precedence: an operator-set `chain.rpcUrls` **replaces** the network defaults; setting only a private `chain.rpcUrl` keeps the public defaults as failover (set `"rpcUrls": []` to opt out). A wrong-chain backup fails the node loudly at startup (provider network-mismatch), never silently. Inspect failover activity at `GET /api/status` → `chain.rpcFailovers` / `chain.rpcExhaustions` / `chain.rpcFailoversByClass`, and per-endpoint reachability at `GET /api/chain/rpc-health`.
 
-The full design rationale lives in [OT-RFC-41](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md).
+The current operator guidance lives in [Updates & Rollback](https://github.com/OriginTrail/dkg/blob/main/docs/use-dkg/updates-and-rollback.md).
 
 ## 2. Capabilities Overview
 
-> **Note:** This skill describes the full DKG V10 API surface. Some endpoints
-> may not yet be available on your node depending on its version. Call
-> `GET /api/status` to check the node version, and rely on error responses
-> (404) to detect unimplemented routes. The node is under active development
-> toward V10.0 — endpoints are being shipped incrementally.
+> **Note:** This skill describes the current DKG V10 API surface. Availability
+> can vary with the installed node version. Call `GET /api/status` to check the
+> version, use `dkg <command> --help` for its CLI surface, and rely on explicit
+> error responses when a route is unavailable.
 
 This node provides a three-layer **verifiable memory system** for AI agents:
 
@@ -79,7 +78,7 @@ This node provides a three-layer **verifiable memory system** for AI agents:
 |-------|-------|------|-------------|-------------|
 | **Working Memory (WM)** | Private to you | Free | Self-attested | Local, survives restarts |
 | **Shared Working Memory (SWM)** | Visible to team | Free | Self-attested (gossip replicated) | TTL-bounded |
-| **Verifiable Memory (VM)** | Permanent, on-chain | TRAC tokens | Self-attested → endorsed → consensus-verified | Permanent |
+| **Verifiable Memory (VM)** | Network-queryable, chain-anchored | Gas + TRAC | Self-attested → endorsed → consensus-verified | Durable |
 
 **What you can do:** create knowledge assertions, import files (PDF, DOCX, Markdown),
 share knowledge with peers, publish to the blockchain, endorse others' knowledge,
@@ -305,7 +304,7 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 > retired so shared/published data always has a lifecycle name, seal, and audit
 > record.
 
-### Verifiable Memory (VM) — Permanent, on-chain
+### Verifiable Memory (VM) — Durable, chain-anchored
 
 > **Lifecycle VM publishing goes through SWM.** Named WM assertions are finalized,
 > shared to SWM, then published from there. The public daemon API no longer has
