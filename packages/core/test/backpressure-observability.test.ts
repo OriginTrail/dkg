@@ -429,11 +429,16 @@ describe('BackpressureMonitor', () => {
       lastRejectedAgeMs: null,
       ...extra,
     });
+    // Two registered schedulers, the way the daemon actually registers them —
+    // one wholly shared, one wholly partitioned. The capacity model is a
+    // scheduler invariant, so a single scheduler reporting a mix of both is a
+    // shape the tracker cannot produce and this test must not invent.
     registry.register({
       backpressureId: 'sync-global',
       getBackpressureSnapshot: () => ({
         scheduler: 'sync-global',
         state: 'saturated',
+        capacityModel: 'shared',
         totals: {
           queued: 4,
           queueLimit: 4,
@@ -446,10 +451,27 @@ describe('BackpressureMonitor', () => {
         lanes: [
           laneRow('durable', 3, { capacityModel: 'shared', pressureQueued: 4 }),
           laneRow('changelog', 1, { capacityModel: 'shared', pressureQueued: 4 }),
-          // Same scheduler, private allocation: its own backlog IS the depth
-          // that classified it, so the record must carry no second number.
-          laneRow('ack', 4, { capacityModel: 'partitioned', pressureQueued: 4 }),
         ],
+      }),
+    });
+    registry.register({
+      backpressureId: 'store',
+      getBackpressureSnapshot: () => ({
+        scheduler: 'store',
+        state: 'saturated',
+        capacityModel: 'partitioned',
+        totals: {
+          queued: 4,
+          queueLimit: 4,
+          inflight: 0,
+          inflightLimit: 2,
+          oldestQueuedAgeMs: 0,
+          oldestActiveAgeMs: 0,
+          rejectedTotal: 0,
+        },
+        // A private allocation: its own backlog IS the depth that classified
+        // it, so the record must carry no second number.
+        lanes: [laneRow('ack', 4, { capacityModel: 'partitioned', pressureQueued: 4 })],
       }),
     });
     const messages: string[] = [];

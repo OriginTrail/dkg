@@ -112,6 +112,16 @@ export interface BackpressureLaneSnapshot {
 export interface BackpressureSnapshot {
   scheduler: string;
   state: BackpressureState;
+  /**
+   * How this scheduler divides capacity between its lanes. It is a **scheduler**
+   * invariant — every lane of one scheduler shares it — so read it here; the
+   * copy on each lane row is derived, and exists so a single row still explains
+   * its own `queueLimit` when it travels alone (a log line, one metric series).
+   *
+   * Optional so a hand-built `BackpressureSource` still satisfies this type;
+   * absent means `partitioned`.
+   */
+  capacityModel?: SchedulerLaneCapacityModel;
   totals: {
     queued: number;
     queueLimit: number | null;
@@ -367,6 +377,7 @@ export class SchedulerPressureTracker {
     return {
       scheduler: this.scheduler,
       state,
+      capacityModel: this.capacity.capacityModel === 'shared' ? 'shared' : 'partitioned',
       totals,
       lanes: snapshots,
     };
@@ -415,39 +426,39 @@ export class SchedulerPressureTracker {
    * classifier's branches.
    */
   private laneCapacityFor(lane: string, laneQueued: number): {
+    /** Reported ceilings, whether or not depth classification applies. */
     capacityModel: SchedulerLaneCapacityModel;
     queueLimit: number | null;
     inflightLimit: number | null;
-    pressureQueued: number;
-    depthCeiling: number | null;
+    /**
+     * The depth and the ceiling the lane's state is classified against, or
+     * `null` when no depth applies to it at all — an unbounded queue, or a lane
+     * with an empty backlog. Carrying the pair together is what keeps "does
+     * depth apply" from being inferred from a nullable ceiling.
+     */
+    depthPressure: { queued: number; limit: number } | null;
   } {
     const shared = this.capacity.capacityModel === 'shared';
     const queueLimit = shared
       ? normalizeLimit(this.capacity.queueLimit)
       : normalizeLimit(this.capacity.lanes?.[lane]?.queueLimit);
     // A lane with nothing waiting is not held back by a full queue, whoever
-    // filled it. Under `partitioned` this guard is implied by the comparisons
-    // it guards, so it changes nothing there; under `shared` it is what keeps
-    // an idle lane out of a pool's saturation.
-    const depthCeiling = queueLimit !== null && queueLimit > 0 && laneQueued > 0
-      ? queueLimit
-      : null;
+    // filled it. Under `partitioned` this is implied by the comparisons it
+    // guards, so it changes nothing there; under `shared` it is what keeps an
+    // idle lane out of a pool's saturation.
+    const depthApplies = queueLimit !== null && queueLimit > 0 && laneQueued > 0;
     return {
       capacityModel: shared ? 'shared' : 'partitioned',
       queueLimit,
       inflightLimit: shared
         ? normalizeLimit(this.capacity.inflightLimit)
         : normalizeLimit(this.capacity.lanes?.[lane]?.inflightLimit),
-      // Exactly the depth the classifier used, so `pressureQueued / queueLimit`
-      // is always the utilization behind this lane's own state. Depth is
-      // measured against whatever the lane's ceiling bounds — its own backlog
-      // when the allocation is private, the whole pool when the ceiling is
-      // shared — and against nothing at all when no depth applies, which is why
-      // a lane with an empty backlog reports its own 0 rather than the pool's
-      // depth. Publishing the pool there would read as 100% utilization on a
-      // lane that is `healthy` and waiting for nothing.
-      pressureQueued: depthCeiling === null || !shared ? laneQueued : this.queued.size,
-      depthCeiling,
+      // Depth is measured against whatever the lane's ceiling bounds: its own
+      // backlog when the allocation is private, the whole pool when the ceiling
+      // is shared.
+      depthPressure: depthApplies && queueLimit !== null
+        ? { queued: shared ? this.queued.size : laneQueued, limit: queueLimit }
+        : null,
     };
   }
 
@@ -459,9 +470,14 @@ export class SchedulerPressureTracker {
       capacityModel,
       queueLimit,
       inflightLimit,
-      pressureQueued,
-      depthCeiling,
+      depthPressure,
     } = this.laneCapacityFor(lane, queued.length);
+    // Exactly the depth the classifier used, so `pressureQueued / queueLimit`
+    // is always the utilization behind this lane's own state. A lane no depth
+    // applies to reports its own backlog rather than a pool it is not being
+    // held back by — publishing the pool there would read as full utilization
+    // on a lane that is `healthy` and waiting for nothing.
+    const pressureQueued = depthPressure?.queued ?? queued.length;
     const oldestQueuedAgeMs = queued.length === 0
       ? 0
       : Math.max(...queued.map((entry) => Math.max(0, Math.floor(now - entry.queuedAt))));
@@ -475,7 +491,7 @@ export class SchedulerPressureTracker {
     if (oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) {
       state = 'stalled';
     } else if (
-      (depthCeiling !== null && pressureQueued >= depthCeiling)
+      (depthPressure !== null && depthPressure.queued >= depthPressure.limit)
       || (
         runtime.lastRejectedAt !== null
         && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs
@@ -485,8 +501,8 @@ export class SchedulerPressureTracker {
     } else if (
       oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs
       || (
-        depthCeiling !== null
-        && pressureQueued / depthCeiling >= this.thresholds.degradedQueueUtilization
+        depthPressure !== null
+        && depthPressure.queued / depthPressure.limit >= this.thresholds.degradedQueueUtilization
       )
     ) {
       state = 'degraded';
