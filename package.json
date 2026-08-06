@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.12",
+  "version": "10.0.13",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
