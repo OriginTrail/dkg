@@ -352,6 +352,40 @@ describe('/api/prime-agent-channel/send', () => {
     expect(JSON.parse(res.body).code).toBe('PRIME_AGENT_SESSION_BUSY');
   });
 
+  it('preserves an allowlisted provider-auth code without forwarding raw provider details', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      sendStatus: 503,
+      sendBody: {
+        error: 'Unauthorized: provider key sk-must-not-leak',
+        code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+        details: { providerToken: 'must-not-leak' },
+      },
+    });
+    writeDescriptor('s1', bridge.url);
+
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-auth' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/send',
+    } as any);
+
+    expect(res.statusCode).toBe(502);
+    const body = JSON.parse(res.body);
+    expect(body).toMatchObject({
+      code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+      error: 'Prime Agent provider authentication failed. Check the configured provider credentials.',
+      source: 'prime-agent-channel',
+      correlationId: 'c-auth',
+      retryable: false,
+    });
+    expect(res.body).not.toContain('must-not-leak');
+    expect(res.body).not.toContain('sk-');
+  });
+
   it('propagates the bridge idle timeout with its partial text instead of a generic 502', async () => {
     const bridge = await startStubBridge({
       sessionId: 's1',
