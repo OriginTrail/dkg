@@ -92,8 +92,22 @@ jobs:
         # published `dist/` types, so the closure must exist before ANY
         # typecheck. Omitting this passes locally (where a dist is usually left
         # over from a previous build) and fails only in CI.
+        #
+        # The CLI closure is included, not just storage's: the harness imports
+        # `daemon/oxigraph-binary` and `daemon/oxigraph-server` by relative
+        # SOURCE path, because the CLI package exports neither subpath. tsc then
+        # follows the CLI's own imports, so every workspace package the CLI
+        # depends on must have real `dist/` types. Without them tsc reports a
+        # wall of TS2307 plus the implicit-any and unknown-catch errors that
+        # cascade from the degraded types — which is exactly what it did, while
+        # the same typecheck passed locally on leftover builds.
+        #
+        # Matches what `test:live:system-record-managed-ownership:generate`
+        # already builds, deliberately: a typecheck over a narrower closure than
+        # the run uses can only produce false results in one direction or the
+        # other.
         run: >-
-          pnpm -r --filter @origintrail-official/dkg-storage...
+          pnpm -r --filter @origintrail-official/dkg...
           --filter '!@origintrail-official/dkg-evm-module' run build
 
       - name: Typecheck the ownership gate harness
