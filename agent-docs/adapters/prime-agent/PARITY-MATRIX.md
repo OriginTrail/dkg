@@ -30,6 +30,7 @@ Refs: `OriginTrail/dkg@843f5213`, `PrimeIntellect-ai/prime-agent@0e0d2339`.
 | --- | --- | --- | --- | --- |
 | `daemon_url` (env `DKG_DAEMON_URL`) | same | read by extension + kernel skill | **v1** | Low |
 | `dkg_home` | same | token resolution root | **v1** | Low |
+| daemon `auth.token` | `bridge_token` | setup copies the selected node token into private adapter `dkg.json` (mode `0600`) | **v1** | High |
 | `bridge.gatewayUrl` | **dropped** | no gateway exists | **dropped** | Low |
 | `bridge.url` / `bridge.healthUrl` | same, populated from the discovery file | | **v1** | Med (per-session) |
 | `context_graph` (env `DKG_CONTEXT_GRAPH`) | same | | **v1** | Low |

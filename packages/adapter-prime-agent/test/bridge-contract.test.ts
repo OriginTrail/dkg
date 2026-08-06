@@ -15,13 +15,14 @@ const TOKEN = 'test-bridge-token-value';
 let workDir: string;
 let bridge: SessionBridge;
 let sent: string[];
+let sendOptions: Array<{ deliverAs?: 'steer' | 'followUp' } | undefined>;
 let base: string;
 
 /** Minimal stand-in for the host ExtensionAPI surface the bridge uses. */
-function stubPi(onSend: (text: string) => void) {
+function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'followUp' }) => void) {
   return {
     on: () => {},
-    sendUserMessage: (content: string) => onSend(content),
+    sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => onSend(content, options),
   };
 }
 
@@ -41,7 +42,8 @@ beforeEach(async () => {
   process.env.PRIME_AGENT_CODING_AGENT_DIR = workDir;
   process.env.DKG_BRIDGE_TOKEN = TOKEN;
   sent = [];
-  bridge = new SessionBridge(stubPi((t) => sent.push(t)) as never, 'sess-test');
+  sendOptions = [];
+  bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-test');
   await bridge.start();
   base = await bridgeBaseUrl(bridge);
 });
@@ -123,14 +125,15 @@ describe('/send', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(sent).toEqual(['hello agent']);
 
-    bridge.onMessageUpdate({ assistantMessageEvent: { delta: 'hi ' } });
-    bridge.onMessageUpdate({ assistantMessageEvent: { delta: 'there' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'hi ' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'there' } });
     bridge.onAgentEnd();
 
     const res = await p;
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toMatchObject({ text: 'hi there', correlationId: 'c-1', sessionId: 'sess-test' });
+    expect(sendOptions).toEqual([{ deliverAs: 'followUp' }]);
   });
 
   it('400s a malformed body and a missing correlationId', async () => {
@@ -160,6 +163,62 @@ describe('/send', () => {
     bridge.onAgentEnd();
     await first;
   });
+
+  it('rejects bridge input while a locally-started agent turn is active', async () => {
+    bridge.onAgentStart();
+    const res = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'remote', correlationId: 'c-local-busy' }),
+    });
+    expect(res.status).toBe(429);
+    expect(sent).toEqual([]);
+    bridge.onAgentEnd();
+  });
+
+  it('reports an idle timeout and stays busy until the real agent_end', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-timeout', {
+      turnIdleTimeoutMs: 40,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const first = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'long turn', correlationId: 'c-timeout' }),
+    });
+    expect(first.status).toBe(504);
+    expect(await first.json()).toMatchObject({ timedOut: true, correlationId: 'c-timeout' });
+
+    const whileStillRunning = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'must wait', correlationId: 'c-too-soon' }),
+    });
+    expect(whileStillRunning.status).toBe(429);
+
+    // Late output from the timed-out turn is ignored, and only agent_end opens
+    // admission for the next bridge request.
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'late-old-output' } });
+    bridge.onAgentEnd();
+  });
+
+  it('only emits verified text_delta events, not thinking or cumulative snapshots', async () => {
+    const pending = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'filter events', correlationId: 'c-filter' }),
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'thinking_delta', delta: 'secret' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_end', text: 'cumulative' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'visible' } });
+    bridge.onAgentEnd();
+    const response = await pending;
+    expect(await response.json()).toMatchObject({ text: 'visible' });
+  });
 });
 
 describe('/stream', () => {
@@ -173,8 +232,8 @@ describe('/stream', () => {
     expect(res.headers.get('content-type')).toContain('text/event-stream');
 
     await new Promise((r) => setTimeout(r, 30));
-    bridge.onMessageUpdate({ assistantMessageEvent: { delta: 'alpha' } });
-    bridge.onMessageUpdate({ assistantMessageEvent: { delta: 'beta' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'alpha' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'beta' } });
     bridge.onAgentEnd();
 
     const text = await res.text();

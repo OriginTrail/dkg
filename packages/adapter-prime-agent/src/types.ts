@@ -118,6 +118,10 @@ export interface PrimeAgentSetupRequest {
   profile?: string;
   agentDir?: string;
   daemonUrl?: string;
+  /** Explicit DKG home used to source the daemon auth token. */
+  dkgHome?: string;
+  /** Injectable bridge token; normally sourced from the DKG auth token. */
+  bridgeToken?: string;
   port?: number;
   memoryMode?: PrimeAgentMemoryMode;
   contextGraph?: string;
@@ -141,6 +145,8 @@ export interface PrimeAgentRestoreResult {
   /** `surgical` removes our entry; `backup-file` renames the .bak over it. */
   path: 'surgical' | 'backup-file' | 'noop' | 'failed';
   restoredFrom?: string;
+  /** User-owned settings preserved before a backup-file recovery. */
+  rejectedPath?: string;
   restoreError?: string;
 }
 
@@ -212,7 +218,7 @@ export interface PrimeAgentChannelSendResponse {
 
 export type PrimeAgentChannelStreamEvent =
   | { type: 'delta'; text: string; correlationId: string }
-  | { type: 'final'; text: string; correlationId: string; sessionId?: string; turnId?: string }
+  | { type: 'final'; text: string; correlationId: string; sessionId?: string; turnId?: string; timedOut?: boolean }
   | { type: 'error'; error: string; correlationId?: string };
 
 export interface PrimeAgentChannelHealthResponse {

@@ -13,22 +13,20 @@
  * that directory instead of reading config.
  */
 
-import { readdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  isLoopbackBridgeUrl,
+  readLiveSessions,
+  type PrimeAgentSessionDescriptor as AdapterPrimeAgentSessionDescriptor,
+} from '@origintrail-official/dkg-adapter-prime-agent';
 
 export const PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
 export const PRIME_AGENT_HEALTH_TIMEOUT_MS = 5_000;
 export const PRIME_AGENT_PRE_SEND_TIMEOUT_MS = 3_000;
 export const PRIME_AGENT_TRANSPORT_KIND = 'prime-agent-channel';
 
-export interface PrimeAgentSessionDescriptor {
-  sessionId: string;
-  bridgeUrl: string;
-  pid: number;
-  startedAt: string;
-  sessionName?: string;
-}
+export type PrimeAgentSessionDescriptor = AdapterPrimeAgentSessionDescriptor;
 
 export interface PrimeAgentChannelTarget {
   sessionId: string;
@@ -51,16 +49,7 @@ export interface PrimeAgentChannelHealthReport {
  * to an off-box address by a malicious or corrupted descriptor.
  */
 export function isPrimeAgentLoopbackUrl(value: string | undefined): boolean {
-  if (!value) return false;
-  try {
-    const { hostname, protocol } = new URL(value);
-    if (protocol !== 'http:' && protocol !== 'https:') return false;
-    return (
-      hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || hostname.startsWith('127.')
-    );
-  } catch {
-    return false;
-  }
+  return isLoopbackBridgeUrl(value);
 }
 
 export function primeAgentSessionsDir(agentDir?: string): string {
@@ -68,59 +57,12 @@ export function primeAgentSessionsDir(agentDir?: string): string {
   return join(base, '.dkg-adapter-prime-agent', 'sessions');
 }
 
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException)?.code === 'EPERM';
-  }
-}
-
 /**
- * Live sessions, newest first. Stale descriptors (dead pid, malformed, or
- * non-loopback) are pruned so a crashed worker cannot leave the directory
- * growing or, worse, point the daemon at a recycled port.
+ * Live sessions, newest first. The adapter owns descriptor validation and
+ * liveness so setup/verify and daemon routing cannot drift apart.
  */
 export function readPrimeAgentSessions(sessionsDir?: string): PrimeAgentSessionDescriptor[] {
-  const dir = sessionsDir ?? primeAgentSessionsDir();
-  if (!existsSync(dir)) return [];
-  let files: string[];
-  try {
-    files = readdirSync(dir).filter((f) => f.endsWith('.json'));
-  } catch {
-    return [];
-  }
-  const live: PrimeAgentSessionDescriptor[] = [];
-  for (const file of files) {
-    const full = join(dir, file);
-    let d: PrimeAgentSessionDescriptor | undefined;
-    try {
-      const parsed = JSON.parse(readFileSync(full, 'utf8')) as PrimeAgentSessionDescriptor;
-      if (
-        typeof parsed?.sessionId === 'string' &&
-        typeof parsed?.bridgeUrl === 'string' &&
-        typeof parsed?.pid === 'number' &&
-        isPrimeAgentLoopbackUrl(parsed.bridgeUrl)
-      ) {
-        d = parsed;
-      }
-    } catch {
-      d = undefined;
-    }
-    if (!d || !isProcessAlive(d.pid)) {
-      try {
-        rmSync(full, { force: true });
-      } catch {
-        /* best effort */
-      }
-      continue;
-    }
-    live.push(d);
-  }
-  live.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)));
-  return live;
+  return readLiveSessions(sessionsDir ?? primeAgentSessionsDir());
 }
 
 export function targetFromDescriptor(d: PrimeAgentSessionDescriptor): PrimeAgentChannelTarget {

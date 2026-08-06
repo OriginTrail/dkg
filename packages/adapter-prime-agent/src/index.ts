@@ -7,6 +7,7 @@
 
 export { PrimeAgentAdapterPlugin } from './PrimeAgentAdapterPlugin.js';
 export { registerPrimeAgentRoutes } from './prime-agent-routes.js';
+export { PRIME_AGENT_ADAPTER_VERSION } from './version.js';
 
 export {
   ADAPTER_CONFIG_FILENAME,
@@ -21,6 +22,7 @@ export {
   disconnect,
   disconnectPrimeAgentProfile,
   doctor,
+  loadDkgAuthToken,
   planPrimeAgentSetup,
   readSettings,
   readSetupState,

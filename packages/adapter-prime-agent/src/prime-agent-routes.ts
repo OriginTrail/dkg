@@ -6,6 +6,7 @@
  */
 
 import type { DaemonPluginApi } from './types.js';
+import { PRIME_AGENT_ADAPTER_VERSION } from './version.js';
 
 export function registerPrimeAgentRoutes(api: DaemonPluginApi): void {
   api.registerHttpRoute({
@@ -17,7 +18,7 @@ export function registerPrimeAgentRoutes(api: DaemonPluginApi): void {
         adapter: 'prime-agent',
         framework: 'prime-intellect-prime-agent',
         status: 'connected',
-        version: '10.0.12',
+        version: PRIME_AGENT_ADAPTER_VERSION,
       });
       response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       response.end(body);

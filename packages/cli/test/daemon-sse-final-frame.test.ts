@@ -89,6 +89,23 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     expect(state.cancelled).toBe(1);
   });
 
+  it('drops frames coalesced after final while forwarding the final frame itself', async () => {
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const { reader } = makeReader([
+      'data: {"type":"delta","text":"before"}\n\n'
+        + 'data: {"type":"final","text":"done"}\n\n'
+        + 'data: {"type":"delta","text":"after"}\n\n',
+    ]);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    const forwarded = res.chunks.join('');
+    expect(forwarded).toContain('"text":"before"');
+    expect(forwarded).toContain('"type":"final"');
+    expect(forwarded).not.toContain('"text":"after"');
+  });
+
   it('keeps streaming while only deltas have arrived', async () => {
     const req = new EventEmitter() as any;
     const res = makeRes();

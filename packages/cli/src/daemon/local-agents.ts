@@ -142,10 +142,6 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
       localChat: true,
       connectFromUi: true,
       installNode: true,
-      // Memory election is advisory here: Prime Agent has no provider slot, so
-      // the adapter registers a hook set rather than claiming exclusivity.
-      dkgPrimaryMemory: true,
-      nodeServedSkill: true,
     },
     manifest: {
       packageName: '@origintrail-official/dkg-adapter-prime-agent',

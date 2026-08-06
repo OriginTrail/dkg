@@ -72,6 +72,7 @@ Two details that are not incidental:
 | `~/.prime/agent/settings.json` | **Prime Agent** | we add exactly one entry to `extensions` |
 | `~/.prime/agent/settings.json.bak.<unix-ms>` | adapter | verbatim pre-change backup |
 | `~/.prime/agent/.dkg-adapter-prime-agent/setup-state.json` | adapter | state + `priorSettings` snapshot |
+| `~/.prime/agent/.dkg-adapter-prime-agent/dkg.json` | adapter | daemon URL, policy, and bridge token; mode `0600` |
 | `~/.prime/agent/.dkg-adapter-prime-agent/sessions/` | adapter | per-session bridge discovery |
 
 ### Reversibility
@@ -101,15 +102,21 @@ publish path must be opened by an operator, never inferred.
 The bridge verifies `x-dkg-bridge-token` with a **timing-safe** comparison, and
 returns `503` (not `401`) when no token has been provisioned at all — an
 unauthenticated bridge would let anything on loopback drive the agent.
+Setup sources that token from `DKG_API_TOKEN`, `DKG_AUTH_TOKEN`, or the selected
+DKG home's `auth.token`, then writes the private adapter config consumed by the
+extension.
 
 ## Known limits (Stage 1)
 
-- Memory election hooks (`before_agent_start`, `turn_end`) are **not yet wired**;
-  the capability flag is advertised but the hook set lands in Stage 4.
+- Memory election hooks (`before_agent_start`, `turn_end`) are **not yet wired**
+  and the integration does not advertise primary-memory capability yet.
 - No Python kernel skill yet (Stage 3), so there is no model-facing `dkg` API.
 - The Node UI panel is live (Stage 5) but has **no session picker**: the node
   routes to the newest live session unless a `sessionId` is supplied.
 - One turn at a time per session: a concurrent `/send` gets `429`.
+- A UI message is sent as `deliverAs: "followUp"`. If a local Prime Agent turn
+  is already observed, the bridge returns `429`; the follow-up choice covers the
+  remaining race without interrupting local work.
 
 ## Tests
 

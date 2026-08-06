@@ -38,6 +38,7 @@ describe('loopback validation', () => {
     expect(isLoopbackBridgeUrl('http://[::1]:1234')).toBe(true);
     expect(isLoopbackBridgeUrl('http://10.0.0.5:1234')).toBe(false);
     expect(isLoopbackBridgeUrl('http://evil.example.com')).toBe(false);
+    expect(isLoopbackBridgeUrl('http://127.evil.example.com:1234')).toBe(false);
     expect(isLoopbackBridgeUrl('ftp://127.0.0.1')).toBe(false);
     expect(isLoopbackBridgeUrl(undefined)).toBe(false);
   });
@@ -76,10 +77,16 @@ describe('descriptor lifecycle', () => {
     expect(readdirSync(sessionsDir)).toHaveLength(0);
   });
 
-  it('prunes a malformed descriptor rather than throwing', () => {
+  it('skips a malformed descriptor without deleting another process\'s in-flight file', () => {
     writeFileSync(join(sessionsDir, 'broken.json'), '{not json');
     expect(readLiveSessions(sessionsDir)).toHaveLength(0);
-    expect(existsSync(join(sessionsDir, 'broken.json'))).toBe(false);
+    expect(existsSync(join(sessionsDir, 'broken.json'))).toBe(true);
+  });
+
+  it('publishes descriptors atomically without leaving temporary files', () => {
+    writeSessionDescriptor(sessionsDir, descriptor());
+    expect(readdirSync(sessionsDir)).toEqual(['sess-alpha.json']);
+    expect(readLiveSessions(sessionsDir)).toHaveLength(1);
   });
 
   it('rejects a descriptor advertising a non-loopback bridge', () => {

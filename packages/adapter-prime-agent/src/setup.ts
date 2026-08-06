@@ -20,10 +20,19 @@
  * silently revert unrelated user edits.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { dkgAuthTokenPath, resolveDkgHome } from '@origintrail-official/dkg-core';
 import {
   readLiveSessions,
   isLoopbackBridgeUrl,
@@ -40,6 +49,7 @@ import type {
   PrimeAgentSetupState,
   PrimeAgentVerifyResult,
 } from './types.js';
+import { PRIME_AGENT_ADAPTER_VERSION } from './version.js';
 
 export const MANAGED_BY = '@origintrail-official/dkg-adapter-prime-agent';
 export const ADAPTER_STATE_DIRNAME = '.dkg-adapter-prime-agent';
@@ -63,6 +73,8 @@ export interface PrimeAgentSetupOptions {
   agentDir?: string;
   memoryMode?: 'hooks' | 'tools-only';
   daemonUrl?: string;
+  dkgHome?: string;
+  bridgeToken?: string;
   contextGraph?: string;
   memoryAssertion?: string;
   preserveSettings?: boolean;
@@ -109,6 +121,49 @@ interface PrimeSettings {
   [k: string]: unknown;
 }
 
+interface PrimeAgentAdapterFile {
+  managedBy: string;
+  daemon_url: string;
+  dkg_home: string;
+  bridge_token: string;
+  context_graph: string;
+  memory_assertion: string;
+  memory_mode: 'hooks' | 'tools-only';
+  publish_guard: PrimeAgentPublishGuardPolicy;
+}
+
+function isManagedExtensionPath(value: string): boolean {
+  return value.includes('dkg-adapter-prime-agent');
+}
+
+function trimmed(value: string | undefined): string | undefined {
+  const result = value?.trim();
+  return result ? result : undefined;
+}
+
+/** Resolve the same daemon credential used by the daemon-side channel route. */
+export function loadDkgAuthToken(dkgHome?: string): string | undefined {
+  const fromEnv = trimmed(process.env.DKG_API_TOKEN) ?? trimmed(process.env.DKG_AUTH_TOKEN);
+  if (fromEnv) return fromEnv;
+  const resolvedHome = resolve(dkgHome ?? resolveDkgHome());
+  try {
+    for (const line of readFileSync(dkgAuthTokenPath(resolvedHome), 'utf8').split('\n')) {
+      const token = trimmed(line);
+      if (token && !token.startsWith('#')) return token;
+    }
+  } catch {
+    // The caller turns absence into an actionable setup error.
+  }
+  return undefined;
+}
+
+function writeAdapterConfig(path: string, config: PrimeAgentAdapterFile): void {
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  // writeFileSync preserves an existing file's mode, so enforce private mode
+  // after every idempotent setup run as well as on first creation.
+  chmodSync(path, 0o600);
+}
+
 export function readSettings(settingsPath: string): PrimeSettings {
   if (!existsSync(settingsPath)) return {};
   try {
@@ -147,12 +202,14 @@ function buildState(
   prior?: PrimeAgentSetupState,
 ): PrimeAgentSetupState {
   const now = new Date().toISOString();
+  const daemonUrl = options.daemonUrl ?? prior?.daemonUrl ?? DEFAULT_DAEMON_URL;
   return {
     managedBy: MANAGED_BY,
-    version: '10.0.12',
+    version: PRIME_AGENT_ADAPTER_VERSION,
     status: 'configured',
     profile,
-    daemonUrl: options.daemonUrl ?? prior?.daemonUrl ?? DEFAULT_DAEMON_URL,
+    daemonUrl,
+    dkgHome: resolve(options.dkgHome ?? prior?.dkgHome ?? resolveDkgHome({ daemonUrl })),
     contextGraph: options.contextGraph ?? prior?.contextGraph ?? DEFAULT_CONTEXT_GRAPH,
     memoryAssertion: options.memoryAssertion ?? prior?.memoryAssertion ?? DEFAULT_MEMORY_ASSERTION,
     extensionPath,
@@ -176,7 +233,8 @@ export function planPrimeAgentSetup(options: PrimeAgentSetupOptions = {}): Prime
 
   const settings = readSettings(profile.settingsPath);
   const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
-  const already = extensions.includes(extensionPath);
+  const managedExtensions = extensions.filter(isManagedExtensionPath);
+  const already = managedExtensions.length === 1 && managedExtensions[0] === extensionPath;
 
   if (!existsSync(profile.agentDir)) {
     warnings.push(
@@ -188,6 +246,11 @@ export function planPrimeAgentSetup(options: PrimeAgentSetupOptions = {}): Prime
     type: existsSync(profile.stateDir) ? 'update' : 'create',
     path: join(profile.stateDir, SETUP_STATE_FILENAME),
     reason: 'adapter setup state (records priorSettings before any destructive write)',
+  });
+  actions.push({
+    type: existsSync(join(profile.stateDir, ADAPTER_CONFIG_FILENAME)) ? 'update' : 'create',
+    path: join(profile.stateDir, ADAPTER_CONFIG_FILENAME),
+    reason: 'private bridge configuration and daemon auth token',
   });
   actions.push({
     type: existsSync(profile.sessionsDir) ? 'skip' : 'create',
@@ -202,7 +265,7 @@ export function planPrimeAgentSetup(options: PrimeAgentSetupOptions = {}): Prime
       reason: 'extension already registered in settings.json',
     });
   } else if (options.preserveSettings) {
-    const conflicting = extensions.filter((p) => p.includes('dkg-adapter-prime-agent'));
+    const conflicting = managedExtensions;
     if (conflicting.length) {
       warnings.push(
         `--preserve-settings: refusing to modify settings.json; a conflicting DKG entry exists: ${conflicting.join(', ')}`,
@@ -240,18 +303,41 @@ export function setupPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): Pr
 
   const { profile } = plan;
   const extensionPath = plan.state.extensionPath;
+  if (!existsSync(extensionPath)) {
+    throw new Error(`Prime Agent extension bundle missing at ${extensionPath}; rebuild or reinstall the adapter`);
+  }
+  const bridgeToken = trimmed(options.bridgeToken) ?? loadDkgAuthToken(plan.state.dkgHome);
+  if (!bridgeToken) {
+    throw new Error(
+      `DKG auth token not found at ${dkgAuthTokenPath(plan.state.dkgHome!)}; initialize/start the DKG node or set DKG_AUTH_TOKEN`,
+    );
+  }
   mkdirSync(profile.stateDir, { recursive: true });
   mkdirSync(profile.sessionsDir, { recursive: true });
 
   const settings = readSettings(profile.settingsPath);
   const extensions = Array.isArray(settings.extensions) ? [...settings.extensions] : [];
-  const already = extensions.includes(extensionPath);
+  const managedExtensions = extensions.filter(isManagedExtensionPath);
+  const already = managedExtensions.length === 1 && managedExtensions[0] === extensionPath;
   const preserveBlocked =
-    options.preserveSettings && extensions.some((p) => p.includes('dkg-adapter-prime-agent')) && !already;
+    options.preserveSettings && managedExtensions.length > 0 && !already;
 
   const managedFiles = new Set(plan.state.managedFiles);
   managedFiles.add(join(profile.stateDir, SETUP_STATE_FILENAME));
   managedFiles.add(profile.sessionsDir);
+  const configPath = join(profile.stateDir, ADAPTER_CONFIG_FILENAME);
+  managedFiles.add(configPath);
+
+  writeAdapterConfig(configPath, {
+    managedBy: MANAGED_BY,
+    daemon_url: plan.state.daemonUrl,
+    dkg_home: plan.state.dkgHome!,
+    bridge_token: bridgeToken,
+    context_graph: plan.state.contextGraph,
+    memory_assertion: plan.state.memoryAssertion,
+    memory_mode: plan.state.profile.memoryMode,
+    publish_guard: plan.state.publishGuard,
+  });
 
   let state: PrimeAgentSetupState = { ...plan.state, managedFiles: [...managedFiles] };
 
@@ -273,13 +359,16 @@ export function setupPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): Pr
     writeSetupState(profile, state);
 
     // STEP 2 — verbatim backup of the original bytes.
-    if (existsSync(profile.settingsPath)) {
+    if (existsSync(profile.settingsPath) && !existsSync(state.priorSettings!.settingsBackupPath)) {
       writeFileSync(state.priorSettings!.settingsBackupPath, readFileSync(profile.settingsPath));
       managedFiles.add(state.priorSettings!.settingsBackupPath);
     }
 
     // STEP 3 — the destructive write.
-    const next: PrimeSettings = { ...settings, extensions: [...extensions, extensionPath] };
+    const next: PrimeSettings = {
+      ...settings,
+      extensions: [...extensions.filter((entry) => !isManagedExtensionPath(entry)), extensionPath],
+    };
     writeFileSync(profile.settingsPath, `${JSON.stringify(next, null, 2)}\n`);
     managedFiles.add(profile.settingsPath);
   }
@@ -298,15 +387,14 @@ export function restorePrimeAgentProfile(req: PrimeAgentRestoreRequest = {}): Pr
   const state = readSetupState(profile);
   if (!state) return { ok: true, path: 'noop' };
 
-  const target = state.extensionPath;
   try {
     const settings = readSettings(profile.settingsPath);
     const extensions = Array.isArray(settings.extensions) ? settings.extensions : [];
-    if (extensions.includes(target)) {
-      const next: PrimeSettings = { ...settings, extensions: extensions.filter((p) => p !== target) };
+    if (extensions.some(isManagedExtensionPath)) {
+      const next: PrimeSettings = { ...settings, extensions: extensions.filter((p) => !isManagedExtensionPath(p)) };
       writeFileSync(profile.settingsPath, `${JSON.stringify(next, null, 2)}\n`);
       const post = readSettings(profile.settingsPath);
-      const stillThere = Array.isArray(post.extensions) && post.extensions.includes(target);
+      const stillThere = Array.isArray(post.extensions) && post.extensions.some(isManagedExtensionPath);
       if (stillThere) return { ok: false, path: 'failed', restoreError: 'entry still present after rewrite' };
       return { ok: true, path: 'surgical' };
     }
@@ -315,13 +403,18 @@ export function restorePrimeAgentProfile(req: PrimeAgentRestoreRequest = {}): Pr
     const backup = state.priorSettings?.settingsBackupPath;
     if (backup && existsSync(backup)) {
       try {
-        renameSync(backup, profile.settingsPath);
-        const post = readSettings(profile.settingsPath);
-        const stillThere = Array.isArray(post.extensions) && post.extensions.includes(target);
-        if (stillThere) {
-          return { ok: false, path: 'failed', restoredFrom: backup, restoreError: 'entry present in backup' };
+        let rejectedPath: string | undefined;
+        if (existsSync(profile.settingsPath)) {
+          rejectedPath = `${profile.settingsPath}.rejected.${Date.now()}`;
+          renameSync(profile.settingsPath, rejectedPath);
         }
-        return { ok: true, path: 'backup-file', restoredFrom: backup };
+        copyFileSync(backup, profile.settingsPath);
+        const post = readSettings(profile.settingsPath);
+        const stillThere = Array.isArray(post.extensions) && post.extensions.some(isManagedExtensionPath);
+        if (stillThere) {
+          return { ok: false, path: 'failed', restoredFrom: backup, ...(rejectedPath ? { rejectedPath } : {}), restoreError: 'entry present in backup' };
+        }
+        return { ok: true, path: 'backup-file', restoredFrom: backup, ...(rejectedPath ? { rejectedPath } : {}) };
       } catch (renameErr) {
         return { ok: false, path: 'failed', restoreError: String(renameErr) };
       }
@@ -367,6 +460,8 @@ export function verifyPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): P
     if (!extensions.includes(state.extensionPath)) {
       errors.push('extension path is not registered in settings.json');
     }
+    const staleManaged = extensions.filter((entry) => isManagedExtensionPath(entry) && entry !== state.extensionPath);
+    if (staleManaged.length) errors.push(`stale Prime Agent adapter extension path(s): ${staleManaged.join(', ')}`);
     // Election here is advisory, not enforced by the host: another extension can
     // register the same hooks. Say so rather than implying exclusivity.
     const others = extensions.filter((p) => p !== state.extensionPath);
@@ -377,6 +472,15 @@ export function verifyPrimeAgentProfile(options: PrimeAgentSetupOptions = {}): P
     }
   } catch (err) {
     errors.push(String(err));
+  }
+
+  const configPath = join(profile.stateDir, ADAPTER_CONFIG_FILENAME);
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<PrimeAgentAdapterFile>;
+    if (config.managedBy !== MANAGED_BY) errors.push(`adapter config is not owned by ${MANAGED_BY}`);
+    if (!trimmed(config.bridge_token)) errors.push('adapter bridge token is missing');
+  } catch (err) {
+    errors.push(`adapter config unavailable at ${configPath}: ${String(err)}`);
   }
 
   const sessions = readLiveSessions(profile.sessionsDir);
@@ -412,6 +516,8 @@ export async function runPrimeAgentSetup(
     ...(req.agentDir !== undefined ? { agentDir: req.agentDir } : {}),
     ...(req.memoryMode !== undefined ? { memoryMode: req.memoryMode } : {}),
     ...(req.daemonUrl !== undefined ? { daemonUrl: req.daemonUrl } : {}),
+    ...(req.dkgHome !== undefined ? { dkgHome: req.dkgHome } : {}),
+    ...(req.bridgeToken !== undefined ? { bridgeToken: req.bridgeToken } : {}),
     ...(req.contextGraph !== undefined ? { contextGraph: req.contextGraph } : {}),
     ...(req.memoryAssertion !== undefined ? { memoryAssertion: req.memoryAssertion } : {}),
     ...(req.preserveSettings !== undefined ? { preserveSettings: req.preserveSettings } : {}),
@@ -518,9 +624,14 @@ export async function runReconnect(options: PrimeAgentSetupOptions = {}): Promis
 }
 
 export async function runUninstall(options: PrimeAgentSetupOptions = {}): Promise<void> {
+  if (options.dryRun) {
+    console.log('[prime-agent] dry-run: would remove adapter extension wiring and restore settings');
+    return;
+  }
   const restore = restorePrimeAgentProfile({ agentDir: options.agentDir, profile: options.profileName });
   if (!restore.ok) console.warn(`[prime-agent] restore reported: ${restore.restoreError}`);
-  console.log('[prime-agent] uninstalled (backup retained)');
+  if (restore.rejectedPath) console.warn(`[prime-agent] preserved replaced settings at ${restore.rejectedPath}`);
+  console.log(`[prime-agent] uninstalled${restore.restoredFrom ? ` (backup retained at ${restore.restoredFrom})` : ''}`);
 }
 
 export const setup = runSetup;

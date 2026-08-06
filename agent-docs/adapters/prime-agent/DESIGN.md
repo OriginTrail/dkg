@@ -86,10 +86,13 @@ Summary of why it wins:
   `pi.sendMessage({...}, { triggerTurn: true })` (`:18-34`). Swapping `fs.watch`
   for `http.createServer` is strictly less exotic than what already ships in
   `examples/`.
-- **Inbound**: `pi.sendUserMessage(content, { deliverAs })`
+- **Inbound**: `pi.sendUserMessage(content, { deliverAs: "followUp" })`
   (`src/core/extensions/types.ts:1135-1138`) — *"sends an actual user message
   that appears as if typed by the user. Always triggers a turn"*
   (`docs/extensions.md:1292-1314`).
+  The bridge rejects new requests while an agent turn is observed active. The
+  explicit follow-up mode handles the remaining admission race without steering
+  or interrupting a locally-started turn.
 - **Outbound**: `pi.on("message_update", ...)` carries
   `assistantMessageEvent`, the token-by-token stream event
   (`types.ts:683`; `docs/extensions.md:541-544`), plus `agent_start`/`agent_end`

@@ -656,29 +656,44 @@ export async function pipeOpenClawStream(
   // browser's spinner — open long after the answer was delivered. So we end the
   // turn on the frame, not on the socket.
   const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
   let frameBuffer = "";
   let scanning = true;
 
-  const sawTerminalFrame = (chunk: Uint8Array): boolean => {
-    if (!scanning) return false;
-    frameBuffer += decoder.decode(chunk, { stream: true });
-    let done = false;
+  const inspectChunk = (chunk: Uint8Array): { terminal: boolean; value: Uint8Array } => {
+    if (!scanning) return { terminal: false, value: chunk };
+    const bufferedBeforeChunk = frameBuffer.length;
+    const decodedChunk = decoder.decode(chunk, { stream: true });
+    frameBuffer += decodedChunk;
     // Frames are separated by a blank line; tolerate CRLF from proxies.
     const separator = /\r?\n\r?\n/;
-    let match = separator.exec(frameBuffer);
+    let consumed = 0;
+    let match = separator.exec(frameBuffer.slice(consumed));
     while (match) {
-      const frame = frameBuffer.slice(0, match.index);
-      frameBuffer = frameBuffer.slice(match.index + match[0].length);
-      if (isTerminalSseFrame(frame)) done = true;
-      match = separator.exec(frameBuffer);
+      const separatorStart = consumed + match.index;
+      const frame = frameBuffer.slice(consumed, separatorStart);
+      const frameEnd = separatorStart + match[0].length;
+      if (isTerminalSseFrame(frame)) {
+        // The transport may coalesce several SSE events into one byte chunk.
+        // Forward through the final frame only; anything after it is outside
+        // the declared stream contract and must be intentionally dropped.
+        const charsFromCurrentChunk = Math.max(0, frameEnd - bufferedBeforeChunk);
+        return {
+          terminal: true,
+          value: encoder.encode(decodedChunk.slice(0, charsFromCurrentChunk)),
+        };
+      }
+      consumed = frameEnd;
+      match = separator.exec(frameBuffer.slice(consumed));
     }
+    frameBuffer = frameBuffer.slice(consumed);
     if (frameBuffer.length > SSE_FRAME_SCAN_LIMIT) {
       // A single event larger than the cap: give up on detection rather than
       // buffer without bound. The stream still completes on upstream EOF.
       scanning = false;
       frameBuffer = "";
     }
-    return done;
+    return { terminal: false, value: chunk };
   };
 
   try {
@@ -686,9 +701,10 @@ export async function pipeOpenClawStream(
       const { done, value } = await reader.read();
       if (done || clientGone) break;
       if (value !== undefined) {
-        await writeOpenClawStreamChunk(res, value);
+        const inspected = inspectChunk(value);
+        await writeOpenClawStreamChunk(res, inspected.value);
         if (clientGone) break;
-        if (sawTerminalFrame(value)) {
+        if (inspected.terminal) {
           if (!res.writableEnded) res.end();
           cancelUpstream();
           break;
@@ -1650,4 +1666,3 @@ export function buildOpenClawAttachmentImportContextEntries(
     };
   });
 }
-

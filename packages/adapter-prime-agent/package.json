@@ -21,11 +21,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p extension/tsconfig.json",
     "test": "vitest run",
     "test:ts": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','extension/dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*"

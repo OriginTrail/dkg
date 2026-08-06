@@ -31,8 +31,8 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -106,8 +106,14 @@ interface PendingTurn {
   chunks: string[];
   subscribers: Set<ServerResponse>;
   settled: boolean;
-  resolve: (text: string) => void;
+  resolve: (outcome: TurnOutcome) => void;
   timer: NodeJS.Timeout;
+}
+
+interface TurnOutcome {
+  text: string;
+  timedOut?: true;
+  error?: string;
 }
 
 class SessionBridge {
@@ -116,11 +122,18 @@ class SessionBridge {
   #server: Server | undefined;
   #descriptorPath: string | undefined;
   #turn: PendingTurn | undefined;
+  #agentActive = false;
   #closed = false;
+  readonly #turnIdleTimeoutMs: number;
 
-  constructor(pi: ExtensionApiLike, sessionId: string) {
+  constructor(
+    pi: ExtensionApiLike,
+    sessionId: string,
+    options: { turnIdleTimeoutMs?: number } = {},
+  ) {
     this.#pi = pi;
     this.#sessionId = sessionId;
+    this.#turnIdleTimeoutMs = options.turnIdleTimeoutMs ?? TURN_IDLE_TIMEOUT_MS;
   }
 
   get sessionId(): string {
@@ -169,7 +182,16 @@ class SessionBridge {
       pid: process.pid,
       startedAt: new Date().toISOString(),
     };
-    writeFileSync(path, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600 });
+    const temporaryPath = join(dir, `.${this.#sessionId}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      writeFileSync(temporaryPath, `${JSON.stringify(descriptor, null, 2)}\n`, {
+        mode: 0o600,
+        flag: 'wx',
+      });
+      renameSync(temporaryPath, path);
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
     this.#descriptorPath = path;
   }
 
@@ -187,7 +209,10 @@ class SessionBridge {
     if (this.#closed) return;
     this.#closed = true;
     this.#cleanupDescriptor();
-    if (this.#turn) this.#settleTurn('');
+    if (this.#turn) {
+      this.#resolveTurn({ text: this.#turn.chunks.join(''), error: 'Bridge stopped' });
+      this.#turn = undefined;
+    }
     const server = this.#server;
     this.#server = undefined;
     if (!server) return;
@@ -246,22 +271,24 @@ class SessionBridge {
       this.#json(res, 400, { error: 'Missing "text" or "correlationId"' });
       return;
     }
-    if (this.#turn && !this.#turn.settled) {
+    if (this.#turn || this.#agentActive) {
       // One turn at a time per session — the agent itself is single-turn, and
       // interleaving two callers' deltas would corrupt both transcripts.
       this.#json(res, 429, { error: 'Session is busy with another turn', retryAfter: 5 });
       return;
     }
 
-    const done = new Promise<string>((resolve) => {
-      this.#turn = {
+    const done = new Promise<TurnOutcome>((resolve) => {
+      const turn: PendingTurn = {
         correlationId,
         chunks: [],
         subscribers: new Set(),
         settled: false,
         resolve,
-        timer: setTimeout(() => this.#settleTurn(this.#turn?.chunks.join('') ?? ''), TURN_IDLE_TIMEOUT_MS),
+        timer: undefined as unknown as NodeJS.Timeout,
       };
+      this.#turn = turn;
+      this.#armIdleTimer(turn);
     });
 
     if (stream) {
@@ -275,21 +302,49 @@ class SessionBridge {
       // the first delta — which for a slow first token looks like a hang, and
       // for a turn that produces no tokens at all never resolves.
       res.write(': open\n\n');
-      this.#turn!.subscribers.add(res);
-      req.on('close', () => this.#turn?.subscribers.delete(res));
+      const turn = this.#turn!;
+      turn.subscribers.add(res);
+      req.on('close', () => turn.subscribers.delete(res));
     }
 
     // Inject as a real user message so the turn is indistinguishable from one
     // the operator typed locally — which is the point of collocation.
-    this.#pi.sendUserMessage(text);
+    // Requests observed while the session is active are rejected above. Use a
+    // follow-up for the remaining race window so a locally-started turn is
+    // never interrupted by a remote UI message.
+    this.#pi.sendUserMessage(text, { deliverAs: 'followUp' });
 
-    const finalText = await done;
+    const outcome = await done;
+
+    if (outcome.error || outcome.timedOut) {
+      const error = outcome.error ?? `Prime Agent turn idle for ${this.#turnIdleTimeoutMs}ms`;
+      if (stream) {
+        writeSse(res, { type: 'error', error, correlationId });
+        writeSse(res, {
+          type: 'final',
+          text: outcome.text,
+          correlationId,
+          sessionId: this.#sessionId,
+          timedOut: outcome.timedOut === true,
+        });
+        res.end();
+      } else {
+        this.#json(res, outcome.timedOut ? 504 : 503, {
+          error,
+          text: outcome.text,
+          correlationId,
+          sessionId: this.#sessionId,
+          timedOut: outcome.timedOut === true,
+        });
+      }
+      return;
+    }
 
     if (stream) {
-      writeSse(res, { type: 'final', text: finalText, correlationId, sessionId: this.#sessionId });
+      writeSse(res, { type: 'final', text: outcome.text, correlationId, sessionId: this.#sessionId });
       res.end();
     } else {
-      this.#json(res, 200, { text: finalText, correlationId, sessionId: this.#sessionId });
+      this.#json(res, 200, { text: outcome.text, correlationId, sessionId: this.#sessionId });
     }
   }
 
@@ -298,7 +353,20 @@ class SessionBridge {
   onMessageUpdate(event: MessageUpdateEvent): void {
     const turn = this.#turn;
     if (!turn || turn.settled) return;
-    const delta = event.assistantMessageEvent?.delta ?? event.assistantMessageEvent?.text;
+    const assistantEvent = event.assistantMessageEvent;
+    const eventType = assistantEvent?.type;
+    // At the pinned Prime Agent API, only text_delta is user-visible answer
+    // text. Thinking/tool-call deltas still prove liveness, but must never leak
+    // into the response transcript.
+    if (
+      eventType === 'text_delta' ||
+      eventType === 'thinking_delta' ||
+      eventType === 'toolcall_delta'
+    ) {
+      this.#armIdleTimer(turn);
+    }
+    if (eventType !== 'text_delta') return;
+    const delta = assistantEvent?.delta;
     if (typeof delta !== 'string' || delta.length === 0) return;
     turn.chunks.push(delta);
     for (const res of turn.subscribers) {
@@ -306,18 +374,36 @@ class SessionBridge {
     }
   }
 
-  onAgentEnd(): void {
-    const turn = this.#turn;
-    if (!turn || turn.settled) return;
-    this.#settleTurn(turn.chunks.join(''));
+  onAgentStart(): void {
+    this.#agentActive = true;
   }
 
-  #settleTurn(text: string): void {
+  onAgentEnd(): void {
+    this.#agentActive = false;
+    const turn = this.#turn;
+    if (!turn) return;
+    if (!turn.settled) this.#resolveTurn({ text: turn.chunks.join('') });
+    clearTimeout(turn.timer);
+    this.#turn = undefined;
+  }
+
+  #armIdleTimer(turn: PendingTurn): void {
+    clearTimeout(turn.timer);
+    turn.timer = setTimeout(() => {
+      if (this.#turn !== turn || turn.settled) return;
+      // Resolve the HTTP request visibly as a timeout, but retain #turn until
+      // the real agent_end. This prevents late deltas from bleeding into a new
+      // request while the old Prime Agent turn is still running.
+      this.#resolveTurn({ text: turn.chunks.join(''), timedOut: true });
+    }, this.#turnIdleTimeoutMs);
+  }
+
+  #resolveTurn(outcome: TurnOutcome): void {
     const turn = this.#turn;
     if (!turn || turn.settled) return;
     turn.settled = true;
     clearTimeout(turn.timer);
-    turn.resolve(text);
+    turn.resolve(outcome);
   }
 
   #json(res: ServerResponse, status: number, body: unknown): void {
@@ -377,6 +463,10 @@ export default function dkgBridgeExtension(pi: ExtensionApiLike): void {
 
   pi.on('message_update', (event: MessageUpdateEvent) => {
     bridge?.onMessageUpdate(event);
+  });
+
+  pi.on('agent_start', () => {
+    bridge?.onAgentStart();
   });
 
   pi.on('agent_end', () => {

@@ -20,7 +20,8 @@ import { connectLocalAgentIntegrationFromUi } from '../src/daemon/local-agents.j
 
 // The setup entry pulls in the adapter's runtime; the daemon only ever calls it
 // on disconnect, and none of these tests exercise that path.
-vi.mock('@origintrail-official/dkg-adapter-prime-agent', () => ({
+vi.mock('@origintrail-official/dkg-adapter-prime-agent', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@origintrail-official/dkg-adapter-prime-agent')>()),
   restorePrimeAgentProfile: vi.fn(async () => ({ ok: true })),
 }));
 
@@ -163,6 +164,7 @@ describe('prime-agent session discovery', () => {
     expect(readPrimeAgentSessions()).toEqual([]);
     expect(isPrimeAgentLoopbackUrl('http://10.0.0.5:9999')).toBe(false);
     expect(isPrimeAgentLoopbackUrl('http://127.0.0.1:1234')).toBe(true);
+    expect(isPrimeAgentLoopbackUrl('http://127.evil.example.com:1234')).toBe(false);
   });
 
   it('prunes a descriptor whose process is gone', () => {
@@ -340,6 +342,7 @@ describe('/api/prime-agent-channel/stream', () => {
         'data: {"type":"delta","text":"Hel"}\n\n',
         'data: {"type":"delta","text":"lo!"}\n\n',
         'data: {"type":"final","text":"Hello!","correlationId":"c1"}\n\n',
+        'data: {"type":"delta","text":"must-be-dropped"}\n\n',
       ],
     });
     writeDescriptor('s1', bridge.url);
@@ -360,6 +363,7 @@ describe('/api/prime-agent-channel/stream', () => {
     expect(res.writableEnded).toBe(true);
     expect(res.body).toContain('"type":"final"');
     expect(res.body).toContain('Hello!');
+    expect(res.body).not.toContain('must-be-dropped');
   });
 });
 

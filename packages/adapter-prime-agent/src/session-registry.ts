@@ -14,7 +14,9 @@
  *     that points at the wrong process even when the pid happens to be alive.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
 import type { PrimeAgentSessionDescriptor } from './types.js';
 
@@ -39,9 +41,21 @@ export function writeSessionDescriptor(
 ): string {
   mkdirSync(sessionsDir, { recursive: true });
   const path = sessionDescriptorPath(sessionsDir, descriptor.sessionId);
-  // Write-then-rename would be nicer, but a torn read is handled by the reader
-  // (parse failures are skipped), and the payload is a single small object.
-  writeFileSync(path, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600 });
+  const temporaryPath = join(
+    sessionsDir,
+    `.${descriptor.sessionId}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    // Same-directory rename is atomic: readers see either the complete old
+    // descriptor or the complete new one, never a partially-written JSON file.
+    writeFileSync(temporaryPath, `${JSON.stringify(descriptor, null, 2)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+    renameSync(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
   return path;
 }
 
@@ -98,7 +112,7 @@ export function isLoopbackBridgeUrl(value: string | undefined): boolean {
       hostname === 'localhost' ||
       hostname === '::1' ||
       hostname === '[::1]' ||
-      hostname.startsWith('127.')
+      (isIP(hostname) === 4 && hostname.startsWith('127.'))
     );
   } catch {
     return false;
@@ -131,10 +145,9 @@ export function readLiveSessions(
     } catch {
       descriptor = null;
     }
-    if (!descriptor) {
-      if (prune) rmSync(full, { force: true });
-      continue;
-    }
+    // A parse failure may be a concurrent or externally-managed write. Skip it
+    // rather than deleting a descriptor whose ownership/liveness is unknown.
+    if (!descriptor) continue;
     if (!isProcessAlive(descriptor.pid)) {
       if (prune) rmSync(full, { force: true });
       continue;

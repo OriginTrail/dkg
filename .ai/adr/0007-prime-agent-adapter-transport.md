@@ -37,7 +37,7 @@ with its context and kernel, not a fresh one spawned per message.
 implementing `/health`, `/send` and `/stream`** — the same contract the DKG
 daemon already speaks for Hermes bridge targets.
 
-- Inbound: `POST /send` → `pi.sendUserMessage(content, { deliverAs })`
+- Inbound: `POST /send` → `pi.sendUserMessage(content, { deliverAs: "followUp" })`
   (`src/core/extensions/types.ts:1135-1138`).
 - Outbound: `POST /stream` → SSE frames `data: <json>\n\n` fed by
   `pi.on("message_update")`, whose payload carries `assistantMessageEvent`, the
