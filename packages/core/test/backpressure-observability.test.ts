@@ -166,6 +166,37 @@ describe('SchedulerPressureTracker', () => {
     });
   });
 
+  it('opens the 75% band on a shared pool no single lane is anywhere near filling', () => {
+    const now = 1_000;
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'sync-global',
+      now: () => now,
+      capacity: { queueLimit: 4, capacityModel: 'shared' },
+    });
+
+    // Three lanes hold one entry each: the pool sits at 75% — the documented
+    // early-warning band — while every lane is at 25% of the ceiling on its
+    // own. The saturation tests above cannot catch a degraded branch that
+    // regressed to per-lane depth, because at a full pool the two denominators
+    // agree often enough to hide it. This is the shape where they disagree.
+    tracker.enqueue({ lane: 'durable', operation: 'durable:catchup-foreground' });
+    tracker.enqueue({ lane: 'changelog', operation: 'changelog:reconcile' });
+    tracker.enqueue({ lane: 'shared_memory', operation: 'shared-memory:on-connect' });
+
+    expect(tracker.snapshot()).toMatchObject({
+      state: 'degraded',
+      totals: { queued: 3, queueLimit: 4 },
+      lanes: [
+        { lane: 'changelog', state: 'degraded', queued: 1, pressureQueued: 3, queueLimit: 4 },
+        { lane: 'durable', state: 'degraded', queued: 1, pressureQueued: 3, queueLimit: 4 },
+        { lane: 'shared_memory', state: 'degraded', queued: 1, pressureQueued: 3, queueLimit: 4 },
+      ],
+    });
+    for (const lane of tracker.snapshot().lanes) {
+      expect(lane).toMatchObject({ oldestQueuedAgeMs: 0, lastRejectedAgeMs: null });
+    }
+  });
+
   it('leaves a shared-pool lane with nothing waiting out of the pool pressure', () => {
     const now = 1_000;
     const tracker = new SchedulerPressureTracker({

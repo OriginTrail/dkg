@@ -407,22 +407,54 @@ export class SchedulerPressureTracker {
     this.recordEvent(lane, 'rejected', normalizedReason);
   }
 
-  private laneSnapshot(lane: string, now: number): BackpressureLaneSnapshot {
-    const runtime = this.runtimeFor(lane);
-    const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
-    const active = [...this.active.values()].filter((entry) => entry.lane === lane);
+  /**
+   * Everything the capacity model decides, in one place: which ceilings apply
+   * to a lane, what depth its state is measured against, and whether depth
+   * pressure applies at all. `laneSnapshot` stays a model-agnostic classifier,
+   * so adding a model means extending this descriptor rather than editing the
+   * classifier's branches.
+   */
+  private laneCapacityFor(lane: string, laneQueued: number): {
+    capacityModel: SchedulerLaneCapacityModel;
+    queueLimit: number | null;
+    inflightLimit: number | null;
+    pressureQueued: number;
+    depthCeiling: number | null;
+  } {
     const shared = this.capacity.capacityModel === 'shared';
     const queueLimit = shared
       ? normalizeLimit(this.capacity.queueLimit)
       : normalizeLimit(this.capacity.lanes?.[lane]?.queueLimit);
-    const inflightLimit = shared
-      ? normalizeLimit(this.capacity.inflightLimit)
-      : normalizeLimit(this.capacity.lanes?.[lane]?.inflightLimit);
-    // Depth pressure is measured against whatever the lane's ceiling bounds:
-    // its own backlog when the allocation is private, the whole pool when the
-    // ceiling is shared. Under `partitioned` this is `queued.length`, so the
-    // classifier below is unchanged for every scheduler that owns its lanes.
-    const boundedDepth = shared ? this.queued.size : queued.length;
+    return {
+      capacityModel: shared ? 'shared' : 'partitioned',
+      queueLimit,
+      inflightLimit: shared
+        ? normalizeLimit(this.capacity.inflightLimit)
+        : normalizeLimit(this.capacity.lanes?.[lane]?.inflightLimit),
+      // Depth is measured against whatever the lane's ceiling bounds: its own
+      // backlog when the allocation is private, the whole pool when the ceiling
+      // is shared. Under `partitioned` this is exactly `laneQueued`, which is
+      // why every scheduler that owns its lanes is unaffected.
+      pressureQueued: shared ? this.queued.size : laneQueued,
+      // A lane with nothing waiting is not held back by a full queue, whoever
+      // filled it. Under `partitioned` this guard is implied by the comparisons
+      // it guards, so it changes nothing there; under `shared` it is what keeps
+      // an idle lane out of a pool's saturation.
+      depthCeiling: queueLimit !== null && queueLimit > 0 && laneQueued > 0 ? queueLimit : null,
+    };
+  }
+
+  private laneSnapshot(lane: string, now: number): BackpressureLaneSnapshot {
+    const runtime = this.runtimeFor(lane);
+    const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
+    const active = [...this.active.values()].filter((entry) => entry.lane === lane);
+    const {
+      capacityModel,
+      queueLimit,
+      inflightLimit,
+      pressureQueued,
+      depthCeiling,
+    } = this.laneCapacityFor(lane, queued.length);
     const oldestQueuedAgeMs = queued.length === 0
       ? 0
       : Math.max(...queued.map((entry) => Math.max(0, Math.floor(now - entry.queuedAt))));
@@ -432,19 +464,11 @@ export class SchedulerPressureTracker {
           0,
           Math.floor(now - (entry.startedAt ?? now)),
         )));
-    // A lane with nothing waiting is not held back by a full queue, whoever
-    // filled it. Under `partitioned` the guard is implied by the comparisons it
-    // guards (`boundedDepth` is this lane's own backlog), so it changes nothing
-    // there; under `shared` it is what keeps an idle lane out of a pool's
-    // saturation.
-    const depthCeiling = queueLimit !== null && queueLimit > 0 && queued.length > 0
-      ? queueLimit
-      : null;
     let state: BackpressureState = 'healthy';
     if (oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) {
       state = 'stalled';
     } else if (
-      (depthCeiling !== null && boundedDepth >= depthCeiling)
+      (depthCeiling !== null && pressureQueued >= depthCeiling)
       || (
         runtime.lastRejectedAt !== null
         && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs
@@ -455,7 +479,7 @@ export class SchedulerPressureTracker {
       oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs
       || (
         depthCeiling !== null
-        && boundedDepth / depthCeiling >= this.thresholds.degradedQueueUtilization
+        && pressureQueued / depthCeiling >= this.thresholds.degradedQueueUtilization
       )
     ) {
       state = 'degraded';
@@ -463,9 +487,9 @@ export class SchedulerPressureTracker {
     return {
       lane,
       state,
-      capacityModel: shared ? 'shared' : 'partitioned',
+      capacityModel,
       queued: queued.length,
-      pressureQueued: boundedDepth,
+      pressureQueued,
       queueLimit,
       inflight: active.length,
       inflightLimit,
