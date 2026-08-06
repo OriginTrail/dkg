@@ -21,6 +21,7 @@ import {
   creditDeposit, termsDigest, type TabTerms, type ObservedTransfer,
 } from "./deposit-rail.js";
 import { verifyCapability, zeroValuePreflight, type SignedDelegation, type CapabilityState } from "./capability.js";
+import { MAX_BINDING_LIFETIME_MS, BINDING_DOMAIN } from "./evm-binding.js";
 
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
 
@@ -81,6 +82,16 @@ export function termsQuote(args: {
     digestKind: bound ? "bound-terms (refundAddress fixed; this is the digest a tab will carry)"
                       : "placeholder-terms (no refundAddress supplied; digest WILL change once you supply one)",
     bindings: { scheduleDigest: args.coefficientsDigest, priceVectorDigest: args.policyDigest ?? args.coefficientsDigest },
+    // Buyer-requested: the lifetime ceiling is a provider POLICY constant, not a
+    // protocol truth, so it must be advertised and versioned rather than
+    // discovered by having a proof rejected.
+    bindingPolicy: {
+      policyVersion: "binding-policy/v1",
+      domain: BINDING_DOMAIN,
+      maxLifetimeMs: MAX_BINDING_LIFETIME_MS,
+      maxLifetimeDays: MAX_BINDING_LIFETIME_MS / 86_400_000,
+      note: "A binding proof is checked against this ceiling before signature recovery. Rejections never reveal whether a principal is registered.",
+    },
     meterMode: args.meterMode,
     // Honesty rule from /api/status: never let a shadow node look like it bills.
     billing: args.meterMode === "enforce" ? "per-principal enforcement active" : "none (metering only)",

@@ -129,6 +129,29 @@ console.log("\nno silent downgrade to the weaker path:");
     mismatched.ok === false);
 }
 
+console.log("\nno registration oracle (buyer-requested):");
+{
+  // Bo: "error ordering stays stable and does not disclose registration state".
+  // A caller must not be able to enumerate registered buyers by watching how a
+  // bad proof fails.
+  const unknownAddr = Wallet.createRandom().address;
+  const badSig = { ...good, evmSignature: "0xdead" };
+  const regBad = R.anchorWalletKey(home, PRINCIPAL, { proof: badSig, chainId: CHAIN });
+  const unregBad = R.anchorWalletKey(home, unknownAddr, { proof: { ...badSig, principal: unknownAddr }, chainId: CHAIN });
+  ok("a bad signature fails IDENTICALLY for registered and unregistered principals",
+    JSON.stringify(regBad) === JSON.stringify(unregBad), `${JSON.stringify(regBad)} vs ${JSON.stringify(unregBad)}`);
+
+  const far = { ...good, notAfter: "9999-12-31T23:59:59.000Z" };
+  const regFar = R.anchorWalletKey(home, PRINCIPAL, { proof: far, chainId: CHAIN });
+  const unregFar = R.anchorWalletKey(home, unknownAddr, { proof: { ...far, principal: unknownAddr }, chainId: CHAIN });
+  ok("a lifetime rejection fails IDENTICALLY for registered and unregistered principals",
+    JSON.stringify(regFar) === JSON.stringify(unregFar));
+
+  ok("the ceiling is checked BEFORE signature recovery — ordering is stable",
+    B.verifyBinding({ ...good, notAfter: "9999-12-31T23:59:59.000Z", evmSignature: "0xdead" }, { chainId: CHAIN }).code
+      === "E_BINDING_LIFETIME_TOO_LONG");
+}
+
 console.log("\naddress casing:");
 {
   const lower = R.anchorWalletKey(home, PRINCIPAL.toLowerCase(), { proof: good, chainId: CHAIN });
