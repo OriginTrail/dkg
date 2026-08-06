@@ -21,6 +21,21 @@ export function formatLocalAgentErrorMessage(
     if (err.code === 'PRIME_AGENT_SESSION_BUSY') {
       return `${integration.name} session is busy — try again in a moment.`;
     }
+    if (err.code === 'PRIME_AGENT_PROVIDER_UNAUTHORIZED') {
+      return `${integration.name} provider authentication failed. Check its provider credentials and try again.`;
+    }
+    if (err.code === 'PRIME_AGENT_PROVIDER_ERROR') {
+      return `${integration.name} provider request failed. Check its provider configuration and try again.`;
+    }
+    if (err.code === 'PRIME_AGENT_TURN_ABORTED') {
+      return `${integration.name} turn was aborted.`;
+    }
+    if (err.code === 'PRIME_AGENT_TURN_TIMEOUT') {
+      return `${integration.name} turn exceeded its maximum run time.`;
+    }
+    if (err.code === 'PRIME_AGENT_DELIVERY_FAILED') {
+      return `${integration.name} rejected the message before starting the turn.`;
+    }
     if (err.code === 'SWM_SYNC_TIMEOUT' || err.source === 'background-sync') {
       return 'Background sync timed out. The chat request was not marked as failed by the local-agent bridge.';
     }
@@ -45,4 +60,3 @@ export function formatLocalAgentErrorMessage(
   }
   return message;
 }
-

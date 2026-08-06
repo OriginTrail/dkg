@@ -328,6 +328,104 @@ describe('/send', () => {
     bridge.onAgentEnd();
   });
 
+  it('releases a provider-auth failure, sanitizes it, and ignores the failed turn late agent_end', async () => {
+    const firstResponse = await fetch(`${base}/stream`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'use the provider', correlationId: 'c-provider-auth' }),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({
+      assistantMessageEvent: {
+        type: 'error',
+        reason: 'error',
+        error: {
+          errorMessage: '{"error":{"message":"Unauthorized","providerToken":"must-not-leak"}}',
+        },
+      },
+      message: {
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: 'provider key sk-must-not-leak was Unauthorized',
+      },
+    });
+
+    const firstText = await firstResponse.text();
+    expect(firstText).toContain('"type":"error"');
+    expect(firstText).toContain('"code":"PRIME_AGENT_PROVIDER_UNAUTHORIZED"');
+    expect(firstText).toContain('"type":"final"');
+    expect(firstText).not.toContain('must-not-leak');
+    expect(firstText).not.toContain('sk-');
+
+    // Start the successor before Prime emits the failed turn's late agent_end.
+    // That stale event must be consumed without resolving this new request.
+    const second = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'retry after credentials are fixed', correlationId: 'c-retry' }),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sent).toEqual(['use the provider', 'retry after credentials are fixed']);
+    bridge.onAgentEnd();
+    const settledByStaleEnd = await Promise.race([
+      second.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+    ]);
+    expect(settledByStaleEnd).toBe(false);
+
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'recovered' } });
+    bridge.onAgentEnd();
+    const secondResponse = await second;
+    expect(secondResponse.status).toBe(200);
+    expect(await secondResponse.json()).toMatchObject({ text: 'recovered', correlationId: 'c-retry' });
+  });
+
+  it('uses a separate hard limit to abort and release a turn that never emits agent_end', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-hard-timeout', {
+      turnIdleTimeoutMs: 30,
+      turnHardTimeoutMs: 80,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+    let abortCount = 0;
+
+    const firstPromise = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'hung turn', correlationId: 'c-hard-timeout' }),
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    bridge.onAgentStart({
+      sessionManager: { getSessionId: () => 'sess-hard-timeout' },
+      abort: () => { abortCount += 1; },
+    });
+
+    const first = await firstPromise;
+    expect(first.status).toBe(504);
+    const whileStillRunning = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'too soon', correlationId: 'c-too-soon-hard' }),
+    });
+    expect(whileStillRunning.status).toBe(429);
+
+    await new Promise((r) => setTimeout(r, 70));
+    expect(abortCount).toBe(1);
+    const recovered = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'after hard timeout', correlationId: 'c-after-hard' }),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    bridge.onAgentStart();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
+    bridge.onAgentEnd();
+    expect((await recovered).status).toBe(200);
+  });
+
   it('only emits verified text_delta events, not thinking or cumulative snapshots', async () => {
     const pending = fetch(`${base}/send`, {
       method: 'POST',

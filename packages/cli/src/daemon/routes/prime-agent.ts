@@ -100,6 +100,26 @@ function isPrimeAgentTimeoutError(err: unknown): boolean {
   );
 }
 
+const SANITIZED_PRIME_AGENT_BRIDGE_FAILURES: Readonly<Record<string, string>> = {
+  PRIME_AGENT_PROVIDER_UNAUTHORIZED:
+    'Prime Agent provider authentication failed. Check the configured provider credentials.',
+  PRIME_AGENT_PROVIDER_ERROR: 'Prime Agent provider request failed.',
+  PRIME_AGENT_TURN_ABORTED: 'Prime Agent turn was aborted.',
+  PRIME_AGENT_TURN_TIMEOUT: 'Prime Agent turn exceeded its hard limit.',
+  PRIME_AGENT_DELIVERY_FAILED: 'Prime Agent rejected the local message before starting the turn.',
+};
+
+function sanitizedPrimeAgentBridgeFailure(text: string): { code: string; error: string } | null {
+  try {
+    const parsed = JSON.parse(text) as { code?: unknown };
+    const code = typeof parsed?.code === 'string' ? parsed.code : '';
+    const error = SANITIZED_PRIME_AGENT_BRIDGE_FAILURES[code];
+    return error ? { code, error } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `timeoutMs` names the limit that actually fired: the bridge's idle window
  * (the response-timeout constant) when we are relaying its 504 verdict, the
@@ -195,6 +215,19 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
             ...timeoutBody(payload.correlationId, target.sessionId, PRIME_AGENT_CHANNEL_RESPONSE_TIMEOUT_MS),
             ...('text' in bridgeBody ? { text: bridgeBody.text } : {}),
             ...('timedOut' in bridgeBody ? { timedOut: bridgeBody.timedOut } : {}),
+          });
+        }
+        const terminalFailure = sanitizedPrimeAgentBridgeFailure(text);
+        if (terminalFailure) {
+          // Only forward codes from the fixed allowlist above. The provider's
+          // raw error body may contain credential-bearing diagnostics and must
+          // not cross the bridge/daemon trust boundary.
+          return jsonResponse(res, 502, {
+            ...terminalFailure,
+            source: 'prime-agent-channel',
+            sessionId: target.sessionId,
+            correlationId: payload.correlationId,
+            retryable: false,
           });
         }
         // 429 is the bridge's one-turn-at-a-time guard, and it is a normal

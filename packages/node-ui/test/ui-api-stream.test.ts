@@ -9,6 +9,7 @@ import {
   streamHermesLocalChat,
   streamLocalAgentChat,
   streamOpenClawLocalChat,
+  streamPrimeAgentLocalChat,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -129,6 +130,42 @@ describe('ui local-agent stream api', () => {
 
     try {
       await expect(streamOpenClawLocalChat('hello')).rejects.toThrow('bridge unavailable');
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+
+  it('preserves a terminal Prime Agent provider-auth code for the UI', async () => {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(
+            'data: {"type":"error","error":"Prime Agent provider authentication failed. Check the configured provider credentials.","code":"PRIME_AGENT_PROVIDER_UNAUTHORIZED","source":"prime-agent-channel","retryable":false,"correlationId":"p-auth"}\n\n',
+          ));
+          controller.enqueue(encoder.encode(
+            'data: {"type":"final","text":"","correlationId":"p-auth","sessionId":"s1"}\n\n',
+          ));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    try {
+      let caught: unknown;
+      await streamPrimeAgentLocalChat('hello').catch((err) => { caught = err; });
+      expect(caught).toBeInstanceOf(LocalAgentApiError);
+      expect(caught).toMatchObject({
+        code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+        source: 'prime-agent-channel',
+        correlationId: 'p-auth',
+        retryable: false,
+      });
     } finally {
       globalThis.fetch = prevFetch;
     }
