@@ -20,6 +20,7 @@ import {
 } from './canonical-json.js';
 import { keccak256 } from './crypto/keccak.js';
 import { workspaceAgentEncryptionKeyId } from './crypto/workspace-encryption.js';
+import { parseDeterministicKnowledgeAssetUal } from './ka-content-scope.js';
 import {
   assertCanonicalSystemRecordPeerIdV1,
   decodeUnpaddedBase64UrlV1,
@@ -460,6 +461,7 @@ function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHeadObjec
     fail('system-record-history', 'ordinary noninitial head requires previousHeadDigest');
   }
 
+  let graphScopedAuthorSeal: Readonly<CanonicalGraphScopedAuthorSealV1> | undefined;
   if (state === 'active') {
     assertCanonicalRfc3339SecondsV1(head.validUntil, 'validUntil');
     if (Date.parse(head.validUntil as string) <= Date.parse(head.issuedAt as string)) {
@@ -467,7 +469,12 @@ function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHeadObjec
     }
     try {
       assertAssertionCoordinateV1(head.assertionCoordinate);
-      assertCanonicalGraphScopedAuthorSealV1(head.graphScopedAuthorSeal);
+      const sealSnapshot = snapshotDataRecord(
+        head.graphScopedAuthorSeal,
+        'graph-scoped author seal',
+      );
+      assertCanonicalGraphScopedAuthorSealV1(sealSnapshot);
+      graphScopedAuthorSeal = sealSnapshot;
     } catch (cause) {
       fail('system-record-binding', 'active head coordinate/seal is invalid', cause);
     }
@@ -476,7 +483,14 @@ function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHeadObjec
     if (ownedSubjectCount === 0n || projectionBytes === 0n || projectionQuads === 0n) {
       fail('system-record-binding', 'active head projection counts must be nonzero');
     }
-    const seal = head.graphScopedAuthorSeal as CanonicalGraphScopedAuthorSealV1;
+    const seal = graphScopedAuthorSeal;
+    const ual = parseDeterministicKnowledgeAssetUal(seal.kaUal);
+    if (ual.chainId !== head.networkId) {
+      fail('system-record-binding', 'graph-scoped seal UAL network must equal the head networkId');
+    }
+    if (seal.assertedAtChainId !== numericChainIdForNetworkV1(head.networkId)) {
+      fail('system-record-binding', 'graph-scoped seal asserted chain must equal the head network chain');
+    }
     if (seal.authorAddress !== head.evmIssuer) {
       fail('system-record-binding', 'graph-scoped seal author must equal evmIssuer');
     }
@@ -506,7 +520,9 @@ function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHeadObjec
       fail('system-record-binding', 'tombstone must commit the canonical empty subject table');
     }
   }
-  return Object.freeze({ ...head }) as unknown as AgentProfileHeadObjectV1;
+  return Object.freeze(state === 'active'
+    ? { ...head, graphScopedAuthorSeal }
+    : { ...head }) as unknown as AgentProfileHeadObjectV1;
 }
 
 export function assertAgentProfileAuthorityTransitionV1(
@@ -635,9 +651,13 @@ function validateForkResolution(value: unknown): AgentProfileForkResolutionV1 {
     fail('system-record-history', 'fork base is omitted only for a version-zero fork');
   }
   if (hasOwnDataProperty(resolution, 'forkBaseHeadDigest')) digest(resolution.forkBaseHeadDigest, 'forkBaseHeadDigest');
-  digestArray(resolution.evidenceHeadDigests, 'evidenceHeadDigests', 2, SYSTEM_RECORD_MAX_CONFLICT_DIGESTS);
+  if (!Array.isArray(resolution.evidenceHeadDigests)) {
+    fail('system-record-schema', 'evidenceHeadDigests must be an array');
+  }
+  const evidenceHeadDigests = Object.freeze([...resolution.evidenceHeadDigests]);
+  digestArray(evidenceHeadDigests, 'evidenceHeadDigests', 2, SYSTEM_RECORD_MAX_CONFLICT_DIGESTS);
   assertCanonicalRfc3339SecondsV1(resolution.issuedAt, 'issuedAt');
-  return Object.freeze({ ...resolution }) as unknown as AgentProfileForkResolutionV1;
+  return Object.freeze({ ...resolution, evidenceHeadDigests }) as unknown as AgentProfileForkResolutionV1;
 }
 
 export function assertAgentProfileConflictEvidenceV1(
@@ -988,11 +1008,12 @@ function validateSignatureEntry(
     fail('system-record-signature', 'signature roles are missing, extra, duplicated, or reordered');
   }
   const isPeer = requiredRole === 'peer';
+  let evidence: SystemRecordSignatureEntryV1['evidence'];
   if (isPeer) {
     if (entry.suite !== 'ed25519-v1' || entry.signer !== object.peerId) {
       fail('system-record-signature', 'peer signature suite/signer is invalid');
     }
-    exactNoneEvidence(entry.evidence);
+    evidence = exactNoneEvidence(entry.evidence);
     decodeUnpaddedBase64UrlV1(
       entry.signature,
       SYSTEM_RECORD_ED25519_SIGNATURE_BYTES,
@@ -1004,10 +1025,10 @@ function validateSignatureEntry(
       fail('system-record-signature', `${requiredRole} signer does not match the object authority`);
     }
     if (entry.suite === 'eip191-personal-sign-digest-v1') {
-      exactNoneEvidence(entry.evidence);
+      evidence = exactNoneEvidence(entry.evidence);
       assertCanonicalEip191SignatureV1(entry.signature);
     } else if (entry.suite === 'eip1271-current-finalized-v1') {
-      validateEip1271Evidence(entry.evidence, issuer, object.networkId);
+      evidence = validateEip1271Evidence(entry.evidence, issuer, object.networkId);
       try {
         assertCanonicalHexBytes(
           entry.signature,
@@ -1022,7 +1043,7 @@ function validateSignatureEntry(
       fail('system-record-signature', 'EVM signature suite is invalid');
     }
   }
-  return Object.freeze({ ...entry }) as unknown as SystemRecordSignatureEntryV1;
+  return Object.freeze({ ...entry, evidence }) as unknown as SystemRecordSignatureEntryV1;
 }
 
 export function assertCanonicalEip191SignatureV1(value: unknown): asserts value is string {
@@ -1662,6 +1683,9 @@ export async function buildAgentProfileVerificationClosureV1(
       || artifact.canonicalBytes.byteLength > SYSTEM_RECORD_OBJECT_CAPS_V1[artifact.objectKind]) {
       fail('system-record-closure', 'closure artifact exceeds its kind cap');
     }
+    const objectKind = context.objectKind;
+    const objectDigest = context.digest;
+    const canonicalBytes = artifact.canonicalBytes.slice();
     const references: Pick<SystemRecordVerificationClosureObjectV1, 'objectKind' | 'digest'>[] = [];
     const add = (
       objectKind: SystemRecordObjectKindV1,
@@ -1674,9 +1698,9 @@ export async function buildAgentProfileVerificationClosureV1(
       references.push({ objectKind, digest: objectDigest });
     };
 
-    if (artifact.objectKind === 'agent-profile-head') {
-      const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(artifact.canonicalBytes);
-      if (envelope.objectDigest !== artifact.digest
+    if (objectKind === 'agent-profile-head') {
+      const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(canonicalBytes);
+      if (envelope.objectDigest !== objectDigest
         || !await verifier.verifyAuthorityEnvelope(envelope)) {
         fail('system-record-closure', 'head authority verification failed');
       }
@@ -1684,13 +1708,13 @@ export async function buildAgentProfileVerificationClosureV1(
       if (isIssuedTooFarInFuture(head.issuedAt, verifier.nowMs)) {
         fail('system-record-closure', 'head issuedAt exceeds the future clock-skew bound');
       }
-      parsedHeads.set(artifact.digest, head);
+      parsedHeads.set(objectDigest, head);
       rootClaims.add(head.rootSubject);
       if (head.acceptedTransitionDigest !== undefined) {
-        add('authority-transition', head.acceptedTransitionDigest, 'history', undefined, artifact.digest);
+        add('authority-transition', head.acceptedTransitionDigest, 'history', undefined, objectDigest);
       }
       if (head.forkResolutionDigest !== undefined) {
-        add('fork-resolution', head.forkResolutionDigest, 'history', undefined, artifact.digest);
+        add('fork-resolution', head.forkResolutionDigest, 'history', undefined, objectDigest);
       }
       if (context.purpose === 'current' && head.state === 'active') {
         add('profile-bundle', head.bundleDigest, 'current');
@@ -1708,13 +1732,13 @@ export async function buildAgentProfileVerificationClosureV1(
           add('owned-subject-table', head.ownedSubjectTableDigest, 'history', head.rootSubject);
         }
       }
-    } else if (artifact.objectKind === 'authority-transition') {
-      const envelope = parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1(artifact.canonicalBytes);
-      if (envelope.objectDigest !== artifact.digest
+    } else if (objectKind === 'authority-transition') {
+      const envelope = parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1(canonicalBytes);
+      if (envelope.objectDigest !== objectDigest
         || !await verifier.verifyAuthorityEnvelope(envelope)) {
         fail('system-record-closure', 'authority-transition verification failed');
       }
-      parsedTransitions.set(artifact.digest, envelope.object);
+      parsedTransitions.set(objectDigest, envelope.object);
       if (context.referencedByHeadDigest !== undefined) {
         const referencingHead = parsedHeads.get(context.referencedByHeadDigest);
         if (referencingHead === undefined
@@ -1724,9 +1748,9 @@ export async function buildAgentProfileVerificationClosureV1(
       }
       rootClaims.add(envelope.object.nextRoot);
       add('agent-profile-head', envelope.object.priorHeadDigest, 'history');
-    } else if (artifact.objectKind === 'fork-resolution') {
-      const envelope = parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1(artifact.canonicalBytes);
-      if (envelope.objectDigest !== artifact.digest
+    } else if (objectKind === 'fork-resolution') {
+      const envelope = parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1(canonicalBytes);
+      if (envelope.objectDigest !== objectDigest
         || !await verifier.verifyAuthorityEnvelope(envelope)) {
         fail('system-record-closure', 'fork-resolution verification failed');
       }
@@ -1746,36 +1770,36 @@ export async function buildAgentProfileVerificationClosureV1(
       if (envelope.object.forkBaseHeadDigest !== undefined) {
         add('agent-profile-head', envelope.object.forkBaseHeadDigest, 'history');
       }
-    } else if (artifact.objectKind === 'profile-bundle') {
+    } else if (objectKind === 'profile-bundle') {
       const current = parsedHeads.get(currentHeadDigest);
       if (current?.state !== 'active'
-        || digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, artifact.canonicalBytes)
-          !== artifact.digest
-        || !await verifier.verifyCurrentBundle(current, artifact.canonicalBytes)) {
+        || digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, canonicalBytes)
+          !== objectDigest
+        || !await verifier.verifyCurrentBundle(current, canonicalBytes.slice())) {
         fail('system-record-closure', 'current profile bundle verification failed');
       }
-    } else if (artifact.objectKind === 'owned-subject-table') {
+    } else if (objectKind === 'owned-subject-table') {
       if (context.rootSubject === undefined) fail('system-record-closure', 'subject table lacks root context');
-      const table = parseCanonicalOwnedSubjectTableObjectV1(context.rootSubject, artifact.canonicalBytes);
-      if (computeOwnedSubjectTableDigestV1(context.rootSubject, table) !== artifact.digest) {
+      const table = parseCanonicalOwnedSubjectTableObjectV1(context.rootSubject, canonicalBytes);
+      if (computeOwnedSubjectTableDigestV1(context.rootSubject, table) !== objectDigest) {
         fail('system-record-closure', 'owned-subject table digest mismatch');
       }
     } else {
-      fail('system-record-closure', `${artifact.objectKind} is not part of an advertised row closure`);
+      fail('system-record-closure', `${objectKind} is not part of an advertised row closure`);
     }
 
-    bytes += artifact.canonicalBytes.byteLength;
+    bytes += canonicalBytes.byteLength;
     if (artifacts.length + 1 > SYSTEM_RECORD_MAX_CLOSURE_OBJECTS
       || bytes > SYSTEM_RECORD_MAX_CLOSURE_BYTES
       || rootClaims.size > SYSTEM_RECORD_MAX_ROOT_CLAIMS
       || parsedResolutions.length > SYSTEM_RECORD_MAX_RESOLVED_FORK_TUPLES) {
       fail('system-record-closure', 'verification closure exceeds a V1 bound');
     }
-    seen.set(key, artifact.objectKind);
+    seen.set(key, objectKind);
     artifacts.push(Object.freeze({
-      objectKind: artifact.objectKind,
-      digest: artifact.digest,
-      canonicalBytes: artifact.canonicalBytes.slice(),
+      objectKind,
+      digest: objectDigest,
+      canonicalBytes,
       references: Object.freeze(references.sort(compareClosureObjects)),
     }));
     if (seen.size + pending.size > SYSTEM_RECORD_MAX_CLOSURE_OBJECTS) {
@@ -2231,6 +2255,14 @@ export function preflightSystemRecordCacheAccountingV1(
     metadataBytes += rowMetadataBytes + rowSidecarMetadataBytes;
     sidecarMetadataBytes += rowSidecarMetadataBytes;
     if (!Number.isSafeInteger(metadataBytes)) fail('system-record-closure', 'cache metadata accounting overflow');
+    if (closurePhysical.size > SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_OBJECTS
+      || closureReferences > SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_REFERENCES
+      || metadataBytes > SYSTEM_RECORD_MAX_CLOSURE_SIDECAR_LIVE_METADATA_BYTES
+      || sidecars > SYSTEM_RECORD_MAX_CONFLICT_SIDECARS
+      || sidecarReferences > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_REFERENCES
+      || sidecarMetadataBytes > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_METADATA_BYTES) {
+      fail('system-record-closure', 'aggregate cache accounting exceeds a live V1 bound');
+    }
   }
   accountReferences(inventoryLeaves, new Map(), 'activation inventory');
   if (inventoryLeaves.some((reference) => reference.objectKind !== 'inventory-leaf')) {
@@ -2442,7 +2474,7 @@ function validateEip1271Evidence(
   value: unknown,
   issuer: string,
   networkId: NetworkIdV1,
-): void {
+): SystemRecordEip1271EvidenceV1 {
   const evidence = snapshotExactDataRecord(
     value,
     ['kind', 'chainId', 'contractAddress', 'finalizedBlockNumber', 'finalizedBlockHash'],
@@ -2462,21 +2494,28 @@ function validateEip1271Evidence(
   if (evidence.contractAddress !== issuer) {
     fail('system-record-binding', 'EIP-1271 contract does not match signer');
   }
-  const separator = networkId.lastIndexOf(':');
-  const expectedChainId = separator <= 0 ? '' : networkId.slice(separator + 1);
-  try {
-    assertCanonicalChainId(expectedChainId, 'network chainId');
-  } catch (cause) {
-    fail('system-record-binding', 'EIP-1271 requires a numeric chain-bound networkId', cause);
-  }
+  const expectedChainId = numericChainIdForNetworkV1(networkId);
   if (evidence.chainId !== expectedChainId) {
     fail('system-record-binding', 'EIP-1271 evidence chainId does not match the record network');
   }
+  return Object.freeze({ ...evidence }) as unknown as SystemRecordEip1271EvidenceV1;
 }
 
-function exactNoneEvidence(value: unknown): void {
+function numericChainIdForNetworkV1(networkId: NetworkIdV1): ChainIdV1 {
+  const separator = networkId.lastIndexOf(':');
+  const chainId = separator <= 0 ? '' : networkId.slice(separator + 1);
+  try {
+    assertCanonicalChainId(chainId, 'network chainId');
+  } catch (cause) {
+    fail('system-record-binding', 'record requires a numeric chain-bound networkId', cause);
+  }
+  return chainId as ChainIdV1;
+}
+
+function exactNoneEvidence(value: unknown): SystemRecordNoSignatureEvidenceV1 {
   const evidence = snapshotExactDataRecord(value, ['kind'], 'signature evidence');
   if (evidence.kind !== 'none') fail('system-record-signature', 'signature evidence must be none');
+  return Object.freeze({ kind: 'none' });
 }
 
 function issuerForRole(
