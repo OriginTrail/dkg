@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
@@ -208,7 +208,7 @@ describe('sync requester bailout', () => {
     const summary = await runDurableSync({
       ctx,
       remotePeerId: 'peer-a',
-      contextGraphIds: ['slow-cg', 'next-cg'],
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'next-cg'],
       stopOnBackoffWorthyFailure: true,
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
@@ -226,8 +226,8 @@ describe('sync requester bailout', () => {
       contextGraphId: request.contextGraphId,
       phase: request.phase,
     }))).toEqual([
-      { contextGraphId: 'slow-cg', phase: 'meta' },
-      { contextGraphId: 'slow-cg', phase: 'data' },
+      { contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, phase: 'meta' },
+      { contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, phase: 'data' },
     ]);
   });
 

@@ -12,11 +12,14 @@ export const EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS = 600_000;
 // meta stream of a large system CG (agents/ontology run to tens of thousands
 // of rows) over a relayed, page-shrinking transport could consume the whole
 // window. The data phase then reported a timeout with zero triples received
-// having never sent a request — every cycle, forever. Capping meta below half
-// the window guarantees data the majority share each cycle while meta keeps
-// enough room to finish (or at least advance its resume checkpoint). Deadlines
-// are absolute, so a meta phase that finishes early hands its unused time to
-// data for free and the two phases combined can never exceed the CG budget.
+// having never sent a request — every cycle, forever. The requester applies
+// this cap to system CGs only: their unverified payloads can persist and resume
+// after a capped partial meta page. Verified CGs keep the full window for meta,
+// because their meta and data cursors advance only after clean joint
+// verification; capping meta there could pin both cursors on the same partial
+// descriptor window. Deadlines are absolute, so a system-CG meta phase that
+// finishes early hands its unused time to data for free and the two phases
+// combined can never exceed the CG budget.
 export const DURABLE_META_PHASE_BUDGET_FRACTION = 0.4;
 // Wall clock the data phase keeps even when an operation deadline clamps the
 // CG window so tight that the fraction above would leave it less. Must stay
@@ -33,10 +36,11 @@ export interface DurableSyncContextGraphBudget {
   readonly fetchDeadline: number;
   /**
    * Earlier deadline for the meta phase alone, keeping a bounded fraction of
-   * the CG window so a slow meta transfer cannot starve the data phase.
-   * Optional for rolling deep-import compatibility: budgets minted before the
-   * phases split share `fetchDeadline`, preserving their single-deadline
-   * behaviour.
+   * the CG window so a slow system-CG meta transfer cannot starve the data
+   * phase. The requester deliberately ignores this earlier deadline for
+   * verified CGs. Optional for rolling deep-import compatibility: budgets
+   * minted before the phases split share `fetchDeadline`, preserving their
+   * single-deadline behaviour.
    */
   readonly metaFetchDeadline?: number;
   /** Fresh deadline for authenticating graph-scoped assets from one verified page. */

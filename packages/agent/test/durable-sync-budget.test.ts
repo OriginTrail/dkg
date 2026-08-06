@@ -76,6 +76,7 @@ function requesterPage(phase: 'data' | 'meta', quads: Quad[]): SyncPageResult {
 
 function requesterBudgetContext(options: {
   assetCount?: number;
+  contextGraphIds?: string[];
   durableSyncBudget: DurableSyncBudget;
   signal?: AbortSignal;
   graphScoped?: boolean;
@@ -100,7 +101,7 @@ function requesterBudgetContext(options: {
   return {
     ctx,
     remotePeerId: 'peer-durable-sync-budget',
-    contextGraphIds: [contextGraphId],
+    contextGraphIds: options.contextGraphIds ?? [contextGraphId],
     durableSyncBudget: options.durableSyncBudget,
     signal: options.signal,
     fetchSyncPages: async ({
@@ -752,12 +753,13 @@ describe('durable sync per-phase deadline split', () => {
     }
   });
 
-  it('threads the bounded meta deadline and full CG deadline through per-phase fetch contexts', async () => {
+  it('threads the bounded meta deadline and full CG deadline through system-CG fetch contexts', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
     const observed: Array<{ phase: 'data' | 'meta'; deadline: number }> = [];
     let activeFetchPhase: 'data' | 'meta' = 'meta';
 
     await runRequesterBudgetHarness({
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
       durableSyncBudget: createDurableSyncBudget({ fetchTimeoutMs: 100_000 }),
       graphScoped: false,
       onFetchPhase: (phase) => { activeFetchPhase = phase; },
@@ -774,13 +776,36 @@ describe('durable sync per-phase deadline split', () => {
     ]);
   });
 
-  it('leaves the data phase at least the floor after meta exhausts its slice', async () => {
+  it('keeps the full CG deadline for both phases of a verified CG', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const observed: Array<{ phase: 'data' | 'meta'; deadline: number }> = [];
+    let activeFetchPhase: 'data' | 'meta' = 'meta';
+
+    await runRequesterBudgetHarness({
+      durableSyncBudget: createDurableSyncBudget({ fetchTimeoutMs: 100_000 }),
+      graphScoped: false,
+      onFetchPhase: (phase) => { activeFetchPhase = phase; },
+      onFetchContext: (fetchContext) => observed.push({
+        phase: activeFetchPhase,
+        deadline: fetchContext.deadline,
+      }),
+      storeGraphScopedAsset: async () => 'applied',
+    });
+
+    expect(observed).toEqual([
+      { phase: 'meta', deadline: 1_100_000 },
+      { phase: 'data', deadline: 1_100_000 },
+    ]);
+  });
+
+  it('leaves the data phase at least the floor after system-CG meta exhausts its slice', async () => {
     let nowMs = 1_000_000;
     vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
     const dataWindows: number[] = [];
     let activeFetchPhase: 'data' | 'meta' = 'meta';
 
     await runRequesterBudgetHarness({
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
       durableSyncBudget: createDurableSyncBudget({
         fetchTimeoutMs: 100_000,
         operationDeadline: 1_008_000,
@@ -805,13 +830,14 @@ describe('durable sync per-phase deadline split', () => {
     expect(dataWindows).toEqual([DURABLE_DATA_PHASE_MIN_BUDGET_MS]);
   });
 
-  it('rolls unused meta time into the data phase', async () => {
+  it('rolls unused system-CG meta time into the data phase', async () => {
     let nowMs = 1_000_000;
     vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
     const dataWindows: number[] = [];
     let activeFetchPhase: 'data' | 'meta' = 'meta';
 
     await runRequesterBudgetHarness({
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
       durableSyncBudget: createDurableSyncBudget({ fetchTimeoutMs: 100_000 }),
       graphScoped: false,
       onFetchPhase: (phase) => { activeFetchPhase = phase; },
@@ -861,6 +887,7 @@ describe('durable sync per-phase deadline split', () => {
     let activeFetchPhase: 'data' | 'meta' = 'meta';
 
     await runRequesterBudgetHarness({
+      contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
       durableSyncBudget: {
         createContextGraphBudget: () => ({
           fetchDeadline: 1_060_000,

@@ -335,6 +335,7 @@ async function runDurableSyncWithBudget(
       throwIfOperationAborted();
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
+      const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
       const contextGraphBudget = durableSyncBudget.createContextGraphBudget({
         contextGraphId: pid,
         remainingContextGraphs: contextGraphIds.length - contextGraphIndex,
@@ -344,10 +345,14 @@ async function runDurableSyncWithBudget(
       // later phase deadline, so both phases combined stay inside the per-CG
       // wall clock. The data phase runs to the full CG deadline, which is how
       // a meta phase that finishes early rolls its unused time into data.
-      const metaFetchDeadline = Math.min(
-        contextGraphBudget.metaFetchDeadline ?? deadline,
-        deadline,
-      );
+      // System CGs accept unverified payloads, so a capped partial meta page
+      // can persist and resume. Verified CGs require joint meta/data
+      // verification before either cursor advances; giving their meta phase an
+      // earlier cap could make the same incomplete descriptor page repeat
+      // forever.
+      const metaFetchDeadline = isSystemContextGraph
+        ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
+        : deadline;
       const exactAssetUals = exactAssetUalsFor?.(pid);
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
@@ -398,8 +403,6 @@ async function runDurableSyncWithBudget(
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
-      const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
-
       let effectiveMetaResult = metaResult;
       let dataResult = rawDataResult;
       let exactAssetDescriptorCoverageComplete = true;
