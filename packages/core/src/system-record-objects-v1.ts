@@ -1888,7 +1888,7 @@ export async function buildAgentProfileVerificationClosureV1(
       if (head.acceptedTransitionDigest !== undefined) {
         add('authority-transition', head.acceptedTransitionDigest, 'history', undefined, objectDigest);
       }
-      if (head.forkResolutionDigest !== undefined) {
+      if (objectDigest === currentHeadDigest && head.forkResolutionDigest !== undefined) {
         add('fork-resolution', head.forkResolutionDigest, 'history', undefined, objectDigest);
       }
       if (context.purpose === 'current' && head.state === 'active') {
@@ -2032,7 +2032,7 @@ export async function buildAgentProfileVerificationClosureV1(
         fail('system-record-closure', `head ${headDigest} does not bind its accepted transition`);
       }
     }
-    if (head.forkResolutionDigest !== undefined) {
+    if (headDigest === currentHeadDigest && head.forkResolutionDigest !== undefined) {
       const resolution = parsedResolutions.find(
         (candidate) => computeAgentProfileForkResolutionDigestV1(candidate) === head.forkResolutionDigest,
       );

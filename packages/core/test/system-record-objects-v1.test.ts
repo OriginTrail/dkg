@@ -1182,6 +1182,49 @@ describe('system-record owned subjects and verification closure', () => {
     })).rejects.toThrow(/missing/);
   });
 
+  it('keeps historical fork resolutions audit-only in a rotated closure', async () => {
+    const fixture = await authorityFixture();
+    const nextAuthority = await authorityFixture(29);
+    const initial = activeHead(fixture);
+    const conflicting = { ...initial, bundleDigest: DIGEST_C };
+    const historicalResolution = forkResolution(fixture, initial, [initial, conflicting]);
+    const resolvedPrior = {
+      ...initial,
+      version: '3' as const,
+      forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(historicalResolution),
+    };
+    const transition = transitionFrom(fixture, resolvedPrior, '1', nextAuthority.evmIssuer);
+    const current = {
+      ...activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+        acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+      }),
+      bundleDigest: CLOSURE_BUNDLE_DIGEST,
+    };
+    const artifacts = closureArtifacts(current, [resolvedPrior], [transition]);
+    const requestedKinds: string[] = [];
+
+    const closure = await buildAgentProfileVerificationClosureV1(
+      computeAgentProfileHeadObjectDigestV1(current),
+      {
+        nowMs: Date.parse('2026-08-08T00:00:00Z'),
+        resolve: async (reference) => {
+          requestedKinds.push(reference.objectKind);
+          return artifacts.get(`${reference.objectKind}:${reference.digest}`);
+        },
+        verifyAuthorityEnvelope: () => true,
+        verifyCurrentBundle: (_head, bytes) => Buffer.from(bytes).equals(Buffer.from(CLOSURE_BUNDLE)),
+      },
+    );
+
+    expect(closure.objects).toHaveLength(4);
+    expect(closure.resolvedForkTuples).toBe(0);
+    expect(requestedKinds).not.toContain('fork-resolution');
+    const historicalArtifact = closure.objects.find(
+      (candidate) => candidate.digest === computeAgentProfileHeadObjectDigestV1(resolvedPrior),
+    );
+    expect(historicalArtifact?.references).toEqual([]);
+  });
+
   it('snapshots resolver-owned artifact bytes before awaited closure verification', async () => {
     class MisleadingSliceBytes extends Uint8Array {
       override slice(): Uint8Array { return new Uint8Array(); }
