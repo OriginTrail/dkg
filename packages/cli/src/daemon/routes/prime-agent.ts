@@ -521,6 +521,12 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
+        // The keepalive comments the bridge now emits only defeat proxy idle
+        // timeouts if they are FLUSHED to the client. Cache-Control does not
+        // govern proxy buffering; this header disables it on nginx-family
+        // fronts, whose default proxy_buffering would otherwise hold small
+        // comment frames in a buffer while the client sees a silent stream.
+        'X-Accel-Buffering': 'no',
         ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
       });
 

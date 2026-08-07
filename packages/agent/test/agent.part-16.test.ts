@@ -738,6 +738,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const agent = await DKGAgent.create({
         name: 'SyncOnConnectDiscoveryRefresh',
         listenHost: '127.0.0.1',
+        nodeRole: 'core',
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
 
@@ -1266,6 +1267,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const agent = await DKGAgent.create({
         name: 'SyncDedupTest',
         listenHost: '127.0.0.1',
+        nodeRole: 'core',
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       });
       try {

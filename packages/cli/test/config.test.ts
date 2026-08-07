@@ -860,6 +860,19 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncAgentsMeta).toBe(false);
   });
 
+  it('round-trips the automatic system Context Graph sync override', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      syncSystemContextGraphsOnConnect: true,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
+  });
+
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
     await saveConfig({
       name: 'test-node',

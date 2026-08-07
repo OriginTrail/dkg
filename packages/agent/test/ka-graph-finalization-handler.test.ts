@@ -1286,6 +1286,74 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
+  it('promotes a durably deferred finalization after live inbox capacity clears', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-deferred-capacity-'));
+    let inbox: SqliteFinalizationRecoveryStore | undefined;
+    let recoveryHandler: FinalizationHandler | undefined;
+    try {
+      const { message, vmGraph } = await stageGraph();
+      const chain = {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+      inbox = await openSqliteFinalizationRecoveryStore(directory, {
+        maxEntries: 1,
+        maxPerPeer: 1,
+        maxPerContextGraph: 1,
+      });
+      const fillerKey = 'capacity-filler';
+      await expect(inbox.receive({
+        key: fillerKey,
+        chainId: 'base:84532',
+        contextGraphId: CG,
+        sourcePeerId: '12D3KooWFiller',
+        ual: `did:dkg:otp:20430/${AUTHOR}/999`,
+        txHash: `0x${'ef'.repeat(32)}`,
+        assertionVersion: '1',
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        kaId: '999',
+        batchId: '999',
+        targetContextGraphId: '42',
+        rawMessage: new Uint8Array([1]),
+      })).resolves.toMatchObject({ status: 'inserted' });
+
+      recoveryHandler = new FinalizationHandler(
+        store,
+        chain,
+        recoveryOptions(inbox),
+      );
+      await recoveryHandler.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+        '12D3KooWPublisher',
+      );
+
+      expect(await store.countQuads(vmGraph)).toBe(1);
+      expect(await inbox.health()).toMatchObject({
+        deferredEntries: 1,
+        dueEntries: 1,
+      });
+      await expect(inbox.transition(fillerKey, 0, 'SUPERSEDED')).resolves.toBe(true);
+
+      recoveryHandler.startRecoveryWorker();
+      await vi.waitFor(async () => {
+        expect(await inbox!.list()).toMatchObject([
+          { key: fillerKey, state: 'SUPERSEDED' },
+          { state: 'SETTLED', ual: UAL },
+        ]);
+        expect(await inbox!.health()).toMatchObject({ deferredEntries: 0 });
+      });
+      expect(await store.countQuads(vmGraph)).toBe(2);
+    } finally {
+      await recoveryHandler?.stopRecoveryWorker();
+      await closeInbox(inbox);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not mutate Oxigraph when the VERIFIED transaction cannot commit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
@@ -1301,6 +1369,9 @@ describe('graph-scoped finalization handler', () => {
         get closed() { return inbox!.closed; },
         get: inbox.get.bind(inbox),
         receive: inbox.receive.bind(inbox),
+        promotePending: inbox.promotePending.bind(inbox),
+        recordPendingTrustedPublisher:
+          inbox.recordPendingTrustedPublisher.bind(inbox),
         recordTrustedPublisher: inbox.recordTrustedPublisher.bind(inbox),
         recordSettledPublisherUpgrade:
           inbox.recordSettledPublisherUpgrade.bind(inbox),
@@ -1378,6 +1449,10 @@ describe('graph-scoped finalization handler', () => {
           if (failureMode === 'write-failure') throw new Error('disk full');
           return { status: 'capacity' };
         },
+        promotePending: async () => 0,
+        recordPendingTrustedPublisher: async () => {
+          throw new Error('recordPendingTrustedPublisher must not run after failed admission');
+        },
         recordTrustedPublisher: async () => {
           throw new Error('recordTrustedPublisher must not run after failed admission');
         },
@@ -1417,11 +1492,19 @@ describe('graph-scoped finalization handler', () => {
         return query(sparql, options);
       };
       try {
-        await recoveryHandler.handleFinalizationMessage(
+        const handling = recoveryHandler.handleFinalizationMessage(
           encodeFinalizationMessage(message),
           CG,
           '12D3KooWPublisher',
         );
+        if (failureMode === 'capacity') {
+          await expect(handling).rejects.toMatchObject({
+            code: 'FINALIZATION_RECOVERY_CAPACITY',
+            retryable: true,
+          });
+        } else {
+          await expect(handling).resolves.toBeUndefined();
+        }
       } finally {
         store.query = query;
       }

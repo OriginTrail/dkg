@@ -892,6 +892,61 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
+  it('pins Prime Agent chat to the elected live session', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'prime-agent',
+              name: 'Prime Agent',
+              description: 'Prime Agent framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true },
+              runtime: { status: 'ready', ready: true },
+              metadata: { sessionCount: 2, activeSessionId: '019f-session-a' },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          sessionCount: 2,
+          target: '019f-session-a',
+          busy: true,
+          turnState: 'running',
+          clientConnected: false,
+          clientDisconnectedAt: '2026-08-07T12:34:56.000Z',
+          sessions: [
+            { sessionId: '019f-session-a', sessionName: 'Research' },
+            { sessionId: '019f-session-b', sessionName: 'Publishing' },
+          ],
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const prime = result.integrations.find((item) => item.id === 'prime-agent');
+      expect(prime?.activeSessionId).toBe('019f-session-a');
+      expect(prime?.defaultSessionId).toBe('019f-session-a');
+      expect(prime?.busy).toBe(true);
+      expect(prime?.liveSessions?.map((session) => session.sessionId)).toEqual([
+        '019f-session-a',
+        '019f-session-b',
+      ]);
+      expect(prime?.statusLabel).toBe('Still working');
+      expect(prime?.detail).toContain('browser stream disconnected');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('fetchLocalAgentIntegrations maps Hermes health metadata into degraded detail', async () => {
     const { fetch } = createTrackingFetch([
       {

@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -11,113 +8,13 @@ import {
 import {
   FINALIZATION_INBOX_DATABASE_FILENAME,
 } from '../src/finalization-recovery-store.js';
-import type {
-  VerifiedGraphScopedFinalizationEvidence,
-} from '../src/finalization-graph-envelope.js';
-
-const TX_HASH = `0x${'ab'.repeat(32)}`;
-const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
-const RAW = Uint8Array.from([1, 2, 3, 4]);
-
-function received(overrides: Record<string, unknown> = {}) {
-  return {
-    key: 'entry-1',
-    chainId: 'base:84532',
-    contextGraphId: 'graph',
-    sourcePeerId: '12D3KooWPublisher',
-    ual: 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7',
-    txHash: TX_HASH,
-    assertionVersion: '1',
-    merkleRoot: `0x${'01'.repeat(32)}`,
-    kaId: '7',
-    batchId: '7',
-    targetContextGraphId: '42',
-    rawMessage: RAW,
-    ...overrides,
-  };
-}
-
-function evidence(
-  overrides: Partial<VerifiedGraphScopedFinalizationEvidence> = {},
-): VerifiedGraphScopedFinalizationEvidence {
-  return {
-    assertionVersion: '1',
-    publicTripleCount: 2,
-    privateTripleCount: 0,
-    publicQuadsDigest: `sha256:${'02'.repeat(32)}`,
-    publisherPeerId: '12D3KooWPublisher',
-    publisherAddress: '0x2222222222222222222222222222222222222222',
-    transactionHash: TX_HASH,
-    blockNumber: 123,
-    blockHash: BLOCK_HASH,
-    txIndex: 4,
-    authorAddress: '0x1111111111111111111111111111111111111111',
-    accessPolicy: 'ownerOnly',
-    allowedPeers: [],
-    ...overrides,
-  };
-}
-
-async function temporaryDirectory(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'dkg-finalization-inbox-'));
-}
-
-async function leaveCommittedReceivedInCrashedWal(path: string): Promise<void> {
-  const script = String.raw`
-const { createHash } = require('node:crypto');
-const { DatabaseSync } = require('node:sqlite');
-const path = process.env.DKG_FINALIZATION_INBOX_PATH;
-const raw = Buffer.from([1, 2, 3, 4]);
-const digest = createHash('sha256').update(raw).digest('hex');
-const database = new DatabaseSync(path);
-database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0');
-database.prepare(
-  "INSERT INTO finalization_inbox_v1 (key,state,chain_id,context_graph_id,ual,tx_hash,"
-  + "assertion_version,merkle_root,ka_id,batch_id,envelope_sha256,raw_envelope,created_at,updated_at)"
-  + " VALUES (?,'RECEIVED',?,?,?,?,?,?,?,?,?,?,?,?)"
-).run(
-  'crash-entry', 'base:84532', 'graph',
-  'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7',
-  '${TX_HASH}', '1', '0x${'01'.repeat(32)}', '7', '7', digest, raw, 1, 1
-);
-process.stdout.write('READY\n');
-setInterval(() => {}, 60_000);
-`;
-  const child = spawn(process.execPath, ['--experimental-sqlite', '-e', script], {
-    env: { ...process.env, DKG_FINALIZATION_INBOX_PATH: path },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let stderr = '';
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-  await new Promise<void>((resolveReady, rejectReady) => {
-    let stdout = '';
-    const timeout = setTimeout(
-      () => rejectReady(new Error(`finalization inbox crash child timed out: ${stderr}`)),
-      10_000,
-    );
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
-      if (!stdout.includes('READY\n')) return;
-      clearTimeout(timeout);
-      resolveReady();
-    });
-    child.once('error', (error) => {
-      clearTimeout(timeout);
-      rejectReady(error);
-    });
-    child.once('exit', (code, signal) => {
-      clearTimeout(timeout);
-      rejectReady(new Error(
-        `finalization inbox crash child exited early: code=${code} signal=${signal} ${stderr}`,
-      ));
-    });
-  });
-  const exit = new Promise<void>((resolveExit) => child.once('exit', () => resolveExit()));
-  child.kill('SIGKILL');
-  await exit;
-}
+import {
+  BLOCK_HASH,
+  RAW,
+  evidence,
+  received,
+  temporaryDirectory,
+} from './finalization-recovery-sqlite-test-helpers.js';
 
 describe('SQLite finalization recovery store', () => {
   it('lists only due live work in bounded oldest-first batches', async () => {
@@ -594,28 +491,6 @@ describe('SQLite finalization recovery store', () => {
     }
   });
 
-  it('keeps VERIFIED evidence when live capacity is full', async () => {
-    const directory = await temporaryDirectory();
-    try {
-      const store = await openSqliteFinalizationRecoveryStore(directory, { maxEntries: 1 });
-      await store.receive(received());
-      await store.markVerified('entry-1', 0, evidence());
-      await expect(store.receive(received({
-        key: 'entry-2',
-        txHash: `0x${'ef'.repeat(32)}`,
-      }))).resolves.toEqual({ status: 'capacity' });
-      expect(await store.list()).toMatchObject([{ key: 'entry-1', state: 'VERIFIED' }]);
-      expect(await store.health()).toMatchObject({
-        available: true,
-        ready: false,
-        degradedReason: 'capacity-exhausted',
-      });
-      await store.close();
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
   it('serializes concurrent duplicate admission without duplicate rows', async () => {
     const directory = await temporaryDirectory();
     try {
@@ -649,28 +524,6 @@ describe('SQLite finalization recovery store', () => {
       const reopened = await openSqliteFinalizationRecoveryStore(directory);
       expect(await reopened.list()).toHaveLength(2);
       await reopened.close();
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('recovers a committed RECEIVED row after a process crash with a hot WAL', async () => {
-    const directory = await temporaryDirectory();
-    try {
-      const initial = await openSqliteFinalizationRecoveryStore(directory);
-      const path = initial.databasePath;
-      await initial.close();
-
-      await leaveCommittedReceivedInCrashedWal(path);
-      expect(existsSync(`${path}-wal`)).toBe(true);
-
-      const recovered = await openSqliteFinalizationRecoveryStore(directory);
-      expect(await recovered.list()).toMatchObject([{
-        key: 'crash-entry',
-        state: 'RECEIVED',
-        rawMessage: RAW,
-      }]);
-      await recovered.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

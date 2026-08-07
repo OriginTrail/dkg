@@ -42,4 +42,17 @@ describe('Prime Agent terminal error messages', () => {
 
     expect(formatLocalAgentErrorMessage(primeAgent, error)).toBe(expected);
   });
+
+  it('renders a dead pinned session as an actionable message, not the raw daemon 409', () => {
+    const error = new LocalAgentApiError('No live Prime Agent session 019f-dead-uuid', {
+      code: 'PRIME_AGENT_NO_SESSION',
+      source: 'prime-agent-channel',
+    });
+
+    const message = formatLocalAgentErrorMessage(primeAgent, error);
+    expect(message).toBe(
+      'No live Prime Agent session is available. Start or resume a session, then send again.',
+    );
+    expect(message).not.toContain('019f-dead-uuid');
+  });
 });

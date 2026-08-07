@@ -51,6 +51,10 @@ export interface PrimeAgentChannelHealthReport {
   sessionCount: number;
   sessions: PrimeAgentSessionDescriptor[];
   target?: string;
+  busy?: boolean;
+  turnState?: 'queued' | 'running';
+  clientConnected?: boolean;
+  clientDisconnectedAt?: string;
   error?: string;
 }
 
@@ -167,7 +171,14 @@ export async function probePrimeAgentChannelHealth(
         },
         timeout,
       );
-      const parsed = body as { ok?: boolean; sessionId?: string };
+      const parsed = body as {
+        ok?: boolean;
+        sessionId?: string;
+        busy?: boolean;
+        turnState?: string;
+        clientConnected?: boolean;
+        clientDisconnectedAt?: string;
+      };
       if (ok && parsed?.ok === true) {
         // Detect a recycled port: the descriptor claims one session, the
         // process answering claims another.
@@ -175,7 +186,22 @@ export async function probePrimeAgentChannelHealth(
           lastError = `bridge at ${target.healthUrl} reports session ${parsed.sessionId}, expected ${descriptor.sessionId}`;
           continue;
         }
-        return { ok: true, sessionCount: sessions.length, sessions, target: descriptor.sessionId };
+        return {
+          ok: true,
+          sessionCount: sessions.length,
+          sessions,
+          target: descriptor.sessionId,
+          ...(typeof parsed.busy === 'boolean' ? { busy: parsed.busy } : {}),
+          ...(parsed.turnState === 'queued' || parsed.turnState === 'running'
+            ? { turnState: parsed.turnState }
+            : {}),
+          ...(typeof parsed.clientConnected === 'boolean'
+            ? { clientConnected: parsed.clientConnected }
+            : {}),
+          ...(typeof parsed.clientDisconnectedAt === 'string' && parsed.clientDisconnectedAt
+            ? { clientDisconnectedAt: parsed.clientDisconnectedAt }
+            : {}),
+        };
       }
       lastError = `health check failed for session ${descriptor.sessionId}`;
     } catch (err) {

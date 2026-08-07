@@ -121,6 +121,7 @@ import {
   type TripleStoreConfig,
   type Quad,
   type LargeLiteralStorageConfig,
+  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -464,6 +465,18 @@ import type { DKGAgent } from './dkg-agent.js';
  * real input problem. New graph-scoped KAs never enter SWM without a seal.
  */
 export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
+
+/**
+ * GH#1759 — stable code tagged on the `assertionFinalize` throws that mean the
+ * DRAFT HAS NO SEALABLE CONTENT: either it holds no quads at all, or every
+ * quad it holds has a reserved-namespace subject that is filtered out before
+ * the assertion crosses the SWM boundary. Both are client preconditions the
+ * caller can fix (write a quad on a non-reserved subject), not server faults,
+ * but the daemon's `respondAssertionError` had no mapping for them and fell
+ * through to a generic 500. Keyed on a code rather than the message text so
+ * the mapping cannot drift when the wording changes.
+ */
+export const ASSERTION_EMPTY_CODE = 'ASSERTION_EMPTY';
 
 const ROOTLESS_UPDATE_DKG_NS = 'http://dkg.io/ontology/';
 const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -2082,6 +2095,15 @@ export class PublishMethods extends DKGAgentBase {
       canonicalSwmGraph,
       canonicalParts.publicQuads.map((quad) => ({ ...quad, graph: canonicalSwmGraph })),
     );
+    // #2079: a REPLACE, not a drop — the catch-up lane's count gate cannot see
+    // it, so the witness must be dropped explicitly. The head is persisted only
+    // after this point, so a tear in between leaves content ahead of the head;
+    // without this, a witness for the OLD digest would still certify it.
+    // Best-effort, like every other invalidate: never fail a write that has
+    // already committed in order to drop a memo.
+    await invalidateSwmMaterializationWitness(this.store, canonicalSwmGraph, {
+      source: 'agent.publish.graphScopedUpdate.witnessInvalidate',
+    }).catch(() => {});
     if (!replacedSwm) {
       throw Object.assign(
         new Error(
@@ -2762,9 +2784,12 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
     if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
-      throw new Error(
-        `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
-          `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
+      throw Object.assign(
+        new Error(
+          `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
+            `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
+        ),
+        { code: ASSERTION_EMPTY_CODE },
       );
     }
 
@@ -2782,11 +2807,14 @@ export class PublishMethods extends DKGAgentBase {
       (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
     );
     if (userQuads.length === 0 && userPrivateQuads.length === 0) {
-      throw new Error(
-        `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
-          `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
-          `which is filtered out before SWM. Add at least one user-authored ` +
-          `public or private quad on a non-reserved subject before finalizing.`,
+      throw Object.assign(
+        new Error(
+          `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
+            `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
+            `which is filtered out before SWM. Add at least one user-authored ` +
+            `public or private quad on a non-reserved subject before finalizing.`,
+        ),
+        { code: ASSERTION_EMPTY_CODE },
       );
     }
 

@@ -1,5 +1,9 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  invalidateSwmMaterializationWitness,
+  tryReplaceGraphAtomically,
+} from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetAgentAddressesEqual, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
@@ -1485,6 +1489,28 @@ export class SharedMemoryHandler {
             { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
           );
         }
+        // #2079: this graph's content just changed, so the catch-up lane's
+        // materialization witness for it now describes bytes that are gone.
+        //
+        // This is the ONLY replace path outside the materializer holding a lock
+        // the witness module can see — the key above is deliberately the same
+        // `swmKaWriteLockKey` string — and the count gate cannot cover it,
+        // because a replace leaves the count matching.
+        //
+        // Ordinarily a successful apply also advances the head, so catch-up
+        // skips an older descriptor before the witness is consulted at all.
+        // The case this closes is a TORN apply: the replace above succeeds and
+        // the snapshot-file or head write then throws, leaving content=v2,
+        // head=v1 and a witness for v1's digest. A peer re-offering v1 would
+        // pass the head guard, pass the count gate, and HIT the witness —
+        // reported materialized while the store holds v2. Pre-#2079 the
+        // read-back returned false there and the graph was repaired.
+        //
+        // Best-effort: failing to drop a memo must never fail an apply that has
+        // already committed.
+        await invalidateSwmMaterializationWitness(this.store, swmGraph, {
+          source: 'publisher.swm.graphScopedReplace.witnessInvalidate',
+        }).catch(() => {});
         // The gossip envelope carries the verified author address
         // (`verifyAgentEnvelope` above already cryptographically bound
         // it to `recovered`); use it for SWM `prov:wasAttributedTo` so
