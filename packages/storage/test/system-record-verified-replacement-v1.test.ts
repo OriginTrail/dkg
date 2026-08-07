@@ -15,6 +15,7 @@ import {
   computeOwnedSubjectTableDigestV1,
   digestSystemRecordBytesV1,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
+  SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type NetworkIdV1,
@@ -23,6 +24,7 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import { createManagedOxigraphOwnershipControllerV1 } from '../src/managed-oxigraph-ownership-v1-internal.js';
+import { createSystemRecordNonQueuedReservationGateV1 } from '../src/system-record-reservation-gate-v1-internal.js';
 import {
   createSystemRecordVerifiedReplacementRegistryV1,
   type SystemRecordActiveReplacementIssueV1,
@@ -286,6 +288,22 @@ describe('system-record verified replacement V1', () => {
     const handle = registry.issuer.issueActive(input);
     expect(registry.consumer.consume(handle, bindings).head.peerId).toBe(input.head.peerId);
     expect(() => registry.consumer.consume(handle, bindings)).toThrow(/already consumed/);
+  });
+
+  it('keeps one exact nonqueued reservation after wrong-owner or partial release attempts', () => {
+    const gate = createSystemRecordNonQueuedReservationGateV1();
+    const firstOwner = Object.freeze(Object.create(null) as object);
+    const secondOwner = Object.freeze(Object.create(null) as object);
+    const bytes = SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES;
+
+    gate.acquire(firstOwner, bytes);
+    expect(() => gate.acquire(secondOwner, 1)).toThrow(/reservation is already live/);
+    expect(() => gate.release(secondOwner, bytes)).toThrow(/accountant state is inconsistent/);
+    expect(() => gate.release(firstOwner, bytes - 1)).toThrow(/accountant state is inconsistent/);
+    expect(() => gate.acquire(secondOwner, 1)).toThrow(/reservation is already live/);
+    gate.release(firstOwner, bytes);
+    expect(() => gate.acquire(secondOwner, bytes)).not.toThrow();
+    gate.release(secondOwner, bytes);
   });
 
   it('owns one nonqueued atomic reservation and releases handle or facts exactly once', () => {

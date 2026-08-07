@@ -51,6 +51,7 @@ import {
 import {
   assertAuthenticSystemRecordAppliedSnapshotV1,
   assertSystemRecordRootClaimSnapshotV1,
+  requiresSystemRecordSnapshotRematerializationV1,
   type SystemRecordAppliedSnapshotV1,
 } from './system-record-state-snapshot-v1-internal.js';
 import {
@@ -231,7 +232,8 @@ export function deriveSystemRecordActiveReplacementV1(input: {
     ? snapshot.ownedSubjectTable
     : Object.freeze([]) as OwnedSubjectTableObjectV1;
 
-  if (authority.equalHead && !(snapshot.state === 'present' && snapshot.requiresRematerialization)) {
+  if (authority.equalHead && !(snapshot.state === 'present'
+      && requiresSystemRecordSnapshotRematerializationV1(snapshot))) {
     if (snapshot.state !== 'present') {
       throw new Error('equal system-record head cannot exist in absent state');
     }

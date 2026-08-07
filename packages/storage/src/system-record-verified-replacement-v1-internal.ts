@@ -28,7 +28,6 @@ import {
   parseCanonicalOwnedSubjectTableObjectV1,
   SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
   SYSTEM_RECORD_MAX_PROJECTION_BYTES,
-  SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type NetworkIdV1,
@@ -36,6 +35,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { Quad } from './triple-store.js';
+import {
+  createSystemRecordNonQueuedReservationGateV1,
+  type SystemRecordRuntimeReservationGateV1,
+} from './system-record-reservation-gate-v1-internal.js';
 
 declare const VERIFIED_REPLACEMENT_HANDLE_BRAND: unique symbol;
 
@@ -159,11 +162,6 @@ interface RuntimeReservationV1 {
   readonly charges: Record<SystemRecordAtomicChargeCategoryV1, number>;
   phase: RuntimeReservationPhaseV1;
   recoveryOwnership?: object;
-}
-
-export interface SystemRecordRuntimeReservationGateV1 {
-  acquire(owner: object, bytes: number): void;
-  release(owner: object, bytes: number): void;
 }
 
 export interface SystemRecordVerifiedReplacementRegistryDepsV1 {
@@ -884,29 +882,7 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
  */
 export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordVerifiedReplacementRegistryV1 {
   return createSystemRecordVerifiedReplacementRegistryForRuntimeV1({
-    reservationGate: createIsolatedReservationGateV1(),
-  });
-}
-
-function createIsolatedReservationGateV1(): SystemRecordRuntimeReservationGateV1 {
-  let liveOwner: object | null = null;
-  let accountedBytes = 0;
-  return Object.freeze({
-    acquire(owner: object, bytes: number): void {
-      if (liveOwner !== null
-          || accountedBytes + bytes > SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES) {
-        throw new Error('system-record atomic transient reservation is already live');
-      }
-      liveOwner = owner;
-      accountedBytes += bytes;
-    },
-    release(owner: object, bytes: number): void {
-      if (liveOwner !== owner || accountedBytes < bytes) {
-        throw new Error('system-record atomic transient accountant state is inconsistent');
-      }
-      liveOwner = null;
-      accountedBytes -= bytes;
-    },
+    reservationGate: createSystemRecordNonQueuedReservationGateV1(),
   });
 }
 

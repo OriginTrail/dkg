@@ -181,7 +181,6 @@ describe('system-record active next-state derivation', () => {
     expect(snapshot).toMatchObject({
       materializationEpoch: EPOCH,
       appliedTupleEpoch: '12',
-      requiresRematerialization: true,
       appliedState: { materializationEpoch: '12', stateRevision: '1' },
     });
     expect(result.nextAppliedState).toMatchObject({

@@ -1,26 +1,32 @@
 import { describe, expect, it } from 'vitest';
 
+import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import {
   canonicalizeOwnedSubjectTableObjectV1,
+  canonicalizeSystemRecordMaterializationReceiptV1,
   computeOwnedSubjectTableDigestV1,
   computeSystemRecordAccountedBytesV1,
   computeSystemRecordAppliedStateDigestV1,
+  computeSystemRecordMaterializationReceiptDigestV1,
   computeSystemRecordRootClaimSetDigestV1,
   computeSystemRecordStableKeyHashV1,
   SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
   type OwnedSubjectTableObjectV1,
   type SystemRecordAppliedStatePresentV1,
   type SystemRecordCapacityStateV1,
+  type SystemRecordMaterializationReceiptV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import {
   buildSystemRecordReservedStateQuadsV1,
   systemRecordRootClaimSubjectV1,
+  SYSTEM_RECORD_V1_JSON_DATATYPE,
   SYSTEM_RECORD_V1_PREDICATES,
 } from '../src/system-record-rdf-schema-v1-internal.js';
 import {
   assertAuthenticSystemRecordAppliedSnapshotV1,
   assertSystemRecordRootClaimSnapshotV1,
   decodeSystemRecordAppliedSnapshotV1,
+  requiresSystemRecordSnapshotRematerializationV1,
 } from '../src/system-record-state-snapshot-v1-internal.js';
 
 const NETWORK = 'otp:20430' as const;
@@ -80,9 +86,9 @@ describe('system-record reserved-state snapshot decoder', () => {
       capacityState: { revision: '7' },
       materializationEpoch: '2',
       appliedTupleEpoch: '2',
-      requiresRematerialization: false,
     });
     if (decoded.state !== 'present') throw new Error('expected present state');
+    expect(requiresSystemRecordSnapshotRematerializationV1(decoded)).toBe(false);
     expect(decoded.expectedRootClaimQuads).toEqual(canonical.rootClaims);
     expect(decoded.previousReservedQuads).toHaveLength(12);
     expect(Object.isFrozen(decoded)).toBe(true);
@@ -104,10 +110,11 @@ describe('system-record reserved-state snapshot decoder', () => {
       state: 'present',
       materializationEpoch: '2',
       appliedTupleEpoch: '1',
-      requiresRematerialization: true,
       appliedState: { materializationEpoch: '1' },
       receipt: { materializationEpoch: '1' },
     });
+    if (decoded.state !== 'present') throw new Error('expected present state');
+    expect(requiresSystemRecordSnapshotRematerializationV1(decoded)).toBe(true);
     expect(decoded.previousReservedQuads).toEqual(expect.arrayContaining(currentEpoch));
     expect(decoded.previousReservedQuads).not.toEqual(expect.arrayContaining(prior.epoch));
   });
@@ -134,6 +141,31 @@ describe('system-record reserved-state snapshot decoder', () => {
       materializationEpoch: '2',
       quads: [...prior.record, ...prior.capacity, ...current.epoch, ...current.receipt],
     })).toThrow(/epoch binding/);
+  });
+
+  it('rejects split receipt revision, applied-state digest, and head digest bindings', () => {
+    const appliedState = state();
+    const canonical = tuple({ appliedState });
+    const canonicalReceipt = receiptFor(appliedState);
+    const mismatches = [
+      { ...canonicalReceipt, stateRevision: '3' },
+      { ...canonicalReceipt, appliedStateDigest: `0x${'cc'.repeat(32)}` },
+      { ...canonicalReceipt, headDigest: `0x${'dd'.repeat(32)}` },
+    ] as const;
+
+    for (const receipt of mismatches) {
+      expect(() => decodeSystemRecordAppliedSnapshotV1({
+        networkId: NETWORK,
+        stableKeyHash: STABLE_KEY,
+        materializationEpoch: '2',
+        quads: [
+          ...canonical.record,
+          ...canonical.capacity,
+          ...canonical.epoch,
+          ...canonicalReceiptQuads(canonical.receipt, receipt),
+        ],
+      })).toThrow(/epoch binding/);
+    }
   });
 
   it('rejects missing, extra, duplicate, malformed, and mismatched-epoch rows', () => {
@@ -388,17 +420,39 @@ function tuple(overrides: {
       projectionBytes: '8192',
       projectionQuads: '6',
     },
-    receipt: {
-      objectType: 'system-record-materialization-receipt',
-      kind: 'agents',
-      networkId: NETWORK,
-      stableKeyHash: STABLE_KEY,
-      stateRevision: appliedState.stateRevision,
-      appliedStateDigest,
-      headDigest: appliedState.headDigest,
-      materializationEpoch: appliedState.materializationEpoch,
-    },
+    receipt: receiptFor(appliedState, appliedStateDigest),
   });
+}
+
+function receiptFor(
+  appliedState: SystemRecordAppliedStatePresentV1,
+  appliedStateDigest = computeSystemRecordAppliedStateDigestV1(appliedState),
+): Parameters<typeof buildSystemRecordReservedStateQuadsV1>[0]['receipt'] {
+  return {
+    objectType: 'system-record-materialization-receipt',
+    kind: 'agents',
+    networkId: NETWORK,
+    stableKeyHash: STABLE_KEY,
+    stateRevision: appliedState.stateRevision,
+    appliedStateDigest,
+    headDigest: appliedState.headDigest,
+    materializationEpoch: appliedState.materializationEpoch,
+  };
+}
+
+function canonicalReceiptQuads(
+  template: ReturnType<typeof tuple>['receipt'],
+  receipt: SystemRecordMaterializationReceiptV1,
+): ReturnType<typeof tuple>['receipt'] {
+  const bytes = canonicalizeSystemRecordMaterializationReceiptV1(receipt);
+  const json = Buffer.from(bytes).toString('utf8');
+  const digest = computeSystemRecordMaterializationReceiptDigestV1(receipt);
+  return Object.freeze(template.map((quad) => Object.freeze({
+    ...quad,
+    object: quad.predicate === SYSTEM_RECORD_V1_PREDICATES.receipt
+      ? `"${escapeSparqlLiteral(json)}"^^<${SYSTEM_RECORD_V1_JSON_DATATYPE}>`
+      : `"${digest}"`,
+  })));
 }
 
 function state(

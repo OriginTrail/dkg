@@ -65,7 +65,6 @@ export interface SystemRecordPresentSnapshotV1 {
   readonly materializationEpoch: string;
   /** Epoch bound by the exact persisted applied-state/receipt tuple. */
   readonly appliedTupleEpoch: string;
-  readonly requiresRematerialization: boolean;
   readonly previousReservedQuads: readonly Readonly<Quad>[];
   readonly expectedRootClaimQuads: readonly Readonly<Quad>[];
   readonly requiredAbsentReservedSubjects: readonly string[];
@@ -252,11 +251,16 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     receipt,
     materializationEpoch: epoch,
     appliedTupleEpoch: appliedState.materializationEpoch,
-    requiresRematerialization: appliedState.materializationEpoch !== epoch,
     previousReservedQuads: expectedFirstRead,
     expectedRootClaimQuads: canonical.rootClaims,
     requiredAbsentReservedSubjects: Object.freeze([]),
   }));
+}
+
+export function requiresSystemRecordSnapshotRematerializationV1(
+  snapshot: SystemRecordPresentSnapshotV1,
+): boolean {
+  return snapshot.appliedTupleEpoch !== snapshot.materializationEpoch;
 }
 
 export function assertAuthenticSystemRecordAppliedSnapshotV1(

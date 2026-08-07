@@ -1,49 +1,16 @@
 import {
-  SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES,
-} from '@origintrail-official/dkg-core/system-record-v1';
-
-import {
   isManagedOxigraphOwnershipLeaseV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
 } from './managed-oxigraph-ownership-v1-internal.js';
 import {
   createSystemRecordVerifiedReplacementRegistryForRuntimeV1,
-  type SystemRecordRuntimeReservationGateV1,
   type SystemRecordVerifiedReplacementRegistryV1,
 } from './system-record-verified-replacement-v1-internal.js';
-
-interface SystemRecordRuntimeReservationStateV1 {
-  liveOwner: object | null;
-  accountedBytes: number;
-}
+import { createSystemRecordNonQueuedReservationGateV1 } from './system-record-reservation-gate-v1-internal.js';
 
 /** One nonqueued process-wide gate shared by every authentic managed endpoint. */
-const PROCESS_RESERVATION_STATE: SystemRecordRuntimeReservationStateV1 = {
-  liveOwner: null,
-  accountedBytes: 0,
-};
-
-const PROCESS_RESERVATION_GATE: SystemRecordRuntimeReservationGateV1 = Object.freeze({
-  acquire(owner: object, bytes: number): void {
-    if (!Number.isSafeInteger(bytes) || bytes <= 0
-        || PROCESS_RESERVATION_STATE.liveOwner !== null
-        || PROCESS_RESERVATION_STATE.accountedBytes + bytes
-          > SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES) {
-      throw new Error('system-record atomic transient reservation is already live');
-    }
-    PROCESS_RESERVATION_STATE.liveOwner = owner;
-    PROCESS_RESERVATION_STATE.accountedBytes += bytes;
-  },
-  release(owner: object, bytes: number): void {
-    if (PROCESS_RESERVATION_STATE.liveOwner !== owner
-        || PROCESS_RESERVATION_STATE.accountedBytes !== bytes) {
-      throw new Error('system-record atomic transient accountant state is inconsistent');
-    }
-    PROCESS_RESERVATION_STATE.liveOwner = null;
-    PROCESS_RESERVATION_STATE.accountedBytes = 0;
-  },
-});
+const PROCESS_RESERVATION_GATE = createSystemRecordNonQueuedReservationGateV1();
 
 const OWNED_RUNTIMES = new WeakMap<
   ManagedOxigraphOwnershipLeaseV1,
