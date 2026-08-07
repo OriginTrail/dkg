@@ -522,6 +522,146 @@ describe('Working Memory Assertion Lifecycle', () => {
     ]);
   });
 
+  it('a completed marker whose assertion was later discarded is a no-op, not a refusal', async () => {
+    // Regression: a successful migration leaves a `completed` marker behind
+    // forever. If the assertion is later discarded, the next chat-memory
+    // initialization runs migration BEFORE create — misclassifying that as a
+    // fresh legacy draft made it refuse, permanently blocking createAssertion.
+    const name = 'legacy-completed-then-discarded';
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+    await store.createGraph(backupGraph);
+    await store.insert([
+      {
+        subject: sourceGraph,
+        predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
+        object: '"completed"',
+        graph: backupGraph,
+      },
+      {
+        subject: sourceGraph,
+        predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationCopiedPublic',
+        object: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: backupGraph,
+      },
+    ]);
+
+    const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+
+    expect(result.status).toBe('not-needed');
+    // The stale marker describes an assertion that no longer exists, so its
+    // recorded counts must not be echoed back as if data were preserved.
+    expect(result.copiedPublic).toBe(0);
+    expect(result.targetGraph).toBeUndefined();
+
+    // ...and the daemon's create-after-migrate path still works afterwards.
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:fresh', predicate: 'http://schema.org/text', object: '"new"' },
+    ]);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:fresh' }),
+    ]);
+  });
+
+  // The eligibility gate refuses a created/WM draft that is not purely local.
+  // Each guard gets its own case so removing any one of them fails a test —
+  // the SWM case above cannot exercise these, since it differs in state/layer.
+  for (const [label, extraLifecycleQuad] of [
+    ['an in-flight share operation', {
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"op-in-flight"',
+    }],
+    ['a durable promote intent', {
+      predicate: 'http://dkg.io/ontology/promoteOperationIntent',
+      object: '"{\\"version\\":1}"',
+    }],
+    ['an SWM layer pointer', {
+      predicate: 'http://dkg.io/ontology/swmCurrentAssertion',
+      object: 'urn:test:swm:snapshot',
+    }],
+    ['a VM layer pointer', {
+      predicate: 'http://dkg.io/ontology/vmCurrentAssertion',
+      object: 'urn:test:vm:snapshot',
+    }],
+  ] as const) {
+    it(`refuses an otherwise-eligible created/WM draft carrying ${label}`, async () => {
+      const name = `legacy-guard-${label.replace(/[^a-z]+/gi, '-')}`;
+      const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
+      const metaGraph = contextGraphMetaUri(CG_ID);
+      const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+      await store.insert([
+        {
+          subject: 'urn:test:guarded',
+          predicate: 'http://schema.org/text',
+          object: '"must remain"',
+          graph: sourceGraph,
+        },
+        { subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"created"', graph: metaGraph },
+        { subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph: metaGraph },
+        { subject: lifecycle, predicate: extraLifecycleQuad.predicate, object: extraLifecycleQuad.object, graph: metaGraph },
+      ]);
+
+      await expect(
+        publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
+          allocateKaNumber: async () => ({
+            number: 99n,
+            reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/99`,
+          }),
+        }),
+      ).rejects.toMatchObject({ code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
+
+      // Refused before any mutation: metadata and source data both intact.
+      const stateIntact = await store.query(
+        `ASK { GRAPH <${metaGraph}> { <${lifecycle}> <http://dkg.io/ontology/state> "created" } }`,
+      );
+      expect(stateIntact.type === 'boolean' && stateIntact.value).toBe(true);
+      const dataIntact = await store.query(
+        `ASK { GRAPH <${sourceGraph}> { <urn:test:guarded> <http://schema.org/text> "must remain" } }`,
+      );
+      expect(dataIntact.type === 'boolean' && dataIntact.value).toBe(true);
+    });
+  }
+
+  it('refuses an otherwise-eligible created/WM draft whose source graph is sealed', async () => {
+    const name = 'legacy-guard-sealed';
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    await store.insert([
+      {
+        subject: 'urn:test:sealed',
+        predicate: 'http://schema.org/text',
+        object: '"must remain"',
+        graph: sourceGraph,
+      },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"created"', graph: metaGraph },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph: metaGraph },
+      // The seal hangs off the SOURCE GRAPH subject, not the lifecycle URN.
+      {
+        subject: sourceGraph,
+        predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT,
+        object: '"deadbeef"^^<http://www.w3.org/2001/XMLSchema#hexBinary>',
+        graph: metaGraph,
+      },
+    ]);
+
+    await expect(
+      publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
+        allocateKaNumber: async () => ({
+          number: 98n,
+          reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/98`,
+        }),
+      }),
+    ).rejects.toMatchObject({ code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
+
+    const dataIntact = await store.query(
+      `ASK { GRAPH <${sourceGraph}> { <urn:test:sealed> <http://schema.org/text> "must remain" } }`,
+    );
+    expect(dataIntact.type === 'boolean' && dataIntact.value).toBe(true);
+  });
+
   it('write inserts triples into the assertion graph', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);

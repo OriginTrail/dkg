@@ -500,6 +500,23 @@ export class ChatMemoryManager {
   }
 
   /**
+   * The ONE route every chat-turn mutation takes. Target graph, assertion
+   * name, and the resolved-agent mutation options are owned here, so a new
+   * write path cannot silently land in a different graph or skip the
+   * agentAddress that reads resolve under (#277, #2149).
+   */
+  private async writeChatTurns(
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+  ): Promise<void> {
+    await this.tools.writeAssertion(
+      this.agentContextGraph,
+      this.chatTurnsAssertion,
+      quads,
+      this.wmMutationOpts(),
+    );
+  }
+
+  /**
    * Lazy creation of the chat-turn context graph + assertion. Runs on the
    * first `storeChatExchange` / `ensureInitialized` call and is idempotent
    * thereafter.
@@ -657,12 +674,7 @@ export class ChatMemoryManager {
       }
     }
 
-    await this.tools.writeAssertion(
-      this.agentContextGraph,
-      this.chatTurnsAssertion,
-      quads,
-      this.wmMutationOpts(),
-    );
+    await this.writeChatTurns(quads);
     this.knownSessions.add(sessionId);
 
     // Fire-and-forget: extract entity mentions and write them as separate triples
@@ -779,12 +791,7 @@ export class ChatMemoryManager {
         graph: '',
       });
     }
-    await this.tools.writeAssertion(
-      this.agentContextGraph,
-      this.chatTurnsAssertion,
-      quads,
-      this.wmMutationOpts(),
-    );
+    await this.writeChatTurns(quads);
   }
 
   private async extractAndWriteMentions(
@@ -832,12 +839,7 @@ export class ChatMemoryManager {
     }
 
     if (quads.length > 0) {
-      await this.tools.writeAssertion(
-        this.agentContextGraph,
-        this.chatTurnsAssertion,
-        quads,
-        this.wmMutationOpts(),
-      );
+      await this.writeChatTurns(quads);
     }
   }
 
@@ -912,12 +914,7 @@ export class ChatMemoryManager {
         { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${new Date().toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       );
     }
-    await this.tools.writeAssertion(
-      this.agentContextGraph,
-      this.chatTurnsAssertion,
-      quads,
-      this.wmMutationOpts(),
-    );
+    await this.writeChatTurns(quads);
     return triples.length;
   }
 

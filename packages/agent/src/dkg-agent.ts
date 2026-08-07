@@ -87,6 +87,7 @@ import {
   pickNetworkTunables,
   ENTITY_PRED_ALT,
   LegacyKnowledgeAssetReadOnlyError,
+  isAllocatableKaAuthorV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
@@ -2596,7 +2597,7 @@ export class DKGAgent extends DKGAgentBase {
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
     } => {
       const author = explicitAuthor ?? agentAddress;
-      const isEvmAuthor = /^0x[a-fA-F0-9]{40}$/.test(author);
+      const isEvmAuthor = isAllocatableKaAuthorV1(author);
       // The allocator MUST consume `author`'s lane, never the outer default:
       // the number is minted into the reserved UAL the lifecycle is stamped
       // with, so allocating from a different address strands the draft under
