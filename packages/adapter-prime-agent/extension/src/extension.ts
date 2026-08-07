@@ -57,6 +57,22 @@ interface MessageUpdateEvent {
   };
   message?: { role?: string; content?: unknown; errorMessage?: string; stopReason?: string };
 }
+interface AssistantMessageDiagnosticLike {
+  type: string;
+  timestamp: number;
+  details?: Record<string, unknown>;
+}
+interface MessageEndEvent {
+  message?: {
+    role?: string;
+    stopReason?: string;
+    diagnostics?: AssistantMessageDiagnosticLike[];
+    [key: string]: unknown;
+  };
+}
+interface MessageEndEventResult {
+  message: NonNullable<MessageEndEvent['message']>;
+}
 interface AgentMessageLike {
   role?: string;
   content?: unknown;
@@ -265,6 +281,7 @@ class SessionBridge {
   // in the background. Retry starts have no before_agent_start; abort them
   // until a genuinely fresh prompt boundary supersedes the failed run.
   #failedRunQuarantined = false;
+  #failedRunFailure: SanitizedTurnFailure | undefined;
   #agentActive = false;
   #abortActiveAgent: (() => void) | undefined;
   #closed = false;
@@ -426,6 +443,7 @@ class SessionBridge {
     this.#activeRunTurn = undefined;
     this.#runHasFreshPrompt = false;
     this.#failedRunQuarantined = false;
+    this.#failedRunFailure = undefined;
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
     const server = this.#server;
@@ -624,6 +642,7 @@ class SessionBridge {
     if (message?.role === 'user') {
       this.#runHasFreshPrompt = true;
       this.#failedRunQuarantined = false;
+      this.#failedRunFailure = undefined;
       return;
     }
     if (message?.role !== 'custom' || message.customType !== BRIDGE_TURN_MARKER_TYPE) return;
@@ -673,7 +692,12 @@ class SessionBridge {
     // finish the HTTP/SSE turn, clear admission, and never expose the raw
     // provider payload (which may contain credential-bearing diagnostics).
     if (eventType === 'error') {
-      this.#failTurn(turn, sanitizedProviderFailure(event));
+      // The provider has already declared this stream terminal. Do not call
+      // ctx.abort() here: Prime may emit agent_end synchronously from abort,
+      // before the matching message_end hook can replace the finalized error
+      // with the non-retryable bridge marker. Genuine timer failures still
+      // abort below because their provider stream is not terminal yet.
+      this.#failTurn(turn, sanitizedProviderFailure(event), false);
       return;
     }
     // At the pinned Prime Agent API, only text_delta is user-visible answer
@@ -695,6 +719,66 @@ class SessionBridge {
     }
   }
 
+  onMessageEnd(event: MessageEndEvent): MessageEndEventResult | undefined {
+    const message = event.message;
+    const activeTurn = this.#activeRunTurn;
+    // Prime Agent 0.7 may finalize a provider failure directly at message_end
+    // without first emitting a message_update error to extensions. Treat the
+    // finalized bridge-owned error as authoritative too; otherwise agent_end
+    // resolves the HTTP turn as an empty success and the UI renders a blank
+    // assistant row while Prime performs its hidden retry.
+    if (
+      !this.#failedRunQuarantined &&
+      activeTurn &&
+      this.#turn === activeTurn &&
+      message?.role === 'assistant' &&
+      message.stopReason === 'error'
+    ) {
+      this.#failTurn(activeTurn, sanitizedProviderFailure({ message }), false);
+    }
+    if (
+      !this.#failedRunQuarantined ||
+      message?.role !== 'assistant' ||
+      message.stopReason !== 'error'
+    ) {
+      return undefined;
+    }
+    const failure = this.#failedRunFailure;
+    const diagnostics = (Array.isArray(message.diagnostics) ? message.diagnostics : [])
+      // A structured auth diagnostic makes Prime force one credential-source
+      // retry even when the message is otherwise marked terminal. The bridge
+      // already returned that failure to its HTTP caller, so retain the safe
+      // classification below instead of the provider payload that triggers a
+      // second hidden request.
+      .filter((diagnostic) => diagnostic.type !== 'provider_stream_failure');
+    const hasLifecycleFailure = diagnostics.some(
+      (diagnostic) => diagnostic.type === 'agent_lifecycle_failure',
+    );
+    // Prime retries every assistant `stopReason: error` unless the finalized
+    // message is explicitly terminal. Mark only the bridge-owned run that has
+    // already returned a terminal HTTP verdict. This is handled synchronously
+    // in Prime's public message_end replacement hook, before its retry decision,
+    // avoiding the race inherent in trying to abort a retry timer later.
+    return {
+      message: {
+        ...message,
+        ...(failure ? { errorMessage: failure.message } : {}),
+        diagnostics: [
+          ...diagnostics,
+          ...(!hasLifecycleFailure ? [{
+            type: 'agent_lifecycle_failure',
+            timestamp: Date.now(),
+            details: {
+              source: 'dkg-bridge',
+              reason: 'terminal_bridge_response_settled',
+              ...(failure ? { code: failure.code } : {}),
+            },
+          }] : []),
+        ],
+      },
+    };
+  }
+
   onAgentStart(ctx?: ExtensionCtxLike): void {
     this.#activeRunTurn = undefined;
     this.#runHasFreshPrompt = false;
@@ -714,16 +798,20 @@ class SessionBridge {
   }
 
   onAgentEnd(): void {
-    this.#agentActive = false;
-    this.#abortActiveAgent = undefined;
     this.#runHasFreshPrompt = false;
     const turn = this.#activeRunTurn;
     this.#activeRunTurn = undefined;
-    if (!turn) return;
-    if (this.#turn === turn && !turn.responseSettled) {
-      this.#settleResponse({ text: turn.chunks.join('') });
+    if (turn) {
+      if (this.#turn === turn && !turn.responseSettled) {
+        this.#settleResponse({ text: turn.chunks.join('') });
+      }
+      this.#clearTurn(turn);
     }
-    this.#clearTurn(turn);
+
+    this.#failedRunQuarantined = false;
+    this.#failedRunFailure = undefined;
+    this.#agentActive = false;
+    this.#abortActiveAgent = undefined;
   }
 
   #armTurnTimers(turn: PendingTurn): void {
@@ -765,7 +853,11 @@ class SessionBridge {
     if (this.#turn === turn) this.#turn = undefined;
   }
 
-  #failTurn(turn: PendingTurn, failure: SanitizedTurnFailure): void {
+  #failTurn(
+    turn: PendingTurn,
+    failure: SanitizedTurnFailure,
+    abortActiveAgent = true,
+  ): void {
     const ownsActiveRun = this.#activeRunTurn === turn;
     if (this.#turn === turn) {
       this.#settleResponse({
@@ -777,12 +869,15 @@ class SessionBridge {
     }
     if (!ownsActiveRun) return;
     this.#failedRunQuarantined = true;
+    this.#failedRunFailure = failure;
     // Keep #agentActive true until the actual agent_end so the bridge does not
     // admit a successor into a run that has not reached a boundary yet.
-    try {
-      this.#abortActiveAgent?.();
-    } catch {
-      /* the ownership quarantine remains authoritative */
+    if (abortActiveAgent) {
+      try {
+        this.#abortActiveAgent?.();
+      } catch {
+        /* the ownership quarantine remains authoritative */
+      }
     }
   }
 
@@ -844,6 +939,8 @@ export default function dkgBridgeExtension(pi: ExtensionApiLike): void {
   pi.on('message_update', (event: MessageUpdateEvent) => {
     bridge?.onMessageUpdate(event);
   });
+
+  pi.on('message_end', (event: MessageEndEvent) => bridge?.onMessageEnd(event));
 
   pi.on('input', (event: InputEvent) => bridge?.onInput(event) ?? { action: 'continue' });
 

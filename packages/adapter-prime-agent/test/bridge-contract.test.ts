@@ -383,7 +383,7 @@ describe('/send', () => {
     bridge.onAgentEnd();
   });
 
-  it('sanitizes a provider failure and aborts its auto-retry without touching the successor', async () => {
+  it('sanitizes a terminal provider failure before Prime can auto-retry it', async () => {
     const firstResponse = await fetch(`${base}/stream`, {
       method: 'POST',
       headers: authed(),
@@ -391,24 +391,20 @@ describe('/send', () => {
     });
     await until(() => sent.length === 1);
     let failedRunAbortCount = 0;
-    startBridgeRun({
+    const failedRunCtx = {
       sessionManager: { getSessionId: () => 'sess-test' },
       abort: () => { failedRunAbortCount += 1; },
-    });
-    bridge.onMessageUpdate({
-      assistantMessageEvent: {
-        type: 'error',
-        reason: 'error',
-        error: {
-          errorMessage: '{"error":{"message":"Unauthorized","providerToken":"must-not-leak"}}',
-        },
-      },
-      message: {
-        role: 'assistant',
-        stopReason: 'error',
-        errorMessage: 'provider key sk-must-not-leak was Unauthorized',
-      },
-    });
+    };
+    startBridgeRun(failedRunCtx);
+    // Prime Agent 0.7 can expose provider failures only at message_end, with no
+    // preceding message_update error for extensions.
+    const finalizedFailure = {
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage: 'provider key sk-must-not-leak was Unauthorized',
+      diagnostics: [{ type: 'provider_stream_failure', timestamp: 1 }],
+    };
+    const replacement = bridge.onMessageEnd({ message: finalizedFailure });
 
     const firstText = await firstResponse.text();
     expect(firstText).toContain('"type":"error"');
@@ -416,7 +412,10 @@ describe('/send', () => {
     expect(firstText).toContain('"type":"final"');
     expect(firstText).not.toContain('must-not-leak');
     expect(firstText).not.toContain('sk-');
-    expect(failedRunAbortCount).toBe(1);
+    // A terminal provider event must finalize through message_end naturally.
+    // Aborting here can re-enter agent_end first and erase the marker that
+    // makes the finalized error non-retryable.
+    expect(failedRunAbortCount).toBe(0);
 
     // The failed run is still active until its real agent_end, so a successor
     // cannot be injected into an ambiguous lifecycle window.
@@ -427,7 +426,25 @@ describe('/send', () => {
     });
     expect(tooSoon.status).toBe(429);
     expect(sent).toEqual(['use the provider']);
+    expect(replacement?.message).toMatchObject({
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage: 'Prime Agent provider authentication failed. Check the configured provider credentials.',
+      diagnostics: [
+        {
+          type: 'agent_lifecycle_failure',
+          details: {
+            source: 'dkg-bridge',
+            reason: 'terminal_bridge_response_settled',
+            code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+          },
+        },
+      ],
+    });
     bridge.onAgentEnd();
+    // The finalized message marker makes Prime's retry decision deterministic,
+    // so no abort or deferred retry can race a successor turn.
+    expect(failedRunAbortCount).toBe(0);
 
     const second = fetch(`${base}/send`, {
       method: 'POST',
@@ -436,42 +453,8 @@ describe('/send', () => {
     });
     await until(() => sent.length === 2);
     expect(sent).toEqual(['use the provider', 'retry after credentials are fixed']);
-
-    // Prime may prepare the queued action before its retry wins the handoff.
-    // Its hidden ownership marker is cached on that action and excluded from
-    // provider context; it must not be consumed by the intervening retry run.
-    const preparedSuccessor = bridge.onBeforeAgentStart({ prompt: 'retry after credentials are fixed' });
-    expect(preparedSuccessor).toBeDefined();
-    const providerContext = bridge.onContext({
-      messages: [
-        { role: 'user', content: [{ type: 'text', text: 'retry after credentials are fixed' }] },
-        { role: 'custom', ...preparedSuccessor!.message },
-      ],
-    });
-    expect(providerContext?.messages).toEqual([
-      { role: 'user', content: [{ type: 'text', text: 'retry after credentials are fixed' }] },
-    ]);
-
-    // Prime auto-retry uses agent.continue(), so it emits no ownership marker.
-    // It remains unowned, is aborted, and neither its output nor its end can
-    // settle the queued successor.
-    let retryAbortCount = 0;
-    const retryCtx = {
-      sessionManager: { getSessionId: () => 'sess-test' },
-      abort: () => { retryAbortCount += 1; },
-    };
-    bridge.onAgentStart(retryCtx);
-    bridge.onBeforeProviderRequest(retryCtx);
-    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'retry output from failed turn' } });
-    bridge.onAgentEnd();
-    expect(retryAbortCount).toBe(1);
-    const settledByStaleEnd = await Promise.race([
-      second.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
-    ]);
-    expect(settledByStaleEnd).toBe(false);
-
-    startBridgeRun(undefined, preparedSuccessor);
+    // No unowned retry can get ahead of this successor.
+    startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'recovered' } });
     bridge.onAgentEnd();
     const secondResponse = await second;
@@ -514,6 +497,7 @@ describe('/send', () => {
     // The hard timeout aborts but keeps admission closed until Prime confirms
     // the lifecycle boundary with agent_end.
     bridge.onAgentEnd();
+    expect(abortCount).toBe(1);
     const recovered = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
@@ -526,7 +510,7 @@ describe('/send', () => {
     expect((await recovered).status).toBe(200);
   });
 
-  it('keeps a zombie run closed through its end and discards an unowned retry tail', async () => {
+  it('keeps a zombie run closed through its end, then releases a fresh successor', async () => {
     await bridge.stop();
     bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-stale-events', {
       turnIdleTimeoutMs: 30,
@@ -563,6 +547,7 @@ describe('/send', () => {
       message: { role: 'assistant', stopReason: 'aborted' },
     });
     bridge.onAgentEnd();
+    await new Promise((r) => setTimeout(r, 0));
 
     const successor = fetch(`${base}/send`, {
       method: 'POST',
@@ -571,17 +556,6 @@ describe('/send', () => {
     });
     await until(() => sent.length === 2);
     expect(sent).toEqual(['zombie turn', 'successor']);
-
-    // A continuation/retry has no before_agent_start and therefore cannot
-    // claim or settle the pending successor.
-    bridge.onAgentStart();
-    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'zombie-retry-tail ' } });
-    bridge.onAgentEnd();
-    const settledByRetry = await Promise.race([
-      successor.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
-    ]);
-    expect(settledByRetry).toBe(false);
 
     startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh answer' } });

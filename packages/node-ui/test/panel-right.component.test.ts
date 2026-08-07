@@ -584,6 +584,77 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
+  it('renders a terminal Prime provider failure before the first token and releases the composer', async () => {
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { LocalAgentApiError } = await import('../src/ui/api.js');
+
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime Agent bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockRejectedValueOnce(new LocalAgentApiError(
+      'Prime Agent provider authentication failed.',
+      {
+        code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+        source: 'prime-agent-channel',
+        correlationId: 'corr-prime-auth',
+      },
+    ));
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Use the provider');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain(
+        'Error: Prime Agent provider authentication failed. Check its provider credentials and try again.',
+      );
+      expect(container.textContent).not.toContain('Thinking…');
+      expect((container.querySelector('textarea') as HTMLTextAreaElement).disabled).toBe(false);
+    });
+    expect(persistLocalAgentChatFailureMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('imports skipped chat attachments as context entries and clears the composer after send', async () => {
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:epub',

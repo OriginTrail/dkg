@@ -43,6 +43,25 @@ function buildFailedTurnDisplay(
   return { content: '', failureNotice: failureContent, synthesized: true };
 }
 
+/**
+ * Build the terminal display for a failure observed by the live stream.
+ *
+ * A failure before the first token used to leave the assistant row dependent
+ * on the optional `failureNotice` side channel. Keeping the actionable error
+ * as the row's primary synthetic content makes the terminal state durable
+ * across re-renders, integration refreshes, and renderers that only consume
+ * `content`. Partial real output still keeps markdown and gets a separate
+ * plaintext failure notice.
+ */
+export function buildLiveFailedTurnDisplay(
+  partialText: string,
+  failureContent: string,
+): Pick<LocalAgentMessage, 'content' | 'failureNotice' | 'synthesized'> {
+  return partialText
+    ? { content: partialText, failureNotice: failureContent, synthesized: false }
+    : { content: failureContent, synthesized: true };
+}
+
 export function mapHistoryMessage(message: LocalAgentHistoryMessage, integrationId = ''): LocalAgentMessage {
   const author = message.author.toLowerCase();
   const role: LocalAgentMessage['role'] = author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user';
@@ -205,4 +224,3 @@ export function renderMessageContent(
     </span>
   );
 }
-

@@ -16,7 +16,10 @@ import {
 } from '../src/daemon/prime-agent.js';
 import { handlePrimeAgentRoutes } from '../src/daemon/routes/prime-agent.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
-import { connectLocalAgentIntegrationFromUi } from '../src/daemon/local-agents.js';
+import {
+  connectLocalAgentIntegrationFromUi,
+  refreshLocalAgentIntegrationFromUi,
+} from '../src/daemon/local-agents.js';
 
 // The setup entry pulls in the adapter's runtime; the daemon only ever calls it
 // on disconnect, and none of these tests exercise that path.
@@ -561,6 +564,60 @@ describe('connect from the Node UI', () => {
 
     expect(result.integration.runtime?.status).toBe('error');
     expect(result.integration.runtime?.lastError).toContain('not writable');
+  });
+});
+
+describe('refresh from the Node UI', () => {
+  it('promotes a previously idle Prime integration when a live session appears', async () => {
+    const bridge = await startStubBridge({ sessionId: 's1' });
+    writeDescriptor('s1', bridge.url);
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: { kind: 'prime-agent-channel' },
+          runtime: {
+            status: 'degraded',
+            ready: false,
+            lastError: 'no live Prime Agent session',
+          },
+          metadata: { sessionCount: 0 },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+
+    expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
+    expect(result.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
+    expect(result.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's1' });
+  });
+
+  it('returns Prime to idle and clears a stale elected session when none is live', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: {
+            kind: 'prime-agent-channel',
+            bridgeUrl: 'http://127.0.0.1:4321',
+          },
+          runtime: { status: 'ready', ready: true, lastError: null },
+          metadata: { sessionCount: 1, activeSessionId: 'old-session' },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+
+    expect(result.runtime).toMatchObject({
+      status: 'degraded',
+      ready: false,
+      lastError: 'no live Prime Agent session',
+    });
+    expect(result.metadata).toMatchObject({ sessionCount: 0, activeSessionId: null });
   });
 });
 

@@ -1064,6 +1064,47 @@ export async function refreshLocalAgentIntegrationFromUi(
     throw new Error(`Unknown integration: ${id}`);
   }
   if (normalizedId !== 'openclaw') {
+    if (normalizedId === 'prime-agent') {
+      // A Prime bridge is session-scoped: connecting the integration before a
+      // session exists stores the expected degraded/idle state, but that state
+      // must not become sticky after a session starts. Refresh discovery and
+      // persist the elected live bridge just like the initial Connect flow.
+      const health = await probePrimeAgentChannelHealth(bridgeAuthToken, {
+        timeoutMs: 3_000,
+      });
+      const live = health.sessions.find((session) => session.sessionId === health.target)
+        ?? health.sessions[0];
+
+      if (health.ok && live) {
+        return updateLocalAgentIntegration(config, normalizedId, {
+          transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+          metadata: {
+            sessionCount: health.sessionCount,
+            activeSessionId: live.sessionId,
+          },
+        });
+      }
+
+      return updateLocalAgentIntegration(config, normalizedId, {
+        runtime: {
+          status: 'degraded',
+          ready: false,
+          lastError: health.error ?? 'no live Prime Agent session',
+        },
+        metadata: {
+          sessionCount: health.sessionCount,
+          // Metadata is merged, so null explicitly retires a session elected
+          // by an earlier refresh instead of leaving a stale route in config.
+          activeSessionId: null,
+        },
+      });
+    }
+
     if (normalizedId === 'hermes') {
       const health = await probeHermesChannelHealth(config, bridgeAuthToken, {
         timeoutMs: 3_000,
