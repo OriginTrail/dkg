@@ -137,8 +137,7 @@ export function createSystemRecordProviderV1(
         timeoutMs,
       );
       timeout.unref?.();
-      let frameReservation: ReturnType<SystemRecordProviderFrameAdmissionV1['tryReserve']> = null;
-      let responseTokens: ReturnType<SystemRecordProviderTokenBucketV1['tryReserveResponse']> = null;
+      let successReservation: ReturnType<SystemRecordProviderFrameAdmissionV1['tryReserve']> = null;
       try {
         let request: SystemRecordRequestHeaderV1;
         try {
@@ -161,8 +160,8 @@ export function createSystemRecordProviderV1(
         }
 
         const successFrameCapacity = maximumSuccessFrameBytes(request);
-        frameReservation = options.frameAdmission.tryReserve(successFrameCapacity);
-        if (frameReservation === null) return reset(exchange, 'memory-capacity');
+        successReservation = options.frameAdmission.tryReserve(successFrameCapacity);
+        if (successReservation === null) return reset(exchange, 'memory-capacity');
 
         let artifact: SystemRecordProviderArtifactV1 | null;
         try {
@@ -196,25 +195,17 @@ export function createSystemRecordProviderV1(
         } catch {
           return await writeError(exchange, request.requestId, 'internal');
         }
-        frameReservation.shrinkTo(response.byteLength);
-        responseTokens = bucket.tryReserveResponse(response.byteLength);
-        if (responseTokens === null) return reset(exchange, 'response-rate');
-        try {
-          await raceAbort(exchange.writeResponseFrame(response, controller.signal), controller.signal);
-        } catch (error) {
-          return reset(exchange, controller.signal.aborted ? abortedReason() : 'write-failed');
-        }
-        responseTokens.commit();
-        served += 1;
-        return 'served';
+        const reservation = successReservation;
+        successReservation = null;
+        return await sendResponse(exchange, response, reservation);
 
         async function writeError(
           target: SystemRecordProviderExchangeV1,
           requestId: string,
           status: Exclude<SystemRecordResponseStatusV1, 'ok' | 'busy'>,
         ): Promise<SystemRecordProviderServeOutcomeV1> {
-          frameReservation?.release();
-          frameReservation = null;
+          successReservation?.release();
+          successReservation = null;
           const errorCode = status === 'not-found'
             ? 'not_found'
             : status === 'invalid-request'
@@ -227,18 +218,34 @@ export function createSystemRecordProviderV1(
             payloadBytes: '0',
             errorCode,
           }, EMPTY);
-          frameReservation = options.frameAdmission.tryReserve(response.byteLength);
-          if (frameReservation === null) return reset(target, 'memory-capacity');
-          responseTokens = bucket.tryReserveResponse(response.byteLength);
-          if (responseTokens === null) return reset(target, 'response-rate');
+          return await sendResponse(target, response);
+        }
+
+        async function sendResponse(
+          target: SystemRecordProviderExchangeV1,
+          response: Uint8Array,
+          admitted: Exclude<ReturnType<SystemRecordProviderFrameAdmissionV1['tryReserve']>, null>
+            | null = null,
+        ): Promise<SystemRecordProviderServeOutcomeV1> {
+          const reservation = admitted ?? options.frameAdmission.tryReserve(response.byteLength);
+          if (reservation === null) return reset(target, 'memory-capacity');
+          let responseTokens: ReturnType<SystemRecordProviderTokenBucketV1['tryReserveResponse']> = null;
           try {
-            await raceAbort(target.writeResponseFrame(response, controller.signal), controller.signal);
-          } catch (error) {
-            return reset(target, controller.signal.aborted ? abortedReason() : 'write-failed');
+            reservation.shrinkTo(response.byteLength);
+            responseTokens = bucket.tryReserveResponse(response.byteLength);
+            if (responseTokens === null) return reset(target, 'response-rate');
+            try {
+              await raceAbort(target.writeResponseFrame(response, controller.signal), controller.signal);
+            } catch (error) {
+              return reset(target, controller.signal.aborted ? abortedReason() : 'write-failed');
+            }
+            responseTokens.commit();
+            served += 1;
+            return 'served';
+          } finally {
+            responseTokens?.release();
+            reservation.release();
           }
-          responseTokens.commit();
-          served += 1;
-          return 'served';
         }
 
         function abortedReason(): 'closed' | 'deadline' | 'invalid-frame' {
@@ -247,8 +254,7 @@ export function createSystemRecordProviderV1(
         }
       } finally {
         clearTimeout(timeout);
-        responseTokens?.release();
-        frameReservation?.release();
+        successReservation?.release();
         activeControllers.delete(controller);
         permit.release();
       }

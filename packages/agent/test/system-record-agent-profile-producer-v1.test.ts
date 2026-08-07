@@ -20,12 +20,12 @@ import { createEvmPersonalMessageSignerV1 } from '../src/evm-message-signer-v1.j
 import { prepareAgentProfileV1, type PreparedAgentProfileV1 } from '../src/profile.js';
 import {
   createAgentProfileProducerV1,
-  createInMemoryAgentProfilePublicationStoreV1,
   type AgentProfileProducerPublicationStoreV1,
   type AgentProfileProducerV1,
   type AgentProfilePublicationBindingV1,
   type SystemRecordPeerSignerV1,
 } from '../src/system-records/agent-profile-producer-v1.js';
+import { createInMemoryAgentProfilePublicationStoreV1 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 
 const NETWORK = 'base:84532' as const;
 const SCHEMA_DIGEST = `0x${'ab'.repeat(32)}` as Digest32V1;
@@ -198,6 +198,26 @@ describe('agent-profile system-record producer V1', () => {
     retry.abort();
     expect(fence).toHaveBeenCalledTimes(2);
     expect(install).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate canonical profile triples before fencing publication', async () => {
+    const fixture = await producerFixture();
+    const fence = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence,
+      install: () => {},
+    });
+    const duplicate = Object.freeze({
+      ...fixture.prepared,
+      quads: Object.freeze([...fixture.prepared.quads, fixture.prepared.quads[0]!]),
+    });
+
+    await expect(producer.prepare(duplicate)).rejects.toThrow(/duplicate-free/);
+    expect(fence).not.toHaveBeenCalled();
   });
 });
 

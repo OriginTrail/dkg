@@ -127,12 +127,17 @@ describe('system-record provider V1', () => {
   });
 
   it('refuses a corrupted cache object instead of serving bytes under its requested digest', async () => {
+    const corruptedBytes = Uint8Array.of(9, 9, 9);
+    expect(digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+      corruptedBytes,
+    )).not.toBe(DIGEST);
     const provider = createSystemRecordProviderV1({
       networkId: NETWORK,
       repository: repository({
         objectKind: 'profile-bundle',
         objectDigest: DIGEST,
-        canonicalBytes: Uint8Array.of(9, 9, 9),
+        canonicalBytes: corruptedBytes,
       }),
       frameAdmission: frameAdmission(),
     });

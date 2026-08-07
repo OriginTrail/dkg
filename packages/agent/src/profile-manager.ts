@@ -9,22 +9,17 @@ import {
   type PreparedAgentProfileV1,
 } from './profile.js';
 
-export interface AgentProfilePublicationHooksV1 {
-  beforePublish(input: Readonly<{
+export interface AgentProfilePublicationTransactionV1 {
+  complete(result: PublishResult): void | Promise<void>;
+  abort(error: unknown): void | Promise<void>;
+}
+
+export interface AgentProfilePublicationCoordinatorV1 {
+  prepare(input: Readonly<{
     prepared: PreparedAgentProfileV1;
     operation: 'publish' | 'update';
     currentKcId: bigint | null;
-  }>): void | Promise<void>;
-  afterPublish(input: Readonly<{
-    prepared: PreparedAgentProfileV1;
-    operation: 'publish' | 'update';
-    result: PublishResult;
-  }>): void | Promise<void>;
-  publishFailed?(input: Readonly<{
-    prepared: PreparedAgentProfileV1;
-    operation: 'publish' | 'update';
-    error: unknown;
-  }>): void | Promise<void>;
+  }>): AgentProfilePublicationTransactionV1 | Promise<AgentProfilePublicationTransactionV1>;
 }
 
 /**
@@ -34,7 +29,7 @@ export interface AgentProfilePublicationHooksV1 {
 export class ProfileManager {
   private readonly publisher: Publisher;
   private readonly store: TripleStore;
-  private readonly publicationHooks?: AgentProfilePublicationHooksV1;
+  private readonly publicationCoordinator?: AgentProfilePublicationCoordinatorV1;
   private currentKcId: bigint | null = null;
   /**
    * Root entity URI used by the most recent publish. Persisted across
@@ -47,18 +42,18 @@ export class ProfileManager {
   constructor(
     publisher: Publisher,
     store: TripleStore,
-    publicationHooks?: AgentProfilePublicationHooksV1,
+    publicationCoordinator?: AgentProfilePublicationCoordinatorV1,
   ) {
     this.publisher = publisher;
     this.store = store;
-    this.publicationHooks = publicationHooks;
+    this.publicationCoordinator = publicationCoordinator;
   }
 
   async publishProfile(config: AgentProfileConfig): Promise<PublishResult> {
     const prepared = prepareAgentProfileV1(config);
     const { quads, rootEntity } = prepared;
     const operation = this.currentKcId === null ? 'publish' : 'update';
-    await this.publicationHooks?.beforePublish({
+    const publicationTransaction = await this.publicationCoordinator?.prepare({
       prepared,
       operation,
       currentKcId: this.currentKcId,
@@ -139,10 +134,10 @@ export class ProfileManager {
         : await this.publisher.publish(options);
       this.currentKcId = result.kaId;
       this.lastRootEntity = rootEntity;
-      await this.publicationHooks?.afterPublish({ prepared, operation, result });
+      await publicationTransaction?.complete(result);
       return result;
     } catch (error) {
-      await this.publicationHooks?.publishFailed?.({ prepared, operation, error });
+      await publicationTransaction?.abort(error);
       throw error;
     }
   }

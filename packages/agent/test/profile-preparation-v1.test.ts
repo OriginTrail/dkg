@@ -38,7 +38,7 @@ describe('prepared agent profile V1', () => {
     expect(prepared.lastSeen).toBe('2026-08-07T11:00:00.000Z');
   });
 
-  it('hands the same prepared profile to the optional hooks and legacy publisher', async () => {
+  it('hands one prepared profile to the publication transaction and legacy publisher', async () => {
     const result = publishResult(7n);
     const publisher = {
       publish: vi.fn(async () => result),
@@ -49,28 +49,32 @@ describe('prepared agent profile V1', () => {
       deleteBySubjectPrefix: vi.fn(async () => 0),
     } as unknown as TripleStore;
     const seen: unknown[] = [];
-    const hooks = {
-      beforePublish: vi.fn((input) => { seen.push(input.prepared); }),
-      afterPublish: vi.fn((input) => { seen.push(input.prepared); }),
-      publishFailed: vi.fn(),
+    const transaction = {
+      complete: vi.fn(),
+      abort: vi.fn(),
     };
-    const manager = new ProfileManager(publisher, store, hooks);
+    const coordinator = {
+      prepare: vi.fn((input) => {
+        seen.push(input.prepared);
+        return transaction;
+      }),
+    };
+    const manager = new ProfileManager(publisher, store, coordinator);
     await manager.publishProfile({
       peerId: 'fixture-peer', name: 'Fixture', skills: [],
       lastSeen: '2026-08-07T12:00:00.000Z',
     });
 
-    expect(seen).toHaveLength(2);
-    expect(seen[1]).toBe(seen[0]);
-    expect(hooks.beforePublish).toHaveBeenCalledWith(expect.objectContaining({ operation: 'publish' }));
-    expect(hooks.afterPublish).toHaveBeenCalledWith(expect.objectContaining({ result }));
-    expect(hooks.publishFailed).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(1);
+    expect(coordinator.prepare).toHaveBeenCalledWith(expect.objectContaining({ operation: 'publish' }));
+    expect(transaction.complete).toHaveBeenCalledWith(result);
+    expect(transaction.abort).not.toHaveBeenCalled();
     const publishedQuads = (publisher.publish as ReturnType<typeof vi.fn>).mock.calls[0]![0].quads;
     expect(publishedQuads).toEqual((seen[0] as { quads: unknown[] }).quads);
     expect(publishedQuads).not.toBe((seen[0] as { quads: unknown[] }).quads);
   });
 
-  it('retains the completed legacy publication identity when the post-publish hook fails', async () => {
+  it('retains the completed legacy publication identity when transaction completion fails', async () => {
     const result = publishResult(9n);
     const publisher = {
       publish: vi.fn(async () => result),
@@ -80,11 +84,12 @@ describe('prepared agent profile V1', () => {
       query: vi.fn(async () => ({ type: 'bindings', variables: ['s'], bindings: [] })),
       deleteBySubjectPrefix: vi.fn(async () => 0),
     } as unknown as TripleStore;
-    const failure = vi.fn();
+    const abort = vi.fn();
     const manager = new ProfileManager(publisher, store, {
-      beforePublish: () => {},
-      afterPublish: () => { throw new Error('record install failed'); },
-      publishFailed: failure,
+      prepare: () => ({
+        complete: () => { throw new Error('record install failed'); },
+        abort,
+      }),
     });
     const config = {
       peerId: 'fixture-peer', name: 'Fixture', skills: [],
@@ -93,7 +98,7 @@ describe('prepared agent profile V1', () => {
 
     await expect(manager.publishProfile(config)).rejects.toThrow(/record install failed/);
     expect(manager.profileKcId).toBe(9n);
-    expect(failure).toHaveBeenCalledWith(expect.objectContaining({ operation: 'publish' }));
+    expect(abort).toHaveBeenCalledWith(expect.objectContaining({ message: 'record install failed' }));
     await expect(manager.publishProfile(config)).rejects.toThrow(/record install failed/);
     expect(publisher.publish).toHaveBeenCalledTimes(1);
     expect(publisher.update).toHaveBeenCalledTimes(1);
@@ -110,8 +115,10 @@ describe('prepared agent profile V1', () => {
     } as unknown as TripleStore;
     const operations: string[] = [];
     const manager = new ProfileManager(publisher, store, {
-      beforePublish: ({ operation }) => { operations.push(operation); },
-      afterPublish: () => {},
+      prepare: ({ operation }) => {
+        operations.push(operation);
+        return { complete: () => {}, abort: () => {} };
+      },
     });
     const config = {
       peerId: 'fixture-peer', name: 'Fixture', skills: [],
