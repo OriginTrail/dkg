@@ -2755,6 +2755,25 @@ async function readSwmMetaRowsPage(
 const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
 
 /**
+ * Ceiling for one subject row-group in the fresh-SWM plan lane. Whole-subject
+ * windows are its consistency unit (#1788), so an oversized subject cannot be
+ * served atomically and receives a bounded refusal. This limit is intentionally
+ * independent of snapshot materialization limits.
+ */
+export const FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS = 64_000;
+
+/**
+ * Retained-heap ceiling for fresh-SWM plan scalars (subject IRIs + row counts).
+ * A plan is control-plane state and must remain much smaller than the rows it
+ * describes, independently of snapshot materialization limits.
+ */
+export const FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
+
+function freshSwmMetaPlanResponseByteLimit(): number {
+  return snapshotResponseByteLimit(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE);
+}
+
+/**
  * Hard cardinality cap for a TTL meta session plan's admitted subjects, across
  * all candidate graphs of the phase. The discovery queries are LIMIT-bounded to
  * this cap (plus one sentinel row), so plan construction can never materialize
@@ -2763,7 +2782,7 @@ const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
  * plan. Sizing: every admitted subject serves at least one row, so this cap
  * alone admits sessions far past the point where they run plan-paged, while
  * the retained plan stays a few megabytes at worst (also capped by the fixed
- * build byte estimate below, which bounds pathological IRI lengths).
+ * plan byte estimate below, which bounds pathological IRI lengths).
  */
 export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
 
@@ -2771,7 +2790,7 @@ export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
  * Discover the TTL-admitted subjects of one SWM meta graph with two
  * small-result queries (no payload rows, no sort, no OFFSET), each bounded by
  * construction: LIMIT (remaining subject allowance + 1 sentinel) and the fixed
- * snapshot-build response byte cap. Crossing either bound is a typed
+ * plan response byte cap. Crossing either bound is a typed
  * per-snapshot budget refusal — the plan lane's one remaining bounded refusal
  * besides the single-oversized-subject case.
  *
@@ -2805,9 +2824,7 @@ async function readFreshSwmMetaSubjects(
     try {
       res = await store.query(sparql, {
         ...syncResponderStoreOptions(signal, operation),
-        maxResponseBytes: snapshotResponseByteLimit(
-          SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
-        ),
+        maxResponseBytes: freshSwmMetaPlanResponseByteLimit(),
       });
     } catch (error) {
       if (!(error instanceof StoreResponseTooLargeError)) throw error;
@@ -2816,7 +2833,7 @@ async function readFreshSwmMetaSubjects(
         reason: 'snapshot_bytes',
         rows: subjects.size,
         bytesEstimate: storeResponseActualBytes(error),
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     if (res.type !== 'bindings') return;
@@ -2887,9 +2904,7 @@ async function countFreshSwmMetaSubjectRows(
         GROUP BY ?s
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.countFreshSwmMetaSubjectRows'),
-        maxResponseBytes: snapshotResponseByteLimit(
-          SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
-        ),
+        maxResponseBytes: freshSwmMetaPlanResponseByteLimit(),
       });
     } catch (error) {
       if (!(error instanceof StoreResponseTooLargeError)) throw error;
@@ -2898,7 +2913,7 @@ async function countFreshSwmMetaSubjectRows(
         reason: 'snapshot_bytes',
         rows: chunk.length,
         bytesEstimate: storeResponseActualBytes(error),
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     if (res.type !== 'bindings') continue;
@@ -2912,6 +2927,20 @@ async function countFreshSwmMetaSubjectRows(
     .filter((entry) => entry.rowCount > 0);
 }
 
+function assertFreshSwmMetaSubjectWindowRows(
+  subject: FreshSwmMetaSubjectEntry,
+  budgetKey: string,
+): void {
+  if (subject.rowCount <= FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS) return;
+  throw snapshotBudgetError({
+    key: budgetKey,
+    reason: 'snapshot_rows',
+    rows: subject.rowCount,
+    bytesEstimate: 0,
+    limit: FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS,
+  });
+}
+
 /**
  * Build the tiny, stable pagination plan for a TTL-filtered SWM meta phase.
  * Only graph/subject/count scalars are computed and cached; the payload rows
@@ -2922,10 +2951,11 @@ async function countFreshSwmMetaSubjectRows(
  *
  * The plan itself is bounded by construction: subject cardinality by
  * {@link FRESH_SWM_META_PLAN_MAX_SUBJECTS} (enforced inside the LIMIT-bounded
- * discovery), and the retained scalar estimate by the FIXED snapshot build
- * byte cap — deliberately the constant, not the test/operator-shrinkable
- * session budget, so shrinking the session budget forces plan-paged mode
- * without ever refusing the plan that paged mode needs (#1847 class).
+ * discovery), and the retained scalar estimate and construction-query response
+ * caps by the FIXED plan byte cap — deliberately the constant, not the
+ * test/operator-shrinkable session budget, so shrinking the session budget
+ * forces plan-paged mode without ever refusing the plan that paged mode needs
+ * (#1847 class).
  */
 async function buildFreshSwmMetaPlan(
   store: TripleStore,
@@ -2958,15 +2988,22 @@ async function buildFreshSwmMetaPlan(
     );
     if (subjects.length === 0) continue;
     for (const entry of subjects) {
+      // This is a plan invariant, not just a plan-paged reader guard: the
+      // ordinary snapshot lane also consumes this plan and must refuse the
+      // same pathological row-group under default budgets.
+      assertFreshSwmMetaSubjectWindowRows(entry, budgetKey);
       bytesEstimate += estimateStringRowHeapBytes(entry.subject, '', '', graph);
     }
-    if (bytesEstimate > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE) {
+    // Pinned to FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE: a plan holds scalars
+    // (subject IRI + row count), so its ceiling is independent of how large a
+    // materialized snapshot may be.
+    if (bytesEstimate > FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE) {
       throw snapshotBudgetError({
         key: budgetKey,
         reason: 'snapshot_bytes',
         rows: subjects.length,
         bytesEstimate,
-        limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     entries.push({
@@ -3115,15 +3152,10 @@ async function readFreshSwmMetaRowsPageFromPlan(
         continue;
       }
       if (window.length === 0) windowStart = beforeWindow;
-      if (subject.rowCount > SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS) {
-        throw snapshotBudgetError({
-          key: budgetKey,
-          reason: 'snapshot_rows',
-          rows: subject.rowCount,
-          bytesEstimate: 0,
-          limit: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
-        });
-      }
+      // Pinned to FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS, NOT the snapshot
+      // build cap: this guards row-group atomicity (#1788), not materialization
+      // size, so it must not drift when the snapshot caps move.
+      assertFreshSwmMetaSubjectWindowRows(subject, budgetKey);
       window.push(subject);
       windowRows += subject.rowCount;
       if (windowStart + windowRows >= skip + remaining) break;
