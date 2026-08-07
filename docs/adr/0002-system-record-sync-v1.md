@@ -126,6 +126,11 @@ An authenticated tombstone is signed and terminal for its authority sequence; re
 needs a valid authority transition. Active/tombstone conflicts resolve to the tombstone and
 cannot enter the ordinary fork-resolution path. If multiple valid tombstones are learned for
 one sequence, the lowest version wins and equal versions select the lowest semantic digest.
+When a tombstone is learned below the current applied sequence, the receiver verifies its exact
+active predecessor and the exact retained transition out of that sequence. The descendant is
+valid only when that transition names the tombstone as its predecessor; otherwise the tombstone
+takes precedence. Missing retained-transition evidence rejects for retry rather than treating the
+tombstone as stale.
 Inventory omission has no deletion authority.
 
 ## AgentProfileHeadV1

@@ -700,6 +700,81 @@ describe('system-record V1 object codecs', () => {
     )).toEqual({ decision: 'stale' });
   });
 
+  it('requires exact resurrection lineage before dismissing a late lower-sequence tombstone', async () => {
+    const fixture = await authorityFixture();
+    const nextAuthority = await authorityFixture(23);
+    const initial = activeHead(fixture);
+    const tombstone = tombstoneHead(initial);
+    const ordinaryTransition = transitionFrom(fixture, initial, '1', nextAuthority.evmIssuer);
+    const ordinaryTransitionDigest = computeAgentProfileAuthorityTransitionDigestV1(ordinaryTransition);
+    const ordinaryDescendant = activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+      acceptedTransitionDigest: ordinaryTransitionDigest,
+    });
+    const nowMs = Date.parse('2026-08-08T00:00:00Z');
+    const ordinaryState = {
+      current: ordinaryDescendant,
+      disposition: 'discoverable' as const,
+      transitionLineage: [{
+        priorAuthoritySequence: '0' as const,
+        nextAuthoritySequence: '1' as const,
+        transitionDigest: ordinaryTransitionDigest,
+      }],
+      historicalRoots: [initial.rootSubject],
+    };
+
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      ordinaryState,
+      tombstone,
+      { nowMs, tombstonePredecessor: initial },
+    )).toEqual({
+      decision: 'reject',
+      reason: 'late tombstone requires the exact retained resurrection transition',
+    });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      ordinaryState,
+      tombstone,
+      { nowMs, tombstonePredecessor: initial, acceptedTransition: ordinaryTransition },
+    )).toEqual({ decision: 'accept' });
+
+    const resurrectionTransition = transitionFrom(
+      fixture,
+      tombstone,
+      '1',
+      nextAuthority.evmIssuer,
+    );
+    const resurrectionTransitionDigest = computeAgentProfileAuthorityTransitionDigestV1(
+      resurrectionTransition,
+    );
+    const resurrectedDescendant = activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+      acceptedTransitionDigest: resurrectionTransitionDigest,
+    });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        ...ordinaryState,
+        current: resurrectedDescendant,
+        transitionLineage: [{
+          priorAuthoritySequence: '0',
+          nextAuthoritySequence: '1',
+          transitionDigest: resurrectionTransitionDigest,
+        }],
+      },
+      tombstone,
+      { nowMs, tombstonePredecessor: initial, acceptedTransition: resurrectionTransition },
+    )).toEqual({ decision: 'stale' });
+
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      { ...ordinaryState, transitionLineage: ordinaryState.transitionLineage.map((entry) => ({
+        ...entry,
+        transitionDigest: resurrectionTransitionDigest,
+      })) },
+      tombstone,
+      { nowMs, tombstonePredecessor: initial, acceptedTransition: resurrectionTransition },
+    )).toEqual({
+      decision: 'reject',
+      reason: 'accepted head does not bind its retained transition lineage',
+    });
+  });
+
   it('rejects tombstone fork evidence and reused or incomplete authority roots', async () => {
     const fixture = await authorityFixture();
     const initial = activeHead(fixture);

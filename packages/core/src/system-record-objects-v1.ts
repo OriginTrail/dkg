@@ -1296,6 +1296,7 @@ export interface AgentProfileAcceptedAuthorityStateV1 {
 
 export interface AgentProfileHeadAdvanceEvidenceV1 {
   readonly nowMs: number;
+  /** Exact transition into a next-sequence candidate or out of a late tombstone sequence. */
   readonly acceptedTransition?: AgentProfileAuthorityTransitionV1;
   readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1;
   /** Opaque proof minted only by buildAgentProfileVerificationClosureV1. */
@@ -1410,6 +1411,10 @@ export function evaluateAgentProfileHeadAdvanceV1(
   if (BigInt(lineage.length) !== currentSequence) {
     return { decision: 'reject', reason: 'accepted authority state has incomplete transition lineage' };
   }
+  if (currentSequence > 0n
+    && lineage[lineage.length - 1]?.transitionDigest !== current.acceptedTransitionDigest) {
+    return { decision: 'reject', reason: 'accepted head does not bind its retained transition lineage' };
+  }
   if (current.networkId !== candidateState.networkId || current.peerId !== candidateState.peerId) {
     return { decision: 'reject', reason: 'stable record key changed' };
   }
@@ -1417,7 +1422,29 @@ export function evaluateAgentProfileHeadAdvanceV1(
     return { decision: 'quarantine', reason: 'transition-equivocation' };
   }
   const candidateSequence = parseCanonicalDecimalU64(candidateState.authoritySequence);
-  if (candidateSequence < currentSequence) return { decision: 'stale' };
+  if (candidateSequence < currentSequence) {
+    if (candidateState.state === 'active') return { decision: 'stale' };
+    const predecessor = evidenceState.tombstonePredecessor === undefined
+      ? undefined
+      : validateAgentProfileHeadObjectV1(evidenceState.tombstonePredecessor);
+    if (predecessor === undefined || predecessor.state !== 'active'
+      || !isTombstoneBoundToPredecessorV1(candidateState, predecessor)) {
+      return { decision: 'reject', reason: 'late tombstone lacks its exact verified active predecessor' };
+    }
+    const retained = lineage[Number(candidateSequence)];
+    const transition = evidenceState.acceptedTransition === undefined
+      ? undefined
+      : validateAuthorityTransition(evidenceState.acceptedTransition);
+    if (retained === undefined || transition === undefined
+      || transition.priorAuthoritySequence !== retained.priorAuthoritySequence
+      || transition.nextAuthoritySequence !== retained.nextAuthoritySequence
+      || computeAgentProfileAuthorityTransitionDigestV1(transition) !== retained.transitionDigest) {
+      return { decision: 'reject', reason: 'late tombstone requires the exact retained resurrection transition' };
+    }
+    return evaluateAuthorityTransitionV1(transition, candidateState, evidenceState.nowMs).decision === 'accept'
+      ? { decision: 'stale' }
+      : { decision: 'accept' };
+  }
   if (candidateSequence > currentSequence + 1n) {
     return { decision: 'reject', reason: 'authority history is incomplete' };
   }
