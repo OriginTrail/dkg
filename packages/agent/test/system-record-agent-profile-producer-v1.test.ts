@@ -6,6 +6,7 @@ import {
   tripleContentV10,
   buildAuthorAttestationTypedData,
   type CanonicalGraphScopedAuthorSealV1,
+  type CatalogSealDeploymentProfileV1,
 } from '@origintrail-official/dkg-core';
 import {
   SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
@@ -51,6 +52,11 @@ const NETWORK = 'base:84532' as const;
 const SCHEMA_DIGEST = `0x${'ab'.repeat(32)}` as Digest32V1;
 const PRIVATE_KEY = `0x${'11'.repeat(32)}`;
 const OTHER_PRIVATE_KEY = `0x${'22'.repeat(32)}`;
+const DEPLOYMENT = Object.freeze({
+  networkId: NETWORK,
+  assertedAtChainId: '84532',
+  assertedAtKav10Address: `0x${'44'.repeat(20)}`,
+}) as unknown as CatalogSealDeploymentProfileV1;
 
 describe('agent-profile system-record producer V1', () => {
   it('stages one exact profile, installs it, then advertises the signed inventory root', async () => {
@@ -59,6 +65,7 @@ describe('agent-profile system-record producer V1', () => {
     const store = observingStore(fixture.store, events);
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store,
@@ -91,6 +98,7 @@ describe('agent-profile system-record producer V1', () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -122,6 +130,7 @@ describe('agent-profile system-record producer V1', () => {
     const install = vi.fn();
     const firstProducer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -130,6 +139,7 @@ describe('agent-profile system-record producer V1', () => {
     });
     const secondProducer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -166,6 +176,7 @@ describe('agent-profile system-record producer V1', () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -202,6 +213,7 @@ describe('agent-profile system-record producer V1', () => {
     );
     const otherProducer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: otherSigner,
       store: fixture.store,
@@ -217,6 +229,7 @@ describe('agent-profile system-record producer V1', () => {
     const prior = await producerFixture();
     const priorProducer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: prior.peerSigner,
       evmSigner: prior.evmSigner,
       store: prior.store,
@@ -246,6 +259,7 @@ describe('agent-profile system-record producer V1', () => {
     const bootstrapStore = createInMemoryAgentProfilePublicationStoreV1();
     const bootstrapProducer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: prior.peerSigner,
       evmSigner: nextSigner,
       store: bootstrapStore,
@@ -304,6 +318,7 @@ describe('agent-profile system-record producer V1', () => {
     );
     const heartbeatProducer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: prior.peerSigner,
       evmSigner: nextSigner,
       store,
@@ -341,6 +356,7 @@ describe('agent-profile system-record producer V1', () => {
     const install = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -357,6 +373,7 @@ describe('agent-profile system-record producer V1', () => {
     let fail = true;
     const retrying = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: retryFixture.peerSigner,
       evmSigner: retryFixture.evmSigner,
       store: durableStore,
@@ -382,6 +399,7 @@ describe('agent-profile system-record producer V1', () => {
     const fixture = await producerFixture(store);
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store,
@@ -407,6 +425,7 @@ describe('agent-profile system-record producer V1', () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -429,6 +448,7 @@ describe('agent-profile system-record producer V1', () => {
     const fence = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -457,6 +477,7 @@ describe('agent-profile system-record producer V1', () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -517,6 +538,7 @@ describe('agent-profile system-record producer V1', () => {
     const install = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -537,6 +559,7 @@ describe('agent-profile system-record producer V1', () => {
     const nowMs = Date.parse('2026-08-07T12:00:00Z');
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: { ...fixture.peerSigner, sign: peerSign },
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -558,10 +581,79 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
+  it.each([
+    [
+      'a foreign UAL network',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: {
+          ...publication.seal,
+          kaUal: publication.seal.kaUal.replace('did:dkg:base:84532/', 'did:dkg:base:1/'),
+        },
+      }),
+    ],
+    [
+      'a foreign KAv10 deployment',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: {
+          ...publication.seal,
+          assertedAtKav10Address: `0x${'55'.repeat(20)}`,
+        },
+      }),
+    ],
+  ])('rejects %s before signing or publication side effects', async (_label, mutate) => {
+    const fixture = await producerFixture();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const evmSignMessage = vi.fn(fixture.evmSigner.signMessage);
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: { ...fixture.evmSigner, signMessage: evmSignMessage },
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+    const publication = mutate(fixture.publication) as unknown as AgentProfilePublicationBindingV1;
+
+    await expect(produce(producer, fixture.prepared, publication))
+      .rejects.toThrow(/different network or deployment/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(evmSignMessage).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
+  it('rejects a non-positive validity window before signing or committing', async () => {
+    const fixture = await producerFixture();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+
+    await expect(produce(producer, fixture.prepared, {
+      ...fixture.publication,
+      validUntil: fixture.publication.issuedAt,
+    })).rejects.toThrow(/validUntil must be later than issuedAt/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
   it('normalizes millisecond publication timestamps before signing the head', async () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -585,6 +677,7 @@ describe('agent-profile system-record producer V1', () => {
     const peerSign = vi.fn(fixture.peerSigner.sign);
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: { ...fixture.peerSigner, sign: peerSign },
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -604,6 +697,7 @@ describe('agent-profile system-record producer V1', () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -629,6 +723,7 @@ describe('agent-profile system-record producer V1', () => {
     const install = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -650,6 +745,7 @@ describe('agent-profile system-record producer V1', () => {
     const fence = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -674,6 +770,7 @@ describe('agent-profile system-record producer V1', () => {
     const fence = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,
@@ -701,6 +798,7 @@ describe('agent-profile system-record producer V1', () => {
     const fence = vi.fn();
     const producer = createAgentProfileProducerV1({
       networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
       peerSigner: fixture.peerSigner,
       evmSigner: fixture.evmSigner,
       store: fixture.store,

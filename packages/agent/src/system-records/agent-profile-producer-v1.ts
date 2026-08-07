@@ -7,12 +7,14 @@ import {
   encodeCanonicalCgSharedPublicRootProjectionV1,
   encodeOpaqueKaBundleV1,
   keccak256,
+  parseDeterministicKnowledgeAssetUal,
   tripleContentV10,
   assertCanonicalDecimalU64,
   assertCanonicalDigest,
   assertCanonicalEvmAddress,
   type AssertionCoordinateV1,
   type CanonicalGraphScopedAuthorSealV1,
+  type CatalogSealDeploymentProfileV1,
 } from '@origintrail-official/dkg-core';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
@@ -130,6 +132,8 @@ export interface AgentProfileProducerPublicationStoreV1 {
 
 export interface CreateAgentProfileProducerOptionsV1 {
   readonly networkId: NetworkIdV1;
+  /** Locally pinned VM publication lane; never derived from an untrusted seal. */
+  readonly publicationDeployment: Readonly<CatalogSealDeploymentProfileV1>;
   readonly peerSigner: SystemRecordPeerSignerV1;
   readonly evmSigner: EvmPersonalMessageSignerV1;
   readonly store: AgentProfileProducerPublicationStoreV1;
@@ -211,6 +215,12 @@ export function createAgentProfileProducerV1(
       || publication.seal.privateMerkleRoot !== null) {
       throw new Error('profile publication seal does not bind the exact public projection');
     }
+    assertPublicationLaneV1(
+      publication.seal,
+      options.networkId,
+      options.publicationDeployment,
+      evmIssuer,
+    );
     assertRecoverableGraphScopedAuthorAttestationV1(publication.seal);
     const ownedSubjectTable = ownedSubjects(prepared.rootEntity, projectionQuads);
     const ownedSubjectTableBytes = canonicalizeOwnedSubjectTableObjectV1(
@@ -580,6 +590,23 @@ function producerNowMs(value: number): number {
     throw new Error('agent-profile producer clock returned an invalid value');
   }
   return value;
+}
+
+function assertPublicationLaneV1(
+  seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
+  networkId: NetworkIdV1,
+  deployment: Readonly<CatalogSealDeploymentProfileV1>,
+  evmIssuer: string,
+): void {
+  const ual = parseDeterministicKnowledgeAssetUal(seal.kaUal);
+  if (deployment.networkId !== networkId
+    || ual.ual !== seal.kaUal
+    || ual.chainId !== networkId
+    || ual.agentAddress !== evmIssuer
+    || seal.assertedAtChainId !== deployment.assertedAtChainId
+    || seal.assertedAtKav10Address !== deployment.assertedAtKav10Address) {
+    throw new Error('profile publication seal belongs to a different network or deployment');
+  }
 }
 
 function ownedSubjects(

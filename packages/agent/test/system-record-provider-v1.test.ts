@@ -306,6 +306,41 @@ describe('system-record provider V1', () => {
     expect(provider.stats()).toMatchObject({ active: 0, queued: 0 });
   });
 
+  it('reports an ordinary response write failure and refunds all admission', async () => {
+    const admission = frameAdmission();
+    const bucket = createSystemRecordProviderTokenBucketV1({
+      requestCapacity: 1,
+      requestRefillPerMinute: 1,
+      responseCapacity: 1024,
+      responseRefillPerMinute: 1,
+    });
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: repository({
+        objectKind: 'profile-bundle',
+        objectDigest: DIGEST,
+        canonicalBytes: PAYLOAD,
+      }),
+      frameAdmission: admission,
+      tokenBucket: bucket,
+    });
+    const exchange = fixtureExchange(bundleRequest());
+    exchange.value.writeResponseFrame = async () => {
+      throw new Error('socket write failed');
+    };
+    const before = bucket.snapshot().responseTokens;
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('reset-write-failed');
+    expect(exchange.reset).toHaveBeenCalledWith('write-failed');
+    expect(bucket.snapshot().responseTokens).toBe(before);
+    expect(admission.active()).toBe(0);
+    expect(provider.stats()).toMatchObject({
+      active: 0,
+      queued: 0,
+      resets: { 'write-failed': 1 },
+    });
+  });
+
   it('refills only on requests and charges the exact encoded response bytes', async () => {
     let now = 0;
     const bucket = createSystemRecordProviderTokenBucketV1({
