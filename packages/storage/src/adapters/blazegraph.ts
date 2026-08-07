@@ -65,14 +65,14 @@ const MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
  *    complete one — a sync page that looks whole and is not. Keeping the
  *    server bound comfortably above the client deadline means the client
  *    always aborts first, so no caller is ever parsing a truncated body.
- *    ({@link assertCompleteNQuads} is the belt-and-braces guard for the
+ *    ({@link parseBlazegraphConstructNQuads} is the belt-and-braces guard for the
  *    residual case.)
  *
  * With the 30s default this yields a 120s server bound: orphan lifetime drops
  * from unbounded to at most 2 minutes, while the truncation path stays
  * unreachable.
  */
-export const SERVER_QUERY_DEADLINE_FACTOR = 4;
+const SERVER_QUERY_DEADLINE_FACTOR = 4;
 
 export interface BlazegraphStoreOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
@@ -467,23 +467,13 @@ export class BlazegraphStore implements TripleStore {
       // "Unable to parse form content". The direct-POST body is not form
       // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
       // SPARQL_QUERY_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
-      const res = await deadline.waitFor(fetch(this.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
-          Accept: 'application/sparql-results+json',
-          [MAX_QUERY_MILLIS_HEADER]: String(this.serverQueryDeadlineMs()),
-        },
-        body: trimmed,
-        signal: deadline.signal,
-      }));
-      if (!res.ok) {
-        const text = await deadline.waitFor((options?.maxResponseBytes === undefined
-          ? res.text()
-          : readResponseTextBounded(res, options.maxResponseBytes)
-        ).catch(() => ''));
-        throw new Error(`Blazegraph query failed (${res.status}): ${text.slice(0, 300)}`);
-      }
+      const res = await this.postReadQuery(
+        trimmed,
+        'application/sparql-results+json',
+        deadline,
+        options,
+        'query',
+      );
 
       const json = options?.maxResponseBytes === undefined
         ? await deadline.waitFor(
@@ -511,16 +501,24 @@ export class BlazegraphStore implements TripleStore {
     return this.operationTimeoutMs * SERVER_QUERY_DEADLINE_FACTOR;
   }
 
-  private async queryConstruct(
+  /**
+   * Canonical request boundary for Blazegraph reads. Keeping transport and
+   * deadline setup here makes it impossible for SELECT/ASK and
+   * CONSTRUCT/DESCRIBE to drift on the server-side cancellation policy while
+   * leaving their distinct response decoding in the callers.
+   */
+  private async postReadQuery(
     sparql: string,
+    accept: string,
     deadline: StoreOperationDeadline,
-    options?: TripleStoreQueryOptions,
-  ): Promise<ConstructResult> {
+    options: TripleStoreQueryOptions | undefined,
+    failureLabel: 'query' | 'construct',
+  ): Promise<Response> {
     const res = await deadline.waitFor(fetch(this.url, {
       method: 'POST',
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
-        Accept: 'text/x-nquads, application/n-quads',
+        Accept: accept,
         [MAX_QUERY_MILLIS_HEADER]: String(this.serverQueryDeadlineMs()),
       },
       body: sparql,
@@ -531,13 +529,27 @@ export class BlazegraphStore implements TripleStore {
         ? res.text()
         : readResponseTextBounded(res, options.maxResponseBytes)
       ).catch(() => ''));
-      throw new Error(`Blazegraph construct failed (${res.status}): ${text.slice(0, 300)}`);
+      throw new Error(`Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    return res;
+  }
+
+  private async queryConstruct(
+    sparql: string,
+    deadline: StoreOperationDeadline,
+    options?: TripleStoreQueryOptions,
+  ): Promise<ConstructResult> {
+    const res = await this.postReadQuery(
+      sparql,
+      'text/x-nquads, application/n-quads',
+      deadline,
+      options,
+      'construct',
+    );
     const text = await deadline.waitFor(options?.maxResponseBytes === undefined
       ? res.text()
       : readResponseTextBounded(res, options.maxResponseBytes));
-    assertCompleteNQuads(text);
-    const quads = parseNQuadsText(text);
+    const quads = parseBlazegraphConstructNQuads(text);
     deadline.check();
     return { type: 'quads', quads };
   }
@@ -677,76 +689,75 @@ function formatTerm(term: string): string {
 }
 
 /**
- * Reject a CONSTRUCT body that Blazegraph cut short.
+ * Parse a Blazegraph CONSTRUCT body and reject one that the engine cut short.
  *
  * Blazegraph commits `200 OK` and starts streaming before it knows whether the
  * query will finish. If the query is then killed — by the server-side deadline,
  * or by an engine error mid-result — the error text is appended to the
- * already-committed body. {@link parseNQuadsText} skips any line it cannot
- * match, so without this check that body parses into a short, structurally
- * valid, silently-incomplete quad set: a sync page that looks whole and is not.
+ * already-committed body. The historical parser skips any line it cannot
+ * match, so without an integrity check that body parses into a short,
+ * structurally valid, silently-incomplete quad set: a sync page that looks
+ * whole and is not.
  *
  * The check is deliberately narrow — it looks for *truncation*, not for any
  * unparseable line — so it cannot start rejecting the odd-but-harmless
  * serialisations the tolerant parser has always accepted:
  *
- *  - a well-formed n-quads document ends its last statement with `.`
+ *  - the final non-comment line must parse as a complete N-Quad statement
  *  - Blazegraph's appended failure text carries a Java exception marker
+ *
+ * Parsing and final-line validation intentionally share {@link parseNQuadLine}
+ * so there is one definition of a statement. Interior unparseable lines retain
+ * the adapter's historical tolerant behaviour; an unparseable final statement
+ * is the truncation signal that must fail closed.
  */
-function assertCompleteNQuads(text: string): void {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return;
-
-  // Both alternatives are line-start anchored on purpose. The engine appends
-  // its failure text as standalone lines ("java.util.…Exception", "\tat
-  // com.bigdata.…"), while the same words inside a *stored literal* sit
-  // mid-line: n-quads forbids raw newlines in literals (they arrive as the
-  // two-character escape \n), and a valid statement line always starts with an
-  // IRI or blank node. An unanchored match here would let user-published
-  // content containing a Java stack trace poison every read of its graph.
-  const javaError = /^(?:[\w.$]+\.)?(?:\w*Exception|\w*Error)\b|^\s*at com\.bigdata\./m.exec(trimmed);
-  if (javaError) {
-    throw new Error(
-      'Blazegraph returned a truncated CONSTRUCT result: the response body carries an engine error '
-      + `(${javaError[0].slice(0, 120)}). Treating this as a failure rather than as an empty/partial `
-      + 'result — see assertCompleteNQuads.',
-    );
-  }
-
-  // Find the final *statement*, skipping blank and comment-only lines — a body
-  // that ends with a comment is complete, not truncated.
-  const lines = trimmed.split('\n');
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
-    if (line.length === 0 || line.startsWith('#')) continue;
-    if (!line.endsWith('.')) {
-      throw new Error(
-        'Blazegraph returned a truncated CONSTRUCT result: the final statement is incomplete '
-        + `(${JSON.stringify(line.slice(-120))}). Treating this as a failure rather than as a `
-        + 'partial result — see assertCompleteNQuads.',
-      );
-    }
-    break;
-  }
-}
-
-function parseNQuadsText(text: string): DKGQuad[] {
+function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   const quads: DKGQuad[] = [];
+  let finalStatement: { line: string; parsed: boolean } | undefined;
+
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
-    const match = line.match(
-      /^(<[^>]+>|_:\S+)\s+(<[^>]+>)\s+(<[^>]+>|_:\S+|"(?:[^"\\]|\\.)*"(?:@\S+|\^\^<[^>]+>)?)\s*(?:(<[^>]+>)\s*)?\.$/,
-    );
-    if (!match) continue;
-    quads.push({
-      subject: stripAngle(match[1]),
-      predicate: stripAngle(match[2]),
-      object: match[3].startsWith('<') ? stripAngle(match[3]) : match[3],
-      graph: match[4] ? stripAngle(match[4]) : '',
-    });
+
+    // Both alternatives are line-start anchored on purpose. The engine
+    // appends failure text as standalone lines, while the same words inside a
+    // stored literal occur after the subject and predicate on a valid N-Quad.
+    const javaError = /^(?:[\w.$]+\.)?(?:\w*Exception|\w*Error)\b|^\s*at com\.bigdata\./.exec(line);
+    if (javaError) {
+      throw new Error(
+        'Blazegraph returned a truncated CONSTRUCT result: the response body carries an engine '
+        + `error (${javaError[0].slice(0, 120)}). Treating this as a failure rather than as an `
+        + 'empty/partial result — see parseBlazegraphConstructNQuads.',
+      );
+    }
+
+    const quad = parseNQuadLine(line);
+    finalStatement = { line, parsed: quad !== undefined };
+    if (quad) quads.push(quad);
   }
+
+  if (finalStatement && !finalStatement.parsed) {
+    throw new Error(
+      'Blazegraph returned a truncated CONSTRUCT result: the final statement is incomplete '
+      + `(${JSON.stringify(finalStatement.line.slice(-120))}). Treating this as a failure rather `
+      + 'than as a partial result — see parseBlazegraphConstructNQuads.',
+    );
+  }
+
   return quads;
+}
+
+function parseNQuadLine(line: string): DKGQuad | undefined {
+  const match = line.match(
+    /^(<[^>]+>|_:\S+)\s+(<[^>]+>)\s+(<[^>]+>|_:\S+|"(?:[^"\\]|\\.)*"(?:@\S+|\^\^<[^>]+>)?)\s*(?:(<[^>]+>)\s*)?\.$/,
+  );
+  if (!match) return undefined;
+  return {
+    subject: stripAngle(match[1]),
+    predicate: stripAngle(match[2]),
+    object: match[3].startsWith('<') ? stripAngle(match[3]) : match[3],
+    graph: match[4] ? stripAngle(match[4]) : '',
+  };
 }
 
 function stripAngle(s: string): string {

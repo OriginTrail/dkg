@@ -80,6 +80,47 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
   });
 
   it(
+    'honours X-BIGDATA-MAX-QUERY-MILLIS on the supported live Blazegraph image',
+    async () => {
+      const GRAPH_DEADLINE = `${GRAPH}:deadline`;
+      const quads = makeQuads(150).map((quad) => ({ ...quad, graph: GRAPH_DEADLINE }));
+      await store.insert(quads);
+
+      // ORDER BY forces Blazegraph to buffer the complete Cartesian result,
+      // so it cannot finish or commit a successful response before the tiny
+      // server deadline. This direct POST deliberately has no adapter/client
+      // abort: it proves the external contract the adapter relies on rather
+      // than merely proving that our mock observed a header.
+      const expensiveQuery = `SELECT ?s1 ?s2 ?s3 WHERE {
+        GRAPH <${GRAPH_DEADLINE}> {
+          ?s1 <${PRED}> ?o1 .
+          ?s2 <${PRED}> ?o2 .
+          ?s3 <${PRED}> ?o3 .
+        }
+      } ORDER BY ?s1 ?s2 ?s3`;
+      const startedAt = Date.now();
+      const response = await fetch(BLAZEGRAPH_URL as string, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sparql-query; charset=utf-8',
+          Accept: 'application/sparql-results+json',
+          'X-BIGDATA-MAX-QUERY-MILLIS': '25',
+        },
+        body: expensiveQuery,
+        signal: AbortSignal.timeout(5_000),
+      });
+      const body = await response.text();
+
+      expect(response.ok, body.slice(0, 500)).toBe(false);
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(body).toMatch(/(?:timeout|cancel|deadline|max query)/i);
+
+      await store.dropGraph(GRAPH_DEADLINE);
+    },
+    15_000,
+  );
+
+  it(
     'large DELETE DATA (publish path) succeeds — the form-content-limit regression',
     async () => {
       // 2 000 quads → a single DELETE DATA body of ~600 KB raw. Form-encoded

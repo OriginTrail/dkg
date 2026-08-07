@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
-import { BlazegraphStore, SERVER_QUERY_DEADLINE_FACTOR } from '../src/adapters/blazegraph.js';
+import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
 
 async function waitForCondition(
@@ -244,13 +244,14 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s
     // abort, queryErrorCount=0 across 20,953 queries). The bound must be
     // WIDER than the client deadline so the client always aborts first —
-    // see SERVER_QUERY_DEADLINE_FACTOR.
+    // The wire-level 120s expectation below independently documents the
+    // operational contract for the default 30s client deadline.
     setFetch(async () => blazeSelectResponse());
     const s = new BlazegraphStore(baseUrl, { timeout: 30_000 });
     await s.query('SELECT ?s WHERE { ?s ?p ?o }');
     const selectHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
     const sent = Number(selectHeaders['X-BIGDATA-MAX-QUERY-MILLIS']);
-    expect(sent).toBe(30_000 * SERVER_QUERY_DEADLINE_FACTOR);
+    expect(sent).toBe(120_000);
     expect(sent).toBeGreaterThan(30_000);
 
     fetchCalls.length = 0;
@@ -261,7 +262,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     await s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
     const constructHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
     expect(Number(constructHeaders['X-BIGDATA-MAX-QUERY-MILLIS']))
-      .toBe(30_000 * SERVER_QUERY_DEADLINE_FACTOR);
+      .toBe(120_000);
   });
 
   it('scales the server-side deadline with a custom client timeout', async () => {
@@ -270,7 +271,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     await s.query('SELECT ?s WHERE { ?s ?p ?o }');
     const headers = fetchCalls[0][1]?.headers as Record<string, string>;
     expect(Number(headers['X-BIGDATA-MAX-QUERY-MILLIS']))
-      .toBe(5_000 * SERVER_QUERY_DEADLINE_FACTOR);
+      .toBe(20_000);
   });
 
   it('rejects a CONSTRUCT body truncated by an engine error instead of parsing it as partial data', async () => {
@@ -293,6 +294,20 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     setFetch(async () => new Response(
       '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
       + '<http://ex.org/s2> <http://ex.org/p2> <http://ex.or',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('rejects a final truncated literal even when the fragment ends with a period', async () => {
+    // A punctuation-only guard mistakes the period inside this unfinished
+    // literal for an N-Quads statement terminator, after which the tolerant
+    // parser silently skips the line and returns only the first quad.
+    setFetch(async () => new Response(
+      '<http://ex.org/s1> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + '<http://ex.org/s2> <http://ex.org/p> "partial.',
       { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
     ));
     const s = new BlazegraphStore(baseUrl);
