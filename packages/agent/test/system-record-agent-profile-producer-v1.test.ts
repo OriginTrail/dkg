@@ -770,6 +770,35 @@ describe('agent-profile system-record producer V1', () => {
     expect(fence).not.toHaveBeenCalled();
   });
 
+  it('rejects an out-of-schema profile predicate before fencing publication', async () => {
+    const fixture = await producerFixture();
+    const fence = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence,
+      install: () => {},
+    });
+    const outOfSchema = Object.freeze({
+      ...fixture.prepared,
+      quads: Object.freeze([
+        ...fixture.prepared.quads,
+        Object.freeze({
+          subject: fixture.prepared.rootEntity,
+          predicate: 'https://example.org/unapproved',
+          object: '"x"',
+          graph: fixture.prepared.quads[0]!.graph,
+        }),
+      ]),
+    });
+
+    await expect(producer.prepare(outOfSchema)).rejects.toThrow(/outside schema V1/);
+    expect(fence).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['peerId', '"12D3KooWRhLYc1qpzVncrVpMkykB3ML1PoQ9G9gX9X9G9gX9X9G"'],
     ['agentAddress', `"0x${'33'.repeat(20)}"`],
