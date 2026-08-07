@@ -80,7 +80,6 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(await graphCount(store, swmGraph)).toBe(1_000);
     expect(await graphCount(store, graphManager.sharedMemoryUri(CONTEXT_GRAPH))).toBe(0);
 
-
     const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
     const meta = await store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,

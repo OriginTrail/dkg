@@ -42,16 +42,37 @@
  * is exactly the case `COUNT` cannot see. Known sites, all on the byte-identical
  * assertion-graph URI:
  *
- *   - the sync materializer's own `replaceGraph`;
- *   - live gossip apply (`workspace-handler`);
- *   - the graph-scoped VM update path (`dkg-agent-publish`);
- *   - storage-ack persistence (`storage-ack-handler`);
- *   - the private SWM recovery lane (`swm-recovery`), lane-disjoint in automatic
- *     operation but reachable via the `recover-shared-memory` route.
+ *   1. the sync materializer's own `replaceGraph`;
+ *   2. live gossip apply (`workspace-handler`);
+ *   3. the graph-scoped VM update path (`dkg-agent-publish`);
+ *   4. storage-ack persistence (`storage-ack-handler`);
+ *   5-6. the private SWM recovery lane (`swm-recovery`, two calls) — lane-disjoint
+ *     in automatic operation but reachable via the `recover-shared-memory` route;
+ *   7. WM→SWM promotion (`dkg-publisher`);
+ *   8. RFC-64 public-catalog activation
+ *     (`public-catalog-native-receiver-v1.activateExactPublicProjection`), which
+ *     uses `tryReplaceGraphAndSubjectAtomically` — see the grep note below.
  *
- * This list is a snapshot, not a closed set. **A new `tryReplaceGraphAtomically`
- * against a SWM assertion graph is a new obligation here** — treat adding one
- * without an invalidate as a defect.
+ * Two nearby RFC-64 sites are deliberately NOT obligations: rollback restore
+ * puts back the exact preimage, so a standing witness becomes valid again; and
+ * deactivation replaces with `[]`, leaving an empty graph the count gate covers.
+ *
+ * This list is a snapshot, not a closed set. **Any new whole-graph replace of a
+ * SWM assertion graph is a new obligation here** — treat adding one without an
+ * invalidate as a defect.
+ *
+ * When you sweep for missed sites, grep the SHAPE, not one function name. The
+ * primitives in tree today are:
+ *
+ *   - `tryReplaceGraphAtomically`
+ *   - `tryReplaceGraphAndSubjectAtomically`   ← added the 8th site below
+ *   - `store.replaceGraph` directly (the recovery lane)
+ *
+ * An earlier revision of this comment named only the first. Four review rounds
+ * then greppped the token it named and kept reporting the set complete, while
+ * `public-catalog-native-receiver-v1`'s activation — which uses the second —
+ * sat unlisted and uninvalidated. **The tripwire caused the miss it existed to
+ * prevent.** If you add a fourth primitive, add it here in the same commit.
  *
  * **Callers must treat a witness hit as valid only after a count gate has
  * already matched.** Do not "optimize" that count away: without it the removal
@@ -60,6 +81,29 @@
  * The digest is part of the READ for the same reason the replace list exists: a
  * standing v1 row cannot satisfy an ASK bound to v2's digest, which bounds the
  * damage when an invalidate is missed or its best-effort call fails.
+ *
+ * ## Known costs — accepted deliberately, recorded so they don't read as bugs
+ *
+ * An accepted trade nobody wrote down is indistinguishable from an oversight six
+ * months later, so:
+ *
+ *   - **No GC.** Rows are orphaned whenever content is destroyed by a path that
+ *     cannot invalidate — the TTL sweep, VM publish, and the chain-reset wipe
+ *     (whose scoped delete spares `urn:dkg:local:*`). Bounded at two quads per
+ *     KA ever materialized, harmless because every read binds the digest, and
+ *     reclaimed on the next replace of that graph. A sweep keyed on
+ *     "assertion graph no longer exists" would close it.
+ *   - **A changelog marker per write.** This graph is in no reserved set
+ *     (`ChangelogStore`'s is `{CHANGELOG_GRAPH}` plus `options.reservedGraphs`,
+ *     which has no callers), so every cold-path write appends a marker and
+ *     advances `seq`. Local only — the delta lane filters on `isCandidateGraph`,
+ *     so it never reaches a peer.
+ *   - **A read is now also a write.** On a MISS the check performs an atomic
+ *     subject replace inside the KA write lock, where before it only read. Cold
+ *     or churning stores therefore pay slightly more than they used to; the
+ *     memo only pays back on warm ones. `DKG_SWM_MATERIALIZATION_WITNESS=0`
+ *     disables both the read and the write for a fleet that finds it net
+ *     negative.
  */
 import { assertSafeIri, sparqlString } from '@origintrail-official/dkg-core';
 import type { QueryOptions, Quad, TripleStore } from './triple-store.js';

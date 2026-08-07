@@ -8676,9 +8676,13 @@ export class DKGPublisher implements Publisher {
     // still advertises v1 — the next round's descriptor is v1, the count
     // matches, and a standing v1 witness would HIT.
     //
-    // Deliberately NOT folded into `replaceExactKnowledgeAssetGraph`: five of
-    // its seven call sites are VM or WM graphs that can never hold a witness,
-    // and putting it there would add a serialised changelog round-trip to each.
+    // Deliberately NOT folded into `replaceExactKnowledgeAssetGraph`: of its
+    // SIX call sites this is the only one targeting a SWM assertion graph — the
+    // rest are `dataGraph` ×2, `vmGraph`, `wmGraph`, and one pass-through
+    // `graphUri` — so folding it in would add a serialised changelog round-trip
+    // to five replaces that can never hold a witness. Enumerated, not counted:
+    // an earlier revision of this comment said "five of seven" and was wrong on
+    // both numbers.
     await invalidateSwmMaterializationWitness(this.store, swmGraphUri, {
       source: 'publisher.promoteWmToSwm.witnessInvalidate',
     }).catch(() => {});
