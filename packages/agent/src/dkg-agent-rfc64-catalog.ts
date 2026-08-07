@@ -47,10 +47,7 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import {
-  resolveRpcUrls,
-  verifyControlEnvelopeIssuerSignatureV1,
-} from '@origintrail-official/dkg-chain';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
@@ -81,7 +78,6 @@ import {
   Rfc64PublicCatalogNativeReceiverV1,
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
-import { createRfc64FinalizedVmAgentPrecommitV1 } from './rfc64/finalized-vm-agent-precommit-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -767,29 +763,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
-        const chainConfig = this.config.chainConfig;
-        const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
-          acceptedPolicySnapshotForCatalogScope: (scope) =>
-            this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(scope),
-          rpcEndpoints: chainConfig === undefined
-            ? null
-            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
-          getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
-          getEvmChainId: () => this.chain.getEvmChainId(),
-          getKnowledgeAssetStorageAddress: async () => {
-            if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {
-              throw new Error(
-                'RFC-64 finalized VM precommit requires DKGKnowledgeAssets resolution',
-              );
-            }
-            return this.chain.getDKGKnowledgeAssetsAddress();
-          },
-          getKnowledgeAssetsLifecycleAddress: () =>
-            this.chain.getKnowledgeAssetsLifecycleAddress(),
-          store: this.store,
-        });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,
           contentTransport: clients.contentTransport,
@@ -797,7 +770,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           kaBundles: persistence.kaBundles,
           store: this.store,
-          beforeAppliedHeadCommit: finalizedVmPrecommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({

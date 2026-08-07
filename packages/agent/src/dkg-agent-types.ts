@@ -1242,9 +1242,9 @@ export interface Rfc64CatalogAccessPolicyAuthorityConfigV1 {
 }
 
 /**
- * Opt-in RFC-64 author-catalog production for ordinary confirmed public KA
- * publishes. Peer fan-out is an availability hint; the durable applied-head
- * pointer remains the correctness source for pull discovery.
+ * Opt-in RFC-64 SWM author-catalog production. Peer fan-out is an availability
+ * hint; the durable applied-head pointer remains the correctness source for
+ * pull discovery. Finalized VM inventory remains on chain.
  */
 export interface Rfc64PublicCatalogAutoPublishConfigV1 {
   readonly peers: readonly string[];

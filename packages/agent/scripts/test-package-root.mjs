@@ -50,6 +50,7 @@ const requiredCatalogMethods = [
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
+  'recordRfc64PublicCatalogAssetV1',
   'recordConfirmedRfc64PublicCatalogAssetV1',
   'synchronizeRfc64PublicCatalogFromProviderV1',
   'readRfc64PublicCatalogBootstrapStatusV1',
