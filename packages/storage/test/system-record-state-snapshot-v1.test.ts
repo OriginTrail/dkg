@@ -88,6 +88,38 @@ describe('system-record reserved-state snapshot decoder', () => {
     expect(() => assertAuthenticSystemRecordAppliedSnapshotV1({ ...decoded })).toThrow(/exact decoder/);
   });
 
+  it('decodes an exact prior-epoch tuple against the current durable epoch', () => {
+    const prior = tuple({ appliedState: state({ materializationEpoch: '1' }) });
+    const currentEpoch = tuple().epoch;
+    const decoded = decodeSystemRecordAppliedSnapshotV1({
+      networkId: NETWORK,
+      stableKeyHash: STABLE_KEY,
+      materializationEpoch: '2',
+      quads: [...prior.record, ...prior.capacity, ...currentEpoch, ...prior.receipt],
+    });
+
+    expect(decoded).toMatchObject({
+      state: 'present',
+      materializationEpoch: '2',
+      appliedState: { materializationEpoch: '1' },
+      receipt: { materializationEpoch: '1' },
+    });
+    expect(decoded.previousReservedQuads).toEqual(expect.arrayContaining(currentEpoch));
+    expect(decoded.previousReservedQuads).not.toEqual(expect.arrayContaining(prior.epoch));
+  });
+
+  it('rejects a persisted tuple from a future materialization epoch', () => {
+    const future = tuple({ appliedState: state({ materializationEpoch: '3' }) });
+    const currentEpoch = tuple().epoch;
+
+    expect(() => decodeSystemRecordAppliedSnapshotV1({
+      networkId: NETWORK,
+      stableKeyHash: STABLE_KEY,
+      materializationEpoch: '2',
+      quads: [...future.record, ...future.capacity, ...currentEpoch, ...future.receipt],
+    })).toThrow(/epoch binding/);
+  });
+
   it('rejects missing, extra, duplicate, malformed, and mismatched-epoch rows', () => {
     const canonical = tuple();
     const all = [...canonical.record, ...canonical.capacity, ...canonical.epoch, ...canonical.receipt];

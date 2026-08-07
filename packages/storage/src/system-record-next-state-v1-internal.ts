@@ -231,7 +231,9 @@ export function deriveSystemRecordActiveReplacementV1(input: {
     ? snapshot.ownedSubjectTable
     : Object.freeze([]) as OwnedSubjectTableObjectV1;
 
-  if (authority.equalHead) {
+  const recoveringPriorEpoch = snapshot.state === 'present'
+    && snapshot.appliedState.materializationEpoch !== facts.materializationEpoch;
+  if (authority.equalHead && !recoveringPriorEpoch) {
     if (snapshot.state !== 'present') {
       throw new Error('equal system-record head cannot exist in absent state');
     }

@@ -169,6 +169,37 @@ describe('system-record active next-state derivation', () => {
     expect(() => assertAuthenticSystemRecordActiveReplacementCompleteV1(result)).not.toThrow();
   });
 
+  it('atomically rematerializes an equal head retained from a prior durable epoch', () => {
+    const cold = coldReady();
+    const snapshot = snapshotAtPriorEpoch(cold, '12');
+    const result = expectReady(deriveSystemRecordActiveReplacementV1({
+      facts: INITIAL_FACTS,
+      snapshot,
+      observedRootClaimQuads: cold.next.rootClaimQuads,
+    }));
+
+    expect(snapshot).toMatchObject({
+      materializationEpoch: EPOCH,
+      appliedState: { materializationEpoch: '12', stateRevision: '1' },
+    });
+    expect(result.nextAppliedState).toMatchObject({
+      materializationEpoch: EPOCH,
+      stateRevision: '2',
+      headDigest: cold.next.appliedState.headDigest,
+    });
+    expect(result.next.capacityState).toMatchObject({ revision: '2', liveRecordCount: '1' });
+    expect(result.previousReservedQuads).toHaveLength(
+      snapshot.previousReservedQuads.length + cold.next.rootClaimQuads.length,
+    );
+    expect(result.previousReservedQuads).toEqual(expect.arrayContaining([
+      ...snapshot.previousReservedQuads,
+      ...cold.next.rootClaimQuads,
+    ]));
+    expect(result.nextReservedQuads).not.toEqual(result.previousReservedQuads);
+    expect(result.success.stateRevision).toBe('2');
+    expect(() => assertAuthenticSystemRecordActiveReplacementCompleteV1(result)).not.toThrow();
+  });
+
   it('never acknowledges an equal digest whose canonical persisted tuple disagrees with the head', () => {
     const cold = coldReady();
     const inconsistent = snapshotWithAppliedState(cold, {
@@ -439,6 +470,43 @@ function snapshotFrom(value: SystemRecordActiveReplacementCompleteV1): SystemRec
     stableKeyHash: value.next.appliedState.stableKeyHash,
     materializationEpoch: value.next.materializationEpoch,
     quads: value.nextReservedQuads.filter((quad) => !rootKeys.has(quadKey(quad))),
+  });
+}
+
+function snapshotAtPriorEpoch(
+  ready: SystemRecordActiveReplacementReadyV1,
+  priorEpoch: string,
+): SystemRecordAppliedSnapshotV1 {
+  const appliedState: SystemRecordAppliedStatePresentV1 = {
+    ...ready.next.appliedState,
+    materializationEpoch: priorEpoch,
+  };
+  const receipt: SystemRecordMaterializationReceiptV1 = {
+    ...ready.next.receipt,
+    materializationEpoch: priorEpoch,
+    appliedStateDigest: computeSystemRecordAppliedStateDigestV1(appliedState),
+  };
+  const prior = buildSystemRecordReservedStateQuadsV1({
+    appliedState,
+    headVersion: ready.next.headVersion,
+    ownedSubjectTable: ready.next.ownedSubjectTable,
+    rootClaimSet: ready.next.rootClaimSet,
+    capacityState: ready.next.capacityState,
+    receipt,
+  });
+  const currentEpoch = buildSystemRecordReservedStateQuadsV1({
+    appliedState: ready.next.appliedState,
+    headVersion: ready.next.headVersion,
+    ownedSubjectTable: ready.next.ownedSubjectTable,
+    rootClaimSet: ready.next.rootClaimSet,
+    capacityState: ready.next.capacityState,
+    receipt: ready.next.receipt,
+  }).epoch;
+  return decodeSystemRecordAppliedSnapshotV1({
+    networkId: INITIAL.networkId,
+    stableKeyHash: computeStableKey(INITIAL),
+    materializationEpoch: EPOCH,
+    quads: [...prior.record, ...prior.capacity, ...currentEpoch, ...prior.receipt],
   });
 }
 

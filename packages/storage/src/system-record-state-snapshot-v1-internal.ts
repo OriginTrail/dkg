@@ -191,8 +191,9 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   if (appliedState.networkId !== networkId || appliedState.stableKeyHash !== stableKeyHash
       || claims.networkId !== networkId || claims.stableKeyHash !== stableKeyHash
       || capacity.networkId !== networkId || receipt.networkId !== networkId
-      || receipt.stableKeyHash !== stableKeyHash || appliedState.materializationEpoch !== epoch
-      || receipt.materializationEpoch !== epoch) {
+      || receipt.stableKeyHash !== stableKeyHash
+      || receipt.materializationEpoch !== appliedState.materializationEpoch
+      || BigInt(appliedState.materializationEpoch) > BigInt(epoch)) {
     throw new Error('persisted system-record tuple crosses its network, key, or epoch binding');
   }
   const canonicalTableBytes = canonicalizeOwnedSubjectTableObjectV1(
@@ -228,7 +229,7 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   const expectedFirstRead = Object.freeze([
     ...canonical.record,
     ...canonical.capacity,
-    ...canonical.epoch,
+    ...epochRows,
     ...canonical.receipt,
   ]);
   assertExactQuadSet(quads, expectedFirstRead, 'reserved state');
