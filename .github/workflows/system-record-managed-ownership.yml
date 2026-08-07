@@ -158,6 +158,10 @@ jobs:
       # coverage of the wall-clock-deadline fix (a `req.setTimeout` bounds
       # socket-active time, not queue wait), and the CLI suites carry 20 of the
       # supervisor fault-injection cases this PR added.
+      - name: Agent facade conformance
+        run: |
+          pnpm --filter @origintrail-official/dkg-agent exec vitest run \n            test/system-record-agent-facade-outcomes-v1.test.ts
+
       - name: CLI supervisor conformance
         run: |
           pnpm --filter @origintrail-official/dkg exec vitest run \

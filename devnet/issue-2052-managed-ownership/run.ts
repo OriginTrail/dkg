@@ -484,6 +484,32 @@ async function runLiveHandoff(
   };
 }
 
+/**
+ * Exact-quad existence probe.
+ *
+ * Deliberately not a graph total: a canary asserted by count can be masked by
+ * any unrelated insertion into the same graph, which is how a check quietly
+ * stops testing what it names.
+ */
+async function askExactQuad(
+  endpoint: string,
+  graph: string,
+  subject: string,
+  predicate: string,
+): Promise<boolean> {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/sparql-query',
+      Accept: 'application/sparql-results+json',
+    },
+    body: `ASK { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+    signal: AbortSignal.timeout(10_000),
+  });
+  const json = (await res.json()) as { boolean?: boolean };
+  return json.boolean === true;
+}
+
 interface Manifest {
   reservedGraphs: string[];
   entries: {
@@ -731,32 +757,54 @@ async function main(): Promise<void> {
       const decoyGraph = 'urn:dkg:gate:unscoped-delete-decoy';
       const decoySubject = 'urn:dkg:gate:decoy-subject';
       const decoyPredicate = 'urn:dkg:gate:decoy-predicate';
+      const canarySubject = 'urn:dkg:gate:reserved-canary';
+
+      // A CANARY inside each reserved graph, matching the SAME predicate the
+      // deletion targets. Without it this check does not test what it claims:
+      // the first version seeded only the ordinary row, so removing the
+      // reserved-prefix FILTER still deleted just that row, reserved counts did
+      // not move, and the gate passed with the guard gone. Measured as a solo
+      // mutant — `PASS: 27 checks` with the FILTER removed.
+      //
+      // The canaries are asserted by EXACT ASK rather than by graph totals, so
+      // an unrelated insertion cannot mask a deletion, and they are removed
+      // again below so the seed-count check further down still sees exactly the
+      // fixture.
       await sparqlUpdate(
         server.updateEndpoint,
-        `INSERT DATA { GRAPH <${decoyGraph}> { <${decoySubject}> <${decoyPredicate}> "decoy" . } }`,
+        `INSERT DATA {\n${[
+          `GRAPH <${decoyGraph}> { <${decoySubject}> <${decoyPredicate}> "decoy" . }`,
+          ...manifest.reservedGraphs.map(
+            (g) => `GRAPH <${g}> { <${canarySubject}> <${decoyPredicate}> "canary" . }`,
+          ),
+        ].join('\n')}\n}`,
       );
-      const reservedBefore: Record<string, number> = {};
-      for (const graph of manifest.reservedGraphs) {
-        reservedBefore[graph] = await countQuadsInGraph(server.queryEndpoint, graph);
-      }
+
       // Deliberately UNSCOPED (no `graph`) and matching only by predicate, so
-      // the pattern is one a reserved row could match too.
-      await full
-        .deleteByPattern({ predicate: decoyPredicate })
-        .catch(() => undefined);
+      // the pattern is exactly one a reserved row DOES match.
+      await full.deleteByPattern({ predicate: decoyPredicate }).catch(() => undefined);
+
       const decoyAfter = await countQuadsInGraph(server.queryEndpoint, decoyGraph);
       if (decoyAfter !== 0) {
         failures.push(`unscoped deleteByPattern did not delete the ordinary row (${decoyAfter} left)`);
       }
       for (const graph of manifest.reservedGraphs) {
-        const after = await countQuadsInGraph(server.queryEndpoint, graph);
-        if (after < reservedBefore[graph]) {
-          failures.push(
-            `unscoped deleteByPattern deleted reserved rows in ${graph} ` +
-              `(${reservedBefore[graph]} -> ${after})`,
-          );
+        const survived = await askExactQuad(
+          server.queryEndpoint,
+          graph,
+          canarySubject,
+          decoyPredicate,
+        );
+        if (!survived) {
+          failures.push(`unscoped deleteByPattern deleted the reserved canary in ${graph}`);
         }
       }
+
+      // Restore the seeded state: the canaries are scaffolding, not fixture.
+      await sparqlUpdate(
+        server.updateEndpoint,
+        `DELETE WHERE { GRAPH ?g { <${canarySubject}> <${decoyPredicate}> ?o } }`,
+      );
 
       // Failed atomic-replace cleanup must not delete persistent reserved state.
       const deleted: string[] = [];

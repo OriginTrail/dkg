@@ -62,10 +62,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     // ordinary revive. Latching that would let one probe landing inside a
     // one-second Oxigraph restart disable the lane for the entire process
     // lifetime, silently, recoverable only by a daemon restart.
-    if (this.systemRecordLaneMemo) return this.systemRecordLaneMemo;
-    const inner = this.inner.getSystemRecordLaneControllerV1?.();
-    this.systemRecordLaneMemo = inner ?? null;
-    return inner;
+    // Straight through, no memo at all. This decorator FORWARDS the inner
+    // controller unchanged, so caching bought no identity stability — it could
+    // only go stale and keep advertising a lane the adapter would now deny.
+    return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
   readonly innerStore: TripleStore;

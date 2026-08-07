@@ -285,9 +285,12 @@ export class SparqlHttpStore implements TripleStore {
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
     //
-    // Reads refuse ONLY on terminal ownership — see
-    // `assertManagedBackendReadable`. `postQuery` is one of exactly two `fetch`
-    // sites in this adapter, and every read form funnels through it
+    // Reads refuse whenever ownership is not LIVE — the same predicate as
+    // mutations; see `assertManagedBackendReadable`. (An earlier revision
+    // refused only on terminal ownership, and this comment outlived it.)
+    //
+    // `postQuery` is one of exactly two `fetch` sites in this adapter, and every
+    // read form funnels through it
     // (`query`/`queryConstruct`/`hasGraph`/`countQuads`/`listGraphsDirect`), so
     // this one site is the whole endpoint-read surface.
     this.assertManagedBackendReadable(options?.source ?? 'query');
@@ -688,16 +691,23 @@ export class SparqlHttpStore implements TripleStore {
       return { outcome: 'deferred', reason: 'generation-changed' };
     }
 
-    if (!this.managedClient || this.managedClient.childGeneration !== childGeneration) {
-      // A pool is bound to one generation for its whole life; a mismatch means
-      // the caller is holding a facade from a retired generation.
-      if (this.managedClient) return { outcome: 'capability-lost' };
-      this.managedClient = new OwnedManagedHttpClient(childGeneration);
-    }
-
-    // The verified-replacement command construction and the full-state CAS
-    // transaction are the next increment of this stack; until they land the
-    // lane refuses rather than dispatching an unproven write.
+    // NO owned pool is created here, and its absence is a fix rather than an
+    // omission.
+    //
+    // This method used to construct an `OwnedManagedHttpClient(childGeneration)`
+    // and then return `deferred` without sending a byte. After any ordinary
+    // child recovery advanced the generation, the next apply found a cached
+    // generation-1 pool, took the "a pool is bound to one generation for its
+    // whole life" branch, and returned `capability-lost` — turning a RECOVERABLE
+    // generation change into a permanently lost capability, caused entirely by a
+    // pool that never carried a request.
+    //
+    // The pool, and the generation-binding invariant that stops a stale facade
+    // reaching a replacement listener, belong with the code that actually
+    // dispatches: the verified-replacement command construction and the
+    // full-state CAS are the next increment of this stack. Until they land the
+    // lane refuses rather than dispatching an unproven write, and leaves nothing
+    // behind while doing so.
     return { outcome: 'deferred', reason: 'validation-mismatch' };
   }
 

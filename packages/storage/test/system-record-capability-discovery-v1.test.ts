@@ -13,6 +13,9 @@ import {
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
+import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const ENDPOINT = 'http://127.0.0.1:1/query';
 
@@ -113,6 +116,48 @@ describe('system-record V1 capability discovery', () => {
       const second = store.getSystemRecordLaneControllerV1?.();
       expect(first).toBe(second);
       await store.close().catch(() => undefined);
+    });
+
+    for (const graphSetIndex of [true, false]) {
+      it(`stops advertising once ownership is lost (graphSetIndex: ${graphSetIndex})`, async () => {
+        // Memoization must preserve wrapper IDENTITY, never answer the
+        // capability question. Absence was already re-probed, but PRESENCE was
+        // latched — so a decorator that had cached a wrapper kept advertising a
+        // lane after the lease went terminal, while the adapter underneath would
+        // have denied it. Discovery is the safety gate callers use, so a stale
+        // "yes" is the dangerous direction of the two.
+        //
+        // Both compositions, because the two decorators cached differently: the
+        // graph-set index wraps the controller, the blob store forwards it.
+        const store = await build(managedOptions(), { graphSetIndex });
+        expect(store.getSystemRecordLaneControllerV1?.()).toBeDefined();
+
+        ownership.invalidate('port-release-unproven');
+        expect(store.getSystemRecordLaneControllerV1?.()).toBeUndefined();
+
+        await store.close().catch(() => undefined);
+      });
+    }
+
+    it('is forwarded LIVE by the literal blob store', async () => {
+      // Constructed directly, because this decorator only joins the composition
+      // when large-literal storage is configured — so `createTripleStore` alone
+      // never exercises it, and its forwarding had no coverage at all.
+      //
+      // It used to memoize a present controller, which could only go stale: it
+      // wraps nothing, so caching bought no identity stability and could only
+      // keep advertising a lane the adapter would now deny.
+      const inner = await build(managedOptions());
+      const blobStore = new SharedMemoryLiteralBlobStore(inner, {
+        blobDir: join(tmpdir(), `dkg-blobstore-probe-${process.pid}`),
+        thresholdBytes: 1_000_000,
+      });
+
+      expect(blobStore.getSystemRecordLaneControllerV1?.()).toBeDefined();
+      ownership.invalidate('port-release-unproven');
+      expect(blobStore.getSystemRecordLaneControllerV1?.()).toBeUndefined();
+
+      await inner.close().catch(() => undefined);
     });
 
     it('is DENIED by an enabled changelog', async () => {

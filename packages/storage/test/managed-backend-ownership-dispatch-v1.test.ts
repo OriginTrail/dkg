@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import '../src/adapters/sparql-http.js';
 
 import {
+  SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
+  SYSTEM_RECORD_V1_STATE_GRAPH,
+} from '../src/internal-graph-policy.js';
+import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipControllerV1,
@@ -55,8 +59,12 @@ describe('managed backend ownership at mutation dispatch', () => {
 
   const recordFetch = (): void => {
     globalThis.fetch = (async (input: unknown, init?: { body?: unknown }) => {
-      requests.push(`${String(input)} :: ${String(init?.body ?? '')}`.slice(0, 120));
-      return new Response(EMPTY_RESULTS, {
+      const body = String(init?.body ?? '');
+      requests.push(`${String(input)} :: ${body}`.slice(0, 120));
+      // ASK answers must be ASK-shaped; a SELECT-shaped body makes `hasGraph`
+      // return `undefined` rather than a boolean and hides what is being tested.
+      const payload = /^\s*ASK/i.test(body) ? JSON.stringify({ boolean: false }) : EMPTY_RESULTS;
+      return new Response(payload, {
         status: 200,
         headers: { 'Content-Type': 'application/sparql-results+json' },
       });
@@ -160,6 +168,26 @@ describe('managed backend ownership at mutation dispatch', () => {
     expect(requests).toHaveLength(1);
 
     await plain.close().catch(() => undefined);
+  });
+
+  it('hides reserved internal graphs from adapter-level hasGraph', async () => {
+    // The policy module claims reserved state never enumerates and that "no
+    // legitimate iterate-and-drop loop can reach one". That held only for the
+    // INDEXED composition: `hasGraph` asked the backend directly, so a store
+    // built without the graph-set index answered `true` and revealed that
+    // reserved state exists. Answered here, before any I/O.
+    const store = await managedStore();
+
+    expect(await store.hasGraph(SYSTEM_RECORD_V1_STATE_GRAPH)).toBe(false);
+    expect(await store.hasGraph(SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH)).toBe(false);
+    expect(requests).toEqual([]);
+
+    // An ordinary graph still reaches the backend, so the guard is scoped and
+    // not a blanket refusal.
+    expect(await store.hasGraph('urn:dkg:test:ordinary')).toBe(false);
+    expect(requests).toHaveLength(1);
+
+    await store.close().catch(() => undefined);
   });
 
   it('refuses a READ with ZERO I/O once ownership is terminal', async () => {
