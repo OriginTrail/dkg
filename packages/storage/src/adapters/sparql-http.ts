@@ -50,8 +50,10 @@ import {
 } from '../atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from '../internal-graph-policy.js';
 import {
+  ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
+  isManagedOxigraphOwnershipLiveV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphSupervisorHandoffV1,
@@ -313,6 +315,21 @@ export class SparqlHttpStore implements TripleStore {
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
+      // AT DISPATCH, and the placement is the entire guarantee.
+      //
+      // The scheduler holds ordinary work while a control barrier is pending and
+      // releases it when the barrier settles — identically whether the barrier
+      // RESOLVED or REJECTED. So a mutation queued before a generation handoff
+      // resumes after that handoff failed, and until now nothing on this path
+      // consulted ownership: reproduced, an `INSERT DATA` went on the wire while
+      // the store's own lease already read
+      // `terminal: true, port-release-unproven`. Every fact needed to refuse was
+      // available at the dispatch instant and simply never read.
+      //
+      // Checking in `insert()`/`update()` instead would be checking at CALL
+      // time, which is before the queue — precisely the calls the review names
+      // as "queued before activation/failure" would pass it and dispatch anyway.
+      this.assertManagedBackendOwned(operation);
       const timeoutSignal = AbortSignal.timeout(this.timeout);
       const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
       const signal = signalScope.signal ?? timeoutSignal;
@@ -344,6 +361,58 @@ export class SparqlHttpStore implements TripleStore {
         signalScope.dispose();
       }
     });
+  }
+
+  /**
+   * Refuse a managed-store mutation whose backend we cannot prove we own.
+   *
+   * Scoped to MUTATIONS on stores that actually hold an ownership lease:
+   *
+   * - An operator-configured store has no lease, returns on the first line, and
+   *   pays one already-loaded field read. Nothing about the default path moves.
+   * - Reads are deliberately NOT refused. A lane failure must not take the
+   *   daemon's whole triple store down — the same reasoning that made a failed
+   *   shutdown leave the child alive rather than kill it. A read against a dead
+   *   port fails at the transport anyway, and refusing reads would turn every
+   *   child respawn into a total store outage.
+   *
+   * It is a live READ of the lease, not a latch armed by the lane, and that is a
+   * deliberate departure from the fix the review proposed. Three measured
+   * reasons:
+   *
+   * 1. An armed latch's safety margin is ZERO microtasks. The scheduler rejects
+   *    the barrier one reaction before it releases queued work, so a latch
+   *    written synchronously in the lane's `catch` wins by exactly one tick —
+   *    and one added `await` anywhere between them silently disarms it with
+   *    every test still green. A dispatch-time read has no ordering requirement
+   *    to get wrong.
+   * 2. An armed latch is blanket. Of the five handoff steps, two
+   *    (`destroyClient`, `rotateMaterializationEpoch`) leave the child proven
+   *    and healthy; latching on "the barrier threw" refuses every managed write
+   *    for the process lifetime on a node where nothing was wrong.
+   * 3. A lane-armed latch fixes the RAREST instance of this class. The same
+   *    exposure exists with no lane involved: on an ordinary child exit the
+   *    supervisor invalidates ownership and revives, and for the whole backoff
+   *    the adapter keeps POSTing to a port it does not own. That path ships
+   *    today; the lane path has no production caller at all.
+   *
+   * Self-clearing follows from being a read: when the supervisor binds a proven
+   * replacement generation the lease reads live again and writes resume, with no
+   * clear path to forget and no sticky field to leave set. A latch would have
+   * needed one, and the version this was modelled on does not have it — which
+   * would have converted a self-healing respawn into a mandatory node restart.
+   */
+  private assertManagedBackendOwned(operation: string): void {
+    if (!this.ownershipLease) return;
+    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
+    // Cold path only: the snapshot allocates, so it is taken to build the error
+    // and nowhere else.
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    throw new ManagedOxigraphBackendUnownedError(
+      `sparql-http.${operation}`,
+      snapshot?.terminal ?? false,
+      snapshot?.lastInvalidation,
+    );
   }
 
   /**

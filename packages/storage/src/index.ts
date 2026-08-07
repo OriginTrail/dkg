@@ -49,11 +49,13 @@ export {
 } from './internal-graph-policy.js';
 export {
   MANAGED_OXIGRAPH_LEASE_OPTION_KEY,
+  ManagedOxigraphBackendUnownedError,
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLeaseV1,
+  isManagedOxigraphOwnershipLiveV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipInvalidationV1,
