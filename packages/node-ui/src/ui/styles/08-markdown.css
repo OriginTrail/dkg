@@ -310,9 +310,9 @@
 .v10-chat-thinking {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   font-size: 13px;
-  line-height: 20px;
+  line-height: 28px;
   color: var(--text-secondary);
 }
 
@@ -333,7 +333,7 @@
 }
 
 .v10-chat-thinking-orb {
-  flex: 0 0 20px;
+  flex: 0 0 28px;
   opacity: 0.86;
 }
 

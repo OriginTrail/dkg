@@ -171,7 +171,8 @@ export function renderMessageContent(
           aria-hidden="true"
           className="v10-chat-thinking-orb"
           state="connecting"
-          size={20}
+          size={64}
+          style={{ width: 28, height: 28 }}
           theme="auto"
         />
         <span>Thinking…</span>
