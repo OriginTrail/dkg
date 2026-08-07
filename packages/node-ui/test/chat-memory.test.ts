@@ -918,7 +918,6 @@ describe('ChatMemoryManager WM write discipline', () => {
   let mockShare: TrackingFn;
   let mockCreateAssertion: TrackingFn;
   let mockWriteAssertion: TrackingFn;
-  let mockMigrateLegacyAssertion: TrackingFn;
   let mockCreateContextGraph: TrackingFn;
   let mockListContextGraphs: TrackingFn;
 
@@ -927,11 +926,6 @@ describe('ChatMemoryManager WM write discipline', () => {
     mockShare = trackFn({ shareOperationId: 'op-1' });
     mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
     mockWriteAssertion = trackFn({ written: 0 });
-    mockMigrateLegacyAssertion = trackFn({
-      status: 'not-needed',
-      copiedPublic: 0,
-      preservedPrivate: 0,
-    });
     mockCreateContextGraph = trackFn(undefined);
     mockListContextGraphs = trackFn([{ id: 'agent-context', name: 'Agent Context' }]);
   });
@@ -942,7 +936,6 @@ describe('ChatMemoryManager WM write discipline', () => {
         query: mockQuery,
         createAssertion: mockCreateAssertion,
         writeAssertion: mockWriteAssertion,
-        migrateLegacyAssertion: mockMigrateLegacyAssertion,
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
@@ -960,7 +953,7 @@ describe('ChatMemoryManager WM write discipline', () => {
     expect(mockShare.calls).toHaveLength(0);
   });
 
-  it('migrates the exact agent-scoped chat-turns draft before creating or writing it', async () => {
+  it('ensureInitialized creates the assertion with the manager agentAddress before first write', async () => {
     const order: string[] = [];
     const manager = new ChatMemoryManager(
       {
@@ -973,10 +966,6 @@ describe('ChatMemoryManager WM write discipline', () => {
           order.push('write');
           return mockWriteAssertion(...args);
         },
-        migrateLegacyAssertion: async (...args) => {
-          order.push('migrate');
-          return mockMigrateLegacyAssertion(...args);
-        },
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
@@ -985,16 +974,71 @@ describe('ChatMemoryManager WM write discipline', () => {
     );
     mockQuery.returns.push({ bindings: [] });
 
-    await manager.storeChatExchange('s-migrate', 'hello', 'reply');
+    await manager.storeChatExchange('s-ensure', 'hello', 'reply');
 
-    expect(order.slice(0, 3)).toEqual(['migrate', 'create', 'write']);
-    expect(mockMigrateLegacyAssertion.calls).toEqual([[
+    // The daemon-side createAssertion owns any legacy chat-WM migration
+    // (#2149) — the manager's contract is only: ensure with the SAME agent
+    // address every mutation uses, before the first write.
+    expect(order.slice(0, 2)).toEqual(['create', 'write']);
+    expect(mockCreateAssertion.calls).toEqual([[
       'agent-context',
       'chat-turns',
       { agentAddress: 'did:dkg:agent:test' },
     ]]);
-    expect(mockCreateAssertion.calls[0]?.[2]).toEqual({ agentAddress: 'did:dkg:agent:test' });
     expect(mockWriteAssertion.calls[0]?.[3]).toEqual({ agentAddress: 'did:dkg:agent:test' });
+  });
+
+  it('recordChatTurnPersistenceTransition writes to chat-turns with the manager agentAddress', async () => {
+    const manager = createManager();
+    mockQuery.returns.push({ bindings: [] });
+
+    await manager.recordChatTurnPersistenceTransition('s-transition', 'turn-9', 'stored');
+
+    expect(mockWriteAssertion.calls).toHaveLength(1);
+    const call = mockWriteAssertion.calls[0]!;
+    expect(call[0]).toBe('agent-context');
+    expect(call[1]).toBe('chat-turns');
+    expect(Array.isArray(call[2])).toBe(true);
+    expect(call[3]).toEqual({ agentAddress: 'did:dkg:agent:test' });
+  });
+
+  it('mention-extraction writes to chat-turns with the manager agentAddress', async () => {
+    const manager = createManager();
+    (manager as any).callMentionExtraction = async () => [{ name: 'Alice', type: 'Person' }];
+
+    await (manager as any).extractAndWriteMentions(
+      'urn:dkg:chat:msg:u1',
+      'Alice asked about the DKG',
+      'urn:dkg:chat:msg:a1',
+      'Explained it to Alice',
+    );
+
+    expect(mockWriteAssertion.calls).toHaveLength(1);
+    const call = mockWriteAssertion.calls[0]!;
+    expect(call[0]).toBe('agent-context');
+    expect(call[1]).toBe('chat-turns');
+    expect(Array.isArray(call[2])).toBe(true);
+    expect(call[3]).toEqual({ agentAddress: 'did:dkg:agent:test' });
+  });
+
+  it('extractKnowledge writes to chat-turns with the manager agentAddress', async () => {
+    const manager = createManager();
+    (manager as any).llmClient = {
+      complete: async () => ({
+        message: { content: '<urn:test:s> <urn:test:p> <urn:test:o> .' },
+      }),
+    };
+    mockQuery.returns.push({ bindings: [] });
+
+    const written = await manager.extractKnowledge('s-extract', 'question', 'answer');
+
+    expect(written).toBe(1);
+    expect(mockWriteAssertion.calls).toHaveLength(1);
+    const call = mockWriteAssertion.calls[0]!;
+    expect(call[0]).toBe('agent-context');
+    expect(call[1]).toBe('chat-turns');
+    expect(Array.isArray(call[2])).toBe(true);
+    expect(call[3]).toEqual({ agentAddress: 'did:dkg:agent:test' });
   });
 
   it('writeAssertion targets agent-context / chat-turns on every call', async () => {

@@ -1900,6 +1900,30 @@ export const VM_CURRENT_ASSERTION_PRED = `${DKG}vmCurrentAssertion`;
 export const KA_ID_PRED = `${DKG}kaId`;
 export const RESERVED_UAL_PRED = `${DKG}reservedUal`;
 export const PROV_WAS_REVISION_OF = `${PROV}wasRevisionOf`;
+// In-flight lane markers stamped on the lifecycle URN while a share /
+// promote operation is outstanding. Their presence means the draft is NOT
+// purely local — the legacy-WM migration eligibility gate keys off them.
+export const SHARE_OPERATION_ID_PRED = `${DKG}shareOperationId`;
+export const PROMOTE_OPERATION_INTENT_PRED = `${DKG}promoteOperationIntent`;
+
+/**
+ * Strip the quoting from an optional SPARQL binding literal. Bindings come
+ * back either bare (IRIs) or as a `"…"`-quoted, JSON-escaped literal —
+ * possibly with a datatype/lang suffix the JSON parse rejects, in which case
+ * the raw inner body between the outer quotes is returned.
+ */
+export function stripOptionalLiteral(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (value.startsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      const lastQuote = value.lastIndexOf('"');
+      return value.slice(1, lastQuote > 0 ? lastQuote : undefined);
+    }
+  }
+  return value;
+}
 
 /** OT-RFC-43 §10.5.4 per-layer / overall KA status enum (string-stable). */
 export type KaStatus = 'draft-open' | 'wm-sealed' | 'swm-shared' | 'vm-confirmed';

@@ -18,8 +18,13 @@ export interface MemoryToolContext {
     },
   ) => Promise<any>;
   /**
-   * Create a per-agent Working Memory assertion graph. Idempotent: "already
-   * exists" is resolved quietly, any other error surfaces.
+   * ENSURE a per-agent Working Memory assertion graph exists and is
+   * writable. Idempotent: "already exists" is resolved quietly, any other
+   * error surfaces. The implementation owns whatever storage upgrades that
+   * takes — the daemon, for example, migrates a legacy root-scoped
+   * `agent-context/chat-turns` draft here before creating (#2149). The
+   * manager only describes the assertion it wants; it never orchestrates
+   * publisher storage concerns.
    */
   createAssertion: (
     contextGraphId: string,
@@ -33,15 +38,6 @@ export interface MemoryToolContext {
     quads: any[],
     opts?: { subGraphName?: string; agentAddress?: string },
   ) => Promise<{ written: number }>;
-  /**
-   * Explicitly migrate one legacy, local-only WM assertion before mutation.
-   * Optional for embedders; the daemon supplies it for durable chat memory.
-   */
-  migrateLegacyAssertion?: (
-    contextGraphId: string,
-    name: string,
-    opts?: { subGraphName?: string; agentAddress?: string },
-  ) => Promise<{ status: string; copiedPublic: number; preservedPrivate: number }>;
   createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
   listContextGraphs: () => Promise<any[]>;
 }
@@ -163,8 +159,11 @@ export interface ImportResult {
  * extraction). v1 of the openclaw-dkg-primary-memory work intentionally
  * defers that migration; follow-up work tracks it.
  */
-const AGENT_CONTEXT_GRAPH = 'agent-context';
-const CHAT_TURNS_ASSERTION = 'chat-turns';
+// Exported so the daemon's MemoryToolContext implementation can key
+// chat-specific ensure behavior (the legacy-WM migration for exactly this
+// assertion, #2149) off the same identifiers the manager writes with.
+export const AGENT_CONTEXT_GRAPH = 'agent-context';
+export const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -533,15 +532,6 @@ export class ChatMemoryManager {
     const assertionKey = `${this.agentContextGraph}::${this.chatTurnsAssertion}`;
     if (!this.assertionEnsured.has(assertionKey)) {
       try {
-        // Upgraded nodes can still hold the pre-graph-scope, name-keyed
-        // `agent-context/chat-turns` draft. The normal create/write APIs keep
-        // those legacy KAs read-only by design, so the daemon exposes one
-        // explicit, data-preserving migration for this local WM assertion.
-        await this.tools.migrateLegacyAssertion?.(
-          this.agentContextGraph,
-          this.chatTurnsAssertion,
-          this.wmMutationOpts(),
-        );
         await this.tools.createAssertion(
           this.agentContextGraph,
           this.chatTurnsAssertion,
