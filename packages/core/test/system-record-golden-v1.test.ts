@@ -123,6 +123,25 @@ describe('independently generated system-record V1 golden vectors', () => {
       },
     })).rejects.toThrow(/chainId.*record network/);
     expect(verifierCalled).toBe(false);
+
+    const transition = vectors.signed.coSignedTransitionEip1271.envelope;
+    const nonnumericObject = {
+      ...transition.object,
+      networkId: 'otp:mainnet',
+    } as AgentProfileAuthorityTransitionV1;
+    const nonnumericNetwork = {
+      ...transition,
+      object: nonnumericObject,
+      objectDigest: computeAgentProfileAuthorityTransitionDigestV1(nonnumericObject),
+    };
+    verifierCalled = false;
+    await expect(verifySignedSystemRecordEnvelopeV1(nonnumericNetwork, {
+      verifyEip1271: () => {
+        verifierCalled = true;
+        return true;
+      },
+    })).rejects.toThrow(/numeric chain-bound networkId/);
+    expect(verifierCalled).toBe(false);
   });
 
   it('pins provider descriptor message/signature independently of authority', async () => {
