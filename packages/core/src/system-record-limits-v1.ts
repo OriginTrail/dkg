@@ -1,0 +1,190 @@
+/**
+ * Frozen numeric and domain constants for the dormant agents system-record V1 lane.
+ *
+ * Keeping the limits in one dependency-free module is intentional: codecs, cache
+ * accounting, transport, storage, and conformance tests must consume the same values.
+ */
+export const SYSTEM_RECORD_PROTOCOL_V1 = '/dkg/system-records/1.0.0' as const;
+export const SYSTEM_RECORD_WIRE_VERSION_V1 = '1' as const;
+export const SYSTEM_RECORD_KIND_V1 = 'agents' as const;
+
+export const SYSTEM_RECORD_MAX_HEADER_BYTES = 8 * 1024;
+export const SYSTEM_RECORD_MAX_FRAME_BYTES = 1_056_772;
+export const SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES = 1024 * 1024;
+export const SYSTEM_RECORD_MAX_JSON_DEPTH = 16;
+export const SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH = 8;
+export const SYSTEM_RECORD_MAX_FLAT_JSON_DEPTH = 4;
+export const SYSTEM_RECORD_MAX_ARRAY_JSON_DEPTH = 2;
+export const SYSTEM_RECORD_MAX_TUPLE_JSON_DEPTH = 3;
+export const SYSTEM_RECORD_MAX_INVENTORY_INTERNAL_JSON_DEPTH = 5;
+export const SYSTEM_RECORD_MAX_WIRE_REQUEST_JSON_DEPTH = 6;
+export const SYSTEM_RECORD_MAX_SIGNED_HEAD_JSON_DEPTH = 20;
+export const SYSTEM_RECORD_MAX_SIGNED_CONTROL_JSON_DEPTH = 12;
+export const SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH = 2;
+export const SYSTEM_RECORD_MAX_INVENTORY_CHILD_INDEX = 255;
+
+export const SYSTEM_RECORD_OBJECT_CAPS_V1 = Object.freeze({
+  'root-descriptor': 16 * 1024,
+  'inventory-internal': 64 * 1024,
+  'inventory-leaf': 256 * 1024,
+  'agent-profile-head': 64 * 1024,
+  'authority-transition': 64 * 1024,
+  'fork-resolution': 64 * 1024,
+  'conflict-evidence': 16 * 1024,
+  'owned-subject-table': 256 * 1024,
+  'profile-bundle': SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
+} as const);
+
+export type SystemRecordObjectKindV1 = keyof typeof SYSTEM_RECORD_OBJECT_CAPS_V1;
+
+export const SYSTEM_RECORD_MAX_PEER_ID_BYTES = 256;
+export const SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES = 32;
+export const SYSTEM_RECORD_ED25519_SIGNATURE_BYTES = 64;
+export const SYSTEM_RECORD_EIP191_SIGNATURE_BYTES = 65;
+export const SYSTEM_RECORD_MAX_EIP1271_SIGNATURE_BYTES = 4_096;
+export const SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX = 14n;
+export const SYSTEM_RECORD_MAX_ROOT_CLAIMS = 15;
+export const SYSTEM_RECORD_MAX_RESOLVED_FORK_TUPLES = 16;
+export const SYSTEM_RECORD_MAX_CONFLICT_DIGESTS = 16;
+export const SYSTEM_RECORD_MAX_CONFLICT_ENTRIES = 8;
+export const SYSTEM_RECORD_MAX_OWNED_SUBJECTS = 2_048;
+export const SYSTEM_RECORD_MAX_PROJECTION_QUADS = 10_000;
+export const SYSTEM_RECORD_MAX_PROJECTION_BYTES = 2 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES = 64 * 1024;
+export const SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES = 512 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_QUADS = 5_000_000;
+export const SYSTEM_RECORD_MAX_DIRTY_RECORDS = 10_000;
+export const SYSTEM_RECORD_MAX_DIRTY_STATE_BYTES = 16 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_CLOCK_SKEW_MS = 5 * 60 * 1_000;
+export const SYSTEM_RECORD_MAX_STATUS_ROWS = 100;
+export const SYSTEM_RECORD_MAX_STATUS_BYTES = 256 * 1024;
+export const SYSTEM_RECORD_STATUS_TIMEOUT_MS = 2_000;
+export const SYSTEM_RECORD_MAX_ATOMIC_BUNDLE_BYTES = 1024 * 1024;
+export const SYSTEM_RECORD_MAX_ATOMIC_SIGNED_HEAD_BYTES = 64 * 1024;
+export const SYSTEM_RECORD_MAX_ATOMIC_DECODED_TERM_BYTES = 2 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES = 4 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES = 12 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_BUNDLE_DECODE_CONCURRENCY = 1;
+export const SYSTEM_RECORD_MAX_MATERIALIZER_WRITE_CONCURRENCY = 1;
+
+export const SYSTEM_RECORD_MAX_CLOSURE_OBJECTS = 32;
+export const SYSTEM_RECORD_MAX_CLOSURE_BYTES = 3 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_SIDECAR_OBJECTS = 17;
+export const SYSTEM_RECORD_MAX_SIDECAR_BYTES = 1_064_960;
+export const SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_OBJECTS = 25_000;
+export const SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_BYTES = 1024 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_REFERENCES = 262_144;
+export const SYSTEM_RECORD_MAX_CLOSURE_SIDECAR_LIVE_METADATA_BYTES = 24 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_CONFLICT_SIDECARS = 1_024;
+export const SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_REFERENCES = 17_408;
+export const SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_AGGREGATE_BYTES = 128 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_METADATA_BYTES = 2 * 1024 * 1024;
+
+export const SYSTEM_RECORD_MAX_ACTIVATION_RECORDS = 512;
+export const SYSTEM_RECORD_MAX_ACTIVATION_BUNDLE_BYTES = 128 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_ACTIVATION_CLOSURE_BYTES = 256 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES = 4;
+export const SYSTEM_RECORD_MAX_ACTIVATION_REFERENCES = 32_768;
+export const SYSTEM_RECORD_MAX_ACTIVATION_METADATA_BYTES = 4 * 1024 * 1024;
+
+export const SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES = 64 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_RUNTIME_ROOT_DIRECTORY_BYTES = 8 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_RUNTIME_LEAF_BYTES = 16 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_RUNTIME_HEAD_BYTES = 8 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_RUNTIME_DECODE_BYTES = 12 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_RUNTIME_EIP1271_BYTES = 8 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_RUNTIME_CONTROL_BYTES = 12 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_OBJECT_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_OBJECT_CACHE_OBJECTS = 50_000;
+export const SYSTEM_RECORD_MAX_RESTART_VALIDATION_KEYS = 8_192;
+export const SYSTEM_RECORD_MAX_RESTART_VALIDATION_BYTES = 1024 * 1024;
+export const SYSTEM_RECORD_MAX_PROVIDER_CONTINUATIONS = 1_024;
+export const SYSTEM_RECORD_MAX_PROVIDER_CONTINUATION_BYTES = 1024 * 1024;
+export const SYSTEM_RECORD_MAX_COMPLETED_LEAF_DIGESTS = 4_096;
+export const SYSTEM_RECORD_MAX_COMPLETED_LEAF_BYTES = 256 * 1024;
+export const SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES = 128;
+export const SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS = 16;
+export const SYSTEM_RECORD_MAX_EIP1271_CONCURRENCY = 2;
+export const SYSTEM_RECORD_MAX_EIP1271_CALLS_PER_SLICE = 2;
+export const SYSTEM_RECORD_MAX_EIP1271_CACHE_ENTRIES = 2_048;
+
+export const SYSTEM_RECORD_MAX_SLICE_ADVANCES = 8;
+export const SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES = 2 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_SLICE_REQUESTS = 12;
+export const SYSTEM_RECORD_MAX_SLICE_RETRIES_PER_REQUEST = 1;
+export const SYSTEM_RECORD_SLICE_TIMEOUT_MS = 3_000;
+export const SYSTEM_RECORD_MAX_CONTINUATION_SLICES = 512;
+export const SYSTEM_RECORD_MAX_CONTINUATION_ADVANCES = 4_096;
+export const SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES = 1024 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_CONTINUATION_CLOSURE_WIRE_BYTES = 768 * 1024 * 1024;
+export const SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS = 30 * 60 * 1_000;
+export const SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS = 3_000;
+export const SYSTEM_RECORD_PROVIDER_REQUEST_TOKEN_CAPACITY = 32;
+export const SYSTEM_RECORD_PROVIDER_REQUEST_TOKEN_REFILL_PER_MINUTE = 256;
+export const SYSTEM_RECORD_PROVIDER_RESPONSE_TOKEN_CAPACITY = 4 * SYSTEM_RECORD_MAX_FRAME_BYTES;
+export const SYSTEM_RECORD_PROVIDER_RESPONSE_TOKEN_REFILL_PER_MINUTE = 32 * 1024 * 1024;
+
+export const SYSTEM_RECORD_MAX_CACHE_STAGING_BYTES = 32 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_CACHE_LIVE_METADATA_BYTES = 32 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_CACHE_RESERVE_METADATA_BYTES = 32 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_UNREFERENCED_OBJECTS = 128;
+export const SYSTEM_RECORD_MAX_UNREFERENCED_BYTES = 64 * 1024 * 1024;
+export const SYSTEM_RECORD_MAX_PUBLICATION_JOURNAL_REFERENCES = 110;
+export const SYSTEM_RECORD_MAX_PUBLICATION_JOURNAL_BYTES = 64 * 1024;
+export const SYSTEM_RECORD_MAX_RECLAIM_DELETES = 16;
+export const SYSTEM_RECORD_MAX_RECLAIM_BYTES = 16 * 1024 * 1024;
+export const SYSTEM_RECORD_RECLAIM_TIMEOUT_MS = 50;
+export const SYSTEM_RECORD_MAX_SERVE_PINS = 64;
+export const SYSTEM_RECORD_SERVE_PIN_TIMEOUT_MS = 30_000;
+export const SYSTEM_RECORD_REPAIR_MIN_DISPATCH_BUDGET_MS = 1_500;
+export const SYSTEM_RECORD_MATERIALIZER_HEALTHY_P99_MS = 750;
+export const SYSTEM_RECORD_MATERIALIZER_HARD_TIMEOUT_MS = 1_000;
+
+export const SYSTEM_RECORD_INVENTORY_ROW_VERSION = 1;
+export const SYSTEM_RECORD_MAX_ROW_BYTES = 512;
+export const SYSTEM_RECORD_MAX_ORDINARY_ROW_BYTES = 340;
+export const SYSTEM_RECORD_MAX_EVIDENCE_ROW_BYTES = 372;
+export const SYSTEM_RECORD_MAX_INTERNAL_ENTRY_BYTES = 256;
+export const SYSTEM_RECORD_LEAF_MIN_ROWS = 128;
+export const SYSTEM_RECORD_LEAF_MAX_ROWS = 512;
+export const SYSTEM_RECORD_INTERNAL_MIN_ENTRIES = 128;
+export const SYSTEM_RECORD_INTERNAL_MAX_ENTRIES = 256;
+export const SYSTEM_RECORD_ROOT_MIN_ENTRIES = 2;
+export const SYSTEM_RECORD_ROOT_MAX_ENTRIES = 256;
+export const SYSTEM_RECORD_MAX_INVENTORY_RECORDS = 262_144;
+export const SYSTEM_RECORD_MAX_INVENTORY_LEAVES = 2_048;
+export const SYSTEM_RECORD_MAX_INVENTORY_OBJECTS = 2_065;
+export const SYSTEM_RECORD_MAX_TREE_HEIGHT = 3;
+export const SYSTEM_RECORD_MAX_TREE_UPDATE_OBJECTS = 6;
+export const SYSTEM_RECORD_MAX_TREE_UPDATE_BYTES = 1024 * 1024;
+export const SYSTEM_RECORD_LEAF_TARGET_BYTES = 64 * 1024;
+export const SYSTEM_RECORD_INTERNAL_TARGET_BYTES = 32 * 1024;
+
+export const SYSTEM_RECORD_DIGEST_DOMAINS_V1 = Object.freeze({
+  rootDescriptor: 'dkg-system-record-root-descriptor-object-v1\n',
+  inventoryInternal: 'dkg-system-record-inventory-internal-object-v1\n',
+  inventoryLeaf: 'dkg-system-record-inventory-leaf-object-v1\n',
+  agentProfileHead: 'dkg-system-record-agent-profile-head-object-v1\n',
+  authorityTransition: 'dkg-system-record-authority-transition-object-v1\n',
+  forkResolution: 'dkg-system-record-fork-resolution-object-v1\n',
+  conflictEvidence: 'dkg-system-record-conflict-evidence-object-v1\n',
+  profileBundle: 'dkg-system-record-profile-bundle-v1\n',
+  signedEnvelope: 'dkg-system-record-signed-envelope-v1\n',
+  signedRootDescriptorEnvelope: 'dkg-system-record-signed-root-descriptor-envelope-v1\n',
+  rootCollisionEvidence: 'dkg-system-record-root-collision-evidence-v1\n',
+  ownedSubjectTable: 'dkg-system-record-owned-subject-table-v1\n',
+  appliedState: 'dkg-system-record-applied-state-v1\n',
+  rootClaimSet: 'dkg-system-record-root-claim-set-v1\n',
+  capacityState: 'dkg-system-record-capacity-state-v1\n',
+  materializationReceipt: 'dkg-system-record-materialization-receipt-v1\n',
+} as const);
+
+export const SYSTEM_RECORD_SIGNATURE_DOMAINS_V1 = Object.freeze({
+  provider: 'dkg-system-record-provider-signature-v1\n',
+  peer: 'dkg-system-record-peer-signature-v1\n',
+  evm: 'dkg-system-record-evm-signature-v1\n',
+} as const);
+
+export const SYSTEM_RECORD_EIP191_MAX_S = BigInt(
+  '0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0',
+);
