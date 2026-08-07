@@ -64,12 +64,36 @@ function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   };
 }
 
+function durableMetaOnlyResult(): CatchupJobResult {
+  const result = mixedPeerResult(0);
+  result.dataSynced = 0;
+  result.denied = false;
+  result.deniedPeers = 0;
+  result.peersSucceeded = 1;
+  if (!result.diagnostics?.durable) {
+    throw new Error('durable diagnostics missing');
+  }
+  result.diagnostics.durable.fetchedDataTriples = 0;
+  result.diagnostics.durable.insertedDataTriples = 0;
+  result.diagnostics.durable.fetchedMetaTriples = 8;
+  result.diagnostics.durable.insertedMetaTriples = 8;
+  result.diagnostics.durable.metaOnlyResponses = 1;
+  result.diagnostics.durable.timedOutPhases = 0;
+  return result;
+}
+
 describe('context graph catch-up readiness classification', () => {
   const readinessBeforeCatchup = {
     version: 0,
     durableVerified: false,
     sharedMemoryVerified: false,
     updatedAt: 0,
+  };
+  const swmVerifiedReadinessBeforeCatchup = {
+    version: CONTEXT_GRAPH_READINESS_VERSION,
+    durableVerified: false,
+    sharedMemoryVerified: true,
+    updatedAt: 1,
   };
 
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
@@ -231,29 +255,14 @@ describe('context graph catch-up readiness classification', () => {
   });
 
   it('does not let previously verified shared memory mask a later durable-only request', () => {
-    const result = mixedPeerResult(0);
-    result.dataSynced = 0;
-    result.denied = false;
-    result.deniedPeers = 0;
-    result.peersSucceeded = 1;
-    result.diagnostics!.durable.fetchedDataTriples = 0;
-    result.diagnostics!.durable.insertedDataTriples = 0;
-    result.diagnostics!.durable.fetchedMetaTriples = 8;
-    result.diagnostics!.durable.insertedMetaTriples = 8;
-    result.diagnostics!.durable.metaOnlyResponses = 1;
-    result.diagnostics!.durable.timedOutPhases = 0;
+    const result = durableMetaOnlyResult();
 
     const classification = classifyContextGraphCatchupReadiness({
       result,
       includeSharedMemory: false,
       hasConfirmedMeta: true,
       isPrivate: false,
-      readinessBeforeCatchup: {
-        version: CONTEXT_GRAPH_READINESS_VERSION,
-        durableVerified: false,
-        sharedMemoryVerified: true,
-        updatedAt: Date.now(),
-      },
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
     });
 
     expect(classification).toMatchObject({
@@ -264,29 +273,14 @@ describe('context graph catch-up readiness classification', () => {
   });
 
   it('reports the private durable-VM shortfall when SWM was already verified', () => {
-    const result = mixedPeerResult(0);
-    result.dataSynced = 0;
-    result.denied = false;
-    result.deniedPeers = 0;
-    result.peersSucceeded = 1;
-    result.diagnostics!.durable.fetchedDataTriples = 0;
-    result.diagnostics!.durable.insertedDataTriples = 0;
-    result.diagnostics!.durable.fetchedMetaTriples = 8;
-    result.diagnostics!.durable.insertedMetaTriples = 8;
-    result.diagnostics!.durable.metaOnlyResponses = 1;
-    result.diagnostics!.durable.timedOutPhases = 0;
+    const result = durableMetaOnlyResult();
 
     const classification = classifyContextGraphCatchupReadiness({
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: true,
       isPrivate: true,
-      readinessBeforeCatchup: {
-        version: CONTEXT_GRAPH_READINESS_VERSION,
-        durableVerified: false,
-        sharedMemoryVerified: true,
-        updatedAt: Date.now(),
-      },
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
     });
 
     expect(classification).toMatchObject({
