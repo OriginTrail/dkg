@@ -97,6 +97,12 @@ Size the daemon service and Oxigraph scope independently, while keeping their co
 - **Apache Jena Fuseki:** Typically `http://host:3030/dataset/query` and `http://host:3030/dataset/update`.
 - **GraphDB, Neptune, Stardog:** Use the vendor’s SPARQL query and update URLs; add `auth` if required.
 
+### Blazegraph provisioned by `dkg init` (Docker)
+
+When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, the CLI offers to provision a container itself. For new containers, the provisioner uses the pinned multi-architecture image and data path declared in `blazegraph-image.json`, stores the journal in a named Docker volume, and uses `--restart unless-stopped`. Blazegraph output uses Docker's compressed `local` log driver with a 4 GB rotation budget (`200m` × 20 files), so an unattended container cannot fill the host disk. The provisioner auto-bumps the host port if 9999 is taken and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
+
+A reused legacy container is never recreated automatically, because doing so could discard its journal. If its volume or log policy does not match the current configuration, the CLI prints explicit backup/migration and unbounded-log warnings instead.
+
 ## Programmatic (DKGAgent)
 
 When creating an agent in code, pass `storeConfig`:
