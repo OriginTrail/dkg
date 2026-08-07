@@ -588,12 +588,13 @@ export async function connectLocalAgentIntegrationFromUi(
     // fall through to an older survivor, which is suitable for the transport
     // readiness check but must never become the UI's conversation pin.
     const activeSessionId = health.sessions[0]?.sessionId ?? null;
+    const activeMemorySessionId = health.sessions[0]?.memorySessionId ?? null;
 
     if (health.ok && live) {
       const integration = updateLocalAgentIntegration(config, requested.id, {
         transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
         runtime: { status: 'ready', ready: true, lastError: null },
-        metadata: { sessionCount: health.sessionCount, activeSessionId },
+        metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
       });
       return {
         integration,
@@ -613,7 +614,7 @@ export async function connectLocalAgentIntegrationFromUi(
         ready: false,
         lastError: health.error ?? 'no live Prime Agent session',
       },
-      metadata: { sessionCount: health.sessionCount, activeSessionId },
+      metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
     });
     return {
       integration,
@@ -1074,6 +1075,7 @@ export async function refreshLocalAgentIntegrationFromUi(
     const metadata = {
       sessionCount: health.sessionCount,
       activeSessionId: health.sessions[0]?.sessionId ?? null,
+      activeMemorySessionId: health.sessions[0]?.memorySessionId ?? null,
     };
     if (health.ok && live) {
       return updateLocalAgentIntegration(config, normalizedId, {

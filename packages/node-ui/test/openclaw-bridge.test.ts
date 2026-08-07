@@ -772,14 +772,28 @@ describe('OpenClaw bridge behavioral tests', () => {
             description: 'Prime Agent adapter',
             enabled: true,
             capabilities: { localChat: true, connectFromUi: true },
-            metadata: { activeSessionId: 'prime-session-1', sessionCount: 1 },
+            metadata: {
+              activeSessionId: 'prime-session-1',
+              activeMemorySessionId: 'prime-agent:dkg-ui:prime-session-1',
+              sessionCount: 1,
+            },
             runtime: { status: 'ready', ready: true },
           }],
         }),
       },
       {
         ok: true,
-        json: async () => ({ ok: true, target: 'prime-session-1', sessionCount: 1 }),
+        json: async () => ({
+          ok: true,
+          target: 'prime-session-1',
+          targetMemorySessionId: 'prime-agent:dkg-ui:prime-session-1',
+          sessionCount: 1,
+          sessions: [{
+            sessionId: 'prime-session-1',
+            rawSessionId: 'prime-session-1',
+            memorySessionId: 'prime-agent:dkg-ui:prime-session-1',
+          }],
+        }),
       },
       {
         ok: true,
@@ -810,6 +824,7 @@ describe('OpenClaw bridge behavioral tests', () => {
 
       await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: primeAgent?.defaultSessionId,
+        targetSessionId: primeAgent?.liveSessions?.[0]?.rawSessionId,
       });
       expect(JSON.parse(calls[3].opts?.body as string).sessionId).toBe('prime-session-1');
     } finally {
@@ -905,7 +920,11 @@ describe('OpenClaw bridge behavioral tests', () => {
               enabled: true,
               capabilities: { localChat: true, connectFromUi: true },
               runtime: { status: 'ready', ready: true },
-              metadata: { sessionCount: 2, activeSessionId: '019f-session-a' },
+              metadata: {
+                sessionCount: 2,
+                activeSessionId: '019f-session-a',
+                activeMemorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+              },
             },
           ],
         }),
@@ -921,8 +940,18 @@ describe('OpenClaw bridge behavioral tests', () => {
           clientConnected: false,
           clientDisconnectedAt: '2026-08-07T12:34:56.000Z',
           sessions: [
-            { sessionId: '019f-session-a', sessionName: 'Research' },
-            { sessionId: '019f-session-b', sessionName: 'Publishing' },
+            {
+              sessionId: '019f-session-a',
+              rawSessionId: '019f-session-a',
+              memorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+              sessionName: 'Research',
+            },
+            {
+              sessionId: '019f-session-b',
+              rawSessionId: '019f-session-b',
+              memorySessionId: 'prime-agent:dkg-ui:019f-session-b',
+              sessionName: 'Publishing',
+            },
           ],
         }),
       },

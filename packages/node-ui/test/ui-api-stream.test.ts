@@ -187,7 +187,11 @@ describe('ui local-agent stream api', () => {
             enabled: true,
             capabilities: { localChat: true, connectFromUi: true },
             runtime: { status: 'ready', ready: true },
-            metadata: { sessionCount: 2, activeSessionId: '019f-session-a' },
+            metadata: {
+              sessionCount: 2,
+              activeSessionId: '019f-session-a',
+              activeMemorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+            },
           }],
         });
       }
@@ -196,7 +200,19 @@ describe('ui local-agent stream api', () => {
           ok: true,
           sessionCount: 2,
           target: '019f-session-a',
-          sessions: [{ sessionId: '019f-session-a' }, { sessionId: '019f-session-b' }],
+          targetMemorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+          sessions: [
+            {
+              sessionId: '019f-session-a',
+              rawSessionId: '019f-session-a',
+              memorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+            },
+            {
+              sessionId: '019f-session-b',
+              rawSessionId: '019f-session-b',
+              memorySessionId: 'prime-agent:dkg-ui:019f-session-b',
+            },
+          ],
         });
       }
       payload = JSON.parse(String(init?.body ?? '{}'));
@@ -225,6 +241,9 @@ describe('ui local-agent stream api', () => {
       });
       const result = await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: conversation.sessionId ?? undefined,
+        targetSessionId: prime?.liveSessions?.find(
+          (session) => session.sessionId === conversation.sessionId,
+        )?.rawSessionId,
       });
       expect(result.sessionId).toBe('019f-session-a');
       expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
@@ -261,7 +280,8 @@ describe('ui local-agent stream api', () => {
 
     try {
       const result = await streamLocalAgentChat('prime-agent', 'hello', {
-        sessionId: 'stale-session',
+        sessionId: 'prime-agent:dkg-ui:stale-session',
+        targetSessionId: 'stale-session',
       });
       expect(result).toMatchObject({ text: 'Recovered', sessionId: 'live-session' });
       expect(payloads).toHaveLength(2);

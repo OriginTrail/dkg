@@ -17,7 +17,6 @@ export * from './pca-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
-const PRIME_AGENT_DKG_SESSION_PREFIX = 'prime-agent:dkg-ui:';
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -1790,6 +1789,8 @@ interface LocalAgentChatRequestOptions {
   signal?: AbortSignal;
   identity?: string;
   sessionId?: string;
+  /** Raw framework session selected from the daemon-owned session contract. */
+  targetSessionId?: string;
   profile?: string;
   persistUserMessage?: string;
   attachments?: LocalAgentChatAttachmentRef[];
@@ -1888,7 +1889,14 @@ export interface LocalAgentHealthResponse {
   };
   status?: string;
   sessionCount?: number;
-  sessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
+  sessions?: Array<{
+    sessionId: string;
+    rawSessionId?: string;
+    memorySessionId?: string;
+    startedAt?: string;
+    sessionName?: string;
+  }>;
+  targetMemorySessionId?: string;
   busy?: boolean;
   turnState?: 'queued' | 'running';
   clientConnected?: boolean;
@@ -2322,7 +2330,14 @@ export interface LocalAgentIntegration {
   /** The selected Prime session currently owns an agent turn. */
   busy?: boolean;
   /** Live Prime sessions available for an explicit UI routing choice. */
-  liveSessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
+  liveSessions?: Array<{
+    /** DKG memory-session id used for history and UI selection. */
+    sessionId: string;
+    /** Prime-owned id sent to the bridge route. */
+    rawSessionId: string;
+    startedAt?: string;
+    sessionName?: string;
+  }>;
 }
 
 export interface LocalAgentConnectResult {
@@ -2353,6 +2368,7 @@ interface LocalAgentSurface {
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
+    targetSessionId?: string;
     profile?: string;
   }) => Record<string, unknown>;
   fetchHealth?: () => Promise<LocalAgentHealthResponse>;
@@ -2388,11 +2404,10 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   'prime-agent': {
     connectSupported: true,
     chatSupported: true,
-    // Prime Agent session ids are minted by Prime itself. The UI uses a
-    // prefixed DKG memory id for shared session history, then strips it back to
-    // the raw Prime session id when targeting the bridge.
-    defaultSessionId: ({ record }) => buildPrimeAgentDefaultSessionId(record),
-    resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId: primeAgentRawSessionId(sessionId) } : {}),
+    // The daemon owns Prime's raw-vs-memory session contract. The UI consumes
+    // its explicit fields and never reconstructs or strips the memory prefix.
+    defaultSessionId: ({ record, health }) => buildPrimeAgentDefaultSessionId(record, health),
+    resolveChatContext: ({ targetSessionId }) => (targetSessionId ? { sessionId: targetSessionId } : {}),
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,
   },
@@ -2529,25 +2544,14 @@ function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord
   return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
 }
 
-function buildPrimeAgentDkgSessionId(rawSessionId: string): string {
-  const trimmed = rawSessionId.trim();
-  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
-    ? trimmed
-    : `${PRIME_AGENT_DKG_SESSION_PREFIX}${trimmed}`;
-}
-
-function primeAgentRawSessionId(sessionId: string): string {
-  const trimmed = sessionId.trim();
-  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
-    ? trimmed.slice(PRIME_AGENT_DKG_SESSION_PREFIX.length)
-    : trimmed;
-}
-
 function buildPrimeAgentDefaultSessionId(
   record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
 ): string | undefined {
-  const activeSessionId = firstTrimmedString(record?.metadata?.activeSessionId);
-  return activeSessionId ? buildPrimeAgentDkgSessionId(activeSessionId) : undefined;
+  return firstTrimmedString(
+    record?.metadata?.activeMemorySessionId,
+    health?.sessions?.[0]?.memorySessionId,
+  ) ?? undefined;
 }
 
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
@@ -2668,10 +2672,16 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     && health.clientConnected === false;
   const liveSessions = id === 'prime-agent' && Array.isArray(health?.sessions)
     ? health.sessions
-        .filter((session) => typeof session?.sessionId === 'string' && session.sessionId.trim())
+        .filter((session) => (
+          typeof session?.rawSessionId === 'string'
+          && session.rawSessionId.trim()
+          && typeof session.memorySessionId === 'string'
+          && session.memorySessionId.trim()
+        ))
         .map((session) => ({
           ...session,
-          sessionId: buildPrimeAgentDkgSessionId(session.sessionId),
+          sessionId: session.memorySessionId!.trim(),
+          rawSessionId: session.rawSessionId!.trim(),
         }))
     : undefined;
   const profile = id === 'hermes'
@@ -2924,17 +2934,18 @@ export async function streamLocalAgentChat(
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
-    const { sessionId, profile, ...transportOpts } = opts;
-    const chatOptions = (resolvedSessionId?: string) => ({
+    const { sessionId, targetSessionId, profile, ...transportOpts } = opts;
+    const chatOptions = (resolvedSessionId?: string, resolvedTargetSessionId?: string) => ({
       ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
         sessionId: resolvedSessionId,
+        targetSessionId: resolvedTargetSessionId,
         profile,
       }),
     });
     try {
-      return await surface.streamChat(text, chatOptions(sessionId));
+      return await surface.streamChat(text, chatOptions(sessionId, targetSessionId));
     } catch (err) {
       // A Prime session id is an automatic live-session pin, not a durable
       // user-owned conversation id. If Prime restarted after the panel pinned

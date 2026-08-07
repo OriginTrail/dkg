@@ -1,6 +1,6 @@
 /**
  * Pins the session-pin plumbing this side of the wire: an integration's
- * defaultSessionId (mapped from the daemon's metadata.activeSessionId) must
+ * defaultSessionId (provided by daemon metadata.activeMemorySessionId) must
  * reach an outgoing chat request whenever the panel holds no sticky selection,
  * and a sticky selection must win over the pin. The api-level pass-through of
  * an explicit sessionId is covered separately in ui-api-stream.test.ts — this
@@ -94,6 +94,7 @@ describe('prime-agent session pin plumbing', () => {
       });
       await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: conversation.sessionId ?? undefined,
+        targetSessionId: '019f-session-a',
       });
       expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
     } finally {
@@ -119,7 +120,10 @@ describe('prime-agent session pin plumbing', () => {
 
     try {
       let caught: unknown;
-      await streamLocalAgentChat('prime-agent', 'hello', { sessionId: '019f-dead' })
+      await streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: 'prime-agent:dkg-ui:019f-dead',
+        targetSessionId: '019f-dead',
+      })
         .catch((err) => { caught = err; });
       expect(caught).toBeInstanceOf(LocalAgentApiError);
       expect(caught).toMatchObject({ code: 'PRIME_AGENT_NO_SESSION', status: 409 });

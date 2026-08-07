@@ -251,6 +251,25 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     expect(forwarded.equals(Buffer.from('data: {"type":"final","text":"done"}\n\n', 'utf8'))).toBe(true);
   });
 
+  it('shares malformed-frame forwarding and split CRLF separator handling', async () => {
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const malformed = 'data: not-json\r\n\r\n';
+    const terminal = 'data: {"type":"final","text":"done"}\r\n\r\n';
+    const dropped = 'data: {"type":"delta","text":"dropped"}\r\n\r\n';
+    const { reader, state } = makeReader([
+      malformed.slice(0, -1),
+      malformed.slice(-1) + terminal.slice(0, -1),
+      terminal.slice(-1) + dropped,
+    ]);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+    expect(Buffer.concat(res.byteChunks).equals(Buffer.from(malformed + terminal, 'utf8'))).toBe(true);
+  });
+
   it('does not double-end a response the caller already closed', async () => {
     const req = new EventEmitter() as any;
     const res = makeRes();

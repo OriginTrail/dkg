@@ -252,6 +252,12 @@ describe('/api/prime-agent-channel/health', () => {
 
     const report = await probePrimeAgentChannelHealth('bridge-token');
     expect(report).toMatchObject({ ok: true, sessionCount: 1, target: 's1' });
+    expect(report.sessions[0]).toMatchObject({
+      sessionId: 's1',
+      rawSessionId: 's1',
+      memorySessionId: 'prime-agent:dkg-ui:s1',
+    });
+    expect(report.targetMemorySessionId).toBe('prime-agent:dkg-ui:s1');
   });
 
   it('surfaces a recoverable disconnected-client turn state from the selected session', async () => {
@@ -703,6 +709,88 @@ describe('/api/prime-agent-channel/stream', () => {
     );
   });
 
+  it.each(['pending', 'failed'] as const)(
+    'transitions an existing %s turn to stored without appending another exchange',
+    async (existingState) => {
+      const memoryManager = makeMemoryManager();
+      memoryManager.getChatTurnPersistenceState.mockResolvedValueOnce(existingState);
+      const toolCalls = [{ name: 'search', args: { query: 'dkg' }, result: { hits: 1 } }];
+      const res = makeJsonResponse();
+
+      await handlePrimeAgentRoutes({
+        req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', {
+          sessionId: 's1',
+          userMessage: 'hello',
+          assistantReply: 'completed reply',
+          turnId: 'turn-transition',
+          persistenceState: 'stored',
+          failureReason: 'recovered',
+          toolCalls,
+        }),
+        res,
+        config: enabledConfig(),
+        bridgeAuthToken: 'bridge-token',
+        path: '/api/prime-agent-channel/persist-turn',
+        memoryManager,
+      } as any);
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({
+        ok: true,
+        transitioned: true,
+        sessionId: 'prime-agent:dkg-ui:s1',
+        turnId: 'turn-transition',
+      });
+      expect(memoryManager.recordChatTurnPersistenceTransition).toHaveBeenCalledWith(
+        'prime-agent:dkg-ui:s1',
+        'turn-transition',
+        'stored',
+        expect.objectContaining({
+          failureReason: 'recovered',
+          assistantReply: 'completed reply',
+          toolCalls,
+        }),
+      );
+      expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { existing: 'failed', incoming: 'failed' },
+    { existing: 'failed', incoming: 'pending' },
+    { existing: 'stored', incoming: 'failed' },
+  ] as const)(
+    'keeps an $incoming retry duplicate when the durable state is $existing',
+    async ({ existing, incoming }) => {
+      const memoryManager = makeMemoryManager();
+      memoryManager.getChatTurnPersistenceState.mockResolvedValueOnce(existing);
+      const res = makeJsonResponse();
+
+      await handlePrimeAgentRoutes({
+        req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', {
+          sessionId: 's1',
+          userMessage: 'hello',
+          assistantReply: 'reply',
+          turnId: 'turn-duplicate-rank',
+          persistenceState: incoming,
+        }),
+        res,
+        config: enabledConfig(),
+        bridgeAuthToken: 'bridge-token',
+        path: '/api/prime-agent-channel/persist-turn',
+        memoryManager,
+      } as any);
+
+      expect(JSON.parse(res.body)).toMatchObject({
+        ok: true,
+        duplicate: true,
+        turnId: 'turn-duplicate-rank',
+      });
+      expect(memoryManager.recordChatTurnPersistenceTransition).not.toHaveBeenCalled();
+      expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+    },
+  );
+
   it('serializes concurrent persistence reports for the same turn', async () => {
     let state: 'stored' | null = null;
     let releaseStore!: () => void;
@@ -778,6 +866,75 @@ describe('/api/prime-agent-channel/stream', () => {
     expect(res.statusCode).toBe(400);
     expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { turnId: 'bad turn' },
+    { correlationId: 'bad/turn' },
+    { turnId: 'x'.repeat(201) },
+  ])('rejects unsafe durable turn identifiers before persistence', async (ids) => {
+    const memoryManager = makeMemoryManager();
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', {
+        sessionId: 's1',
+        userMessage: 'hello',
+        assistantReply: 'hi',
+        ...ids,
+      }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/persist-turn',
+      memoryManager,
+    } as any);
+
+    expect(res.statusCode).toBe(400);
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+  });
+
+  it.each(['/api/prime-agent-channel/send', '/api/prime-agent-channel/stream'])(
+    'rejects an unsafe correlation id before bridge selection on %s',
+    async (path) => {
+      const res = makeJsonResponse();
+      await handlePrimeAgentRoutes({
+        req: makeJsonRequest('POST', path, { text: 'hello', correlationId: 'bad turn' }),
+        res,
+        config: enabledConfig(),
+        bridgeAuthToken: 'bridge-token',
+        path,
+      } as any);
+
+      // With no live descriptor, reaching target selection would return 409.
+      // A 400 proves validation happened before any bridge could be dispatched.
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe('Invalid "correlationId"');
+    },
+  );
+
+  it('rejects malformed tool-call args instead of silently casting them', async () => {
+    const raw = {
+      sessionId: 's1',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      turnId: 'turn-tools',
+      toolCalls: [{ name: 'search', args: 'not-an-object' }],
+    };
+    expect(normalizePrimeAgentPersistTurnPayload(raw)).toEqual({ error: 'Invalid "toolCalls"' });
+
+    const memoryManager = makeMemoryManager();
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', raw),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/persist-turn',
+      memoryManager,
+    } as any);
+
+    expect(res.statusCode).toBe(400);
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+  });
 });
 
 describe('connect from the Node UI', () => {
@@ -812,7 +969,11 @@ describe('connect from the Node UI', () => {
     );
 
     expect(result.integration.runtime?.status).toBe('ready');
-    expect(result.integration.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's1' });
+    expect(result.integration.metadata).toMatchObject({
+      sessionCount: 1,
+      activeSessionId: 's1',
+      activeMemorySessionId: 'prime-agent:dkg-ui:s1',
+    });
     expect(result.integration.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
   });
 
@@ -846,11 +1007,19 @@ describe('connect from the Node UI', () => {
     };
 
     const live = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
-    expect(live.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 'current' });
+    expect(live.metadata).toMatchObject({
+      sessionCount: 1,
+      activeSessionId: 'current',
+      activeMemorySessionId: 'prime-agent:dkg-ui:current',
+    });
 
     rmSync(join(sessionsDir, 'current.json'));
     const idle = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
-    expect(idle.metadata).toMatchObject({ sessionCount: 0, activeSessionId: null });
+    expect(idle.metadata).toMatchObject({
+      sessionCount: 0,
+      activeSessionId: null,
+      activeMemorySessionId: null,
+    });
   });
 
   it('does not claim to be connected when setup itself failed', async () => {
@@ -889,7 +1058,11 @@ describe('local-agent integrations listing', () => {
     expect(res.statusCode).toBe(200);
     const integrations = JSON.parse(res.body).integrations as Array<{ id: string; metadata?: any }>;
     const primeAgent = integrations.find((entry) => entry.id === 'prime-agent');
-    expect(primeAgent?.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's1' });
+    expect(primeAgent?.metadata).toMatchObject({
+      sessionCount: 1,
+      activeSessionId: 's1',
+      activeMemorySessionId: 'prime-agent:dkg-ui:s1',
+    });
 
     // Single-session agents must not grow a phantom counter.
     expect(integrations.find((entry) => entry.id === 'hermes')?.metadata?.sessionCount).toBeUndefined();
@@ -953,6 +1126,10 @@ describe('local-agent integrations listing', () => {
 
     expect(res.statusCode).toBe(200);
     const integration = JSON.parse(res.body).integration as { metadata?: any };
-    expect(integration.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's-live' });
+    expect(integration.metadata).toMatchObject({
+      sessionCount: 1,
+      activeSessionId: 's-live',
+      activeMemorySessionId: 'prime-agent:dkg-ui:s-live',
+    });
   });
 });

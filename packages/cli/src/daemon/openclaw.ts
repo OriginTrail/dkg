@@ -604,33 +604,8 @@ export async function writeOpenClawStreamChunk(
   });
 }
 
-/**
- * Largest SSE frame we will buffer while looking for the terminator. A frame is
- * `data: ...\n\n`, so this only bounds a single event; past it we stop scanning
- * for `final` rather than growing without limit. Bytes are still forwarded.
- */
+/** Largest complete SSE event retained while looking for its separator. */
 const SSE_FRAME_SCAN_LIMIT = 1_000_000;
-
-/**
- * True when `frame` is a complete SSE event whose JSON payload declares itself
- * terminal. Malformed or non-JSON frames are simply not terminal — this must
- * never throw, because a parse failure is not a reason to cut a live stream.
- */
-function isTerminalSseFrame(frame: string): boolean {
-  for (const line of frame.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) continue;
-    const data = trimmed.slice(5).trim();
-    if (!data) continue;
-    try {
-      const parsed = JSON.parse(data) as { type?: unknown };
-      if (parsed?.type === "final") return true;
-    } catch {
-      /* not a JSON event frame */
-    }
-  }
-  return false;
-}
 
 const LF = 0x0a;
 const CR = 0x0d;
@@ -659,12 +634,91 @@ function matchSseSeparatorAt(bytes: Uint8Array, index: number): number {
   return -1;
 }
 
-export async function pipeOpenClawStream(
+function findSseSeparator(
+  bytes: Uint8Array,
+  startIndex = 0,
+): { start: number; end: number } | null {
+  for (let index = startIndex; index < bytes.length; index += 1) {
+    const end = matchSseSeparatorAt(bytes, index);
+    if (end >= 0) return { start: index, end };
+  }
+  return null;
+}
+
+function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  if (left.length === 0) return right.slice();
+  if (right.length === 0) return left.slice();
+  const combined = new Uint8Array(left.length + right.length);
+  combined.set(left, 0);
+  combined.set(right, left.length);
+  return combined;
+}
+
+function parseSseJsonEvent(frame: Uint8Array): Record<string, unknown> | null {
+  const decoded = new TextDecoder().decode(frame);
+  for (const line of decoded.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export type LocalAgentSseFrameAction = {
+  /** Forward this frame byte-for-byte to the downstream response. */
+  forward: boolean;
+  /** Stop at this semantic frame and intentionally drop every later byte. */
+  terminal?: boolean;
+};
+
+export type LocalAgentSseFrame = {
+  event: Record<string, unknown> | null;
+  frame: Uint8Array;
+  separator: Uint8Array;
+};
+
+export type LocalAgentSseStreamResult = {
+  terminal: boolean;
+  clientGone: boolean;
+};
+
+/**
+ * Canonical local-agent SSE pump.
+ *
+ * It owns byte-safe frame splitting, split separators, malformed/oversized
+ * frames, downstream backpressure, cancellation, and terminal truncation.
+ * Integrations customize only frame policy: OpenClaw/Hermes forward `final`
+ * immediately, while Prime Agent withholds `error`/`final` until its durable
+ * persistence hook succeeds.
+ */
+export async function pipeLocalAgentSseStream(
   req: OpenClawStreamRequest,
   res: OpenClawStreamResponse,
   reader: OpenClawStreamReader,
-): Promise<void> {
+  options: {
+    onFrame?: (
+      frame: LocalAgentSseFrame,
+    ) => LocalAgentSseFrameAction | Promise<LocalAgentSseFrameAction>;
+    endResponseOnTerminal?: boolean;
+  } = {},
+): Promise<LocalAgentSseStreamResult> {
   let clientGone = false;
+  let terminal = false;
+  let buffer: Uint8Array = new Uint8Array(0);
+  let scanOffset = 0;
+  let oversizedFrame = false;
+  let oversizedTail: Uint8Array = new Uint8Array(0);
+  const endResponseOnTerminal = options.endResponseOnTerminal !== false;
+
   const cancelUpstream = () => {
     if (clientGone) return;
     clientGone = true;
@@ -677,82 +731,117 @@ export async function pipeOpenClawStream(
   });
   res.on("error", cancelUpstream);
 
-  // `final` is the terminal SEMANTIC event; upstream EOF is a TRANSPORT event,
-  // and the two do not have to coincide. An agent bridge that keeps its socket
-  // open for reuse (Prime Agent does) would otherwise hold this proxy — and the
-  // browser's spinner — open long after the answer was delivered. So we end the
-  // turn on the frame, not on the socket.
-  const frameDecoder = new TextDecoder();
-  let tail: Uint8Array = new Uint8Array(0);
-  let scanning = true;
+  const handleFrame = async (
+    frame: Uint8Array,
+    separator: Uint8Array,
+  ): Promise<boolean> => {
+    const event = parseSseJsonEvent(frame);
+    const action = options.onFrame
+      ? await options.onFrame({ event, frame, separator })
+      : { forward: true, terminal: event?.type === "final" };
+    if (action.forward && !clientGone && !res.writableEnded) {
+      await writeOpenClawStreamChunk(res, concatBytes(frame, separator));
+    }
+    if (action.terminal) terminal = true;
+    return terminal;
+  };
 
-  const inspectChunk = (chunk: Uint8Array): { terminal: boolean; value: Uint8Array } => {
-    if (!scanning) return { terminal: false, value: chunk };
-    // Scan in BYTE space. Earlier chunks were forwarded verbatim, so a
-    // decode→slice→re-encode of the current chunk re-sends any multi-byte
-    // codepoint straddling the chunk boundary: the streaming decoder holds its
-    // lead bytes from the previous chunk — already on the wire — and emits the
-    // completed character at the head of this chunk's decoded text.
-    const tailLength = tail.length;
-    let bytes: Uint8Array;
-    if (tailLength === 0) {
-      bytes = chunk;
-    } else {
-      bytes = new Uint8Array(tailLength + chunk.length);
-      bytes.set(tail, 0);
-      bytes.set(chunk, tailLength);
-    }
-    let consumed = 0;
-    // The tail never holds a complete separator, and the longest separator is
-    // 4 bytes, so none can start before the last 3 tail bytes.
-    let cursor = Math.max(0, tailLength - 3);
-    while (cursor < bytes.length) {
-      const separatorEnd = matchSseSeparatorAt(bytes, cursor);
-      if (separatorEnd < 0) {
-        cursor += 1;
-        continue;
+  const inspectBufferedFrames = async (atEof = false): Promise<boolean> => {
+    let boundary = findSseSeparator(buffer, scanOffset);
+    while (boundary) {
+      const frame = buffer.slice(0, boundary.start);
+      const separator = buffer.slice(boundary.start, boundary.end);
+      buffer = buffer.slice(boundary.end);
+      scanOffset = 0;
+      if (await handleFrame(frame, separator)) {
+        // The terminal frame is the stream contract. Bytes already coalesced
+        // after it belong to no subsequent turn and are deliberately dropped.
+        buffer = new Uint8Array(0);
+        scanOffset = 0;
+        return true;
       }
-      // Frame boundaries are ASCII separators, so a complete frame is whole
-      // codepoints and safe to decode in isolation.
-      if (isTerminalSseFrame(frameDecoder.decode(bytes.subarray(consumed, cursor)))) {
-        // The transport may coalesce several SSE events into one byte chunk.
-        // Forward through the final frame only; anything after it is outside
-        // the declared stream contract and must be intentionally dropped. The
-        // separator's end always lands inside the current chunk (the tail
-        // cannot contain a complete one), so this prefix is never empty.
-        return { terminal: true, value: chunk.subarray(0, separatorEnd - tailLength) };
+      boundary = findSseSeparator(buffer);
+    }
+
+    // The longest separator is four bytes. Everything before this point has
+    // already been disproved, while the last three bytes may be a prefix split
+    // across the next transport read.
+    scanOffset = Math.max(0, buffer.length - 3);
+
+    if (atEof && buffer.length > 0) {
+      const frame = buffer;
+      buffer = new Uint8Array(0);
+      scanOffset = 0;
+      return handleFrame(frame, new Uint8Array(0));
+    }
+
+    if (buffer.length > SSE_FRAME_SCAN_LIMIT) {
+      // A malformed giant frame must not grow memory without limit. Forward
+      // the bytes already received and scan only for its eventual separator;
+      // normal parsing resumes with the first complete frame after it.
+      if (!clientGone && !res.writableEnded) {
+        await writeOpenClawStreamChunk(res, buffer);
       }
-      consumed = separatorEnd;
-      cursor = separatorEnd;
+      oversizedTail = buffer.slice(Math.max(0, buffer.length - 3));
+      buffer = new Uint8Array(0);
+      scanOffset = 0;
+      oversizedFrame = true;
     }
-    tail = bytes.slice(consumed);
-    if (tail.length > SSE_FRAME_SCAN_LIMIT) {
-      // A single event larger than the cap: give up on detection rather than
-      // buffer without bound. The stream still completes on upstream EOF.
-      scanning = false;
-      tail = new Uint8Array(0);
+    return false;
+  };
+
+  const consumeOversizedFrame = async (chunk: Uint8Array): Promise<Uint8Array> => {
+    const combined = concatBytes(oversizedTail, chunk);
+    const boundary = findSseSeparator(combined);
+    if (!boundary) {
+      if (!clientGone && !res.writableEnded) await writeOpenClawStreamChunk(res, chunk);
+      oversizedTail = combined.slice(Math.max(0, combined.length - 3));
+      return new Uint8Array(0);
     }
-    return { terminal: false, value: chunk };
+    // `oversizedTail` was already forwarded. Only write the bytes contributed
+    // by this chunk through the separator, then return the unforwarded suffix
+    // to the normal frame parser.
+    const endInChunk = boundary.end - oversizedTail.length;
+    if (endInChunk > 0 && !clientGone && !res.writableEnded) {
+      await writeOpenClawStreamChunk(res, chunk.slice(0, endInChunk));
+    }
+    oversizedFrame = false;
+    oversizedTail = new Uint8Array(0);
+    return chunk.slice(Math.max(0, endInChunk));
   };
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done || clientGone) break;
-      if (value !== undefined) {
-        const inspected = inspectChunk(value);
-        await writeOpenClawStreamChunk(res, inspected.value);
-        if (clientGone) break;
-        if (inspected.terminal) {
-          if (!res.writableEnded) res.end();
-          cancelUpstream();
-          break;
-        }
+      if (value === undefined || value.length === 0) continue;
+      const unconsumed = oversizedFrame ? await consumeOversizedFrame(value) : value;
+      if (clientGone || unconsumed.length === 0) continue;
+      buffer = concatBytes(buffer, unconsumed);
+      if (await inspectBufferedFrames()) {
+        if (endResponseOnTerminal && !res.writableEnded) res.end();
+        void reader.cancel().catch(() => {});
+        break;
+      }
+    }
+    if (!clientGone && !terminal && !oversizedFrame) {
+      if (await inspectBufferedFrames(true)) {
+        if (endResponseOnTerminal && !res.writableEnded) res.end();
+        void reader.cancel().catch(() => {});
       }
     }
   } finally {
     reader.releaseLock();
   }
+  return { terminal, clientGone };
+}
+
+export async function pipeOpenClawStream(
+  req: OpenClawStreamRequest,
+  res: OpenClawStreamResponse,
+  reader: OpenClawStreamReader,
+): Promise<void> {
+  await pipeLocalAgentSseStream(req, res, reader);
 }
 
 export function isValidOpenClawPersistTurnPayload(payload: {
