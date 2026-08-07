@@ -160,7 +160,8 @@ jobs:
       # supervisor fault-injection cases this PR added.
       - name: Agent facade conformance
         run: |
-          pnpm --filter @origintrail-official/dkg-agent exec vitest run \n            test/system-record-agent-facade-outcomes-v1.test.ts
+          pnpm --filter @origintrail-official/dkg-agent exec vitest run \
+            test/system-record-agent-facade-outcomes-v1.test.ts
 
       - name: CLI supervisor conformance
         run: |
