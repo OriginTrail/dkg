@@ -22,7 +22,6 @@ import {
 } from '../src/evm-message-signer-v1.js';
 import { prepareAgentProfileV1, type PreparedAgentProfileV1 } from '../src/profile.js';
 import {
-  createAgentProfileProducerV1,
   type AgentProfileProducerPublicationCommitV1,
   type AgentProfileProducerPublicationStoreV1,
   type AgentProfileProducerV1,
@@ -41,6 +40,7 @@ import {
   DEPLOYMENT,
   NETWORK,
   OTHER_PRIVATE_KEY,
+  createFixtureAgentProfileProducerV1 as createAgentProfileProducerV1,
   controlRequest,
   envelopeArtifact,
   makePrepared,

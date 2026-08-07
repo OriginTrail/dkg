@@ -40,9 +40,15 @@ describe('system-record provider V1', () => {
       objectDigest: DIGEST,
       canonicalBytes: PAYLOAD,
     });
+    const expectedLookup = Object.freeze({
+      type: 'object' as const,
+      objectKind: 'profile-bundle' as const,
+      objectDigest: DIGEST,
+    });
+    const exact = exactRepository(expectedLookup, artifact);
     const provider = createSystemRecordProviderV1({
       networkId: NETWORK,
-      repository: repository(artifact),
+      repository: exact.repository,
       frameAdmission: admission,
     });
     const exchange = fixtureExchange(bundleRequest());
@@ -54,6 +60,42 @@ describe('system-record provider V1', () => {
     expect(admission.reservations[0]?.requested).toBe(SYSTEM_RECORD_MAX_FRAME_BYTES);
     expect(admission.reservations[0]?.shrunk).toBe(exchange.written[0]!.byteLength);
     expect(provider.stats()).toMatchObject({ served: 1, active: 0, peakActive: 1, queued: 0 });
+    expect(exact.resolve).toHaveBeenCalledWith(expectedLookup, expect.any(AbortSignal));
+  });
+
+  it('routes an exact control-object request to its repository lookup', async () => {
+    const payload = new TextEncoder().encode('[]');
+    const digest = digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.ownedSubjectTable,
+      payload,
+    );
+    const artifact = Object.freeze({
+      objectKind: 'owned-subject-table' as const,
+      objectDigest: digest,
+      canonicalBytes: payload,
+    });
+    const expectedLookup = Object.freeze({
+      type: 'object' as const,
+      objectKind: artifact.objectKind,
+      objectDigest: digest,
+    });
+    const exact = exactRepository(expectedLookup, artifact);
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: exact.repository,
+      frameAdmission: frameAdmission(),
+    });
+    const exchange = fixtureExchange(controlRequest(digest));
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('served');
+    const response = decodeSystemRecordResponseFrameV1(exchange.written[0]!);
+    expect(response.header).toMatchObject({
+      status: 'ok',
+      objectKind: artifact.objectKind,
+      objectDigest: digest,
+    });
+    expect(response.payload).toEqual(payload);
+    expect(exact.resolve).toHaveBeenCalledWith(expectedLookup, expect.any(AbortSignal));
   });
 
   it('does not queue a second stream behind the one provider permit', async () => {
@@ -428,6 +470,20 @@ function repository(
   return { resolve: async () => artifact };
 }
 
+function exactRepository(
+  expectedLookup: SystemRecordArtifactLookupV1,
+  artifact: SystemRecordArtifactV1,
+) {
+  const resolve = vi.fn(async (lookup: SystemRecordArtifactLookupV1) => {
+    expect(lookup).toEqual(expectedLookup);
+    return artifact;
+  });
+  return {
+    repository: { resolve } satisfies SystemRecordArtifactRepositoryV1,
+    resolve,
+  };
+}
+
 function bundleRequest(requestId = '1'.repeat(32)): SystemRecordRequestHeaderV1 {
   return {
     wireVersion: '1', requestId, kind: 'agents', networkId: NETWORK,
@@ -440,6 +496,17 @@ function rootRequest(requestId: string): SystemRecordRequestHeaderV1 {
   return {
     wireVersion: '1', requestId, kind: 'agents', networkId: NETWORK,
     operation: 'get-root', payloadBytes: '0',
+  };
+}
+
+function controlRequest(
+  objectDigest: typeof DIGEST,
+  requestId = 'a'.repeat(32),
+): SystemRecordRequestHeaderV1 {
+  return {
+    wireVersion: '1', requestId, kind: 'agents', networkId: NETWORK,
+    operation: 'get-control-object', objectKind: 'owned-subject-table', objectDigest,
+    payloadBytes: '0',
   };
 }
 

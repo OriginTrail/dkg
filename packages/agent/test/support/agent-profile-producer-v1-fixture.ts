@@ -28,7 +28,9 @@ import {
 } from '../../src/evm-message-signer-v1.js';
 import { prepareAgentProfileV1, type PreparedAgentProfileV1 } from '../../src/profile.js';
 import {
+  createAgentProfileProducerV1,
   type AgentProfilePublicationBindingV1,
+  type CreateAgentProfileProducerOptionsV1,
   type AgentProfileProducerV1,
   type SystemRecordPeerSignerV1,
 } from '../../src/system-records/agent-profile-producer-v1.js';
@@ -51,6 +53,16 @@ export const DEPLOYMENT = Object.freeze({
 
 const SCHEMA_DIGEST = `0x${'ab'.repeat(32)}` as Digest32V1;
 const PRIVATE_KEY = `0x${'11'.repeat(32)}`;
+export const PRODUCER_FIXTURE_NOW_MS = Date.parse('2026-08-07T12:30:00Z');
+
+export function createFixtureAgentProfileProducerV1(
+  options: CreateAgentProfileProducerOptionsV1,
+): AgentProfileProducerV1 {
+  return createAgentProfileProducerV1({
+    ...options,
+    nowMs: options.nowMs ?? (() => PRODUCER_FIXTURE_NOW_MS),
+  });
+}
 
 export async function produce(
   producer: AgentProfileProducerV1,
