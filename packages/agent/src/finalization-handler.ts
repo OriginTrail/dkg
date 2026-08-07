@@ -71,10 +71,12 @@ import {
 } from './finalization-lifecycle-logger.js';
 import type { FinalizationRuntime } from './finalization-runtime.js';
 import {
+  FinalizationRecoveryCapacityError,
   FinalizationRecovery,
   type FinalizationRecoveryApplyOutcome,
   type FinalizationRecoveryInvalidationOutcome,
   type FinalizationRecoveryLiveInput,
+  type FinalizationRecoveryLiveProcessResult,
   type FinalizationRecoveryMaterializer,
   type FinalizationRecoveryPreparedMaterialization,
   type FinalizationRecoveryReplayOutcome,
@@ -485,10 +487,13 @@ export class FinalizationHandler {
     let candidate: ParsedGraphScopedFinalization | undefined;
     if (liveAdmission.status === 'admitted') {
       candidate = liveAdmission.input.candidate;
+      let recoveryResult: FinalizationRecoveryLiveProcessResult;
       try {
-        if (await this.recovery.processLive(liveAdmission.input)) return;
+        recoveryResult = await this.recovery.processLiveOutcome(liveAdmission.input);
       } catch (error) {
-        if (error instanceof StoreSchedulerBusyError) throw error;
+        if (
+          error instanceof StoreSchedulerBusyError
+        ) throw error;
         const ctx = candidate.msg.operationId
           ? createOperationContext('gossip', candidate.msg.operationId)
           : createOperationContext('gossip');
@@ -504,6 +509,18 @@ export class FinalizationHandler {
         }));
         this.log.warn(ctx, `Finalization: failed to process graph-scoped message: ${reason}`);
         return;
+      }
+      switch (recoveryResult.status) {
+        case 'handled':
+          return;
+        case 'retryable-capacity':
+          throw new FinalizationRecoveryCapacityError(recoveryResult.ual);
+        case 'fallback':
+          break;
+        default: {
+          const exhaustive: never = recoveryResult;
+          throw new Error(`Unhandled finalization recovery result: ${JSON.stringify(exhaustive)}`);
+        }
       }
       envelope = {
         rawMessage: data,
