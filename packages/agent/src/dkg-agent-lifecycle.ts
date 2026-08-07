@@ -339,6 +339,7 @@ import {
   type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
+import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
 import {
   activeSyncAdmissionSource,
   monotonicNowMs,
@@ -3282,8 +3283,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
 
-    // On new peer connection, request sync of system context graphs so we discover
-    // agents that published their profiles before we came online.
+    // On new peer connection, request automatic durable catch-up. Core nodes
+    // include the system Context Graphs; Edge nodes default to the graphs their
+    // operator selected and can fetch system graphs explicitly when needed.
     // Wait for protocol identification to complete, then only sync with
     // peers that actually support the sync protocol (skips raw relay nodes).
     const handleSyncError = (remotePeer: string, err: unknown): void => {
@@ -4002,6 +4004,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
+      getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
+        this.config.syncContextGraphs ?? [],
+        {
+          nodeRole: this.config.nodeRole,
+          configValue: this.config.syncSystemContextGraphsOnConnect,
+          envValue: process.env.DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT,
+        },
+      ),
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
         peerId,

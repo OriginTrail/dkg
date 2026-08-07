@@ -31,6 +31,13 @@ async function createUnstartedAgent(name: string): Promise<DKGAgent> {
   });
 }
 
+function allowAllNetworkAdmission(agent: DKGAgent): void {
+  const coordinator = (agent as any).networkAdmissionCoordinator;
+  coordinator.isAcceptedPeer = () => true;
+  coordinator.isRejectedPeer = () => false;
+  coordinator.ensureAdmitted = async () => true;
+}
+
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
 function emptyDetailedSync(overrides: Record<string, number> = {}) {
@@ -75,6 +82,101 @@ describe('sync-on-connect churn gates', () => {
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       configuredGraph,
+    ]);
+  });
+
+  it('uses the exact automatic durable scope supplied by the role policy', async () => {
+    const syncFromPeer = recorder(async () => 0);
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['selected-cg'],
+      getDurableSyncContextGraphs: () => ['selected-cg'],
+      getSharedMemorySyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([[PEER_A, ['selected-cg']]]);
+    expect([...refreshMetaSyncedFlags.calls[0][0]]).toEqual(['selected-cg']);
+  });
+
+  it('treats an empty automatic durable scope as a clean no-op', async () => {
+    const syncFromPeer = recorder(async () => 0);
+    const refreshMetaSyncedFlags = recorder(async () => undefined);
+    const discoverContextGraphsFromStore = recorder(async () => 0);
+    const syncedPeers: Array<{ peerId: string; fresh: boolean; progress?: boolean }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      getDurableSyncContextGraphs: () => [],
+      getSharedMemorySyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags,
+      discoverContextGraphsFromStore,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+      onPeerSynced: (peerId, syncOutcome) => {
+        syncedPeers.push({ peerId, fresh: syncOutcome?.fresh ?? false, progress: syncOutcome?.progress });
+      },
+    });
+
+    expect(outcome).toBe('synced');
+    expect(syncFromPeer.calls).toEqual([]);
+    expect(refreshMetaSyncedFlags.calls).toEqual([]);
+    expect(discoverContextGraphsFromStore.calls).toEqual([[]]);
+    expect(syncedPeers).toEqual([{ peerId: PEER_A, fresh: true, progress: false }]);
+  });
+
+  it.each([
+    ['edge', ['selected-cg']],
+    ['core', [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 'selected-cg']],
+  ] as const)('wires the %s role into the automatic durable scope', async (nodeRole, expectedScope) => {
+    const agent = await createUnstartedAgent(`AutomaticSystemScope-${nodeRole}`);
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.nodeRole = nodeRole;
+    (agent as any).config.syncContextGraphs = ['selected-cg'];
+    (agent as any).config.syncSharedMemoryOnConnect = false;
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const syncFromPeerDetailed = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
+    (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+      eligibleContextGraphIds: [],
+    });
+
+    expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('synced');
+    expect(syncFromPeerDetailed.calls[0][1]).toEqual(expectedScope);
+  });
+
+  it('keeps explicit Edge catch-up available for system Context Graphs', async () => {
+    const agent = await createUnstartedAgent('ExplicitSystemGraphCatchup');
+    (agent as any).config.nodeRole = 'edge';
+    const syncFromPeerDetailed = recorder(async () => emptyDetailedSync());
+    (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+
+    await agent.syncFromPeer(PEER_A, [
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+    ]);
+
+    expect(syncFromPeerDetailed.calls[0][1]).toEqual([
+      SYSTEM_CONTEXT_GRAPHS.AGENTS,
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
     ]);
   });
 
