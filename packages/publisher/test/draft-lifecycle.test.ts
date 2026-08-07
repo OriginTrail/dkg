@@ -675,6 +675,58 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
   });
 
+  it('a prepared marker resumes the CONTENT COPY when the draft exists but data was not copied', async () => {
+    // The riskiest crash window: `prepareBackup` ran, `createGraphScopedDraft`
+    // minted graph-scoped metadata, and the process died BEFORE
+    // `writeGraphScopedDraft` copied the legacy source quads. This is the
+    // data-preservation path — the rerun is the only thing that will ever
+    // move that content — so it is asserted on an EMPTY target graph rather
+    // than one already holding the data.
+    const name = 'legacy-resume-pre-copy';
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+
+    // Graph-scoped metadata exists (the draft was already minted)...
+    await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+      allocateKaNumber: async () => ({
+        number: 88n,
+        reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/88`,
+      }),
+    });
+    // ...but the legacy content is still sitting in the old name-keyed graph,
+    // and the target WM graph is empty.
+    await store.insert([{
+      subject: 'urn:test:uncopied',
+      predicate: 'http://schema.org/text',
+      object: '"must be preserved"',
+      graph: sourceGraph,
+    }]);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([]);
+    await store.createGraph(backupGraph);
+    await store.insert([{
+      subject: sourceGraph,
+      predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
+      object: '"prepared"',
+      graph: backupGraph,
+    }]);
+
+    // No allocator passed: once the identity exists, resuming must not need one.
+    const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+
+    expect(result.status).toBe('resumed');
+    expect(result.copiedPublic).toBe(1);
+    // The legacy quad reached the graph-scoped draft.
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:uncopied', object: '"must be preserved"' }),
+    ]);
+    const completed = await store.query(
+      `ASK { GRAPH <${backupGraph}> { <${sourceGraph}> `
+      + '<http://dkg.io/ontology/legacyWorkingMemoryMigrationState> "completed" } }',
+    );
+    expect(completed.type === 'boolean' && completed.value).toBe(true);
+  });
+
   it('a prepared marker resumes idempotently after the graph-scoped draft already exists', async () => {
     // Crash-recovery coverage for the OTHER side of the prepared window: the
     // draft was already created and its content copied, but the process died

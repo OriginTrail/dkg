@@ -7397,13 +7397,13 @@ export class DKGPublisher implements Publisher {
         DKGPublisher.validateOptionalSubGraph(subGraphName);
         await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
       },
-      loadMigratableContent: async (sourceGraph, request) => {
-        const publicQuads = await this.assertionScopedQuads(sourceGraph);
+      loadMigratableContent: async (selector) => {
+        const publicQuads = await this.assertionScopedQuads(selector.sourceGraph);
         const privateQuads = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
-          request.contextGraphId,
-          request.agentAddress,
-          request.name,
-          request.subGraphName,
+          selector.contextGraphId,
+          selector.agentAddress,
+          selector.name,
+          selector.subGraphName,
         );
         rejectUserAuthoredProtocolMetadata(publicQuads);
         rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
