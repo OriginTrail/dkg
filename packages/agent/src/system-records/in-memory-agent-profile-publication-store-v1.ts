@@ -18,17 +18,23 @@ import type {
   AgentProfileProducerPublicationCommitV1,
   AgentProfileProducerPublicationStoreV1,
 } from './agent-profile-producer-v1.js';
-import type { SystemRecordProviderArtifactV1 } from './provider-v1.js';
+import type {
+  SystemRecordProviderArtifactV1,
+  SystemRecordProviderRepositoryV1,
+} from './provider-v1.js';
 
 export interface InMemoryAgentProfilePublicationStoreOptionsV1 {
   readonly maxObjects?: number;
   readonly maxBytes?: number;
 }
 
+export interface InMemoryAgentProfilePublicationStoreV1
+  extends AgentProfileProducerPublicationStoreV1, SystemRecordProviderRepositoryV1 {}
+
 /** Default-off test/composition store. Production lifecycle must supply durable storage. */
 export function createInMemoryAgentProfilePublicationStoreV1(
   options: InMemoryAgentProfilePublicationStoreOptionsV1 = {},
-): AgentProfileProducerPublicationStoreV1 {
+): InMemoryAgentProfilePublicationStoreV1 {
   const maxObjects = options.maxObjects ?? SYSTEM_RECORD_MAX_OBJECT_CACHE_OBJECTS;
   const maxBytes = options.maxBytes ?? SYSTEM_RECORD_MAX_OBJECT_CACHE_BYTES;
   if (!Number.isSafeInteger(maxObjects) || maxObjects < 1
@@ -65,7 +71,7 @@ export function createInMemoryAgentProfilePublicationStoreV1(
         addedBytes += artifact.canonicalBytes.byteLength;
       }
       const nextRootBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(input.rootEnvelope);
-      const nextObjectCount = artifacts.size + addedObjects + (rootEnvelope === null ? 1 : 0);
+      const nextObjectCount = artifacts.size + addedObjects + 1;
       if (nextObjectCount > maxObjects
         || bytes + addedBytes - rootBytes + nextRootBytes.byteLength > maxBytes) {
         throw new Error('system-record provider cache capacity exhausted');
@@ -81,7 +87,7 @@ export function createInMemoryAgentProfilePublicationStoreV1(
           for (const artifact of input.artifacts) {
             artifacts.set(
               artifactKey(artifact.objectKind, artifact.objectDigest),
-              freezeArtifact(artifact.objectKind, artifact.objectDigest as Digest32V1, artifact.canonicalBytes),
+              freezeArtifact(artifact.objectKind, artifact.objectDigest, artifact.canonicalBytes),
             );
           }
           inventory = input.inventory;
@@ -114,7 +120,7 @@ export function createInMemoryAgentProfilePublicationStoreV1(
       const artifact = artifacts.get(artifactKey(request.objectKind, request.objectDigest));
       return artifact === undefined
         ? null
-        : freezeArtifact(artifact.objectKind, artifact.objectDigest as Digest32V1, artifact.canonicalBytes);
+        : freezeArtifact(artifact.objectKind, artifact.objectDigest, artifact.canonicalBytes);
     },
   });
 }

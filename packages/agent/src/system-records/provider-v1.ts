@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  assertCanonicalDecimalU64,
+} from '@origintrail-official/dkg-core';
+import {
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_HEADER_BYTES,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
@@ -181,13 +184,15 @@ export function createSystemRecordProviderV1(
           || (request.operation !== 'get-root' && artifact.objectDigest !== request.objectDigest)) {
           return await writeError(exchange, request.requestId, 'internal');
         }
+        const payloadBytes = artifact.canonicalBytes.byteLength.toString();
+        assertCanonicalDecimalU64(payloadBytes, 'system-record response payloadBytes');
         const response = encodeSystemRecordResponseFrameV1({
           wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
           requestId: request.requestId,
           status: 'ok',
           objectKind: artifact.objectKind,
-          objectDigest: artifact.objectDigest as never,
-          payloadBytes: artifact.canonicalBytes.byteLength.toString() as never,
+          objectDigest: artifact.objectDigest,
+          payloadBytes,
         }, artifact.canonicalBytes);
         try {
           const decoded = decodeSystemRecordResponseFrameV1(response);

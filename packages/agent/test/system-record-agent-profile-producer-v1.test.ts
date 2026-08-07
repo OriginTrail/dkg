@@ -20,16 +20,19 @@ import { createEvmPersonalMessageSignerV1 } from '../src/evm-message-signer-v1.j
 import { prepareAgentProfileV1, type PreparedAgentProfileV1 } from '../src/profile.js';
 import {
   createAgentProfileProducerV1,
-  type AgentProfileProducerPublicationStoreV1,
   type AgentProfileProducerV1,
   type AgentProfilePublicationBindingV1,
   type SystemRecordPeerSignerV1,
 } from '../src/system-records/agent-profile-producer-v1.js';
-import { createInMemoryAgentProfilePublicationStoreV1 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
+import {
+  createInMemoryAgentProfilePublicationStoreV1,
+  type InMemoryAgentProfilePublicationStoreV1,
+} from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 
 const NETWORK = 'base:84532' as const;
 const SCHEMA_DIGEST = `0x${'ab'.repeat(32)}` as Digest32V1;
 const PRIVATE_KEY = `0x${'11'.repeat(32)}`;
+const OTHER_PRIVATE_KEY = `0x${'22'.repeat(32)}`;
 
 describe('agent-profile system-record producer V1', () => {
   it('stages one exact profile, installs it, then advertises the signed inventory root', async () => {
@@ -96,6 +99,57 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().inventory?.descriptor.totalRows).toBe('1');
   });
 
+  it('rejects ordinary update authority and schema changes without replacing the head', async () => {
+    const fixture = await producerFixture();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    const first = await produce(producer, fixture.prepared, fixture.publication);
+    const nextPrepared = makePrepared(
+      fixture.peerSigner,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00.000Z',
+    );
+    const nextPublication = await publicationFor(
+      nextPrepared,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00Z',
+    );
+    await expect(produce(producer, nextPrepared, {
+      ...nextPublication,
+      projectionSchemaDigest: `0x${'cd'.repeat(32)}` as Digest32V1,
+    })).rejects.toThrow(/changed its root or projection schema/);
+    expect(fixture.store.snapshot().currentHead?.objectDigest).toBe(first.headDigest);
+
+    const otherSigner = createEvmPersonalMessageSignerV1({
+      mode: 'custodial',
+      address: new ethers.Wallet(OTHER_PRIVATE_KEY).address,
+      privateKey: OTHER_PRIVATE_KEY,
+      purpose: 'system-record alternate authority test',
+    });
+    const otherPrepared = makePrepared(
+      fixture.peerSigner,
+      otherSigner.address,
+      '2026-08-07T12:40:00.000Z',
+    );
+    const otherProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: otherSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    const lease = await otherProducer.prepare(otherPrepared);
+    await expect(lease.complete(nextPublication)).rejects.toThrow(/authority transition/);
+    expect(fixture.store.snapshot().currentHead?.objectDigest).toBe(first.headDigest);
+  });
+
   it('preflights provider capacity before materialization and releases a failed commit lease', async () => {
     const fixture = await producerFixture(createInMemoryAgentProfilePublicationStoreV1({
       maxObjects: 1,
@@ -137,6 +191,35 @@ describe('agent-profile system-record producer V1', () => {
     });
   });
 
+  it('counts the retained root descriptor against cache capacity on rollover', async () => {
+    const store = createInMemoryAgentProfilePublicationStoreV1({
+      maxObjects: 7,
+      maxBytes: 1024 * 1024,
+    });
+    const fixture = await producerFixture(store);
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store,
+      fence: () => {},
+      install: () => {},
+    });
+    const first = await produce(producer, fixture.prepared, fixture.publication);
+    const nextPrepared = makePrepared(
+      fixture.peerSigner,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00.000Z',
+    );
+
+    await expect(produce(
+      producer,
+      nextPrepared,
+      await publicationFor(nextPrepared, fixture.evmSigner.address, '2026-08-07T12:20:00Z'),
+    )).rejects.toThrow(/cache capacity exhausted/);
+    expect(store.snapshot().currentHead?.objectDigest).toBe(first.headDigest);
+  });
+
   it('fails closed when the publication seal is not for the exact prepared bytes', async () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
@@ -152,6 +235,48 @@ describe('agent-profile system-record producer V1', () => {
       seal: { ...fixture.publication.seal, assertionMerkleRoot: `0x${'cd'.repeat(32)}` },
     } as AgentProfilePublicationBindingV1;
     await expect(produce(producer, fixture.prepared, tampered)).rejects.toThrow(/exact public projection/);
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
+  it('normalizes millisecond publication timestamps before signing the head', async () => {
+    const fixture = await producerFixture();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    await produce(producer, fixture.prepared, {
+      ...fixture.publication,
+      issuedAt: '2026-08-07T12:00:00.123Z',
+      validUntil: '2026-08-08T12:00:00.987Z',
+    });
+
+    expect(fixture.store.snapshot().currentHead?.object).toMatchObject({
+      issuedAt: '2026-08-07T12:00:00Z',
+      validUntil: '2026-08-08T12:00:00Z',
+    });
+  });
+
+  it('rejects invalid publication timestamp scalars before signing or committing', async () => {
+    const fixture = await producerFixture();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+
+    await expect(produce(producer, fixture.prepared, {
+      ...fixture.publication,
+      issuedAt: '2026-02-30T12:00:00.000Z',
+    })).rejects.toThrow(/calendar-valid/);
+    expect(peerSign).not.toHaveBeenCalled();
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
@@ -219,6 +344,33 @@ describe('agent-profile system-record producer V1', () => {
     await expect(producer.prepare(duplicate)).rejects.toThrow(/duplicate-free/);
     expect(fence).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['peerId', '"12D3KooWRhLYc1qpzVncrVpMkykB3ML1PoQ9G9gX9X9G9gX9X9G"'],
+    ['agentAddress', `"0x${'33'.repeat(20)}"`],
+    ['publicKey', '"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="'],
+  ])('rejects a mismatched advertised %s before fencing publication', async (field, object) => {
+    const fixture = await producerFixture();
+    const fence = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence,
+      install: () => {},
+    });
+    const predicate = `https://dkg.network/ontology#${field}`;
+    const mismatched = Object.freeze({
+      ...fixture.prepared,
+      quads: Object.freeze(fixture.prepared.quads.map((quad) => Object.freeze(
+        quad.predicate === predicate ? { ...quad, object } : quad,
+      ))),
+    });
+
+    await expect(producer.prepare(mismatched)).rejects.toThrow(/does not bind the signed/);
+    expect(fence).not.toHaveBeenCalled();
+  });
 });
 
 async function produce(
@@ -240,8 +392,9 @@ async function producerFixture(
     sign: async (message: Uint8Array) => ed25519.sign(message, peerSeed),
   });
   const evmSigner = createEvmPersonalMessageSignerV1({
+    mode: 'custodial',
     address: new ethers.Wallet(PRIVATE_KEY).address,
-    custodialPrivateKey: PRIVATE_KEY,
+    privateKey: PRIVATE_KEY,
     purpose: 'system-record test',
   });
   const prepared = makePrepared(peerSigner, evmSigner.address, '2026-08-07T12:00:00.000Z');
@@ -332,9 +485,9 @@ function projectionContentDigest(prepared: PreparedAgentProfileV1): Digest32V1 {
 }
 
 function observingStore(
-  inner: AgentProfileProducerPublicationStoreV1,
+  inner: InMemoryAgentProfilePublicationStoreV1,
   events: string[],
-): AgentProfileProducerPublicationStoreV1 {
+): InMemoryAgentProfilePublicationStoreV1 {
   return Object.freeze({
     snapshot: () => inner.snapshot(),
     resolve: (request, signal) => inner.resolve(request, signal),

@@ -38,7 +38,7 @@ describe('prepared agent profile V1', () => {
     expect(prepared.lastSeen).toBe('2026-08-07T11:00:00.000Z');
   });
 
-  it('hands one prepared profile to the publication transaction and legacy publisher', async () => {
+  it('publishes a clone of the exact prepared profile quads', async () => {
     const result = publishResult(7n);
     const publisher = {
       publish: vi.fn(async () => result),
@@ -48,60 +48,17 @@ describe('prepared agent profile V1', () => {
       query: vi.fn(async () => ({ type: 'bindings', variables: ['s'], bindings: [] })),
       deleteBySubjectPrefix: vi.fn(async () => 0),
     } as unknown as TripleStore;
-    const seen: unknown[] = [];
-    const transaction = {
-      complete: vi.fn(),
-      abort: vi.fn(),
-    };
-    const coordinator = {
-      prepare: vi.fn((input) => {
-        seen.push(input.prepared);
-        return transaction;
-      }),
-    };
-    const manager = new ProfileManager(publisher, store, coordinator);
-    await manager.publishProfile({
-      peerId: 'fixture-peer', name: 'Fixture', skills: [],
-      lastSeen: '2026-08-07T12:00:00.000Z',
-    });
-
-    expect(seen).toHaveLength(1);
-    expect(coordinator.prepare).toHaveBeenCalledWith(expect.objectContaining({ operation: 'publish' }));
-    expect(transaction.complete).toHaveBeenCalledWith(result);
-    expect(transaction.abort).not.toHaveBeenCalled();
-    const publishedQuads = (publisher.publish as ReturnType<typeof vi.fn>).mock.calls[0]![0].quads;
-    expect(publishedQuads).toEqual((seen[0] as { quads: unknown[] }).quads);
-    expect(publishedQuads).not.toBe((seen[0] as { quads: unknown[] }).quads);
-  });
-
-  it('retains the completed legacy publication identity when transaction completion fails', async () => {
-    const result = publishResult(9n);
-    const publisher = {
-      publish: vi.fn(async () => result),
-      update: vi.fn(async () => result),
-    } as unknown as Publisher;
-    const store = {
-      query: vi.fn(async () => ({ type: 'bindings', variables: ['s'], bindings: [] })),
-      deleteBySubjectPrefix: vi.fn(async () => 0),
-    } as unknown as TripleStore;
-    const abort = vi.fn();
-    const manager = new ProfileManager(publisher, store, {
-      prepare: () => ({
-        complete: () => { throw new Error('record install failed'); },
-        abort,
-      }),
-    });
     const config = {
       peerId: 'fixture-peer', name: 'Fixture', skills: [],
       lastSeen: '2026-08-07T12:00:00.000Z',
     };
+    const expected = prepareAgentProfileV1(config);
+    const manager = new ProfileManager(publisher, store);
+    await manager.publishProfile(config);
 
-    await expect(manager.publishProfile(config)).rejects.toThrow(/record install failed/);
-    expect(manager.profileKcId).toBe(9n);
-    expect(abort).toHaveBeenCalledWith(expect.objectContaining({ message: 'record install failed' }));
-    await expect(manager.publishProfile(config)).rejects.toThrow(/record install failed/);
-    expect(publisher.publish).toHaveBeenCalledTimes(1);
-    expect(publisher.update).toHaveBeenCalledTimes(1);
+    const publishedQuads = (publisher.publish as ReturnType<typeof vi.fn>).mock.calls[0]![0].quads;
+    expect(publishedQuads).toEqual(expected.quads);
+    expect(publishedQuads).not.toBe(expected.quads);
   });
 
   it('treats a zero-valued KA id as an existing publication on the next call', async () => {
@@ -113,13 +70,7 @@ describe('prepared agent profile V1', () => {
       query: vi.fn(async () => ({ type: 'bindings', variables: ['s'], bindings: [] })),
       deleteBySubjectPrefix: vi.fn(async () => 0),
     } as unknown as TripleStore;
-    const operations: string[] = [];
-    const manager = new ProfileManager(publisher, store, {
-      prepare: ({ operation }) => {
-        operations.push(operation);
-        return { complete: () => {}, abort: () => {} };
-      },
-    });
+    const manager = new ProfileManager(publisher, store);
     const config = {
       peerId: 'fixture-peer', name: 'Fixture', skills: [],
       lastSeen: '2026-08-07T12:00:00.000Z',
@@ -129,7 +80,6 @@ describe('prepared agent profile V1', () => {
     await manager.publishProfile(config);
     expect(publisher.publish).toHaveBeenCalledTimes(1);
     expect(publisher.update).toHaveBeenCalledWith(0n, expect.anything());
-    expect(operations).toEqual(['publish', 'update']);
   });
 });
 

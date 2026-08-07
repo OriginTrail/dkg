@@ -2,6 +2,8 @@ import {
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
+  buildSystemRecordInventoryTreeV1,
+  canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
   decodeSystemRecordResponseFrameV1,
   digestSystemRecordBytesV1,
   encodeSystemRecordRequestFrameV1,
@@ -126,6 +128,25 @@ describe('system-record provider V1', () => {
     expect(provider.stats().queued).toBe(0);
   });
 
+  it('returns unsupported without resolving local objects for another network', async () => {
+    const resolve = vi.fn(async () => null);
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: { resolve },
+      frameAdmission: frameAdmission(),
+    });
+    const exchange = fixtureExchange({
+      ...bundleRequest(),
+      networkId: 'base:1',
+    });
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('served');
+    const response = decodeSystemRecordResponseFrameV1(exchange.written[0]!);
+    expect(response.header.status).toBe('unsupported');
+    expect(response.payload).toHaveLength(0);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it('refuses a corrupted cache object instead of serving bytes under its requested digest', async () => {
     const corruptedBytes = Uint8Array.of(9, 9, 9);
     expect(digestSystemRecordBytesV1(
@@ -146,6 +167,69 @@ describe('system-record provider V1', () => {
     const response = decodeSystemRecordResponseFrameV1(exchange.written[0]!);
     expect(response.header.status).toBe('internal');
     expect(response.payload).toHaveLength(0);
+  });
+
+  it('serves the root descriptor and its requested inventory object', async () => {
+    const inventory = buildSystemRecordInventoryTreeV1(NETWORK, []);
+    const rootEnvelope = Object.freeze({
+      object: inventory.descriptor,
+      objectDigest: inventory.descriptorDigest,
+      providerPeerId: '12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf',
+      signatureSuite: 'ed25519-v1' as const,
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const rootBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(rootEnvelope);
+    const inventoryObject = inventory.objects.get(inventory.descriptor.treeRootDigest)!;
+    const admission = frameAdmission();
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: {
+        resolve: async (request) => request.operation === 'get-root'
+          ? {
+              objectKind: 'root-descriptor',
+              objectDigest: inventory.descriptorDigest,
+              canonicalBytes: rootBytes,
+            }
+          : {
+              objectKind: inventoryObject.objectKind,
+              objectDigest: inventory.descriptor.treeRootDigest,
+              canonicalBytes: inventoryObject.canonicalBytes,
+            },
+      },
+      frameAdmission: admission,
+    });
+
+    const rootExchange = fixtureExchange(rootRequest('8'.repeat(32)));
+    await expect(provider.serve(rootExchange.value)).resolves.toBe('served');
+    const rootResponse = decodeSystemRecordResponseFrameV1(rootExchange.written[0]!);
+    expect(rootResponse.header).toMatchObject({
+      status: 'ok',
+      objectKind: 'root-descriptor',
+      objectDigest: inventory.descriptorDigest,
+    });
+    expect(rootResponse.payload).toEqual(rootBytes);
+
+    const inventoryExchange = fixtureExchange({
+      wireVersion: '1',
+      requestId: '9'.repeat(32),
+      kind: 'agents',
+      networkId: NETWORK,
+      operation: 'get-inventory-object',
+      rootDescriptorDigest: inventory.descriptorDigest,
+      path: [],
+      objectKind: inventoryObject.objectKind,
+      objectDigest: inventory.descriptor.treeRootDigest,
+      payloadBytes: '0',
+    });
+    await expect(provider.serve(inventoryExchange.value)).resolves.toBe('served');
+    const inventoryResponse = decodeSystemRecordResponseFrameV1(inventoryExchange.written[0]!);
+    expect(inventoryResponse.header).toMatchObject({
+      status: 'ok',
+      objectKind: inventoryObject.objectKind,
+      objectDigest: inventory.descriptor.treeRootDigest,
+    });
+    expect(inventoryResponse.payload).toEqual(inventoryObject.canonicalBytes);
+    expect(admission.active()).toBe(0);
   });
 
   it('refunds response bytes and frame admission when shutdown aborts a blocked write', async () => {
@@ -262,6 +346,13 @@ function bundleRequest(requestId = '1'.repeat(32)): SystemRecordRequestHeaderV1 
     wireVersion: '1', requestId, kind: 'agents', networkId: NETWORK,
     operation: 'get-bundle', objectKind: 'profile-bundle', objectDigest: DIGEST,
     payloadBytes: '0',
+  };
+}
+
+function rootRequest(requestId: string): SystemRecordRequestHeaderV1 {
+  return {
+    wireVersion: '1', requestId, kind: 'agents', networkId: NETWORK,
+    operation: 'get-root', payloadBytes: '0',
   };
 }
 

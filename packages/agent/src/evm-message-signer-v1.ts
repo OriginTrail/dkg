@@ -7,18 +7,35 @@ export interface EvmPersonalMessageSignerV1 {
   signMessage(message: Uint8Array): Promise<string>;
 }
 
-export interface CreateEvmPersonalMessageSignerInputV1 {
+interface CreateEvmPersonalMessageSignerBaseV1 {
   readonly address: string;
-  readonly custodialPrivateKey?: string;
-  readonly signMessageAs?: (
-    address: string,
-    message: Uint8Array,
-  ) => Promise<{ readonly r: Uint8Array; readonly vs: Uint8Array }>;
-  readonly signMessage?: (
-    message: Uint8Array,
-  ) => Promise<{ readonly r: Uint8Array; readonly vs: Uint8Array }>;
   readonly purpose: string;
 }
+
+interface CompactEvmSignatureV1 {
+  readonly r: Uint8Array;
+  readonly vs: Uint8Array;
+}
+
+export type CreateEvmPersonalMessageSignerInputV1 = CreateEvmPersonalMessageSignerBaseV1 & (
+  | Readonly<{
+    mode: 'custodial';
+    privateKey: string;
+  }>
+  | Readonly<{
+    mode: 'chain-as';
+    signMessageAs: (
+    address: string,
+    message: Uint8Array,
+    ) => Promise<CompactEvmSignatureV1>;
+  }>
+  | Readonly<{
+    mode: 'chain-default';
+    signMessage: (
+    message: Uint8Array,
+    ) => Promise<CompactEvmSignatureV1>;
+  }>
+);
 
 /**
  * Build one EIP-191 signer without exposing the selected private-key path.
@@ -28,10 +45,10 @@ export function createEvmPersonalMessageSignerV1(
   input: CreateEvmPersonalMessageSignerInputV1,
 ): EvmPersonalMessageSignerV1 {
   const expectedAddress = ethers.getAddress(input.address).toLowerCase();
-  if (input.custodialPrivateKey !== undefined) {
-    const key = input.custodialPrivateKey.startsWith('0x')
-      ? input.custodialPrivateKey
-      : `0x${input.custodialPrivateKey}`;
+  if (input.mode === 'custodial') {
+    const key = input.privateKey.startsWith('0x')
+      ? input.privateKey
+      : `0x${input.privateKey}`;
     const wallet = new ethers.Wallet(key);
     if (wallet.address.toLowerCase() !== expectedAddress) {
       throw new Error(`${input.purpose} custodial key does not match ${expectedAddress}`);
@@ -51,13 +68,9 @@ export function createEvmPersonalMessageSignerV1(
     address: expectedAddress,
     signMessage: async (message: Uint8Array) => {
       assertMessageBytes(message);
-      const compact = input.signMessageAs !== undefined
+      const compact = input.mode === 'chain-as'
         ? await input.signMessageAs(expectedAddress, message)
-        : input.signMessage !== undefined
-          ? await input.signMessage(message)
-          : (() => {
-              throw new Error(`${input.purpose} configured chain has no message signer`);
-            })();
+        : await input.signMessage(message);
       const signature = ethers.Signature.from({
         r: ethers.hexlify(compact.r),
         yParityAndS: ethers.hexlify(compact.vs),

@@ -201,6 +201,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   const entity = `did:dkg:agent:${didSubject}`;
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
+  const profileTimestamp = config.lastSeen ?? new Date().toISOString();
 
   const q = (s: string, p: string, o: string) =>
     quads.push({ subject: s, predicate: p, object: o, graph: AGENT_REGISTRY_GRAPH });
@@ -246,7 +247,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
       q(entity, `${DKG}multiaddr`, `"${ma}"`);
     }
   }
-  q(entity, `${DKG}lastSeen`, `"${config.lastSeen ?? new Date().toISOString()}"`);
+  q(entity, `${DKG}lastSeen`, `"${profileTimestamp}"`);
   // Encryption keys: prefer the multi-key array; fall back to the deprecated
   // singular fields only when the array isn't supplied (legacy callers /
   // test fixtures). Retired keys still get published so peers learn their
@@ -304,7 +305,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   const activityUri = `${entity}/.well-known/genid/registration`;
   q(entity, `${PROV}wasGeneratedBy`, activityUri);
   q(activityUri, RDF_TYPE, `${PROV}Activity`);
-  q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
+  q(activityUri, `${PROV}atTime`, `"${profileTimestamp}"`);
 
   const served = config.contextGraphsServed;
   if (served?.length) {

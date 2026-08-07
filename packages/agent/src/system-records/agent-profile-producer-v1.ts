@@ -8,12 +8,16 @@ import {
   encodeOpaqueKaBundleV1,
   keccak256,
   tripleContentV10,
+  assertCanonicalDecimalU64,
+  assertCanonicalDigest,
+  assertCanonicalEvmAddress,
   type AssertionCoordinateV1,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
+  assertCanonicalRfc3339SecondsV1,
   buildSystemRecordProviderSignatureMessageV1,
   buildSystemRecordSignatureMessageV1,
   buildSystemRecordInventoryTreeV1,
@@ -32,9 +36,12 @@ import {
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
+  type CanonicalRfc3339SecondsV1,
   type Digest32V1,
   type NetworkIdV1,
   type OwnedSubjectTableObjectV1,
+  type SignedAgentProfileAuthorityTransitionEnvelopeV1,
+  type SignedAgentProfileForkResolutionEnvelopeV1,
   type SignedAgentProfileHeadEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryRowV1,
@@ -47,10 +54,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
-import type {
-  SystemRecordProviderArtifactV1,
-  SystemRecordProviderRepositoryV1,
-} from './provider-v1.js';
+import type { SystemRecordProviderArtifactV1 } from './provider-v1.js';
 
 const UTF8 = new TextEncoder();
 
@@ -100,8 +104,7 @@ export interface AgentProfileProducerPublicationCommitLeaseV1 {
   abort(): void;
 }
 
-export interface AgentProfileProducerPublicationStoreV1
-  extends SystemRecordProviderRepositoryV1 {
+export interface AgentProfileProducerPublicationStoreV1 {
   snapshot(): Readonly<{
     inventory: SystemRecordInventoryTreeSnapshotV1 | null;
     currentHead: SignedAgentProfileHeadEnvelopeV1 | null;
@@ -153,6 +156,16 @@ export function createAgentProfileProducerV1(
     signal: AbortSignal,
   ): Promise<AgentProfileProducerPublicationV1> => {
     signal.throwIfAborted();
+    if (publication.publicationStatus !== 'confirmed') {
+      throw new Error('agent-profile system record requires a confirmed publication');
+    }
+    const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
+    const validUntil = normalizePublicationTimestampV1(publication.validUntil, 'validUntil');
+    if (Date.parse(validUntil) <= Date.parse(issuedAt)) {
+      throw new Error('agent-profile validUntil must be later than issuedAt');
+    }
+    const evmIssuer = options.evmSigner.address;
+    assertCanonicalEvmAddress(evmIssuer, 'profile EVM issuer');
     const snapshot = options.store.snapshot();
     const previous = snapshot.currentHead;
     if (previous !== null
@@ -166,17 +179,13 @@ export function createAgentProfileProducerV1(
     if (previous?.object.state === 'tombstone') {
       throw new Error('a tombstoned profile requires an explicit authority transition');
     }
-    if (previous !== null && previous.object.evmIssuer !== options.evmSigner.address) {
+    if (previous !== null && previous.object.evmIssuer !== evmIssuer) {
       throw new Error('agent-profile authority transition must be authored explicitly');
-    }
-
-    if (publication.publicationStatus !== 'confirmed') {
-      throw new Error('agent-profile system record requires a confirmed publication');
     }
     const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(projectionQuads);
     const contentDigest = computeProjectionContentDigest(projectionQuads);
     if (contentDigest !== publication.seal.assertionMerkleRoot
-      || publication.seal.authorAddress !== options.evmSigner.address
+      || publication.seal.authorAddress !== evmIssuer
       || publication.seal.publicTripleCount !== String(projectionQuads.length)
       || publication.seal.privateTripleCount !== '0'
       || publication.seal.privateMerkleRoot !== null) {
@@ -205,6 +214,14 @@ export function createAgentProfileProducerV1(
     const version = previous === null
       ? '0'
       : (BigInt(previous.object.version) + 1n).toString();
+    const ownedSubjectCount = String(ownedSubjectTable.length);
+    const projectionByteCount = String(projectionBytes.byteLength);
+    const projectionQuadCount = String(projectionQuads.length);
+    assertCanonicalDecimalU64(authoritySequence, 'profile authoritySequence');
+    assertCanonicalDecimalU64(version, 'profile version');
+    assertCanonicalDecimalU64(ownedSubjectCount, 'profile ownedSubjectCount');
+    assertCanonicalDecimalU64(projectionByteCount, 'profile projectionBytes');
+    assertCanonicalDecimalU64(projectionQuadCount, 'profile projectionQuads');
     if (previous !== null
       && (previous.object.rootSubject !== prepared.rootEntity
         || previous.object.projectionSchemaDigest !== publication.projectionSchemaDigest)) {
@@ -217,18 +234,18 @@ export function createAgentProfileProducerV1(
       networkId: options.networkId,
       peerId: options.peerSigner.peerId,
       peerPublicKey: options.peerSigner.publicKey,
-      authoritySequence: authoritySequence as never,
-      version: version as never,
+      authoritySequence,
+      version,
       ...(previous === null ? {} : { previousHeadDigest: previous.objectDigest }),
-      evmIssuer: options.evmSigner.address as never,
+      evmIssuer,
       rootSubject: prepared.rootEntity,
       projectionSchemaDigest: publication.projectionSchemaDigest,
-      issuedAt: publication.issuedAt as never,
+      issuedAt,
       ownedSubjectTableDigest,
-      ownedSubjectCount: String(ownedSubjectTable.length) as never,
-      projectionBytes: String(projectionBytes.byteLength) as never,
-      projectionQuads: String(projectionQuads.length) as never,
-      validUntil: publication.validUntil as never,
+      ownedSubjectCount,
+      projectionBytes: projectionByteCount,
+      projectionQuads: projectionQuadCount,
+      validUntil,
       assertionCoordinate: publication.assertionCoordinate,
       graphScopedAuthorSeal: publication.seal,
       contentDigest,
@@ -331,7 +348,7 @@ export function createAgentProfileProducerV1(
       artifacts.map((artifact) => [artifactKey(artifact.objectKind, artifact.objectDigest), artifact]),
     );
     const verifiedClosure = await buildAgentProfileVerificationClosureV1(headDigest, {
-      nowMs: Date.parse(publication.issuedAt),
+      nowMs: Date.parse(issuedAt),
       resolve: async ({ objectKind, digest }) => {
         const artifact = artifactsByKey.get(artifactKey(objectKind, digest));
         return artifact === undefined
@@ -342,8 +359,7 @@ export function createAgentProfileProducerV1(
               canonicalBytes: Uint8Array.from(artifact.canonicalBytes),
             };
       },
-      verifyAuthorityEnvelope: (candidate) =>
-        verifySignedSystemRecordEnvelopeV1(candidate as never),
+      verifyAuthorityEnvelope: verifyAgentProfileAuthorityEnvelopeV1,
       verifyCurrentBundle: (_candidate, canonicalBundleBytes) =>
         Buffer.from(canonicalBundleBytes).equals(Buffer.from(bundle)),
     });
@@ -532,7 +548,9 @@ function computeProjectionContentDigest(
     new V10MerkleTree(leaves).root,
     SENTINEL_NO_PRIVATE_V10,
   );
-  return `0x${Buffer.from(root).toString('hex')}` as Digest32V1;
+  const digest = `0x${Buffer.from(root).toString('hex')}`;
+  assertCanonicalDigest(digest, 'profile content digest');
+  return digest;
 }
 
 function compareQuads(left: Readonly<Quad>, right: Readonly<Quad>): number {
@@ -544,6 +562,55 @@ function compareQuads(left: Readonly<Quad>, right: Readonly<Quad>): number {
 
 function compareUtf8(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
+function normalizePublicationTimestampV1(
+  value: string,
+  label: string,
+): CanonicalRfc3339SecondsV1 {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)) {
+    throw new Error(`${label} must be an RFC3339 UTC timestamp`);
+  }
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) throw new Error(`${label} must be a valid RFC3339 UTC timestamp`);
+  const canonical = new Date(Math.floor(millis / 1_000) * 1_000)
+    .toISOString()
+    .replace('.000Z', 'Z');
+  if (canonical !== `${value.slice(0, 19)}Z`) {
+    throw new Error(`${label} must be a calendar-valid RFC3339 UTC timestamp`);
+  }
+  assertCanonicalRfc3339SecondsV1(canonical, label);
+  return canonical;
+}
+
+function verifyAgentProfileAuthorityEnvelopeV1(
+  envelope: SignedAgentProfileHeadEnvelopeV1
+    | SignedAgentProfileAuthorityTransitionEnvelopeV1
+    | SignedAgentProfileForkResolutionEnvelopeV1,
+): Promise<boolean> {
+  if (isAgentProfileHeadEnvelopeV1(envelope)) {
+    return verifySignedSystemRecordEnvelopeV1(envelope);
+  }
+  if (isAgentProfileAuthorityTransitionEnvelopeV1(envelope)) {
+    return verifySignedSystemRecordEnvelopeV1(envelope);
+  }
+  return verifySignedSystemRecordEnvelopeV1(envelope);
+}
+
+function isAgentProfileHeadEnvelopeV1(
+  envelope: SignedAgentProfileHeadEnvelopeV1
+    | SignedAgentProfileAuthorityTransitionEnvelopeV1
+    | SignedAgentProfileForkResolutionEnvelopeV1,
+): envelope is SignedAgentProfileHeadEnvelopeV1 {
+  return envelope.object.objectType === 'agent-profile-head';
+}
+
+function isAgentProfileAuthorityTransitionEnvelopeV1(
+  envelope: SignedAgentProfileHeadEnvelopeV1
+    | SignedAgentProfileAuthorityTransitionEnvelopeV1
+    | SignedAgentProfileForkResolutionEnvelopeV1,
+): envelope is SignedAgentProfileAuthorityTransitionEnvelopeV1 {
+  return envelope.object.objectType === 'authority-transition';
 }
 
 function artifactKey(kind: SystemRecordObjectKindV1, digest: string): string {

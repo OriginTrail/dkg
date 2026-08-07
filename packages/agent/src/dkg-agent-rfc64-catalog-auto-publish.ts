@@ -118,13 +118,32 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     authorAddress: EvmAddressV1,
   ): Rfc64CatalogAuthorSignerV1 {
-    return createEvmPersonalMessageSignerV1({
-      address: authorAddress,
-      custodialPrivateKey: this.getCustodialAgentPrivateKey(authorAddress),
-      signMessageAs: this.chain.signMessageAs?.bind(this.chain),
-      signMessage: this.chain.signMessage?.bind(this.chain),
-      purpose: 'RFC-64 catalog author',
-    });
+    const privateKey = this.getCustodialAgentPrivateKey(authorAddress);
+    if (privateKey !== undefined) {
+      return createEvmPersonalMessageSignerV1({
+        mode: 'custodial',
+        address: authorAddress,
+        privateKey,
+        purpose: 'RFC-64 catalog author',
+      });
+    }
+    if (this.chain.signMessageAs !== undefined) {
+      return createEvmPersonalMessageSignerV1({
+        mode: 'chain-as',
+        address: authorAddress,
+        signMessageAs: this.chain.signMessageAs.bind(this.chain),
+        purpose: 'RFC-64 catalog author',
+      });
+    }
+    if (this.chain.signMessage !== undefined) {
+      return createEvmPersonalMessageSignerV1({
+        mode: 'chain-default',
+        address: authorAddress,
+        signMessage: this.chain.signMessage.bind(this.chain),
+        purpose: 'RFC-64 catalog author',
+      });
+    }
+    throw new Error('RFC-64 catalog author configured chain has no message signer');
   }
 
   private async resolveRfc64AutoPublishDeploymentProfileV1(

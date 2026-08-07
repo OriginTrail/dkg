@@ -11,8 +11,9 @@ describe('shared EVM personal-message signer V1', () => {
   it('signs and re-verifies with a matching custodial key', async () => {
     const wallet = new ethers.Wallet(KEY);
     const signer = createEvmPersonalMessageSignerV1({
+      mode: 'custodial',
       address: wallet.address,
-      custodialPrivateKey: KEY,
+      privateKey: KEY,
       purpose: 'fixture',
     });
     const signature = await signer.signMessage(MESSAGE);
@@ -30,6 +31,7 @@ describe('shared EVM personal-message signer V1', () => {
       };
     };
     const signer = createEvmPersonalMessageSignerV1({
+      mode: 'chain-as',
       address: wallet.address,
       signMessageAs: compact,
       purpose: 'fixture',
@@ -38,6 +40,7 @@ describe('shared EVM personal-message signer V1', () => {
 
     const wrong = new ethers.Wallet(OTHER_KEY);
     const wrongSigner = createEvmPersonalMessageSignerV1({
+      mode: 'chain-default',
       address: wallet.address,
       signMessage: async (message) => {
         const signature = ethers.Signature.from(await wrong.signMessage(message));
@@ -50,8 +53,9 @@ describe('shared EVM personal-message signer V1', () => {
 
   it('rejects a custodial key that does not own the requested address', () => {
     expect(() => createEvmPersonalMessageSignerV1({
+      mode: 'custodial',
       address: new ethers.Wallet(KEY).address,
-      custodialPrivateKey: OTHER_KEY,
+      privateKey: OTHER_KEY,
       purpose: 'fixture',
     })).toThrow(/custodial key does not match/);
   });
