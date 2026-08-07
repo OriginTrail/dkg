@@ -1706,9 +1706,10 @@ function partitionByTarget<T>(
 
 function validateInventoryRow(row: unknown, networkId?: NetworkIdV1): SystemRecordInventoryRowV1 {
   const probe = snapshotDataRecord(row, 'inventory row', { rejectNullValues: true });
+  const hasConflictEvidence = hasOwnDataProperty(probe, 'conflictEvidenceDigest');
   const expected = [
     'stableKeyHash', 'peerId', 'authoritySequence', 'version', 'headDigest',
-    ...(hasOwnDataProperty(probe, 'conflictEvidenceDigest') ? ['conflictEvidenceDigest'] : []),
+    ...(hasConflictEvidence ? ['conflictEvidenceDigest'] : []),
     'tombstone', 'quarantined',
   ];
   const validated = snapshotExactDataRecord(probe, expected, 'inventory row');
@@ -1723,12 +1724,15 @@ function validateInventoryRow(row: unknown, networkId?: NetworkIdV1): SystemReco
   }
   assertCanonicalDecimalU64(validated.version);
   assertCanonicalDigest(validated.headDigest);
-  if (hasOwnDataProperty(validated, 'conflictEvidenceDigest')) {
+  if (hasConflictEvidence) {
     assertCanonicalDigest(validated.conflictEvidenceDigest);
     if (!validated.quarantined) throw new Error('conflict evidence may appear only on quarantined rows');
   }
   if (typeof validated.tombstone !== 'boolean' || typeof validated.quarantined !== 'boolean') {
     throw new Error('inventory row flags must be booleans');
+  }
+  if (validated.quarantined && !hasConflictEvidence) {
+    throw new Error('quarantined inventory rows require conflict evidence');
   }
   if (networkId !== undefined && validated.stableKeyHash
     !== computeSystemRecordStableKeyHashV1(networkId, validated.peerId as string)) {

@@ -15,7 +15,10 @@ import {
   type SystemRecordAppliedStatePresentV1,
 } from '../src/system-record-applied-state-v1.js';
 import { computeSystemRecordStableKeyHashV1 } from '../src/system-record-inventory-v1.js';
-import { SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES } from '../src/system-record-limits-v1.js';
+import {
+  SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES,
+  SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES,
+} from '../src/system-record-limits-v1.js';
 import { EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1 } from '../src/system-record-objects-v1.js';
 
 const HASH_A = `0x${'aa'.repeat(32)}` as const;
@@ -101,6 +104,12 @@ describe('system-record applied-state codecs', () => {
     expect(parseCanonicalSystemRecordCapacityStateV1(
       canonicalizeSystemRecordCapacityStateV1(capacity),
     )).toEqual(capacity);
+    expect(() => canonicalizeSystemRecordCapacityStateV1({
+      ...capacity,
+      stateBytes: SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES.toString(),
+      tableBytes: '1',
+      projectionBytes: '0',
+    })).toThrow(/combined bytes exceed the aggregate bound/);
     expect(computeSystemRecordAccountedBytesV1(2048, 4096)).toBe(
       SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES + 2048 + 4096,
     );

@@ -75,10 +75,17 @@ describe('system-record compact inventory rows', () => {
     expect(decodeSystemRecordInventoryRowV1(NETWORK, new MisleadingRowBytes(encoded))).toEqual(value);
   });
 
-  it('rejects mismatched stable keys and evidence without quarantine', () => {
+  it('rejects mismatched stable keys and inconsistent quarantine evidence', () => {
     expect(() => encodeSystemRecordInventoryRowV1(NETWORK, {
       ...row(PEER_A), quarantined: false, conflictEvidenceDigest: EVIDENCE,
     })).toThrow(/quarantined/);
+    expect(() => encodeSystemRecordInventoryRowV1(NETWORK, {
+      ...row(PEER_A), quarantined: true,
+    })).toThrow(/conflict evidence/);
+    const quarantinedWithoutEvidence = encodeSystemRecordInventoryRowV1(NETWORK, row(PEER_A));
+    quarantinedWithoutEvidence[quarantinedWithoutEvidence.byteLength - 1] |= 0b010;
+    expect(() => decodeSystemRecordInventoryRowV1(NETWORK, quarantinedWithoutEvidence))
+      .toThrow(/conflict evidence/);
     const encoded = encodeSystemRecordInventoryRowV1(NETWORK, row(PEER_A));
     expect(() => decodeSystemRecordInventoryRowV1('other:network' as typeof NETWORK, encoded))
       .toThrow(/stable key/);
