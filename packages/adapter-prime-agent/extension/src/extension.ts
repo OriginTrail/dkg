@@ -111,11 +111,48 @@ const TURN_HARD_TIMEOUT_MS = 55 * 60_000;
 // republication that landed (atomic rename, fresh mtime) between our read and
 // the rm. Mirrored in the daemon-side reader (`session-registry.ts`).
 const PRUNE_MIN_AGE_MS = 30_000;
-// Removed by our `input` handler before Prime creates the user message. The
-// opaque tag distinguishes this extension's submission from another extension
-// (or an identical local prompt) without exposing metadata to the model.
+// Retained on Prime's prepared action, then removed by our awaited
+// `message_start` handler before listeners, persistence, or provider context.
+// The opaque tag distinguishes this extension's submission from another
+// extension (or an identical local prompt).
 const BRIDGE_INPUT_TAG_PREFIX = '\u2063dkg-bridge-turn:';
 const BRIDGE_TURN_MARKER_TYPE = 'dkg.bridge.turn-owner';
+
+interface TaggedPrompt {
+  ownershipToken: string;
+  prompt: string;
+}
+
+function parseTaggedPrompt(text: string): TaggedPrompt | undefined {
+  if (!text.startsWith(BRIDGE_INPUT_TAG_PREFIX)) return undefined;
+  const separator = text.indexOf('\u2063', BRIDGE_INPUT_TAG_PREFIX.length);
+  if (separator < 0) return undefined;
+  const ownershipToken = text.slice(BRIDGE_INPUT_TAG_PREFIX.length, separator);
+  if (!ownershipToken) return undefined;
+  return { ownershipToken, prompt: text.slice(separator + 1) };
+}
+
+function sanitizedTaggedUserMessage(
+  message: AgentMessageLike,
+): { tagged: TaggedPrompt; message: AgentMessageLike } | undefined {
+  if (message.role !== 'user') return undefined;
+  if (typeof message.content === 'string') {
+    const tagged = parseTaggedPrompt(message.content);
+    return tagged ? { tagged, message: { ...message, content: tagged.prompt } } : undefined;
+  }
+  if (!Array.isArray(message.content)) return undefined;
+  let tagged: TaggedPrompt | undefined;
+  const content = message.content.map((block) => {
+    if (tagged || !block || typeof block !== 'object') return block;
+    const record = block as { type?: unknown; text?: unknown };
+    if (record.type !== 'text' || typeof record.text !== 'string') return block;
+    const parsed = parseTaggedPrompt(record.text);
+    if (!parsed) return block;
+    tagged = parsed;
+    return { ...record, text: parsed.prompt };
+  });
+  return tagged ? { tagged, message: { ...message, content } } : undefined;
+}
 
 function agentDir(): string {
   return process.env.PRIME_AGENT_CODING_AGENT_DIR ?? join(homedir(), '.prime', 'agent');
@@ -269,6 +306,13 @@ class SessionBridge {
   // preparation hook. Local turns and agent.continue() retries have no marker.
   #activeRunTurn: PendingTurn | undefined;
   #runHasFreshPrompt = false;
+  // Records that the current run was opened by a still-pending bridge turn.
+  // If that turn fails before its cached ownership marker arrives, the run
+  // must be poisoned at failure time rather than relying on marker ordering.
+  #freshPromptFromTurn: PendingTurn | undefined;
+  // Once stale bridge content is observed in a run, no later user message in
+  // that same run may clear the quarantine. Reset only at agent_start.
+  #runQuarantineLatched = false;
   // A terminal HTTP verdict must stop Prime from continuing that logical turn
   // in the background. Retry starts have no before_agent_start; abort them
   // until a genuinely fresh prompt boundary supersedes the failed run.
@@ -439,6 +483,8 @@ class SessionBridge {
     }
     this.#activeRunTurn = undefined;
     this.#runHasFreshPrompt = false;
+    this.#freshPromptFromTurn = undefined;
+    this.#runQuarantineLatched = false;
     this.#failedRunQuarantined = false;
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
@@ -542,6 +588,19 @@ class SessionBridge {
         keepaliveTimer: undefined,
       };
       this.#turn = turn;
+      // This is an end-to-end deadline, including Prime's asynchronous
+      // validation/preparation phase. The public extension API returns void
+      // and reports async sendUserMessage failures only to Prime's error bus,
+      // so waiting for agent_start can otherwise leave the HTTP request and
+      // per-session busy guard pending forever.
+      turn.hardTimer = setTimeout(() => {
+        if (this.#turn !== turn) return;
+        this.#failTurn(turn, {
+          code: 'PRIME_AGENT_TURN_TIMEOUT',
+          message: `Prime Agent turn exceeded the ${this.#turnHardTimeoutMs}ms hard limit.`,
+        });
+      }, this.#turnHardTimeoutMs);
+      turn.hardTimer.unref?.();
     });
     const admittedTurn = this.#turn!;
 
@@ -642,7 +701,10 @@ class SessionBridge {
     const turn = this.#turn;
     if (turn && !turn.responseSettled && event.text === turn.taggedPrompt) {
       turn.inputObserved = true;
-      return { action: 'transform', text: turn.prompt };
+      // Keep the opaque identity on Prime's prepared action until
+      // before_agent_start. It is removed from the user message at
+      // message_start, before listeners, persistence, or provider context.
+      return { action: 'continue' };
     }
     // A tagged submission whose HTTP request was already cleared must never
     // execute later. Swallow it instead of letting the internal tag or a
@@ -656,7 +718,7 @@ class SessionBridge {
     // bridge state, the marker survives a deferred handoff and is emitted only
     // when that exact prepared action enters the agent loop.
     const turn = this.#turn;
-    if (!turn || !turn.inputObserved || turn.responseSettled || event.prompt !== turn.prompt) {
+    if (!turn || !turn.inputObserved || turn.responseSettled || event.prompt !== turn.taggedPrompt) {
       return undefined;
     }
     return {
@@ -672,6 +734,33 @@ class SessionBridge {
   onMessageStart(event: MessageStartEvent): void {
     const message = event.message;
     if (message?.role === 'user') {
+      const sanitized = sanitizedTaggedUserMessage(message);
+      if (sanitized) {
+        // Prime passes the live message object through this awaited hook before
+        // notifying listeners or persisting it. Mutate only the content so the
+        // internal tag never reaches the terminal transcript or the model.
+        message.content = sanitized.message.content;
+        const turn = this.#turn;
+        if (sanitized.tagged.ownershipToken !== turn?.ownershipToken) {
+          // A tagged action is bridge-originated by construction, so any token
+          // other than the pending turn's own belongs to a request that is
+          // already gone: failed before its commit, superseded, or issued by a
+          // predecessor bridge. Whichever identity carrier arrives first,
+          // treat the run like a failed retry (no fresh prompt) so
+          // before_provider_request aborts it instead of letting a caller who
+          // already received a terminal failure produce side effects.
+          this.#runHasFreshPrompt = false;
+          this.#failedRunQuarantined = true;
+          this.#runQuarantineLatched = true;
+          return;
+        }
+        if (this.#runQuarantineLatched) return;
+        this.#freshPromptFromTurn = turn;
+      }
+      // A steer or other user message can arrive after stale bridge content
+      // but before provider I/O. Quarantine is a per-run latch: only the next
+      // agent_start may establish a clean prompt boundary.
+      if (this.#runQuarantineLatched) return;
       this.#runHasFreshPrompt = true;
       this.#failedRunQuarantined = false;
       return;
@@ -685,19 +774,33 @@ class SessionBridge {
     if (turn && !turn.responseSettled && ownershipToken === turn.ownershipToken) {
       this.#activeRunTurn = turn;
       this.#armTurnTimers(turn);
+      return;
     }
+    // Historical markers remain in Prime's event stream and may be replayed
+    // during resume/fork. An unrecognized marker is therefore not sufficient
+    // evidence of a live stale action. The tagged user carrier quarantines
+    // stale commits; #failTurn handles the deadline window between carriers.
   }
 
   onContext(event: ContextEvent): { messages: AgentMessageLike[] } | undefined {
-    if (!event.messages?.some((message) => message.customType === BRIDGE_TURN_MARKER_TYPE)) {
-      return undefined;
+    if (!event.messages) return undefined;
+    let changed = false;
+    const messages: AgentMessageLike[] = [];
+    for (const message of event.messages) {
+      if (message.customType === BRIDGE_TURN_MARKER_TYPE) {
+        changed = true;
+        continue;
+      }
+      const sanitized = sanitizedTaggedUserMessage(message);
+      if (sanitized) changed = true;
+      messages.push(sanitized?.message ?? message);
     }
+    if (!changed) return undefined;
     // The marker is transport metadata, not conversation content. Keep it out
     // of every provider request while retaining it in Prime's event stream as
-    // a reliable committed-action identity signal.
-    return {
-      messages: event.messages.filter((message) => message.customType !== BRIDGE_TURN_MARKER_TYPE),
-    };
+    // a reliable committed-action identity signal. Tag stripping here is a
+    // defense in depth for host versions that clone message_start payloads.
+    return { messages };
   }
 
   onBeforeProviderRequest(ctx?: ExtensionCtxLike): void {
@@ -748,6 +851,8 @@ class SessionBridge {
   onAgentStart(ctx?: ExtensionCtxLike): void {
     this.#activeRunTurn = undefined;
     this.#runHasFreshPrompt = false;
+    this.#freshPromptFromTurn = undefined;
+    this.#runQuarantineLatched = false;
     this.#agentActive = true;
     this.#abortActiveAgent = typeof ctx?.abort === 'function' ? () => ctx.abort!() : undefined;
     // Election stamp, once per turn — agent_start fires for locally-typed and
@@ -767,6 +872,7 @@ class SessionBridge {
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
     this.#runHasFreshPrompt = false;
+    this.#freshPromptFromTurn = undefined;
     const turn = this.#activeRunTurn;
     this.#activeRunTurn = undefined;
     if (!turn) return;
@@ -777,16 +883,8 @@ class SessionBridge {
   }
 
   #armTurnTimers(turn: PendingTurn): void {
-    if (turn.idleTimer || turn.hardTimer) return;
+    if (turn.idleTimer) return;
     this.#armIdleTimer(turn);
-    turn.hardTimer = setTimeout(() => {
-      if (this.#turn !== turn) return;
-      this.#failTurn(turn, {
-        code: 'PRIME_AGENT_TURN_TIMEOUT',
-        message: `Prime Agent turn exceeded the ${this.#turnHardTimeoutMs}ms hard limit.`,
-      });
-    }, this.#turnHardTimeoutMs);
-    turn.hardTimer.unref?.();
   }
 
   #armIdleTimer(turn: PendingTurn): void {
@@ -859,8 +957,18 @@ class SessionBridge {
       });
       this.#clearTurn(turn);
     }
+    if (!ownsActiveRun && this.#freshPromptFromTurn === turn) {
+      // The tagged user carrier opened this run while the request was still
+      // pending, but the request failed before its cached marker committed.
+      // Poison the assembling run now; replayed foreign markers stay no-ops.
+      this.#freshPromptFromTurn = undefined;
+      this.#runHasFreshPrompt = false;
+      this.#failedRunQuarantined = true;
+      this.#runQuarantineLatched = true;
+    }
     if (!ownsActiveRun) return;
     this.#failedRunQuarantined = true;
+    this.#runQuarantineLatched = true;
     // Keep #agentActive true until the actual agent_end so the bridge does not
     // admit a successor into a run that has not reached a boundary yet.
     try {
