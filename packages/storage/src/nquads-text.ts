@@ -1,5 +1,9 @@
 import type { Quad as DKGQuad } from './triple-store.js';
 
+export type NQuadLineScan =
+  | { readonly line: string; readonly parsed: true; readonly quad: DKGQuad }
+  | { readonly line: string; readonly parsed: false; readonly quad?: undefined };
+
 /**
  * Parse one normalized N-Quads statement into the storage wire model.
  *
@@ -21,14 +25,36 @@ export function parseNQuadLine(line: string): DKGQuad | undefined {
   };
 }
 
-/** Parse newline-delimited N-Quads while tolerating blank, comment, and invalid lines. */
-export function parseNQuadsText(text: string): DKGQuad[] {
-  const quads: DKGQuad[] = [];
+/**
+ * Scan normalized content lines without choosing whether parse failures are fatal.
+ *
+ * Blank and comment lines are not content and are omitted. Every other line is
+ * returned with either its parsed quad or explicit parse-failure metadata so
+ * callers can apply their own integrity policy without duplicating scanning.
+ */
+export function scanNQuadLines(text: string): NQuadLineScan[] {
+  const lines: NQuadLineScan[] = [];
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
     const quad = parseNQuadLine(line);
-    if (quad) quads.push(quad);
+    lines.push(quad
+      ? { line, parsed: true, quad }
+      : { line, parsed: false });
+  }
+  return lines;
+}
+
+/**
+ * Parse newline-delimited N-Quads using the HTTP adapters' legacy tolerant policy.
+ *
+ * Blank, comment, and invalid lines are ignored. Integrity-sensitive callers
+ * should consume {@link scanNQuadLines} and handle parse failures explicitly.
+ */
+export function parseNQuadsTextTolerant(text: string): DKGQuad[] {
+  const quads: DKGQuad[] = [];
+  for (const scanned of scanNQuadLines(text)) {
+    if (scanned.parsed) quads.push(scanned.quad);
   }
   return quads;
 }

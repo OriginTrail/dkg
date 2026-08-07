@@ -33,7 +33,7 @@ import {
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
-import { parseNQuadLine } from '../nquads-text.js';
+import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -707,18 +707,18 @@ function formatTerm(term: string): string {
  *  - the final non-comment line must parse as a complete N-Quad statement
  *  - Blazegraph's appended failure text carries a Java exception marker
  *
- * Parsing and final-line validation intentionally share {@link parseNQuadLine}
- * so there is one definition of a statement. Interior unparseable lines retain
- * the adapter's historical tolerant behaviour; an unparseable final statement
- * is the truncation signal that must fail closed.
+ * Parsing and final-line validation consume {@link scanNQuadLines}, so line
+ * normalization and parse-failure metadata have one shared definition.
+ * Interior unparseable lines retain the adapter's historical tolerant
+ * behaviour; an unparseable final statement is the truncation signal that
+ * must fail closed.
  */
 function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   const quads: DKGQuad[] = [];
-  let finalStatement: { line: string; parsed: boolean } | undefined;
+  let finalStatement: NQuadLineScan | undefined;
 
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
+  for (const scanned of scanNQuadLines(text)) {
+    const { line } = scanned;
 
     // Both alternatives are line-start anchored on purpose. The engine
     // appends failure text as standalone lines, while the same words inside a
@@ -732,9 +732,8 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
       );
     }
 
-    const quad = parseNQuadLine(line);
-    finalStatement = { line, parsed: quad !== undefined };
-    if (quad) quads.push(quad);
+    finalStatement = scanned;
+    if (scanned.parsed) quads.push(scanned.quad);
   }
 
   if (finalStatement && !finalStatement.parsed) {

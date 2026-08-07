@@ -61,7 +61,7 @@ import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
 } from '../abortable-store-work-lifecycle.js';
-import { parseNQuadsText } from '../nquads-text.js';
+import { parseNQuadsTextTolerant } from '../nquads-text.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -609,7 +609,7 @@ export class SparqlHttpStore implements TripleStore {
         const text = options?.maxResponseBytes === undefined
           ? await res.text()
           : await readResponseTextBounded(res, options.maxResponseBytes);
-        const quads = parseNQuadsText(text);
+        const quads = parseNQuadsTextTolerant(text);
         return { type: 'quads', quads };
       },
     );
