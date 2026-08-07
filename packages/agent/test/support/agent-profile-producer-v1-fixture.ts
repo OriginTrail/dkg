@@ -139,7 +139,7 @@ export async function publicationFor(
       contentScopeVersion: '2',
       kaUal: `did:dkg:base:84532/${canonicalAddress}/7`,
       assertionVersion: '1',
-      publicTripleCount: String(prepared.quads.length),
+      publicTripleCount: String(prepared.projectionQuads.length),
       privateTripleCount: '0',
       privateMerkleRoot: null,
     }) as CanonicalGraphScopedAuthorSealV1,
@@ -264,7 +264,7 @@ export function controlRequest(digest: Digest32V1): SystemRecordArtifactLookupV1
 }
 
 function projectionContentDigest(prepared: PreparedAgentProfileV1): Digest32V1 {
-  const quads = [...prepared.quads].sort((left, right) => Buffer.compare(
+  const quads = [...prepared.projectionQuads].sort((left, right) => Buffer.compare(
     tripleContentV10(left.subject, left.predicate, left.object),
     tripleContentV10(right.subject, right.predicate, right.object),
   ));

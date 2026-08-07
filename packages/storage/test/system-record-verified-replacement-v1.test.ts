@@ -9,6 +9,7 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
+  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -46,21 +47,41 @@ const vectors = JSON.parse(readFileSync(new URL(
   import.meta.url,
 ), 'utf8')) as Vectors;
 
-function projectionFor(root: string) {
+function identityProjectionFor(
+  head: Pick<AgentProfileActiveHeadObjectV1,
+    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
+) {
+  const identity = agentProfileIdentityFactsV1({
+    rootSubject: head.rootSubject,
+    peerId: head.peerId,
+    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
+    agentAddress: head.evmIssuer,
+  });
+  return [identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
+    subject: head.rootSubject,
+    ...fact,
+    graph: '',
+  }));
+}
+
+function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return [
     {
-      subject: root,
+      subject: head.rootSubject,
       predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
       object: 'https://dkg.network/ontology#Agent',
       graph: '',
     },
-    { subject: root, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
-    { subject: root, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
-  ] as const;
+    ...identityProjectionFor(head),
+    { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
+    { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
+  ].sort(compareProjectionQuads);
 }
 
-function projectionBytes(root: string): Uint8Array {
-  return canonicalBytesFor(projectionFor(root));
+function projectionBytes(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>): Uint8Array {
+  return canonicalBytesFor(projectionFor(head));
 }
 
 function canonicalBytesFor(quads: readonly Readonly<{
@@ -73,8 +94,19 @@ function canonicalBytesFor(quads: readonly Readonly<{
   );
 }
 
-function projectionContentDigest(root: string): `0x${string}` {
-  return contentDigestFor(projectionFor(root));
+function projectionContentDigest(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>): `0x${string}` {
+  return contentDigestFor(projectionFor(head));
+}
+
+function compareProjectionQuads(
+  left: Readonly<{ subject: string; predicate: string; object: string }>,
+  right: Readonly<{ subject: string; predicate: string; object: string }>,
+): number {
+  return Buffer.compare(
+    tripleContentV10(left.subject, left.predicate, left.object),
+    tripleContentV10(right.subject, right.predicate, right.object),
+  );
 }
 
 function contentDigestFor(quads: readonly Readonly<{
@@ -123,15 +155,17 @@ async function mintAuthority(
 
 const VERIFIED = await (async () => {
   const source = structuredClone(vectors.variants.active.object);
-  const canonicalProjectionBytes = projectionBytes(source.rootSubject);
-  const contentDigest = projectionContentDigest(source.rootSubject);
+  const canonicalProjectionBytes = projectionBytes(source);
+  const contentDigest = projectionContentDigest(source);
   const head = {
     ...source,
     projectionBytes: String(canonicalProjectionBytes.byteLength),
+    projectionQuads: String(projectionFor(source).length),
     contentDigest,
     graphScopedAuthorSeal: {
       ...source.graphScopedAuthorSeal,
       assertionMerkleRoot: contentDigest,
+      publicTripleCount: String(projectionFor(source).length),
     },
     bundleDigest: digestSystemRecordBytesV1(
       SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
@@ -169,7 +203,7 @@ function fixture(): {
       verifiedAuthoritySummary: VERIFIED.authority,
       canonicalProjectionBytes: new Uint8Array(VERIFIED.canonicalProjectionBytes),
       ownedSubjectTable: [head.rootSubject],
-      projectionQuads: projectionFor(head.rootSubject),
+      projectionQuads: projectionFor(head),
     },
   };
 }
@@ -611,7 +645,8 @@ describe('system-record verified replacement V1', () => {
         object: '"Meow"@en',
         graph: '',
       },
-    ] as const;
+      ...identityProjectionFor(base.input.head),
+    ].sort(compareProjectionQuads);
     const canonicalProjectionBytes = canonicalBytesFor(projectionQuads);
     const contentDigest = contentDigestFor(projectionQuads);
     const ownedSubjectTable = [root, capability] as const;
@@ -620,12 +655,12 @@ describe('system-record verified replacement V1', () => {
       ownedSubjectTableDigest: computeOwnedSubjectTableDigestV1(root, ownedSubjectTable),
       ownedSubjectCount: '2',
       projectionBytes: String(canonicalProjectionBytes.byteLength),
-      projectionQuads: '3',
+      projectionQuads: String(projectionQuads.length),
       contentDigest,
       graphScopedAuthorSeal: {
         ...base.input.head.graphScopedAuthorSeal,
         assertionMerkleRoot: contentDigest,
-        publicTripleCount: '3',
+        publicTripleCount: String(projectionQuads.length),
       },
     } as AgentProfileActiveHeadObjectV1;
     const registry = createSystemRecordVerifiedReplacementRegistryV1();
@@ -638,11 +673,29 @@ describe('system-record verified replacement V1', () => {
       ownedSubjectTable,
     });
     const facts = registry.consumer.consume(handle, base.bindings);
-    expect(facts.projectionQuads.map((quad) => quad.subject)).toEqual([
-      capability,
-      root,
-      root,
-    ]);
+    expect(facts.projectionQuads.map((quad) => quad.subject)).toEqual(
+      projectionQuads.map((quad) => quad.subject),
+    );
+  });
+
+  it.each([
+    ['peerId', '"12D3KooWForeignPeerIdentity"'],
+    ['agentAddress', `"0x${'33'.repeat(20)}"`],
+    ['publicKey', `"${Buffer.alloc(32, 9).toString('base64')}"`],
+  ])('rejects projection %s facts that differ from the authenticated head', async (
+    field,
+    object,
+  ) => {
+    const base = fixture().input;
+    const predicate = `https://dkg.network/ontology#${field}`;
+    const projectionQuads = base.projectionQuads.map((quad) => (
+      quad.predicate === predicate ? { ...quad, object } : quad
+    ));
+    const candidate = await replacementFor(projectionQuads, base.ownedSubjectTable);
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+
+    expect(() => registry.issuer.issueActive(candidate))
+      .toThrow(new RegExp(`signed ${field}`));
   });
 
   it('rejects unlinked, wrong-kind-linked, and underived encryption subjects', async () => {

@@ -20,6 +20,7 @@ import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
+  assertAgentProfileProjectionIdentityV1,
   assertAgentProfileProjectionSchemaV1,
   assertCanonicalRfc3339SecondsV1,
   buildSystemRecordProviderSignatureMessageV1,
@@ -55,10 +56,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
-import {
-  agentProfileAdvertisedIdentityV1,
-  type PreparedAgentProfileV1,
-} from '../profile.js';
+import type { PreparedAgentProfileV1 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import {
   systemRecordArtifactKeyV1,
@@ -587,7 +585,7 @@ function applyInventoryUpdate(
 function validateAndProject(
   prepared: PreparedAgentProfileV1,
 ): readonly Readonly<Quad>[] {
-  const projected = prepared.quads.map((quad) => Object.freeze({ ...quad, graph: '' }));
+  const projected = prepared.projectionQuads.map((quad) => Object.freeze({ ...quad }));
   projected.sort(compareQuads);
   for (let index = 1; index < projected.length; index += 1) {
     if (compareQuads(projected[index - 1]!, projected[index]!) === 0) {
@@ -607,13 +605,19 @@ function validateAndProject(
 }
 
 function snapshotPreparedProfileV1(prepared: PreparedAgentProfileV1): PreparedAgentProfileV1 {
-  if (!Array.isArray(prepared.quads)
+  if (!Array.isArray(prepared.publicationQuads)
+    || !Array.isArray(prepared.projectionQuads)
     || typeof prepared.rootEntity !== 'string'
     || typeof prepared.lastSeen !== 'string') {
     throw new TypeError('prepared profile has an invalid structural shape');
   }
   return Object.freeze({
-    quads: Object.freeze(prepared.quads.map((quad) => Object.freeze({ ...quad }))),
+    publicationQuads: Object.freeze(
+      prepared.publicationQuads.map((quad) => Object.freeze({ ...quad })),
+    ),
+    projectionQuads: Object.freeze(
+      prepared.projectionQuads.map((quad) => Object.freeze({ ...quad })),
+    ),
     rootEntity: prepared.rootEntity,
     lastSeen: prepared.lastSeen,
   });
@@ -705,26 +709,11 @@ function assertAdvertisedIdentity(
   peerSigner: SystemRecordPeerSignerV1,
   evmAddress: string,
 ): void {
-  const identity = agentProfileAdvertisedIdentityV1({
+  assertCanonicalEvmAddress(evmAddress, 'profile EVM issuer');
+  assertAgentProfileProjectionIdentityV1({
+    rootSubject,
     peerId: peerSigner.peerId,
-    publicKey: Buffer.from(peerSigner.publicKey, 'base64url').toString('base64'),
-    agentAddress: evmAddress,
-  });
-  if (identity.rootEntity !== rootSubject
-    || identity.publicKey === undefined
-    || identity.agentAddress === undefined) {
-    throw new Error('profile projection does not bind the signed root identity');
-  }
-  const expected = [
-    ['peerId', identity.peerId],
-    ['agentAddress', identity.agentAddress],
-    ['publicKey', identity.publicKey],
-  ] as const;
-  for (const [field, fact] of expected) {
-    const advertised = quads.filter((quad) =>
-      quad.subject === rootSubject && quad.predicate === fact.predicate);
-    if (advertised.length !== 1 || advertised[0]?.object !== fact.object) {
-      throw new Error(`profile projection does not bind the signed ${field}`);
-    }
-  }
+    peerPublicKey: peerSigner.publicKey,
+    evmIssuer: evmAddress,
+  }, quads);
 }

@@ -7,6 +7,7 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
+  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -48,7 +49,7 @@ const vectors = JSON.parse(readFileSync(new URL(
 
 const verified = await (async () => {
   const source = structuredClone(vectors.variants.active.object);
-  const projectionQuads = projectionFor(source.rootSubject);
+  const projectionQuads = projectionFor(source);
   const canonicalProjectionBytes = canonicalBytesFor(projectionQuads);
   const contentDigest = contentDigestFor(projectionQuads);
   const bundle = new TextEncoder().encode('verified-profile-bundle');
@@ -140,17 +141,32 @@ function issue(binding: SystemRecordLaneExecutionBindingV1): SystemRecordActiveR
   };
 }
 
-function projectionFor(root: string) {
+function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
+  const identity = agentProfileIdentityFactsV1({
+    rootSubject: head.rootSubject,
+    peerId: head.peerId,
+    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
+    agentAddress: head.evmIssuer,
+  });
   return [
     {
-      subject: root,
+      subject: head.rootSubject,
       predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
       object: 'https://dkg.network/ontology#Agent',
       graph: '',
     },
-    { subject: root, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
-    { subject: root, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
-  ] as const;
+    ...[identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
+      subject: head.rootSubject,
+      ...fact,
+      graph: '',
+    })),
+    { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
+    { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
+  ].sort((left, right) => Buffer.compare(
+    tripleContentV10(left.subject, left.predicate, left.object),
+    tripleContentV10(right.subject, right.predicate, right.object),
+  ));
 }
 
 function canonicalBytesFor(

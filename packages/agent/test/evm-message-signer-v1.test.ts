@@ -23,13 +23,13 @@ describe('shared EVM personal-message signer V1', () => {
 
   it('normalizes a chain compact signature and rejects the wrong chain signer', async () => {
     const wallet = new ethers.Wallet(KEY);
-    const compact = async (_address: string, message: Uint8Array) => {
+    const compact = vi.fn(async (_address: string, message: Uint8Array) => {
       const signature = ethers.Signature.from(await wallet.signMessage(message));
       return {
         r: ethers.getBytes(signature.r),
         vs: ethers.getBytes(signature.yParityAndS),
       };
-    };
+    });
     const signer = createEvmPersonalMessageSignerV1({
       mode: 'chain-as',
       address: wallet.address,
@@ -37,6 +37,7 @@ describe('shared EVM personal-message signer V1', () => {
       purpose: 'fixture',
     });
     await expect(signer.signMessage(MESSAGE)).resolves.toMatch(/^0x[0-9a-f]{130}$/);
+    expect(compact).toHaveBeenCalledWith(wallet.address.toLowerCase(), MESSAGE);
 
     const wrong = new ethers.Wallet(OTHER_KEY);
     const wrongSigner = createEvmPersonalMessageSignerV1({

@@ -6,6 +6,7 @@ import {
   assertOwnedSubjectTableObjectV1,
   classifyAgentProfileOwnedSubjectV1,
   isAllowedAgentProfilePredicateV1,
+  type AgentProfileHeadCommonV1,
   type AgentProfileOwnedSubjectKindV1,
   type OwnedSubjectTableObjectV1,
 } from './system-record-objects-v1.js';
@@ -40,6 +41,75 @@ export interface AgentProfileProjectionQuadV1 {
   readonly predicate: string;
   readonly object: string;
   readonly graph: string;
+}
+
+export interface AgentProfileIdentityFactsInputV1 {
+  readonly rootSubject: string;
+  readonly peerId: string;
+  /** Standard padded base64, matching the existing profile RDF contract. */
+  readonly publicKey?: string;
+  readonly agentAddress?: string;
+}
+
+export interface AgentProfileIdentityFactV1 {
+  readonly predicate: string;
+  readonly object: string;
+}
+
+export interface AgentProfileIdentityFactsV1 {
+  readonly rootSubject: string;
+  readonly peerId: AgentProfileIdentityFactV1;
+  readonly publicKey?: AgentProfileIdentityFactV1;
+  readonly agentAddress?: AgentProfileIdentityFactV1;
+}
+
+/** Canonical RDF identity facts shared by profile authors and verified materializers. */
+export function agentProfileIdentityFactsV1(
+  input: AgentProfileIdentityFactsInputV1,
+): AgentProfileIdentityFactsV1 {
+  return Object.freeze({
+    rootSubject: input.rootSubject,
+    peerId: Object.freeze({ predicate: `${DKG}peerId`, object: `"${input.peerId}"` }),
+    ...(input.publicKey === undefined ? {} : {
+      publicKey: Object.freeze({ predicate: `${DKG}publicKey`, object: `"${input.publicKey}"` }),
+    }),
+    ...(input.agentAddress === undefined ? {} : {
+      agentAddress: Object.freeze({
+        predicate: `${DKG}agentAddress`,
+        object: `"${input.agentAddress}"`,
+      }),
+    }),
+  });
+}
+
+/** Bind projection identity facts to the authority already authenticated by the signed head. */
+export function assertAgentProfileProjectionIdentityV1(
+  head: Pick<AgentProfileHeadCommonV1,
+    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
+  quads: readonly Readonly<AgentProfileProjectionQuadV1>[],
+): void {
+  if (head.rootSubject !== `did:dkg:agent:${head.evmIssuer}`) {
+    throw new Error('profile projection does not bind the signed root identity');
+  }
+  const identity = agentProfileIdentityFactsV1({
+    rootSubject: head.rootSubject,
+    peerId: head.peerId,
+    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
+    agentAddress: head.evmIssuer,
+  });
+  const expected = [
+    ['peerId', identity.peerId],
+    ['agentAddress', identity.agentAddress],
+    ['publicKey', identity.publicKey],
+  ] as const;
+  for (const [field, fact] of expected) {
+    if (fact === undefined) throw new Error(`signed profile ${field} is unavailable`);
+    const advertised = quads.filter((quad) =>
+      quad.subject === head.rootSubject && quad.predicate === fact.predicate);
+    if (advertised.length !== 1 || advertised[0]?.object !== fact.object) {
+      throw new Error(`profile projection does not bind the signed ${field}`);
+    }
+  }
 }
 
 /** Frozen V1 RDF schema shared by profile authors and verified materializers. */

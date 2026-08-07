@@ -18,13 +18,18 @@ describe('prepared agent profile V1', () => {
     expect(now).toHaveBeenCalledTimes(1);
     expect(prepared.lastSeen).toBe('2026-08-07T12:00:00.000Z');
     expect(Object.isFrozen(prepared)).toBe(true);
-    expect(Object.isFrozen(prepared.quads)).toBe(true);
-    expect(prepared.quads.every(Object.isFrozen)).toBe(true);
-    expect(prepared.quads).toContainEqual(expect.objectContaining({
+    expect(Object.isFrozen(prepared.publicationQuads)).toBe(true);
+    expect(prepared.publicationQuads.every(Object.isFrozen)).toBe(true);
+    expect(Object.isFrozen(prepared.projectionQuads)).toBe(true);
+    expect(prepared.projectionQuads.every(Object.isFrozen)).toBe(true);
+    expect(prepared.publicationQuads).not.toBe(prepared.projectionQuads);
+    expect(prepared.publicationQuads.every((quad) => quad.graph !== '')).toBe(true);
+    expect(prepared.projectionQuads.every((quad) => quad.graph === '')).toBe(true);
+    expect(prepared.publicationQuads).toContainEqual(expect.objectContaining({
       predicate: 'https://dkg.network/ontology#lastSeen',
       object: '"2026-08-07T12:00:00.000Z"',
     }));
-    expect(prepared.quads).toContainEqual(expect.objectContaining({
+    expect(prepared.projectionQuads).toContainEqual(expect.objectContaining({
       predicate: 'http://www.w3.org/ns/prov#atTime',
       object: '"2026-08-07T12:00:00.000Z"',
     }));
@@ -40,7 +45,7 @@ describe('prepared agent profile V1', () => {
     }, now);
     expect(now).not.toHaveBeenCalled();
     expect(prepared.lastSeen).toBe('2026-08-07T11:00:00.000Z');
-    expect(prepared.quads).toContainEqual(expect.objectContaining({
+    expect(prepared.publicationQuads).toContainEqual(expect.objectContaining({
       predicate: 'http://www.w3.org/ns/prov#atTime',
       object: '"2026-08-07T11:00:00.000Z"',
     }));
@@ -65,8 +70,8 @@ describe('prepared agent profile V1', () => {
     await manager.publishProfile(config);
 
     const publishedQuads = (publisher.publish as ReturnType<typeof vi.fn>).mock.calls[0]![0].quads;
-    expect(publishedQuads).toEqual(expected.quads);
-    expect(publishedQuads).not.toBe(expected.quads);
+    expect(publishedQuads).toEqual(expected.publicationQuads);
+    expect(publishedQuads).not.toBe(expected.publicationQuads);
   });
 
   it('treats a zero-valued KA id as an existing publication on the next call', async () => {

@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   assertAgentProfileHeadObjectV1,
+  assertAgentProfileProjectionIdentityV1,
   assertAgentProfileProjectionSchemaV1,
   assertAgentProfileVerifiedAuthoritySummaryV1,
   assertNetworkIdV1,
@@ -618,6 +619,7 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
         BigInt(canonicalProjectionBytes.byteLength),
       );
       assertAgentProfileProjectionSchemaV1(head.rootSubject, subjectTable, projection);
+      assertAgentProfileProjectionIdentityV1(head, projection);
       assertCanonicalProjectionBytesForQuads(
         projection,
         canonicalProjectionBytes,

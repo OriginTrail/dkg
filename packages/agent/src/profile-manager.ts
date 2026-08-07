@@ -34,7 +34,7 @@ export class ProfileManager {
 
   async publishProfile(config: AgentProfileConfig): Promise<PublishResult> {
     const prepared = prepareAgentProfileV1(config);
-    const { quads, rootEntity } = prepared;
+    const { publicationQuads: quads, rootEntity } = prepared;
     // A-12 review: upgraded nodes that previously published
     // `did:dkg:agent:<peerId>` must drop the legacy subject alongside
     // the new EVM-form subject, otherwise discovery returns the same

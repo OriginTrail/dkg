@@ -8,6 +8,7 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
+  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -59,7 +60,7 @@ const vectors = JSON.parse(readFileSync(new URL(
 ), 'utf8')) as Vectors;
 
 const VERIFIED = await verifiedFixture(
-  projectionFor(vectors.variants.active.object.rootSubject),
+  projectionFor(vectors.variants.active.object),
   [vectors.variants.active.object.rootSubject],
 );
 
@@ -84,7 +85,8 @@ const VERIFIED_WITH_DERIVED_SUBJECT = await verifiedFixture([
     object: '"Meow"@en',
     graph: '',
   },
-], [vectors.variants.active.object.rootSubject, DERIVED_CAPABILITY]);
+  ...identityProjectionFor(vectors.variants.active.object),
+].sort(compareProjectionQuads), [vectors.variants.active.object.rootSubject, DERIVED_CAPABILITY]);
 
 async function verifiedFixture(
   projectionQuads: readonly Readonly<Quad>[],
@@ -412,11 +414,9 @@ describe('bounded system-record atomic apply executor V1', () => {
       verified: VERIFIED_WITH_DERIVED_SUBJECT,
       postState: 'next',
     });
-    expect(fixture.exactNextProjection.map((quad) => quad.subject)).toEqual([
-      DERIVED_CAPABILITY,
-      VERIFIED_WITH_DERIVED_SUBJECT.head.rootSubject,
-      VERIFIED_WITH_DERIVED_SUBJECT.head.rootSubject,
-    ]);
+    expect(fixture.exactNextProjection.map((quad) => quad.subject)).toEqual(
+      VERIFIED_WITH_DERIVED_SUBJECT.projectionQuads.map((quad) => quad.subject),
+    );
     expect(parseSystemRecordInspectionResponseV1({
       body: selectJson(fixture.exactNextProjection),
       scope: 'authoritative',
@@ -888,12 +888,38 @@ class FakeClient implements SystemRecordAtomicApplyHttpClientV1 {
   }
 }
 
-function projectionFor(root: string) {
+function identityProjectionFor(
+  head: Pick<AgentProfileActiveHeadObjectV1,
+    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
+) {
+  const identity = agentProfileIdentityFactsV1({
+    rootSubject: head.rootSubject,
+    peerId: head.peerId,
+    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
+    agentAddress: head.evmIssuer,
+  });
+  return [identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
+    subject: head.rootSubject,
+    ...fact,
+    graph: '',
+  }));
+}
+
+function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return [
-    { subject: root, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#Agent', graph: '' },
-    { subject: root, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
-    { subject: root, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
-  ] as const;
+    { subject: head.rootSubject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#Agent', graph: '' },
+    ...identityProjectionFor(head),
+    { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
+    { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
+  ].sort(compareProjectionQuads);
+}
+
+function compareProjectionQuads(left: Readonly<Quad>, right: Readonly<Quad>): number {
+  return Buffer.compare(
+    tripleContentV10(left.subject, left.predicate, left.object),
+    tripleContentV10(right.subject, right.predicate, right.object),
+  );
 }
 
 function canonicalBytesFor(quads: readonly Readonly<{ subject: string; predicate: string; object: string }>[]) {

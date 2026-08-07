@@ -66,7 +66,7 @@ describe('agent-profile system-record producer V1', () => {
       fence: () => { events.push('fence'); },
       install: (input) => {
         events.push('install');
-        expect(input.projectionQuads).toHaveLength(fixture.prepared.quads.length);
+        expect(input.projectionQuads).toHaveLength(fixture.prepared.projectionQuads.length);
         expect(input.head.rootSubject).toBe(fixture.prepared.rootEntity);
         expect(input.verifiedAuthoritySummary.candidateHeadDigest).toBe(input.envelope.objectDigest);
       },
@@ -597,13 +597,15 @@ describe('agent-profile system-record producer V1', () => {
       install: () => {},
     });
     const mutable = {
-      quads: fixture.prepared.quads.map((quad) => ({ ...quad })),
+      publicationQuads: fixture.prepared.publicationQuads.map((quad) => ({ ...quad })),
+      projectionQuads: fixture.prepared.projectionQuads.map((quad) => ({ ...quad })),
       rootEntity: fixture.prepared.rootEntity,
       lastSeen: fixture.prepared.lastSeen,
     };
 
     const lease = await producer.prepare(mutable);
-    mutable.quads.length = 0;
+    mutable.publicationQuads.length = 0;
+    mutable.projectionQuads.length = 0;
     mutable.rootEntity = 'urn:mutated-after-prepare';
     await expect(lease.complete(fixture.publication)).resolves.toMatchObject({ version: '0' });
     expect(fence).toHaveBeenCalledWith(
@@ -928,6 +930,38 @@ describe('agent-profile system-record producer V1', () => {
     expect(install).not.toHaveBeenCalled();
   });
 
+  it('aborts a reserved commit when cancellation races a blocked install', async () => {
+    const fixture = await producerFixture();
+    const installStarted = Promise.withResolvers<void>();
+    const releaseInstall = Promise.withResolvers<void>();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: async ({ signal }) => {
+        installStarted.resolve();
+        await releaseInstall.promise;
+        signal.throwIfAborted();
+      },
+    });
+
+    const lease = await producer.prepare(fixture.prepared);
+    const completion = lease.complete(fixture.publication);
+    await installStarted.promise;
+    lease.abort(new Error('cancel blocked install'));
+    releaseInstall.resolve();
+
+    await expect(completion).rejects.toThrow(/cancel blocked install/);
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+    expect(fixture.store.snapshot().inventory).toBeNull();
+
+    const retry = await producer.prepare(fixture.prepared);
+    await expect(retry.complete(fixture.publication)).resolves.toMatchObject({ version: '0' });
+  });
+
   it('rejects duplicate canonical profile triples before fencing publication', async () => {
     const fixture = await producerFixture();
     const fence = vi.fn();
@@ -942,7 +976,10 @@ describe('agent-profile system-record producer V1', () => {
     });
     const duplicate = Object.freeze({
       ...fixture.prepared,
-      quads: Object.freeze([...fixture.prepared.quads, fixture.prepared.quads[0]!]),
+      projectionQuads: Object.freeze([
+        ...fixture.prepared.projectionQuads,
+        fixture.prepared.projectionQuads[0]!,
+      ]),
     });
 
     await expect(producer.prepare(duplicate)).rejects.toThrow(/duplicate-free/);
@@ -963,13 +1000,13 @@ describe('agent-profile system-record producer V1', () => {
     });
     const outOfSchema = Object.freeze({
       ...fixture.prepared,
-      quads: Object.freeze([
-        ...fixture.prepared.quads,
+      projectionQuads: Object.freeze([
+        ...fixture.prepared.projectionQuads,
         Object.freeze({
           subject: fixture.prepared.rootEntity,
           predicate: 'https://example.org/unapproved',
           object: '"x"',
-          graph: fixture.prepared.quads[0]!.graph,
+          graph: '',
         }),
       ]),
     });
@@ -981,7 +1018,7 @@ describe('agent-profile system-record producer V1', () => {
   it.each([
     {
       label: 'a literal profile link',
-      mutate: (prepared: PreparedAgentProfileV1) => prepared.quads.map((quad) => (
+      mutate: (prepared: PreparedAgentProfileV1) => prepared.projectionQuads.map((quad) => (
         quad.predicate === 'http://www.w3.org/ns/prov#wasGeneratedBy'
           ? { ...quad, object: '"not-an-iri"' }
           : quad
@@ -989,7 +1026,7 @@ describe('agent-profile system-record producer V1', () => {
     },
     {
       label: 'an unapproved rdf:type object',
-      mutate: (prepared: PreparedAgentProfileV1) => prepared.quads.map((quad) => (
+      mutate: (prepared: PreparedAgentProfileV1) => prepared.projectionQuads.map((quad) => (
         quad.subject === prepared.rootEntity
           && quad.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
           && quad.object === 'https://dkg.network/ontology#Agent'
@@ -1000,18 +1037,18 @@ describe('agent-profile system-record producer V1', () => {
     {
       label: 'an underived x25519 revocation subject',
       mutate: (prepared: PreparedAgentProfileV1) => [
-        ...prepared.quads,
+        ...prepared.projectionQuads,
         {
           subject: prepared.rootEntity,
           predicate: 'https://dkg.network/ontology#publicEncryptionKey',
           object: `"${Buffer.alloc(32, 9).toString('base64url')}"`,
-          graph: prepared.quads[0]!.graph,
+          graph: '',
         },
         {
           subject: `${prepared.rootEntity}#x25519-${'0'.repeat(32)}`,
           predicate: 'https://dkg.network/ontology#revokedAt',
           object: '"2026-08-07T12:00:00Z"',
-          graph: prepared.quads[0]!.graph,
+          graph: '',
         },
       ],
     },
@@ -1029,7 +1066,7 @@ describe('agent-profile system-record producer V1', () => {
     });
     const malformed = Object.freeze({
       ...fixture.prepared,
-      quads: Object.freeze(mutate(fixture.prepared)),
+      projectionQuads: Object.freeze(mutate(fixture.prepared)),
     });
 
     await expect(producer.prepare(malformed)).rejects.toThrow(/outside schema V1/);
@@ -1056,7 +1093,7 @@ describe('agent-profile system-record producer V1', () => {
     const predicate = `https://dkg.network/ontology#${field}`;
     const mismatched = Object.freeze({
       ...fixture.prepared,
-      quads: Object.freeze(fixture.prepared.quads.map((quad) => Object.freeze(
+      projectionQuads: Object.freeze(fixture.prepared.projectionQuads.map((quad) => Object.freeze(
         quad.predicate === predicate ? { ...quad, object } : quad,
       ))),
     });
@@ -1083,13 +1120,13 @@ describe('agent-profile system-record producer V1', () => {
     });
     const conflicting = Object.freeze({
       ...fixture.prepared,
-      quads: Object.freeze([
-        ...fixture.prepared.quads,
+      projectionQuads: Object.freeze([
+        ...fixture.prepared.projectionQuads,
         Object.freeze({
           subject: fixture.prepared.rootEntity,
           predicate: `https://dkg.network/ontology#${field}`,
           object,
-          graph: fixture.prepared.quads[0]!.graph,
+          graph: '',
         }),
       ]),
     });

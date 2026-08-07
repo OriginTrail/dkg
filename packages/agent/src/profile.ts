@@ -4,6 +4,11 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   isPublicLikeAddress,
 } from '@origintrail-official/dkg-core';
+import {
+  agentProfileIdentityFactsV1,
+  type AgentProfileIdentityFactsV1,
+  type AgentProfileProjectionQuadV1,
+} from '@origintrail-official/dkg-core/system-record-v1';
 
 /**
  * Canonicalise the DID subject for an agent.
@@ -149,48 +154,44 @@ export interface AgentProfileConfig {
   encryptionKeyProof?: string;
 }
 
-export interface AgentProfileIdentityFactV1 {
-  readonly predicate: string;
-  readonly object: string;
-}
-
-export interface AgentProfileAdvertisedIdentityV1 {
+export type AgentProfileAdvertisedIdentityV1 = Omit<AgentProfileIdentityFactsV1, 'rootSubject'> & {
   readonly rootEntity: string;
-  readonly peerId: AgentProfileIdentityFactV1;
-  readonly publicKey?: AgentProfileIdentityFactV1;
-  readonly agentAddress?: AgentProfileIdentityFactV1;
-}
+};
 
 /** Canonical RDF identity terms shared by the profile builder and signed-record binder. */
 export function agentProfileAdvertisedIdentityV1(
   config: Pick<AgentProfileConfig, 'peerId' | 'publicKey' | 'agentAddress'>,
 ): AgentProfileAdvertisedIdentityV1 {
   const rootEntity = `did:dkg:agent:${canonicalAgentDidSubject(config.agentAddress ?? config.peerId)}`;
+  const identity = agentProfileIdentityFactsV1({
+    rootSubject: rootEntity,
+    peerId: config.peerId,
+    publicKey: config.publicKey,
+    agentAddress: config.agentAddress === undefined
+      ? undefined
+      : canonicalAgentDidSubject(config.agentAddress),
+  });
   return Object.freeze({
     rootEntity,
-    peerId: Object.freeze({ predicate: `${DKG}peerId`, object: `"${config.peerId}"` }),
-    ...(config.publicKey === undefined ? {} : {
-      publicKey: Object.freeze({ predicate: `${DKG}publicKey`, object: `"${config.publicKey}"` }),
-    }),
-    ...(config.agentAddress === undefined ? {} : {
-      agentAddress: Object.freeze({
-        predicate: `${DKG}agentAddress`,
-        object: `"${canonicalAgentDidSubject(config.agentAddress)}"`,
-      }),
-    }),
+    peerId: identity.peerId,
+    ...(identity.publicKey === undefined ? {} : { publicKey: identity.publicKey }),
+    ...(identity.agentAddress === undefined ? {} : { agentAddress: identity.agentAddress }),
   });
 }
 
 export interface PreparedAgentProfileV1 {
-  readonly quads: readonly Readonly<Quad>[];
+  /** Graphful quads consumed by the legacy VM publisher. */
+  readonly publicationQuads: readonly Readonly<Quad>[];
+  /** Graphless facts consumed by signed profile projection. */
+  readonly projectionQuads: readonly Readonly<AgentProfileProjectionQuadV1>[];
   readonly rootEntity: string;
-  /** Exact freshness value already embedded in `quads`. */
+  /** Exact freshness value already embedded in both quad views. */
   readonly lastSeen: string;
 }
 
 /**
- * Snapshot all time-dependent profile input once. The same immutable quads can
- * then be handed to the legacy publisher and to a signed-record producer.
+ * Snapshot all time-dependent profile input once, then expose distinct immutable
+ * graphful publication and graphless signed-projection views.
  */
 export function prepareAgentProfileV1(
   config: AgentProfileConfig,
@@ -198,9 +199,11 @@ export function prepareAgentProfileV1(
 ): PreparedAgentProfileV1 {
   const lastSeen = config.lastSeen ?? now().toISOString();
   const built = buildAgentProfile({ ...config, lastSeen });
-  const quads = built.quads.map((quad) => Object.freeze({ ...quad }));
+  const publicationQuads = built.quads.map((quad) => Object.freeze({ ...quad }));
+  const projectionQuads = built.quads.map((quad) => Object.freeze({ ...quad, graph: '' }));
   return Object.freeze({
-    quads: Object.freeze(quads),
+    publicationQuads: Object.freeze(publicationQuads),
+    projectionQuads: Object.freeze(projectionQuads),
     rootEntity: built.rootEntity,
     lastSeen,
   });
