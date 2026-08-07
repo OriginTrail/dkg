@@ -855,15 +855,6 @@ async function persistHermesTurnWithDuplicateLock(
         payload.assistantReply,
       ),
     });
-    if (outcome.kind === 'transition-unavailable') {
-      return {
-        statusCode: 409,
-        body: {
-          error: 'Existing Hermes turn requires a persistence-state transition path',
-          turnId: payload.turnId,
-        },
-      };
-    }
     return {
       statusCode: 200,
       body: {

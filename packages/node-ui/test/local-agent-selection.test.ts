@@ -8,7 +8,7 @@
  * request body.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { LocalAgentApiError, streamLocalAgentChat, type LocalAgentIntegration } from '../src/ui/api.js';
 import {
@@ -94,7 +94,10 @@ describe('prime-agent session pin plumbing', () => {
       });
       await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: conversation.sessionId ?? undefined,
-        targetSessionId: '019f-session-a',
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:019f-session-a',
+          rawSessionId: '019f-session-a',
+        },
       });
       expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
     } finally {
@@ -122,11 +125,33 @@ describe('prime-agent session pin plumbing', () => {
       let caught: unknown;
       await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: 'prime-agent:dkg-ui:019f-dead',
-        targetSessionId: '019f-dead',
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:019f-dead',
+          rawSessionId: '019f-dead',
+        },
       })
         .catch((err) => { caught = err; });
       expect(caught).toBeInstanceOf(LocalAgentApiError);
       expect(caught).toMatchObject({ code: 'PRIME_AGENT_NO_SESSION', status: 409 });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('rejects a mismatched raw-and-memory Prime session pair before transport', async () => {
+    const savedFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    try {
+      await expect(streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: 'prime-agent:dkg-ui:session-a',
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:session-b',
+          rawSessionId: 'session-b',
+        },
+      })).rejects.toThrow('Prime Agent live session does not match the selected conversation');
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = savedFetch;
     }

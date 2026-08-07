@@ -241,9 +241,9 @@ describe('ui local-agent stream api', () => {
       });
       const result = await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: conversation.sessionId ?? undefined,
-        targetSessionId: prime?.liveSessions?.find(
+        liveSession: prime?.liveSessions?.find(
           (session) => session.sessionId === conversation.sessionId,
-        )?.rawSessionId,
+        ),
       });
       expect(result.sessionId).toBe('019f-session-a');
       expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
@@ -281,7 +281,10 @@ describe('ui local-agent stream api', () => {
     try {
       const result = await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: 'prime-agent:dkg-ui:stale-session',
-        targetSessionId: 'stale-session',
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:stale-session',
+          rawSessionId: 'stale-session',
+        },
       });
       expect(result).toMatchObject({ text: 'Recovered', sessionId: 'live-session' });
       expect(payloads).toHaveLength(2);

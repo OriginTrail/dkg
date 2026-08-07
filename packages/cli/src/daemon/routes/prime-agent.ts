@@ -41,21 +41,14 @@ import {
   type PrimeAgentPersistTurnPayload,
 } from '../prime-agent.js';
 import {
-  pipeLocalAgentSseStream,
-  writeOpenClawStreamChunk,
-} from '../openclaw.js';
+  pipeDurableLocalAgentTurnSseStream,
+  type DurableLocalAgentTurn,
+} from '../local-agent-sse.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
 
 type PrimeAgentPersistRouteResult = {
   statusCode: number;
   body: Record<string, unknown>;
-};
-
-type PrimeAgentStreamResult = {
-  text: string;
-  terminal: boolean;
-  finalEvent?: Record<string, unknown>;
-  errorEvent?: Record<string, unknown>;
 };
 
 function ensurePrimeAgentIntegrationEnabled(
@@ -81,8 +74,20 @@ function resolveTargets(
   payload: PrimeAgentChatPayload,
   res: RequestContext['res'],
 ): PrimeAgentChannelTarget[] | null {
+  const rawSessionId = payload.sessionId === undefined
+    ? undefined
+    : primeAgentRawSessionId(payload.sessionId);
+  if (payload.sessionId !== undefined && !rawSessionId) {
+    jsonResponse(res, 400, {
+      error: 'Invalid "sessionId"',
+      code: 'INVALID_SESSION_ID',
+      source: 'prime-agent-channel',
+      correlationId: payload.correlationId,
+    });
+    return null;
+  }
   const targets = getPrimeAgentChannelTargets({
-    sessionId: payload.sessionId ? primeAgentRawSessionId(payload.sessionId) : undefined,
+    sessionId: rawSessionId,
   });
   if (targets.length === 0) {
     jsonResponse(res, 409, {
@@ -209,16 +214,6 @@ async function persistPrimeAgentTurn(
         toolCalls: payload.toolCalls,
       },
     });
-    if (outcome.kind === 'transition-unavailable') {
-      return {
-        statusCode: 409,
-        body: {
-          error: 'Existing Prime Agent turn requires a persistence-state transition path',
-          turnId,
-          sessionId,
-        },
-      };
-    }
     return {
       statusCode: 200,
       body: {
@@ -234,49 +229,7 @@ async function persistPrimeAgentTurn(
   }
 }
 
-async function pipePrimeAgentStreamAndCollect(
-  ctx: RequestContext,
-  reader: { read: () => Promise<{ done: boolean; value?: Uint8Array }>; cancel: () => Promise<unknown>; releaseLock: () => void },
-): Promise<PrimeAgentStreamResult> {
-  let text = '';
-  let finalEvent: Record<string, unknown> | undefined;
-  let errorEvent: Record<string, unknown> | undefined;
-  const streamed = await pipeLocalAgentSseStream(ctx.req, ctx.res, reader, {
-    endResponseOnTerminal: false,
-    onFrame: ({ event }) => {
-      if (event?.type === 'delta' && typeof event.text === 'string') {
-        text += event.text;
-        return { forward: true };
-      }
-      if (event?.type === 'error') {
-        // Hold a terminal error until the following final frame arrives so the
-        // failed turn can be made durable before the browser observes failure.
-        errorEvent = event;
-        return { forward: false };
-      }
-      if (event?.type === 'final') {
-        if (typeof event.text === 'string') text = event.text;
-        finalEvent = event;
-        return { forward: false, terminal: true };
-      }
-      return { forward: true };
-    },
-  });
-  return { text, terminal: streamed.terminal, finalEvent, errorEvent };
-}
-
-async function writePrimeAgentSseEvent(
-  res: RequestContext['res'],
-  event: Record<string, unknown>,
-): Promise<void> {
-  if (res.writableEnded || (res as { destroyed?: boolean }).destroyed) return;
-  await writeOpenClawStreamChunk(
-    res,
-    new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
-  );
-}
-
-function primeAgentStreamFailureReason(streamed: PrimeAgentStreamResult): string | undefined {
+function primeAgentStreamFailureReason(streamed: DurableLocalAgentTurn): string | undefined {
   if (typeof streamed.errorEvent?.error === 'string' && streamed.errorEvent.error.trim()) {
     return streamed.errorEvent.error.trim();
   }
@@ -491,53 +444,48 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
       });
 
-      const streamed = await pipePrimeAgentStreamAndCollect(ctx, (transportRes.body as any).getReader());
-      if (streamed.terminal) {
-        const failureReason = primeAgentStreamFailureReason(streamed);
-        const persistenceState = failureReason ? 'failed' : 'stored';
-        const persisted = await persistPrimeAgentTurn(
-          ctx,
-          buildPrimeAgentPersistPayload(
-            payload,
-            target,
-            streamed.text,
-            persistenceState,
-            failureReason,
-          ),
-        );
-        if (persisted.statusCode >= 400) {
-          await writePrimeAgentSseEvent(res, {
-            type: 'error',
-            error: 'Prime Agent UI chat persistence failed',
-            code: 'PRIME_AGENT_UI_PERSISTENCE_ERROR',
-            details: persisted.body.error,
-            correlationId: payload.correlationId,
-          });
-          if (!res.writableEnded) res.end();
-          return;
-        }
-
-        // The bridge sends `error` followed by `final` for terminal failures.
-        // Release both only after the failed turn is durable, and release a
-        // successful final only after the stored turn is durable.
-        if (streamed.errorEvent) {
-          await writePrimeAgentSseEvent(res, streamed.errorEvent);
-        }
-        await writePrimeAgentSseEvent(res, {
-          ...(streamed.finalEvent ?? {}),
-          type: 'final',
-          text: streamed.text,
-          correlationId: payload.correlationId,
-          sessionId: primeAgentDkgSessionId(target.sessionId),
-          turnId: String(persisted.body.turnId ?? payload.correlationId),
-        });
-      } else if (streamed.errorEvent) {
-        // Preserve a malformed bridge stream that ended after `error` without
-        // the required terminal frame; without a final there is no complete
-        // exchange to persist, but the client still needs the bridge failure.
-        await writePrimeAgentSseEvent(res, streamed.errorEvent);
-      }
-      if (!res.writableEnded) res.end();
+      await pipeDurableLocalAgentTurnSseStream(
+        req,
+        res,
+        (transportRes.body as any).getReader(),
+        async (streamed) => {
+          const failureReason = primeAgentStreamFailureReason(streamed);
+          const persistenceState = failureReason ? 'failed' : 'stored';
+          const persisted = await persistPrimeAgentTurn(
+            ctx,
+            buildPrimeAgentPersistPayload(
+              payload,
+              target,
+              streamed.text,
+              persistenceState,
+              failureReason,
+            ),
+          );
+          if (persisted.statusCode >= 400) {
+            return {
+              ok: false,
+              errorEvent: {
+                type: 'error',
+                error: 'Prime Agent UI chat persistence failed',
+                code: 'PRIME_AGENT_UI_PERSISTENCE_ERROR',
+                details: persisted.body.error,
+                correlationId: payload.correlationId,
+              },
+            };
+          }
+          return {
+            ok: true,
+            finalEvent: {
+              ...streamed.finalEvent,
+              type: 'final',
+              text: streamed.text,
+              correlationId: payload.correlationId,
+              sessionId: primeAgentDkgSessionId(target.sessionId),
+              turnId: String(persisted.body.turnId ?? payload.correlationId),
+            },
+          };
+        },
+      );
       return;
     } catch (err) {
       if (res.writableEnded || res.headersSent) {

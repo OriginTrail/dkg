@@ -824,7 +824,7 @@ describe('OpenClaw bridge behavioral tests', () => {
 
       await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: primeAgent?.defaultSessionId,
-        targetSessionId: primeAgent?.liveSessions?.[0]?.rawSessionId,
+        liveSession: primeAgent?.liveSessions?.[0],
       });
       expect(JSON.parse(calls[3].opts?.body as string).sessionId).toBe('prime-session-1');
     } finally {

@@ -1,5 +1,5 @@
+import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import type { OpenClawAttachmentRef } from './openclaw.js';
-import type { RequestContext } from './routes/context.js';
 
 export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
 
@@ -21,12 +21,18 @@ export type DurableChatTurnPayload = {
 };
 
 export type DurableChatTurnOutcome = {
-  kind: 'created' | 'duplicate' | 'transitioned' | 'transition-unavailable';
+  kind: 'created' | 'duplicate' | 'transitioned';
   sessionId: string;
   turnId: string;
 };
 
-type ChatMemoryManager = RequestContext['memoryManager'];
+/** Required storage contract for the daemon's durable-turn state machine. */
+export type DurableChatTurnStore = Pick<
+  ChatMemoryManager,
+  | 'getChatTurnPersistenceState'
+  | 'recordChatTurnPersistenceTransition'
+  | 'storeChatExchange'
+>;
 
 const chatTurnPersistenceInflight = new Map<string, Promise<DurableChatTurnOutcome>>();
 
@@ -41,28 +47,15 @@ function persistenceKey(sessionId: string, turnId: string): string {
 }
 
 async function readPersistenceState(
-  memoryManager: ChatMemoryManager,
+  memoryManager: DurableChatTurnStore,
   sessionId: string,
   turnId: string,
 ): Promise<ChatTurnPersistenceState | null> {
-  const manager = memoryManager as unknown as {
-    getChatTurnPersistenceState?: (
-      sessionId: string,
-      turnId: string,
-    ) => Promise<ChatTurnPersistenceState | null>;
-    hasChatTurn?: (sessionId: string, turnId: string) => Promise<boolean>;
-  };
-  if (typeof manager.getChatTurnPersistenceState === 'function') {
-    return manager.getChatTurnPersistenceState.call(memoryManager, sessionId, turnId);
-  }
-  if (typeof manager.hasChatTurn === 'function') {
-    return await manager.hasChatTurn.call(memoryManager, sessionId, turnId) ? 'stored' : null;
-  }
-  return null;
+  return memoryManager.getChatTurnPersistenceState(sessionId, turnId);
 }
 
 async function persistDurableChatTurnUnlocked(args: {
-  memoryManager: ChatMemoryManager;
+  memoryManager: DurableChatTurnStore;
   payload: DurableChatTurnPayload;
   afterStored?: () => Promise<void>;
 }): Promise<DurableChatTurnOutcome> {
@@ -93,28 +86,7 @@ async function persistDurableChatTurnUnlocked(args: {
   }
 
   if (existingState) {
-    const recorder = (memoryManager as unknown as {
-      recordChatTurnPersistenceTransition?: (
-        sessionId: string,
-        turnId: string,
-        persistenceState: ChatTurnPersistenceState,
-        opts?: {
-          failureReason?: string | null;
-          assistantReply?: string;
-          toolCalls?: ChatTurnToolCall[];
-          attachmentRefs?: OpenClawAttachmentRef[];
-        },
-      ) => Promise<void>;
-    }).recordChatTurnPersistenceTransition;
-    if (typeof recorder !== 'function') {
-      return {
-        kind: 'transition-unavailable',
-        sessionId: payload.sessionId,
-        turnId: payload.turnId,
-      };
-    }
-    await recorder.call(
-      memoryManager,
+    await memoryManager.recordChatTurnPersistenceTransition(
       payload.sessionId,
       payload.turnId,
       payload.persistenceState,
@@ -163,7 +135,7 @@ async function persistDurableChatTurnUnlocked(args: {
  * the route layer shared by Hermes, Prime Agent, and future local agents.
  */
 export async function persistDurableChatTurn(args: {
-  memoryManager: ChatMemoryManager;
+  memoryManager: DurableChatTurnStore;
   payload: DurableChatTurnPayload;
   afterStored?: () => Promise<void>;
 }): Promise<DurableChatTurnOutcome> {
