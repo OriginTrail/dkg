@@ -4675,7 +4675,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       outcomes: new Map(),
       attemptedOrdinals: [],
       continuationOrdinal,
-      hasImmediateProviderWork: false,
+      hasImmediateRecoveryWork: false,
       cooldownOnly,
     });
     if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
@@ -5178,18 +5178,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
     const unattemptedContinuationOrdinal = currentTargets.find((target) =>
       eligibleOrdinals.has(target.ordinal) && !attemptedOrdinals.has(target.ordinal))?.ordinal;
-    const hasImmediateProviderWork = eligible.some(({ target }) => {
+    const hasImmediateRecoveryWork = eligible.some(({ target }) => {
       const outcome = outcomes.get(target.ordinal);
-      if (
-        outcome?.status !== 'pending'
-        || !outcome.recovery
-        || !this.vmReconcileRecoveryTargetMatches(target, outcome.recovery)
-      ) return false;
       const record = this.vmReconcileRotationState.get(
         this.vmReconcileRotationSlotKey(target),
       );
-      return record?.phase === 'collecting'
-        && this.vmReconcileUncreditedCandidateOrder(record).length > 0;
+      if (
+        record?.phase !== 'collecting'
+        || record.fingerprint !== this.vmReconcileRotationFingerprint(target)
+        || this.vmReconcileUncreditedCandidateOrder(record).length === 0
+      ) return false;
+      // When revalidation ran, it must still describe the same pending target.
+      // A protocol/admission failure can consume an attempt before producing
+      // an outcome; the matching retained record is then sufficient proof that
+      // another bounded provider attempt remains immediately runnable.
+      return outcome === undefined
+        ? attemptedOrdinals.has(target.ordinal)
+        : outcome.status === 'pending'
+          && outcome.recovery !== undefined
+          && this.vmReconcileRecoveryTargetMatches(target, outcome.recovery);
     });
     const continuationOrdinal = unattemptedContinuationOrdinal;
 
@@ -5207,7 +5214,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       !recoveryWorkRan
       || recoveredAny
       || continuationOrdinal !== undefined
-      || hasImmediateProviderWork
+      || hasImmediateRecoveryWork
     ) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     } else {
@@ -5222,7 +5229,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // next peer, but once every submitted target has consumed one attempt
       // the outer fair scan must wrap from its watermark on the next cycle.
       continuationOrdinal,
-      hasImmediateProviderWork,
+      hasImmediateRecoveryWork,
       cooldownOnly: false,
     };
   }

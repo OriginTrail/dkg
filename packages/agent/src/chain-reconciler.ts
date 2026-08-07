@@ -73,11 +73,11 @@ export interface PendingOrdinalRecoveryResult {
    */
   continuationOrdinal: number | undefined;
   /**
-   * Retained provider rotation has an untried peer and should be scheduled
-   * immediately. This is deliberately separate from the ordered scan cursor
-   * so provider retries cannot starve untouched ordinals.
+   * Recovery has bounded work that should be scheduled immediately. This is
+   * deliberately separate from the ordered scan cursor so implementation-
+   * specific retries cannot starve untouched ordinals.
    */
-  hasImmediateProviderWork: boolean;
+  hasImmediateRecoveryWork: boolean;
   /**
    * True only when recovery intentionally skipped networking because its
    * per-CG cooldown is active. This preserves the continuation without
@@ -206,7 +206,7 @@ export async function reconcileContextGraph(
   let recoveryContinuationOrdinal: number | undefined;
   let recoveryAttempted = false;
   let recoveryCooldownOnly = false;
-  let recoveryHasImmediateProviderWork = false;
+  let recoveryHasImmediateWork = false;
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -295,7 +295,7 @@ export async function reconcileContextGraph(
         recoveryContinuationOrdinal = recovery.continuationOrdinal;
         recoveryAttempted = recovery.attemptedOrdinals.length > 0;
         recoveryCooldownOnly = recovery.cooldownOnly === true;
-        recoveryHasImmediateProviderWork = recovery.hasImmediateProviderWork;
+        recoveryHasImmediateWork = recovery.hasImmediateRecoveryWork;
       }
     }
 
@@ -341,7 +341,7 @@ export async function reconcileContextGraph(
     && (
       recoveryAttempted
         ? recoveryContinuationOrdinal !== undefined
-          || recoveryHasImmediateProviderWork
+          || recoveryHasImmediateWork
           || hasUnvisitedCandidates
         : hasUnvisitedCandidates
     );
