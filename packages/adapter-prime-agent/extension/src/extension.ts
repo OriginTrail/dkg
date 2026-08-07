@@ -112,7 +112,6 @@ const PRUNE_MIN_AGE_MS = 30_000;
 // extension (or an identical local prompt).
 const BRIDGE_INPUT_TAG_PREFIX = '\u2063dkg-bridge-turn:';
 const BRIDGE_TURN_MARKER_TYPE = 'dkg.bridge.turn-owner';
-const RETIRED_OWNERSHIP_TOKEN_LIMIT = 64;
 
 interface TaggedPrompt {
   ownershipToken: string;
@@ -303,11 +302,6 @@ class SessionBridge {
   // in the background. Retry starts have no before_agent_start; abort them
   // until a genuinely fresh prompt boundary supersedes the failed run.
   #failedRunQuarantined = false;
-  // A request may hit its absolute deadline after Prime accepted the action
-  // but before model/auth validation reaches before_agent_start. Remember the
-  // opaque action token so that a delayed commit can be sanitized and aborted
-  // instead of executing after its caller has already received a failure.
-  readonly #retiredOwnershipTokens = new Set<string>();
   #agentActive = false;
   #abortActiveAgent: (() => void) | undefined;
   #closed = false;
@@ -463,9 +457,6 @@ class SessionBridge {
     this.#closed = true;
     this.#cleanupDescriptor();
     if (this.#turn) {
-      if (this.#activeRunTurn !== this.#turn) {
-        this.#rememberRetiredOwnershipToken(this.#turn.ownershipToken);
-      }
       this.#settleResponse({ text: this.#turn.chunks.join(''), error: 'Bridge stopped' });
       this.#clearTurn(this.#turn);
     }
@@ -690,9 +681,14 @@ class SessionBridge {
         // notifying listeners or persisting it. Mutate only the content so the
         // internal tag never reaches the terminal transcript or the model.
         message.content = sanitized.message.content;
-        if (this.#retiredOwnershipTokens.delete(sanitized.tagged.ownershipToken)) {
-          // This prepared action outlived its HTTP request. Treat it like a
-          // failed retry (no fresh prompt) so before_provider_request aborts it.
+        if (sanitized.tagged.ownershipToken !== this.#turn?.ownershipToken) {
+          // A tagged action is bridge-originated by construction, so any token
+          // other than the pending turn's own belongs to a request that is
+          // already gone: failed before its commit, superseded, or issued by a
+          // predecessor bridge. Whichever identity carrier arrives first,
+          // treat the run like a failed retry (no fresh prompt) so
+          // before_provider_request aborts it instead of letting a caller who
+          // already received a terminal failure produce side effects.
           this.#runHasFreshPrompt = false;
           this.#failedRunQuarantined = true;
           return;
@@ -707,19 +703,19 @@ class SessionBridge {
       message.details && typeof message.details === 'object'
         ? (message.details as { ownershipToken?: unknown }).ownershipToken
         : undefined;
-    if (typeof ownershipToken === 'string' && this.#retiredOwnershipTokens.delete(ownershipToken)) {
-      // The user message can be emitted immediately before this cached marker.
-      // If the absolute deadline fires between those events, the marker is the
-      // final identity-bearing boundary at which to quarantine the stale run.
-      this.#runHasFreshPrompt = false;
-      this.#failedRunQuarantined = true;
-      return;
-    }
     const turn = this.#turn;
     if (turn && !turn.responseSettled && ownershipToken === turn.ownershipToken) {
       this.#activeRunTurn = turn;
       this.#armTurnTimers(turn);
+      return;
     }
+    // Markers are only ever cached on bridge-prepared actions, so one that
+    // does not belong to the pending turn identifies a stale action exactly
+    // like a foreign tag does above. The absolute deadline can fire between
+    // the user message and this cached marker; whichever carrier lands after
+    // the failure re-asserts the quarantine.
+    this.#runHasFreshPrompt = false;
+    this.#failedRunQuarantined = true;
   }
 
   onContext(event: ContextEvent): { messages: AgentMessageLike[] } | undefined {
@@ -852,7 +848,6 @@ class SessionBridge {
 
   #failTurn(turn: PendingTurn, failure: SanitizedTurnFailure): void {
     const ownsActiveRun = this.#activeRunTurn === turn;
-    if (!ownsActiveRun) this.#rememberRetiredOwnershipToken(turn.ownershipToken);
     if (this.#turn === turn) {
       this.#settleResponse({
         text: turn.chunks.join(''),
@@ -870,13 +865,6 @@ class SessionBridge {
     } catch {
       /* the ownership quarantine remains authoritative */
     }
-  }
-
-  #rememberRetiredOwnershipToken(ownershipToken: string): void {
-    this.#retiredOwnershipTokens.add(ownershipToken);
-    if (this.#retiredOwnershipTokens.size <= RETIRED_OWNERSHIP_TOKEN_LIMIT) return;
-    const oldest = this.#retiredOwnershipTokens.values().next().value as string | undefined;
-    if (oldest) this.#retiredOwnershipTokens.delete(oldest);
   }
 
   #json(res: ServerResponse, status: number, body: unknown): void {

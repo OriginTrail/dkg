@@ -16,7 +16,6 @@ const TOKEN = 'test-bridge-token-value';
 let workDir: string;
 let bridge: SessionBridge;
 let sent: string[];
-let submitted: string[];
 let sendOptions: Array<{ deliverAs?: 'steer' | 'followUp' } | undefined>;
 let base: string;
 
@@ -32,13 +31,14 @@ function stubPi(onSend: (text: string, options?: { deliverAs?: 'steer' | 'follow
   return {
     on: () => {},
     sendUserMessage: (content: string, options?: { deliverAs?: 'steer' | 'followUp' }) => {
-      // Mirror Prime's input normalization: the bridge keeps its tag on the
-      // prepared action, then message_start removes it from the live message.
+      // Mirror Prime's submission flow faithfully: the bridge keeps its tag on
+      // the prepared action and nothing strips it until message_start. `sent`
+      // therefore records the RAW submission; assertions apply visiblePrompt()
+      // wherever they mean operator-visible text, so the strip point stays in
+      // the code under test instead of hiding in this harness.
       const result = bridge.onInput({ source: 'extension', text: content });
       if (result.action === 'handled') return;
-      const normalized = result.action === 'transform' ? result.text : content;
-      submitted.push(normalized);
-      onSend(visiblePrompt(normalized), options);
+      onSend(result.action === 'transform' ? result.text : content, options);
     },
   };
 }
@@ -73,7 +73,7 @@ function startBridgeRun(
   ctx?: Parameters<SessionBridge['onAgentStart']>[0],
   prepared?: PreparedBridgeRun,
 ): void {
-  const prompt = submitted.at(-1);
+  const prompt = sent.at(-1);
   if (!prompt) throw new Error('startBridgeRun(): no injected prompt');
   const ownership = prepared ?? bridge.onBeforeAgentStart({ prompt });
   if (!ownership) throw new Error('startBridgeRun(): prompt did not receive an ownership marker');
@@ -103,7 +103,6 @@ beforeEach(async () => {
   process.env.PRIME_AGENT_CODING_AGENT_DIR = workDir;
   process.env.DKG_BRIDGE_TOKEN = TOKEN;
   sent = [];
-  submitted = [];
   sendOptions = [];
   bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-test');
   await bridge.start();
@@ -307,7 +306,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'hello agent', correlationId: 'c-1' }),
     });
     await new Promise((r) => setTimeout(r, 30));
-    expect(sent).toEqual(['hello agent']);
+    expect(sent.map(visiblePrompt)).toEqual(['hello agent']);
 
     startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'hi ' } });
@@ -437,7 +436,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'too soon', correlationId: 'c-too-soon' }),
     });
     expect(tooSoon.status).toBe(429);
-    expect(sent).toEqual(['use the provider']);
+    expect(sent.map(visiblePrompt)).toEqual(['use the provider']);
     bridge.onAgentEnd();
 
     const second = fetch(`${base}/send`, {
@@ -446,16 +445,16 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'retry after credentials are fixed', correlationId: 'c-retry' }),
     });
     await until(() => sent.length === 2);
-    expect(sent).toEqual(['use the provider', 'retry after credentials are fixed']);
+    expect(sent.map(visiblePrompt)).toEqual(['use the provider', 'retry after credentials are fixed']);
 
     // Prime may prepare the queued action before its retry wins the handoff.
     // Its hidden ownership marker is cached on that action and excluded from
     // provider context; it must not be consumed by the intervening retry run.
-    const preparedSuccessor = bridge.onBeforeAgentStart({ prompt: submitted.at(-1) });
+    const preparedSuccessor = bridge.onBeforeAgentStart({ prompt: sent.at(-1) });
     expect(preparedSuccessor).toBeDefined();
     const providerContext = bridge.onContext({
       messages: [
-        { role: 'user', content: [{ type: 'text', text: submitted.at(-1) }] },
+        { role: 'user', content: [{ type: 'text', text: sent.at(-1) }] },
         { role: 'custom', ...preparedSuccessor!.message },
       ],
     });
@@ -564,7 +563,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'successor', correlationId: 'c-successor' }),
     });
     expect(tooSoon.status).toBe(429);
-    expect(sent).toEqual(['zombie turn']);
+    expect(sent.map(visiblePrompt)).toEqual(['zombie turn']);
 
     // The zombie keeps talking after its terminal verdict. It owns no live
     // bridge request, and admission stays closed until its real agent_end.
@@ -581,7 +580,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'successor', correlationId: 'c-successor' }),
     });
     await until(() => sent.length === 2);
-    expect(sent).toEqual(['zombie turn', 'successor']);
+    expect(sent.map(visiblePrompt)).toEqual(['zombie turn', 'successor']);
 
     // A continuation/retry has no before_agent_start and therefore cannot
     // claim or settle the pending successor.
@@ -617,7 +616,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'bridge prompt', correlationId: 'c-local-race' }),
     });
     await until(() => sent.length === 1);
-    expect(sent).toEqual(['bridge prompt']);
+    expect(sent.map(visiblePrompt)).toEqual(['bridge prompt']);
 
     // The local action has the exact same operator-visible text, but it does
     // not carry the bridge's opaque prepared-action tag and gets no marker.
@@ -661,7 +660,7 @@ describe('/send', () => {
     // Prime may cache before_agent_start metadata and then lose the action to
     // a local handoff. Its public extension send API returns void, so an async
     // validation failure itself is not observable by the bridge.
-    const taggedPrompt = submitted.at(-1);
+    const taggedPrompt = sent.at(-1);
     const prepared = bridge.onBeforeAgentStart({ prompt: taggedPrompt });
     expect(prepared).toBeDefined();
 
@@ -700,6 +699,75 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'fresh prompt', correlationId: 'c-after-prestart-timeout' }),
     });
     await until(() => sent.length === 2);
+    startBridgeRun();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh answer' } });
+    bridge.onAgentEnd();
+    expect(await retry.then((res) => res.json())).toMatchObject({ text: 'fresh answer' });
+  });
+
+  it('quarantines a stale action no matter which identity carrier is emitted first', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-marker-first', {
+      turnIdleTimeoutMs: 5_000,
+      turnHardTimeoutMs: 70,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const pending = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'validate me', correlationId: 'c-marker-first' }),
+    });
+    await until(() => sent.length === 1);
+    const taggedPrompt = sent.at(-1);
+    const prepared = bridge.onBeforeAgentStart({ prompt: taggedPrompt });
+    expect(prepared).toBeDefined();
+    expect((await pending).status).toBe(503);
+
+    // Nothing pins which of the two cached carriers Prime emits first. If the
+    // marker lands before the tagged user message, the quarantine must not be
+    // consumed by the marker and then cleared by the message.
+    let abortCount = 0;
+    const ctx = {
+      sessionManager: { getSessionId: () => 'sess-marker-first' },
+      abort: () => { abortCount += 1; },
+    };
+    const userMessage = { role: 'user', content: [{ type: 'text', text: taggedPrompt }] };
+    bridge.onAgentStart(ctx);
+    bridge.onMessageStart({ message: { role: 'custom', ...prepared!.message } });
+    bridge.onMessageStart({ message: userMessage });
+    expect(userMessage.content[0].text).toBe('validate me');
+    bridge.onBeforeProviderRequest(ctx);
+    expect(abortCount).toBe(1);
+    bridge.onAgentEnd();
+  });
+
+  it('quarantines an orphaned tagged action from a predecessor bridge generation', async () => {
+    // A queued tagged action can outlive the bridge instance that created it
+    // (reload/resume builds a successor with no memory of the token). Its
+    // commit must be sanitized and aborted, not executed as an unowned ghost.
+    const orphanPrompt = '⁣dkg-bridge-turn:token-from-a-previous-bridge⁣do the thing';
+    let abortCount = 0;
+    const ctx = {
+      sessionManager: { getSessionId: () => 'sess-test' },
+      abort: () => { abortCount += 1; },
+    };
+    const userMessage = { role: 'user', content: [{ type: 'text', text: orphanPrompt }] };
+    bridge.onAgentStart(ctx);
+    bridge.onMessageStart({ message: userMessage });
+    expect(userMessage.content[0].text).toBe('do the thing');
+    bridge.onBeforeProviderRequest(ctx);
+    expect(abortCount).toBe(1);
+    bridge.onAgentEnd();
+
+    // A genuinely fresh bridge turn on this generation still recovers.
+    const retry = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'fresh prompt', correlationId: 'c-after-orphan' }),
+    });
+    await until(() => sent.length === 1);
     startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'fresh answer' } });
     bridge.onAgentEnd();
@@ -810,7 +878,7 @@ describe('/send', () => {
       body: JSON.stringify({ text: 'deliverable', correlationId: 'c-deliver-2' }),
     });
     await until(() => sent.length === 1);
-    expect(sent).toEqual(['deliverable']);
+    expect(sent.map(visiblePrompt)).toEqual(['deliverable']);
     startBridgeRun();
     bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'delivered' } });
     bridge.onAgentEnd();
