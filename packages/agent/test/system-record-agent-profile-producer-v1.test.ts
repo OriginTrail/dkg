@@ -46,6 +46,7 @@ describe('agent-profile system-record producer V1', () => {
         events.push('install');
         expect(input.projectionQuads).toHaveLength(fixture.prepared.quads.length);
         expect(input.head.rootSubject).toBe(fixture.prepared.rootEntity);
+        expect(input.verifiedAuthoritySummary.candidateHeadDigest).toBe(input.envelope.objectDigest);
       },
     });
 

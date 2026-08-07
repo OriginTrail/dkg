@@ -19,6 +19,7 @@ import {
   buildSystemRecordProviderSignatureMessageV1,
   buildSystemRecordSignatureMessageV1,
   buildSystemRecordInventoryTreeV1,
+  buildAgentProfileVerificationClosureV1,
   canonicalizeOwnedSubjectTableObjectV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
@@ -34,6 +35,7 @@ import {
   verifySignedSystemRecordEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileVerifiedAuthoritySummaryV1,
   type Digest32V1,
   type NetworkIdV1,
   type OwnedSubjectTableObjectV1,
@@ -79,6 +81,7 @@ export interface AgentProfileProducerInstallInputV1 {
   readonly canonicalProjectionBytes: Uint8Array;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
   readonly signal: AbortSignal;
 }
 
@@ -329,6 +332,27 @@ export function createAgentProfileProducerV1(
       inventory,
       inventoryUpdate,
     });
+    const artifactsByKey = new Map(
+      artifacts.map((artifact) => [artifactKey(artifact.objectKind, artifact.objectDigest), artifact]),
+    );
+    const verifiedClosure = await buildAgentProfileVerificationClosureV1(headDigest, {
+      nowMs: Date.parse(publication.issuedAt),
+      resolve: async ({ objectKind, digest }) => {
+        const artifact = artifactsByKey.get(artifactKey(objectKind, digest));
+        return artifact === undefined
+          ? undefined
+          : {
+              objectKind: artifact.objectKind,
+              digest: artifact.objectDigest,
+              canonicalBytes: Uint8Array.from(artifact.canonicalBytes),
+            };
+      },
+      verifyAuthorityEnvelope: (candidate) =>
+        verifySignedSystemRecordEnvelopeV1(candidate as never),
+      verifyCurrentBundle: (_candidate, canonicalBundleBytes) =>
+        Buffer.from(canonicalBundleBytes).equals(Buffer.from(bundle)),
+    });
+    signal.throwIfAborted();
 
     const commitLease = await options.store.prepareCommit({ artifacts, inventory, rootEnvelope });
     let committed = false;
@@ -340,6 +364,7 @@ export function createAgentProfileProducerV1(
         canonicalProjectionBytes: projectionBytes,
         projectionQuads,
         ownedSubjectTable,
+        verifiedAuthoritySummary: verifiedClosure.authoritySummary,
         signal,
       });
       signal.throwIfAborted();
