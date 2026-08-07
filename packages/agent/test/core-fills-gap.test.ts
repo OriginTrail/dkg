@@ -2748,7 +2748,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.continuationOrdinal).toBe(3);
   });
 
-  it('tries each pending target once per eligible pass and damps immediate retries', async () => {
+  it('continues immediately while pending targets still have untried providers', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmBatchCooldown', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
@@ -2799,16 +2799,22 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
     expect(first.outcomes.get(1)).toMatchObject({ status: 'pending' });
     expect(first.attemptedOrdinals).toEqual([0, 1]);
-    expect(first.continuationOrdinal).toBeUndefined();
+    expect(first.continuationOrdinal).toBe(0);
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
 
-    // Nothing recovered: the cooldown stamped on entry stands, so an immediate
-    // next pass performs no network fetch for this CG.
+    // Both targets retain one untried provider. The next bounded pass rotates
+    // to those providers immediately instead of sleeping for the 60s sweep.
     const second = await internals.recoverVmReconcileBatch(localCgId, 1n, targets, 100, () => true);
-    expect(fetchedUals).toEqual([[target.ual], [deferredTarget.ual]]);
-    expect(second.outcomes.size).toBe(0);
-    expect(second.attemptedOrdinals).toEqual([]);
-    expect(second.continuationOrdinal).toBe(0);
-    expect(second.cooldownOnly).toBe(true);
+    expect(fetchedUals).toEqual([
+      [target.ual],
+      [deferredTarget.ual],
+      [target.ual],
+      [deferredTarget.ual],
+    ]);
+    expect(second.attemptedOrdinals).toEqual([0, 1]);
+    expect(second.continuationOrdinal).toBeUndefined();
+    expect(second.cooldownOnly).toBe(false);
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
   });
 
   it('suppresses completed incomplete cycles after every pending target receives an attempt', async () => {
@@ -2938,8 +2944,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId, 1n, [target], 100, () => true,
     );
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
+    expect(first.continuationOrdinal).toBe(0);
+    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
 
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
     const second = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
     );

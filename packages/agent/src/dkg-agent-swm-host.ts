@@ -5174,17 +5174,36 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     }
 
-    // Mirror the inline path's cooldown policy: a pass that performs no
-    // protocol/admission/transport work must not consume the fetch budget, and
-    // completed work resets the damper so the trailing `hasMore` slice of a
-    // draining backlog fetches immediately.
-    // Only a batch that reached a peer and recovered nothing retains the
-    // cooldown. Re-anchor that short damper at completion: a slow or legacy
-    // response may already have outlived the timestamp taken before transfer.
+    const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
+    const unattemptedContinuationOrdinal = currentTargets.find((target) =>
+      eligibleOrdinals.has(target.ordinal) && !attemptedOrdinals.has(target.ordinal))?.ordinal;
+    const providerContinuationOrdinal = eligible.find(({ target }) => {
+      const outcome = outcomes.get(target.ordinal);
+      if (
+        outcome?.status !== 'pending'
+        || !outcome.recovery
+        || !this.vmReconcileRecoveryTargetMatches(target, outcome.recovery)
+      ) return false;
+      const record = this.vmReconcileRotationState.get(
+        this.vmReconcileRotationSlotKey(target),
+      );
+      return record?.phase === 'collecting'
+        && this.vmReconcileUncreditedCandidateOrder(record).length > 0;
+    })?.target.ordinal;
+    const continuationOrdinal = unattemptedContinuationOrdinal
+      ?? providerContinuationOrdinal;
+
+    // Mirror the inline path's cooldown policy, but do not turn a bounded peer
+    // slice into a one-minute stall while the retained rotation record proves
+    // there is novel work left. Each trailing pass still obeys the hard peer,
+    // ordinal and global-sync admission caps; it merely reaches the next target
+    // or untried provider without waiting for the periodic safety-net sweep.
+    // Once every retained provider cycle is exhausted, the ordinary cooldown /
+    // negative backoff applies exactly as before.
     if (!isRecoveryCurrent()) return noRecovery();
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
-    if (!recoveryWorkRan || recoveredAny) {
+    if (!recoveryWorkRan || recoveredAny || continuationOrdinal !== undefined) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     } else {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
@@ -5197,10 +5216,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // attempts are rotated inside `remaining` to give untouched targets the
       // next peer, but once every submitted target has consumed one attempt
       // the outer fair scan must wrap from its watermark on the next cycle.
-      continuationOrdinal: currentTargets.find(
-        (target) => eligible.some((entry) => entry.target.ordinal === target.ordinal)
-          && !attemptedOrdinals.has(target.ordinal),
-      )?.ordinal,
+      continuationOrdinal,
       cooldownOnly: false,
     };
   }
