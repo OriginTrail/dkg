@@ -4675,6 +4675,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       outcomes: new Map(),
       attemptedOrdinals: [],
       continuationOrdinal,
+      hasImmediateProviderWork: false,
       cooldownOnly,
     });
     if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
@@ -5177,7 +5178,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
     const unattemptedContinuationOrdinal = currentTargets.find((target) =>
       eligibleOrdinals.has(target.ordinal) && !attemptedOrdinals.has(target.ordinal))?.ordinal;
-    const providerContinuationOrdinal = eligible.find(({ target }) => {
+    const hasImmediateProviderWork = eligible.some(({ target }) => {
       const outcome = outcomes.get(target.ordinal);
       if (
         outcome?.status !== 'pending'
@@ -5189,9 +5190,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       return record?.phase === 'collecting'
         && this.vmReconcileUncreditedCandidateOrder(record).length > 0;
-    })?.target.ordinal;
-    const continuationOrdinal = unattemptedContinuationOrdinal
-      ?? providerContinuationOrdinal;
+    });
+    const continuationOrdinal = unattemptedContinuationOrdinal;
 
     // Mirror the inline path's cooldown policy, but do not turn a bounded peer
     // slice into a one-minute stall while the retained rotation record proves
@@ -5203,7 +5203,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!isRecoveryCurrent()) return noRecovery();
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
-    if (!recoveryWorkRan || recoveredAny || continuationOrdinal !== undefined) {
+    if (
+      !recoveryWorkRan
+      || recoveredAny
+      || continuationOrdinal !== undefined
+      || hasImmediateProviderWork
+    ) {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
     } else {
       this.vmReconcileFetchCooldownAt.delete(localCgId);
@@ -5217,6 +5222,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // next peer, but once every submitted target has consumed one attempt
       // the outer fair scan must wrap from its watermark on the next cycle.
       continuationOrdinal,
+      hasImmediateProviderWork,
       cooldownOnly: false,
     };
   }

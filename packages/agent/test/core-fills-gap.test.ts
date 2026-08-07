@@ -2200,6 +2200,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         ])),
         attemptedOrdinals: targets.map((target) => target.ordinal),
         continuationOrdinal: undefined,
+        hasImmediateProviderWork: false,
       };
     };
 
@@ -2799,7 +2800,8 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
     expect(first.outcomes.get(1)).toMatchObject({ status: 'pending' });
     expect(first.attemptedOrdinals).toEqual([0, 1]);
-    expect(first.continuationOrdinal).toBe(0);
+    expect(first.continuationOrdinal).toBeUndefined();
+    expect(first.hasImmediateProviderWork).toBe(true);
     expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
 
     // Both targets retain one untried provider. The next bounded pass rotates
@@ -2813,6 +2815,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     ]);
     expect(second.attemptedOrdinals).toEqual([0, 1]);
     expect(second.continuationOrdinal).toBeUndefined();
+    expect(second.hasImmediateProviderWork).toBe(false);
     expect(second.cooldownOnly).toBe(false);
     expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
   });
@@ -2944,7 +2947,8 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId, 1n, [target], 100, () => true,
     );
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
-    expect(first.continuationOrdinal).toBe(0);
+    expect(first.continuationOrdinal).toBeUndefined();
+    expect(first.hasImmediateProviderWork).toBe(true);
     expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
 
     const second = await internals.recoverVmReconcileBatch(
