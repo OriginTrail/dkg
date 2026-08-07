@@ -239,6 +239,119 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(String(init?.body)).toMatch(/^CONSTRUCT /);
   });
 
+  it('sends a server-side query deadline on SELECT and CONSTRUCT, wider than the client deadline', async () => {
+    // Without a server-side bound, a client abort leaves the query executing
+    // on Blazegraph indefinitely (observed on mainnet: 10-32+ min past a 30s
+    // abort, queryErrorCount=0 across 20,953 queries). The bound must be
+    // WIDER than the client deadline so the client always aborts first —
+    // The wire-level 120s expectation below independently documents the
+    // operational contract for the default 30s client deadline.
+    setFetch(async () => blazeSelectResponse());
+    const s = new BlazegraphStore(baseUrl, { timeout: 30_000 });
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const selectHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
+    const sent = Number(selectHeaders['X-BIGDATA-MAX-QUERY-MILLIS']);
+    expect(sent).toBe(120_000);
+    expect(sent).toBeGreaterThan(30_000);
+
+    fetchCalls.length = 0;
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    await s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    const constructHeaders = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(Number(constructHeaders['X-BIGDATA-MAX-QUERY-MILLIS']))
+      .toBe(120_000);
+  });
+
+  it('scales the server-side deadline with a custom client timeout', async () => {
+    setFetch(async () => blazeSelectResponse());
+    const s = new BlazegraphStore(baseUrl, { timeout: 5_000 });
+    await s.query('SELECT ?s WHERE { ?s ?p ?o }');
+    const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+    expect(Number(headers['X-BIGDATA-MAX-QUERY-MILLIS']))
+      .toBe(20_000);
+  });
+
+  it('rejects a CONSTRUCT body truncated by an engine error instead of parsing it as partial data', async () => {
+    // Blazegraph commits 200 and streams before it knows the query will fail,
+    // then appends the error into the committed body. The tolerant n-quads
+    // parser skips unmatched lines, so without the guard this returns a short
+    // but structurally valid quad set — silent data loss.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + 'java.util.concurrent.TimeoutException: query deadline exceeded\n'
+      + '\tat com.bigdata.rdf.sail.webapp.BigdataRDFContext.run(BigdataRDFContext.java:1)\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('rejects a CONSTRUCT body cut mid-statement', async () => {
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + '<http://ex.org/s2> <http://ex.org/p2> <http://ex.or',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('rejects a final truncated literal even when the fragment ends with a period', async () => {
+    // A punctuation-only guard mistakes the period inside this unfinished
+    // literal for an N-Quads statement terminator, after which the tolerant
+    // parser silently skips the line and returns only the first quad.
+    setFetch(async () => new Response(
+      '<http://ex.org/s1> <http://ex.org/p> <http://ex.org/o> <http://ctx/1> .\n'
+      + '<http://ex.org/s2> <http://ex.org/p> "partial.',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+      .rejects.toThrow(/truncated CONSTRUCT result/i);
+  });
+
+  it('does not misread a trailing comment or an error-like literal as truncation', async () => {
+    // Two false positives a narrower guard must not have: (1) a body whose
+    // final line is a comment is complete, not cut short; (2) a STORED literal
+    // containing Java-stack-trace text sits mid-line inside its quad (n-quads
+    // forbids raw newlines in literals), so the line-start-anchored error scan
+    // must not fire on it. User-published content is arbitrary — a KA holding
+    // error logs must not poison every read of its graph.
+    setFetch(async () => new Response(
+      '<http://ex.org/s> <http://ex.org/p> "logs: at com.bigdata.Journal.run TimeoutException" <http://ctx/1> .\n'
+      + '# end of results\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const r = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(r.type).toBe('quads');
+    expect((r as { quads: unknown[] }).quads).toHaveLength(1);
+  });
+
+  it('still accepts complete CONSTRUCT bodies, including empty results and comments', async () => {
+    // The guard must not start rejecting shapes the tolerant parser has
+    // always accepted, or it becomes a worse bug than the one it fixes.
+    setFetch(async () => new Response('', { status: 200, headers: { 'Content-Type': 'text/x-nquads' } }));
+    const empty = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(empty.type).toBe('quads');
+    expect((empty as { quads: unknown[] }).quads).toHaveLength(0);
+
+    setFetch(async () => new Response(
+      '# a comment line\n'
+      + '<http://ex.org/s> <http://ex.org/p> "lit"@en <http://ctx/1> .\n',
+      { status: 200, headers: { 'Content-Type': 'text/x-nquads' } },
+    ));
+    const ok = await new BlazegraphStore(baseUrl)
+      .query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect((ok as { quads: unknown[] }).quads).toHaveLength(1);
+  });
+
   it.each([
     {
       name: 'SELECT',
