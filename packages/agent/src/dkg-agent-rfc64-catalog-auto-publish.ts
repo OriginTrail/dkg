@@ -106,6 +106,10 @@ export interface RecordRfc64PublicCatalogAssetParamsV1 {
   readonly seal: AssertionSeal;
 }
 
+/** @deprecated Use RecordRfc64PublicCatalogAssetParamsV1. */
+export type RecordConfirmedRfc64PublicCatalogAssetParamsV1 =
+  RecordRfc64PublicCatalogAssetParamsV1;
+
 function shadowResult(
   status: Rfc64SwmAuthorInventoryShadowMutationResultV1['status'],
   action: Rfc64SwmAuthorInventoryShadowMutationResultV1['action'],
@@ -574,6 +578,17 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       catalogIssuerDelegationExpiresAt:
         lane.autoPublishConfig.catalogIssuerDelegationExpiresAt,
     });
+  }
+
+  /**
+   * @deprecated Explicit compatibility alias only. Ordinary VM confirmation
+   * does not call this method; the chain remains the finalized-VM inventory.
+   */
+  recordConfirmedRfc64PublicCatalogAssetV1(
+    this: DKGAgent,
+    params: RecordConfirmedRfc64PublicCatalogAssetParamsV1,
+  ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
+    return this.recordRfc64PublicCatalogAssetV1(params);
   }
 
   /** One canonical activation, policy, ownership, and era boundary for catalog and SWM. */

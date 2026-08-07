@@ -1002,7 +1002,9 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     }));
     agentLike.removeRfc64SwmAuthorInventoryShadowV1 = removal;
     const catalogAuthoring = recorder(async () => null);
+    const legacyCatalogAuthoring = recorder(async () => null);
     agentLike.recordRfc64PublicCatalogAssetV1 = catalogAuthoring;
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = legacyCatalogAuthoring;
     const snapshotQuads = [{
       subject: 'urn:test:queued-public',
       predicate: 'http://schema.org/name',
@@ -1032,8 +1034,24 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       },
     });
     expect(catalogAuthoring.calls).toHaveLength(0);
-    expect((DKGAgent.prototype as any).recordConfirmedRfc64PublicCatalogAssetV1)
-      .toBeUndefined();
+    expect(legacyCatalogAuthoring.calls).toHaveLength(0);
+  });
+
+  it('keeps the deprecated confirmed-catalog method as an explicit-authoring adapter', async () => {
+    const expected = Object.freeze({ objectDigest: 'sha256:compatibility-head' });
+    const canonicalCatalogAuthoring = recorder(async () => expected);
+    const agentLike = {
+      recordRfc64PublicCatalogAssetV1: canonicalCatalogAuthoring,
+    };
+    const params = Object.freeze({ contextGraphId: 'public-cg' });
+
+    await expect(
+      (DKGAgent.prototype as any).recordConfirmedRfc64PublicCatalogAssetV1.call(
+        agentLike,
+        params,
+      ),
+    ).resolves.toBe(expected);
+    expect(canonicalCatalogAuthoring.calls).toEqual([[params]]);
   });
 
   it('keeps a confirmed queued VM publish successful when SWM inventory removal fails', async () => {

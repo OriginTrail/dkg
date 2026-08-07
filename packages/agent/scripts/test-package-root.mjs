@@ -51,6 +51,7 @@ const requiredCatalogMethods = [
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
   'recordRfc64PublicCatalogAssetV1',
+  'recordConfirmedRfc64PublicCatalogAssetV1',
   'synchronizeRfc64PublicCatalogFromProviderV1',
   'readRfc64PublicCatalogBootstrapStatusV1',
   'whenRfc64PublicCatalogBootstrapIdleV1',
@@ -62,12 +63,6 @@ for (const method of requiredCatalogMethods) {
   ) {
     throw new Error(`published DKGAgent entry points did not expose ${method}`);
   }
-}
-if (
-  typeof root.DKGAgent.prototype.recordConfirmedRfc64PublicCatalogAssetV1 === 'function'
-  || typeof legacyAgent.DKGAgent.prototype.recordConfirmedRfc64PublicCatalogAssetV1 === 'function'
-) {
-  throw new Error('published DKGAgent entry points still expose the stale confirmed-VM catalog API');
 }
 if (
   !Array.isArray(root.RFC64_POLICY_CELLS_V1)
