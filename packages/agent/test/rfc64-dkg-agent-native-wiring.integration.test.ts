@@ -2235,6 +2235,145 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
   }, 60_000);
 
+  it('applies a finalized-policy SWM successor through production wiring without VM writes', async () => {
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const fixture = Object.freeze({
+      accessPolicy: 0,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      assets: Object.freeze([]),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7c',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
+      nameHash: nameHash as Digest32V1,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+      publishPolicy: 1,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture);
+    const rpc = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+    const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
+    await receiverChain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash,
+    });
+    const receiver = await startNativeAgent(
+      'finalized-policy-production-receiver',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      {
+        rpcUrl: rpc.url,
+        chainAdapter: receiverChain,
+        initialSubscription: CONTEXT_GRAPH_ID,
+      },
+    );
+    const author = await startNativeAgent(
+      'finalized-policy-production-author',
+      NATIVE_DEPLOYMENT,
+      undefined,
+      undefined,
+      {
+        rpcUrl: rpc.url,
+        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture),
+      },
+      {
+        peers: [receiver.peerId],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    );
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(
+      AUTHOR_WALLET.privateKey,
+    );
+    const policy = finalizedPublicCatalogPolicy();
+    const policyEnvelope = {
+      issuer: CONTEXT_GRAPH_STORAGE,
+      objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+      payload: policy,
+      signatureEvidence: { kind: 'none' },
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    } as UnsignedContextGraphPolicyEnvelopeV1;
+    const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
+    for (const agent of [author, receiver]) {
+      agent.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster: null });
+    }
+    await connectBothWays(author, receiver);
+
+    const publicQuads = [{
+      subject: 'https://example.org/policy-only',
+      predicate: 'https://schema.org/name',
+      object: '"Policy-only SWM"',
+      graph: '',
+    }];
+    const kaNumber = 42n;
+    const published = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'finalized-policy-production-success' as never,
+      publicQuads,
+      seal: assertionSealFromCanonical(await authorSeal(kaNumber, publicQuads)),
+    });
+    if (published === null) throw new Error('explicit RFC-64 catalog authoring was not enabled');
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430',
+      governanceContractAddress: CONTEXT_GRAPH_STORAGE,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    } as const;
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      published.currentCatalogHeadDigest,
+    )).toBeNull();
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: published.currentCatalogHeadDigest,
+      inventoryRowCount: '1',
+    });
+    const swmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.SharedWorkingMemory,
+      AUTHOR,
+      Number(kaNumber),
+    );
+    const vmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory,
+      AUTHOR,
+      Number(kaNumber),
+    );
+    await expect((receiver as any).store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    )).resolves.toMatchObject({
+      type: 'bindings',
+      bindings: [expect.objectContaining({ s: 'https://example.org/policy-only' })],
+    });
+    await expect((receiver as any).store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
+  }, 60_000);
+
   registerM0RecoveryScenario('curated-parity', rfc64M0RecoveryTitle('curated-parity'), async () => {
     const kaNumbers = [41n] as const;
     const assets = kaNumbers.map((kaNumber) => Object.freeze({
