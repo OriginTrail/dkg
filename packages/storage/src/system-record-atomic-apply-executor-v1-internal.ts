@@ -401,7 +401,7 @@ async function executeAdmitted(
   }
 
   try {
-    if (!matchesProjectionSnapshot(snapshot, exactPrior.projectionQuads)) {
+    if (!matchesProjectionSnapshot(snapshot, exactPrior.projectionQuads, binding.mode)) {
       return noMutation({ outcome: 'deferred', reason: 'validation-mismatch' });
     }
   } catch {
@@ -485,7 +485,7 @@ async function executeAdmitted(
             appliedStateDigest: prepared.success.appliedStateDigest,
           }),
         });
-      } else if (matchesExact(observed, exactPrior)) {
+      } else if (updateFailure === null && matchesExact(observed, exactPrior)) {
         return noMutation({ outcome: 'deferred', reason: 'state-changed' });
       } else {
         updateFailure ??= new Error('system-record post-read matched neither prior nor next state');
@@ -1055,8 +1055,14 @@ export function fingerprintSystemRecordProjectionV1(
 function matchesProjectionSnapshot(
   snapshot: SystemRecordAppliedSnapshotV1,
   projectionQuads: readonly Readonly<Quad>[],
+  mode: SystemRecordLaneExecutionBindingV1['mode'],
 ): boolean {
   const observed = fingerprintSystemRecordProjectionV1(projectionQuads);
+  // No applied state owns authoritative projection subjects yet, so bounded
+  // rows on the exact next-subject union are legacy content that the initial
+  // atomic transaction must replace. Shadow storage is protocol-owned from
+  // inception and therefore remains strict-empty when its state is absent.
+  if (snapshot.state === 'absent' && mode === 'authoritative') return true;
   const expected = snapshot.state === 'present'
     ? snapshot.appliedState
     : Object.freeze({

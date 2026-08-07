@@ -861,10 +861,12 @@ scheduler-fenced projection preflight. While holding the exclusive `agents` perm
 storage reads the exact prior/next subject union from the selected projection graph,
 incrementally hashes its strict canonical graphless N-Triples lines under
 `dkg-ka-projection-v1\n`, and compares digest, byte count, and quad count with the
-applied snapshot. Canonical line-order failure or any mismatch defers with zero
-update dispatch, including an absent snapshot with a pre-existing candidate-subject
-row and equal-head projection drift. Inspected prior rows are never enumerated into
-the SPARQL update.
+applied snapshot. Canonical line-order failure or any present-state mismatch defers
+with zero update dispatch, as does a pre-existing candidate-subject row in absent
+shadow storage. For absent authoritative state, bounded rows on the exact next-subject
+union are legacy content and the initial transaction replaces them. Equal-head
+projection drift always defers. Inspected prior rows are never enumerated into the
+SPARQL update.
 
 The expected-state CAS covers `(stateRevision, appliedStateDigest, headDigest,
 transitionLineage,
@@ -974,8 +976,10 @@ The controller owns at most one aggregate session per store for the enabled
 `disabled|enabling|enabled|reconciling|disabling|shutdown|unavailable`; transition
 precedence is `shutdown > disable > recovery/revive > open`. Same-descriptor calls
 coalesce/idempotently return and incompatible opens reject. `disabled -> enabling`
-atomically seals admission before enqueueing its epoch transition. Every queued/running
-mutation and V1 call binds activation and child-generation abort scopes at enqueue;
+atomically seals admission before enqueueing its epoch transition. Every mutation
+enqueued after activation intent and every V1 call binds activation and child-generation
+abort scopes at enqueue. A managed mutation already queued on the default-off path is
+rechecked at dispatch and rejected if activation has committed in the meantime;
 transitions cancel queued retired scopes and drain or physically terminate running
 ones before state changes. A different enabled-set descriptor requires disabling and
 reopening this same aggregate session; `ontology` never creates a second controller,
@@ -1001,8 +1005,9 @@ honor the bound; only ACK/health work in unrelated domains bypasses `agents`. A
 generation/control transition seals every mutation for the managed store only. The default-off undefined path keeps current
 O(1) head selection with no metadata allocation/evaluation. Because the scheduler is
 process-global and disabled-mode work has no store identity, each enable takes one
-conservative global watermark. Queued predispatch work may run or be removed/timeout
-before dispatch. Active work must physically settle; a logical timeout never decrements
+conservative global watermark. Queued predispatch reads may run or be removed/timeout;
+managed writes queued before activation fail closed if they reach dispatch after commit.
+Active work must physically settle; a logical timeout never decrements
 the transition watermark. If an untagged active operation cannot be attributed and
 proven settled, activation fails closed. Regardless of apparent completion, every
 `disabled -> enabling` transition destroys the old managed HTTP client, stops/proves

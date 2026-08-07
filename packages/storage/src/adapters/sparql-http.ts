@@ -285,6 +285,7 @@ export class SparqlHttpStore implements TripleStore {
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined) => Promise<T>,
     mutationBinding?: ManagedMutationBindingV1,
+    guardUnboundManagedMutation = false,
   ): Promise<T> {
     return this.workLifecycle.run(
       options?.signal,
@@ -293,6 +294,7 @@ export class SparqlHttpStore implements TripleStore {
         options?.source ?? `sparql-http.${operation}`,
         () => {
           if (mutationBinding) this.assertManagedMutationBinding(mutationBinding);
+          else if (guardUnboundManagedMutation) this.assertUnboundManagedMutationStillPermitted();
           return work(signal);
         },
         signal,
@@ -363,6 +365,18 @@ export class SparqlHttpStore implements TripleStore {
       )
     ) {
       throw new ManagedOxigraphMutationUnavailableError('child generation changed before dispatch');
+    }
+  }
+
+  /** Refuse a managed write whose admission state changed while it was queued. */
+  private assertUnboundManagedMutationStillPermitted(): void {
+    if (this.managedMutationFailure !== null) {
+      throw new ManagedOxigraphMutationUnavailableError(this.managedMutationFailure);
+    }
+    if (this.systemRecordAdmissionActive) {
+      throw new ManagedOxigraphMutationUnavailableError(
+        'mutation was queued before system-record admission became active',
+      );
     }
   }
 
@@ -450,6 +464,11 @@ export class SparqlHttpStore implements TripleStore {
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
     const mutationBinding = this.createManagedMutationBinding(graphs);
+    // A managed mutation admitted before activation intentionally remains
+    // untagged. Recheck it at dispatch so a control barrier cannot enable the
+    // lane and then release that stale entry under the legacy rules.
+    const guardUnboundManagedMutation = this.ownershipLease !== null
+      && mutationBinding === undefined;
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const timeoutSignal = AbortSignal.timeout(this.timeout);
       const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
@@ -481,7 +500,7 @@ export class SparqlHttpStore implements TripleStore {
       } finally {
         signalScope.dispose();
       }
-    }, mutationBinding);
+    }, mutationBinding, guardUnboundManagedMutation);
   }
 
   /**
@@ -540,8 +559,9 @@ export class SparqlHttpStore implements TripleStore {
    * Advertising is gated on a LIVE lease, not merely on holding one: a store
    * whose child has exited still holds the lease object, but its snapshot is
    * not ready and the lane must not be advertised as usable. The controller
-   * itself is built lazily and memoized, so a store nobody asks allocates
-   * nothing and the default-off path stays free.
+   * itself is built lazily and memoized, so a store nobody asks allocates no
+   * per-store lane/controller state and the default-off path stays free of
+   * runtime I/O, scheduling, and timers.
    */
   getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
     // Fail-closed on all three preconditions. A store missing ANY of them is

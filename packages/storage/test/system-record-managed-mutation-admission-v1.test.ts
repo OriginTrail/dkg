@@ -139,6 +139,32 @@ describe('managed Oxigraph mutation admission V1', () => {
     return { entered: entered.promise, release: () => gate.resolve(undefined), work };
   }
 
+  function holdSchedulerCapacity(): {
+    readonly entered: Promise<void>;
+    readonly release: () => void;
+    readonly work: Promise<void>;
+  } {
+    const entered = deferred<void>();
+    const gate = deferred<void>();
+    const capacity = externalStorePriorityScheduler.snapshot.maxConcurrent;
+    let enteredCount = 0;
+    const blockers = Array.from({ length: capacity }, (_, index) =>
+      externalStorePriorityScheduler.run(
+        'ack',
+        `test.managed-mutation.capacity-${index}`,
+        async () => {
+          enteredCount += 1;
+          if (enteredCount === capacity) entered.resolve(undefined);
+          await gate.promise;
+        },
+      ));
+    return {
+      entered: entered.promise,
+      release: () => gate.resolve(undefined),
+      work: Promise.all(blockers).then(() => undefined),
+    };
+  }
+
   it('holds system mutations behind an agents exclusive', async () => {
     await activate();
     const exclusive = holdAgentsExclusive();
@@ -162,6 +188,47 @@ describe('managed Oxigraph mutation admission V1', () => {
       'INSERT DATA { <urn:test:u> <urn:test:p> "x" }',
       { touchedGraphs: [UNRELATED_GRAPH] },
     )).rejects.toMatchObject({
+      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('refuses a scoped mutation queued before activation when it reaches dispatch', async () => {
+    const capacity = holdSchedulerCapacity();
+    await capacity.entered;
+
+    const write = store.insert([quad(AGENTS_GRAPH)]);
+    await drainTurns();
+    const activation = activate();
+    await drainTurns();
+
+    capacity.release();
+    await capacity.work;
+    await activation;
+
+    await expect(write).rejects.toMatchObject({
+      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('refuses an opaque update queued before activation when it reaches dispatch', async () => {
+    const capacity = holdSchedulerCapacity();
+    await capacity.entered;
+
+    const write = store.update(
+      'INSERT DATA { <urn:test:u> <urn:test:p> "x" }',
+      { touchedGraphs: [UNRELATED_GRAPH] },
+    );
+    await drainTurns();
+    const activation = activate();
+    await drainTurns();
+
+    capacity.release();
+    await capacity.work;
+    await activation;
+
+    await expect(write).rejects.toMatchObject({
       code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
     });
     expect(fetchCalls).toBe(0);
@@ -239,6 +306,26 @@ describe('managed Oxigraph mutation admission V1', () => {
     expect(after.admissionTaggedInflight).toBe(before.admissionTaggedInflight);
     expect(after.admissionHeldRuns).toBe(before.admissionHeldRuns);
     expect(fetchCalls).toBe(1);
+  });
+
+  it('does not evaluate managed admission state for an unowned endpoint', async () => {
+    const unowned = new SparqlHttpStore({
+      queryEndpoint: QUERY_ENDPOINT,
+      updateEndpoint: UPDATE_ENDPOINT,
+    });
+    Object.defineProperty(unowned, 'systemRecordAdmissionActive', {
+      configurable: true,
+      get: () => {
+        throw new Error('unowned update evaluated managed admission state');
+      },
+    });
+
+    try {
+      await expect(unowned.insert([quad(UNRELATED_GRAPH)])).resolves.toBeUndefined();
+      expect(fetchCalls).toBe(1);
+    } finally {
+      await unowned.close();
+    }
   });
 
   it('restores the zero-metadata scheduler fast path after a successful disable', async () => {

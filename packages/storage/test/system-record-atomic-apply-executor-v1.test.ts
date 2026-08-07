@@ -196,8 +196,30 @@ describe('bounded system-record atomic apply executor V1', () => {
     expect(fixture.client.updateCalls).toBe(0);
   });
 
-  it('rejects a pre-existing row on a next-only subject when local state is absent', async () => {
+  it('atomically replaces a pre-existing legacy row on authoritative cold apply', async () => {
     const fixture = makeFixture({
+      priorProjection: () => [{
+        subject: VERIFIED.head.rootSubject,
+        predicate: 'https://schema.org/name',
+        object: '"pre-existing"',
+        graph: '',
+      }],
+    });
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({
+      settlement: 'settled',
+      outcome: { outcome: 'applied' },
+    });
+    expect(fixture.client.updateCalls).toBe(1);
+  });
+
+  it('rejects a pre-existing row in absent shadow storage', async () => {
+    const fixture = makeFixture({
+      mode: 'shadow',
       priorProjection: () => [{
         subject: VERIFIED.head.rootSubject,
         predicate: 'https://schema.org/name',
@@ -215,6 +237,51 @@ describe('bounded system-record atomic apply executor V1', () => {
       outcome: { outcome: 'deferred', reason: 'validation-mismatch' },
     });
     expect(fixture.client.updateCalls).toBe(0);
+  });
+
+  it.each([
+    ['transport failure', { updateFailure: new Error('timeout') }],
+    ['non-2xx response', { updateStatus: 500 }],
+  ] as const)('transfers %s with an immediate exact-prior read to recovery', async (
+    _label,
+    update,
+  ) => {
+    const recoveryCompletion = new Promise<{ readonly resolution: 'unavailable' }>(() => undefined);
+    const fixture = makeFixture({ postState: 'prior', recoveryCompletion, ...update });
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({
+      settlement: 'recovery-owned',
+      outcome: { outcome: 'indeterminate' },
+    });
+    expect(fixture.client.updateCalls).toBe(1);
+    const request = fixture.registeredRequest();
+    expect(request).toBeDefined();
+    const responses = [
+      { status: 200, body: selectJson([EPOCH]) },
+      { status: 200, body: selectJson([]) },
+    ];
+    const recoveryClient: SystemRecordAtomicApplyHttpClientV1 = {
+      childGeneration: '3',
+      isDestroyed: false,
+      post: async (_url, _contentType, _body, _timeoutMs, _signal, limits) => {
+        const response = responses.shift();
+        if (!response) throw new Error('unexpected exact-prior recovery request');
+        limits?.reserveResponseCapacity?.(Buffer.byteLength(response.body, 'utf8'));
+        return response;
+      },
+    };
+    await expect(request!.reconcile({
+      client: recoveryClient,
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+      absoluteDeadlineMs: performance.now() + 30_000,
+      signal: new AbortController().signal,
+      assertAttributable: () => true,
+    })).resolves.toEqual({ resolution: 'not-applied' });
+    expect(responses).toHaveLength(0);
   });
 
   it('fingerprints a maximum-row projection incrementally in canonical order', () => {
@@ -599,7 +666,10 @@ function makeFixture(options: Readonly<{
   verified?: typeof VERIFIED;
   admittedDeadlineMs?: number;
   localState?: 'absent' | 'next';
+  mode?: SystemRecordLaneExecutionBindingV1['mode'];
   postState?: 'next' | 'prior' | 'malformed';
+  updateFailure?: Error;
+  updateStatus?: number;
   rejectRecoveryOwnership?: boolean;
   order?: string[];
   recoveryCompletion?: Promise<{ readonly resolution: 'unavailable' }>;
@@ -618,7 +688,7 @@ function makeFixture(options: Readonly<{
     activationGeneration: '1',
     networkId: NETWORK,
     kind: 'agents',
-    mode: 'authoritative',
+    mode: options.mode ?? 'authoritative',
     sessionIdentity: Object.freeze(Object.create(null) as object),
     childGeneration: '2',
     materializationEpoch: '2',
@@ -663,7 +733,7 @@ function makeFixture(options: Readonly<{
     { status: 200, body: selectJson(initialProjection) },
   ];
   if (!localNext && admittedDeadlineMs >= 1_500) {
-    responses.push({ status: 204, body: '' });
+    responses.push({ status: options.updateStatus ?? 204, body: '' });
     if (options.postState === 'malformed') {
       responses.push({ status: 200, body: '{' });
     } else if (options.postState === 'prior') {
@@ -691,6 +761,7 @@ function makeFixture(options: Readonly<{
         attributable = false;
       }
     },
+    options.updateFailure,
   );
   const registry = createSystemRecordVerifiedReplacementRegistryV1();
   const proof = registry.issuer.issueActive(issue(binding, admittedDeadlineMs, verified));
@@ -791,6 +862,7 @@ class FakeClient implements SystemRecordAtomicApplyHttpClientV1 {
     private readonly responses: Array<Readonly<{ status: number; body: string }>>,
     private readonly onPost: () => void = () => undefined,
     private readonly onResponse: (remainingResponses: number) => void = () => undefined,
+    private readonly updateFailure?: Error,
   ) {}
 
   async post(
@@ -807,7 +879,10 @@ class FakeClient implements SystemRecordAtomicApplyHttpClientV1 {
     limits?.reserveResponseCapacity?.(responseBytes);
     this.onPost();
     this.calls.push({ contentType, body, responseBytes });
-    if (contentType.startsWith('application/sparql-update')) this.updateCalls += 1;
+    if (contentType.startsWith('application/sparql-update')) {
+      this.updateCalls += 1;
+      if (this.updateFailure !== undefined) throw this.updateFailure;
+    }
     this.onResponse(this.responses.length);
     return response;
   }

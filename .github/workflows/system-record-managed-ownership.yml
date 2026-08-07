@@ -129,6 +129,7 @@ jobs:
             test/system-record-capability-discovery-v1.test.ts \
             test/system-record-inspection-v1.test.ts \
             test/system-record-managed-mutation-admission-v1.test.ts \
+            test/system-record-materialization-epoch-adapter-v1.test.ts \
             test/system-record-materialization-epoch-v1.test.ts \
             test/system-record-next-state-v1.test.ts \
             test/system-record-rdf-schema-v1.test.ts \

@@ -34,7 +34,9 @@ export {
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
 // System-record V1 (#2052 Stack B2). Default-unused: these modules perform no
-// work until the daemon supervisor supplies a live ownership lease.
+// I/O, scheduling, timer, or per-store lane work until the daemon supervisor
+// supplies a live ownership lease. Their fixed module-level registries remain
+// dormant until then.
 // Only the members with real consumers are public. `isInternalGraphUriV1` and
 // `isEphemeralInternalStagingGraphUriV1` stay module-scoped (imported directly
 // by tests, which pin the reserved/ephemeral partition) rather than being

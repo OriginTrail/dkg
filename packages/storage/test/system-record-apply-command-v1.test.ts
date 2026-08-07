@@ -61,11 +61,15 @@ describe('system-record conditional apply command V1', () => {
     )).toThrow(/not produced by the verified state derivation/);
   });
 
-  it('executes atomically in Oxigraph and a stale CAS becomes a zero-write miss', async () => {
+  it('atomically replaces authoritative legacy rows and a stale CAS becomes a zero-write miss', async () => {
     endpoint = await startOxigraphSparqlEndpoint();
-    const { ready } = makeAuthenticActiveReplacementFixtureV1('shadow');
+    const { ready } = makeAuthenticActiveReplacementFixtureV1('authoritative');
+    const legacySubject = ready.nextSubjects[0];
     endpoint.store.update(`INSERT DATA {
       ${ready.previousReservedQuads.map(renderQuad).join('\n')}
+      GRAPH <${ready.projectionGraph}> {
+        <${legacySubject}> <urn:test:legacy> "must-be-replaced" .
+      }
     }`);
     const update = buildSystemRecordConditionalApplyUpdateV1(ready);
     const dispatch = async () => {
@@ -85,6 +89,8 @@ describe('system-record conditional apply command V1', () => {
     const reserved = ready.nextReservedQuads[0];
     expect(ask(`GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}> { <${reserved.subject}> ` +
       `<${reserved.predicate}> ${renderObject(reserved.object)} }`)).toBe(true);
+    expect(ask(`GRAPH <${ready.projectionGraph}> { <${legacySubject}> ` +
+      '<urn:test:legacy> "must-be-replaced" }')).toBe(false);
 
     const guardedSubject = ready.nextSubjects[0];
     endpoint.store.update(`INSERT DATA { GRAPH <${ready.projectionGraph}> {
