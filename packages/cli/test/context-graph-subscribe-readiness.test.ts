@@ -758,7 +758,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
-  it('records clean private shared-memory progress without fabricating durable readiness', async () => {
+  it('records clean private shared-memory progress without reporting VM-complete catch-up', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
       isPrivate: true,
@@ -772,8 +772,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
 
     expect(result.runCalls).toBe(1);
-    expect(result.job.status).toBe('done');
-    expect(result.job.error).toBeUndefined();
+    expect(result.job).toMatchObject({
+      status: 'unreachable',
+      error: expect.stringContaining('durable VM catch-up did not complete'),
+    });
     expect(result.job.result).toMatchObject({
       dataSynced: 0,
       sharedMemorySynced: 4,
