@@ -75,6 +75,8 @@ HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
 DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
 BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
 BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
+BLAZEGRAPH_LOG_MAX_SIZE="200m"
+BLAZEGRAPH_LOG_MAX_FILE="20"
 # Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
 # 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
 # DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
@@ -375,6 +377,40 @@ read_blazegraph_metadata() {
     "$REPO_ROOT/blazegraph-image.json" "$@"
 }
 
+create_blazegraph_namespace() {
+  local ns="$1"
+  local namespace_xml response_code
+  if ! namespace_xml="$(
+    node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" --namespace-xml "$ns"
+  )"; then
+    log "WARNING: Failed to render Blazegraph namespace properties: $ns"
+    return 1
+  fi
+  if ! response_code="$(
+    curl -sS -o /dev/null -w '%{http_code}' -X POST \
+      "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
+      -H "Content-Type: application/xml" \
+      --data-binary "$namespace_xml"
+  )"; then
+    log "WARNING: Failed to create Blazegraph namespace: $ns (request failed)"
+    return 1
+  fi
+  case "$response_code" in
+    2??)
+      log "Created Blazegraph namespace: $ns"
+      return 0
+      ;;
+    409)
+      log "Blazegraph namespace already exists: $ns"
+      return 0
+      ;;
+    *)
+      log "WARNING: Failed to create Blazegraph namespace: $ns (HTTP ${response_code:-unknown})"
+      return 1
+      ;;
+  esac
+}
+
 start_blazegraph() {
   # Use an EXTERNAL Blazegraph already serving on the port. Skips Docker entirely;
   # namespaces are the operator's job here.
@@ -406,6 +442,9 @@ start_blazegraph() {
 
   log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
   if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
+    --log-driver local \
+    --log-opt "max-size=$BLAZEGRAPH_LOG_MAX_SIZE" \
+    --log-opt "max-file=$BLAZEGRAPH_LOG_MAX_FILE" \
     -p "127.0.0.1:$BLAZEGRAPH_PORT:$blazegraph_container_port" \
     "$blazegraph_image" > /dev/null 2>&1; then
     log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
@@ -422,11 +461,7 @@ start_blazegraph() {
       # no inline copy to drift.
       for n in 3 4; do
         local ns="node${n}"
-        node "$REPO_ROOT/packages/cli/blazegraph-image-metadata.cjs" --namespace-xml "$ns" \
-          | curl -s -X POST "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
-            -H "Content-Type: application/xml" \
-            --data-binary @- > /dev/null 2>&1
-        log "Created Blazegraph namespace: $ns"
+        create_blazegraph_namespace "$ns" || true
       done
       return 0
     fi

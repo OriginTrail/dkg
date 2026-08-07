@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -297,23 +297,54 @@ describe('publishJsonLd', () => {
     const { agent, store } = await createAgent('AsyncMaxRetriesBot', { publisherMaxRetries: 0 });
     await agent.createContextGraph({ id: 'async-maxretries', name: 'AsyncMaxRetries', description: '' });
     await agent.registerContextGraph('async-maxretries');
+    let releaseShadow!: () => void;
+    const deferredShadow = new Promise<void>((resolve) => { releaseShadow = resolve; });
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockImplementation(async () => {
+        await deferredShadow;
+        return {
+          status: 'dormant',
+          action: 'upsert',
+          attempts: 0,
+          headObjectDigest: null,
+          error: null,
+        };
+      });
 
-    const { captureID } = await agent.publishAsync(
-      'did:dkg:context-graph:async-maxretries',
-      {
-        private: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/AsyncMaxRetries',
-          '@type': 'Thing',
-          'name': 'Async MaxRetries',
+    const { captureID } = await Promise.race([
+      agent.publishAsync(
+        'did:dkg:context-graph:async-maxretries',
+        {
+          private: {
+            '@context': 'http://schema.org/',
+            '@id': 'http://example.org/AsyncMaxRetries',
+            '@type': 'Thing',
+            'name': 'Async MaxRetries',
+          },
         },
-      },
-      { localOnly: true },
-    );
+        { localOnly: true },
+      ),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('publishAsync waited for shadow observer')), 2_000);
+      }),
+    ]);
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(job?.retries.maxRetries).toBe(0);
+    expect(shadow).toHaveBeenCalledOnce();
+    expect(shadow).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: 'async-maxretries',
+      assertionCoordinate: expect.any(String),
+      lifecycleAgentAddress: expect.any(String),
+      shareOperationId: expect.any(String),
+    }));
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(1);
+    releaseShadow();
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
+    shadow.mockRestore();
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async private-only JSON-LD enqueues one rootless KA with one non-root challenge anchor', async () => {

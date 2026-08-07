@@ -61,6 +61,7 @@ import {
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
   loadOpWallets,
+  type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
@@ -465,6 +466,44 @@ function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: b
     undefined,
     { 'Retry-After': '5' },
   );
+}
+
+type SubscribeLifetimeSnapshot = Readonly<{
+  subscribed?: boolean;
+  syncMode?: ContextGraphSyncMode;
+}>;
+
+type SubscribeLifetimePlan = Readonly<{
+  changesLifetime: boolean;
+  effectiveSyncMode: ContextGraphSyncMode;
+}>;
+
+function resolveSubscribeLifetimeChange(
+  existing: SubscribeLifetimeSnapshot | undefined,
+  requestedSyncMode: ContextGraphSyncMode,
+): SubscribeLifetimePlan {
+  const effectiveSyncMode = existing?.subscribed === true && existing.syncMode === 'always-on'
+    ? 'always-on'
+    : requestedSyncMode;
+  return {
+    changesLifetime: existing?.syncMode !== effectiveSyncMode,
+    effectiveSyncMode,
+  };
+}
+
+function applySubscriptionMutationAfterAdmission(input: Readonly<{
+  plan: SubscribeLifetimePlan;
+  acceptingJobs: boolean;
+  subscribe: () => ContextGraphSyncMode;
+}>): Readonly<
+  | { accepted: false }
+  | { accepted: true; syncMode: ContextGraphSyncMode }
+> {
+  if (!input.plan.changesLifetime) {
+    return { accepted: true, syncMode: input.plan.effectiveSyncMode };
+  }
+  if (!input.acceptingJobs) return { accepted: false };
+  return { accepted: true, syncMode: input.subscribe() };
 }
 
 async function handleReconcileContextGraphRoute(
@@ -1734,6 +1773,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // `include_shared_memory` value; it depends only on the parsed body.
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
+    // Omission preserves the legacy always-on default, but an explicit null is
+    // malformed input and must not silently opt the caller into durable sync.
+    const requestedSyncMode = parsed.syncMode === undefined
+      ? 'always-on'
+      : parsed.syncMode;
+    if (requestedSyncMode !== 'on-demand' && requestedSyncMode !== 'always-on') {
+      recordCatchupRequest('bad_request', shouldSyncSharedMemory);
+      return jsonResponse(res, 400, {
+        error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
+      });
+    }
     // #1102: accept `id` as an alias for `contextGraphId`.
     const contextGraphId = parsed.contextGraphId ?? parsed.id;
     if (!contextGraphId) {
@@ -1773,17 +1823,36 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
+    // Preview the only existing-live-state promotion rule without mutating the
+    // agent. The authoritative normalization still happens in
+    // subscribeToContextGraph below, after the shutdown admission guard and
+    // after the final readiness await.
+    const lifetimePlan = resolveSubscribeLifetimeChange(existingSub, requestedSyncMode);
+    let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
     let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        const lifetimeMutation = applySubscriptionMutationAfterAdmission({
+          plan: lifetimePlan,
+          acceptingJobs: daemonState.catchupAcceptingJobs,
+          subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode,
+        });
+        if (!lifetimeMutation.accepted) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        effectiveSyncMode = lifetimeMutation.syncMode;
         // Dedupe: hands back a job that already exists and mints nothing, so
-        // it needs no admission guard and produces no I8 point.
+        // it needs no job-admission guard and produces no I8 point. A lifetime
+        // promotion above is independently guarded because it is a mutation.
         recordCatchupRequest('deduped', shouldSyncSharedMemory);
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
+          syncMode: effectiveSyncMode,
           catchup: {
             status: existingJob.status,
             includeWorkspace: existingJob.includeWorkspace,
@@ -1817,6 +1886,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         if (!reusableDoneJob && !daemonState.catchupAcceptingJobs) {
           return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
         }
+        const lifetimeMutation = applySubscriptionMutationAfterAdmission({
+          plan: lifetimePlan,
+          acceptingJobs: daemonState.catchupAcceptingJobs,
+          subscribe: () => agent.subscribeToContextGraph(contextGraphId, {
+            syncMode: requestedSyncMode,
+          }).syncMode,
+        });
+        if (!lifetimeMutation.accepted) {
+          return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
+        }
+        effectiveSyncMode = lifetimeMutation.syncMode;
         const jobId = reusableDoneJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         if (!reusableDoneJob) {
           const syntheticJob: CatchupJob = {
@@ -1840,6 +1920,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         );
         return jsonResponse(res, 200, {
           subscribed: contextGraphId,
+          syncMode: effectiveSyncMode,
           catchup: {
             status: "done",
             includeWorkspace: shouldSyncSharedMemory,
@@ -1884,8 +1965,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupShuttingDownResponse(res, shouldSyncSharedMemory);
     }
 
-    console.log(`[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory}`);
-    agent.subscribeToContextGraph(contextGraphId);
+    effectiveSyncMode = agent.subscribeToContextGraph(contextGraphId, {
+      syncMode: requestedSyncMode,
+    }).syncMode;
+    console.log(
+      `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode}`,
+    );
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
@@ -2024,6 +2109,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     recordCatchupRequest('queued', shouldSyncSharedMemory);
     return jsonResponse(res, 200, {
       subscribed: contextGraphId,
+      syncMode: effectiveSyncMode,
       catchup: {
         status: "queued",
         includeWorkspace: shouldSyncSharedMemory,

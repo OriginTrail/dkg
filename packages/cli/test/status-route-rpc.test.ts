@@ -33,10 +33,15 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
-import { loadNetworkConfig } from '../src/config.js';
+import {
+  loadNetworkConfig,
+  resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+} from '../src/config.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
+import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
@@ -49,12 +54,23 @@ const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
     operatorActionRequired: true,
   },
 };
+const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
+  enabled: false,
+  selectedContextGraphs: [],
+};
 
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
+  configOverrides: Record<string, unknown> = {},
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const config = {
+      name: 'status-finalization-recovery-test',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+      ...configOverrides,
+    };
     await handleStatusRoutes({
       req,
       res,
@@ -62,11 +78,11 @@ async function requestStatusWithAgent(
       path: url.pathname,
       url,
       network: null,
-      config: {
-        name: 'status-finalization-recovery-test',
-        nodeRole: 'edge',
-        chain: { type: 'mock' },
-      },
+      config,
+      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
+        config as never,
+        resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+      ),
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-test',
@@ -221,6 +237,109 @@ describe('/api/status finalization recovery health', () => {
   });
 });
 
+describe('/api/status RFC-64 selected-public activation', () => {
+  it('reports the fail-closed disabled state without invoking catalog controls', async () => {
+    const catalogStats = vi.fn(() => {
+      throw new Error('disabled status must not read catalog service state');
+    });
+    const bootstrapStatus = vi.fn(() => {
+      throw new Error('disabled status must not read catalog bootstrap state');
+    });
+    const response = await requestStatusWithAgent({
+      rfc64PublicCatalogStatsV1: catalogStats,
+      readRfc64PublicCatalogBootstrapStatusV1: bootstrapStatus,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+      autoPublishEnabled: false,
+      service: null,
+      bootstrap: null,
+    });
+    expect(catalogStats).not.toHaveBeenCalled();
+    expect(bootstrapStatus).not.toHaveBeenCalled();
+  });
+
+  it('exposes selected scopes and exact per-target applied-head evidence', async () => {
+    const service = {
+      started: true,
+      acceptedPolicies: 1,
+      receiver: { queued: 0, applied: 1, failed: 0 },
+    };
+    const bootstrap = {
+      running: false,
+      pass: 2,
+      retryIntervalMs: 30_000,
+      targets: [{
+        scope: { contextGraphId: 'selected-public-cg', authorAddress: `0x${'22'.repeat(20)}` },
+        outcome: 'applied',
+        appliedHeadDigest: `0x${'33'.repeat(32)}`,
+        inventoryRowCount: '50',
+      }],
+    };
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => service,
+        readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          autoPublish: {
+            peers: ['12D3KooReceiver'],
+            catalogIssuerDelegationExpiresAt: '1893456000000',
+          },
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')],
+          },
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toEqual({
+      enabled: true,
+      selectedContextGraphs: ['selected-public-cg'],
+      autoPublishEnabled: true,
+      service,
+      bootstrap,
+    });
+  });
+
+  it('reports receiver-only activation without claiming auto-publish is enabled', async () => {
+    const bootstrap = {
+      running: true,
+      pass: 1,
+      retryIntervalMs: 30_000,
+      targets: [],
+    };
+    const response = await requestStatusWithAgent(
+      {
+        rfc64PublicCatalogStatsV1: () => ({ started: true }),
+        readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+      },
+      {
+        rfc64PublicCatalog: {
+          enabled: true,
+          bootstrap: {
+            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('receiver-only-cg')],
+          },
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64PublicCatalog).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['receiver-only-cg'],
+      autoPublishEnabled: false,
+      bootstrap,
+    });
+  });
+});
+
 describe('/api/status selected overlay details', () => {
   it('returns the network id and name for the selected overlay genesis', async () => {
     const network = await loadNetworkConfig('mainnet-gnosis');
@@ -241,6 +360,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'mock' },
         },
+        rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: {
           peerId: 'peer-status-test',
@@ -312,6 +432,7 @@ describe('/api/status selected overlay details', () => {
               chainId: 'evm:31337',
             },
           },
+          rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
           startedAt: Date.now(),
           agent: {
             peerId: 'peer-status-test',
@@ -372,6 +493,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
         },
+        rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },
         nodeVersion: '0.0.0-test',

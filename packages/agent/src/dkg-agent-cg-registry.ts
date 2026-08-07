@@ -1048,7 +1048,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       // one curator triple per node and `getContextGraphOwner`'s
       // `LIMIT 1` made ownership nondeterministic — any subscriber could
       // win the unordered query and look like the curator.
-      this.subscribeToContextGraph(opts.id);
+      this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
       this.setContextGraphSubscription(opts.id, {
         name: opts.name,
         subscribed: true,
@@ -1108,7 +1108,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureNewContextGraph(opts.id);
 
-    this.subscribeToContextGraph(opts.id);
+    this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: true,

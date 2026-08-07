@@ -1,0 +1,17 @@
+{
+  "name": "@devnet/issue-2052-system-records",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build-fixture": "node --import tsx build-fixture.ts --check",
+    "characterize": "node --import tsx characterize.ts --fixture r27 --json",
+    "test": "node --import tsx build-fixture.ts --check && node --import tsx --test characterize.test.ts extract-rdf.test.ts",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@libp2p/peer-id": "^6.0.9",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*"
+  }
+}

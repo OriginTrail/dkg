@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -56,8 +58,32 @@ describe('Blazegraph image metadata contract', () => {
     { image: 'example/blazegraph', containerPort: 8080 },
     { image: 'example/blazegraph', containerPort: 8080, dataPath: 'data' },
     { image: 'example/blazegraph', containerPort: 8080, dataPath: '/bad,path' },
+    { image: 'example/blazegraph', containerPort: 8080, dataPath: '/bad path' },
+    { image: 'example/blazegraph', containerPort: 8080, dataPath: '/bad\tpath' },
+    { image: 'example/blazegraph', containerPort: 8080, dataPath: '/bad\npath' },
   ])('rejects invalid metadata: %j', (metadata) => {
     expect(() => contract.parseBlazegraphImageMetadata(metadata)).toThrow();
+  });
+
+  it('rejects line-breaking data paths through the CLI field contract', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dkg-blazegraph-metadata-'));
+    const invalidMetadataPath = join(root, 'blazegraph-image.json');
+    writeFileSync(
+      invalidMetadataPath,
+      JSON.stringify({
+        image: 'example/blazegraph',
+        containerPort: 8080,
+        dataPath: '/data\ncorrupted-field=value',
+      }),
+    );
+    const result = spawnSync(process.execPath, [parserPath, invalidMetadataPath, 'dataPath'], {
+      encoding: 'utf8',
+    });
+    rmSync(root, { recursive: true, force: true });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('without commas or whitespace');
   });
 
   it('prints every field as self-describing key=value lines by default', () => {

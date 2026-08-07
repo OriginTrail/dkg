@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import type { RequestContext } from './context.js';
 import {
   jsonResponse,
@@ -18,9 +16,7 @@ import {
   buildStableHermesTurnId,
   buildHermesChannelHeaders,
   ensureHermesBridgeAvailable,
-  getPersistedHermesTurnState,
   getHermesChannelTargets,
-  hermesPersistTurnKey,
   normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
   hermesApiServerKeyRemediation,
@@ -32,11 +28,11 @@ import {
   verifyHermesAttachmentRefsProvenance,
   verifyHermesAttachmentImportResultsProvenance,
   type HermesChatPayload,
-  type HermesTurnPersistenceState,
 } from '../hermes.js';
 import {
   buildOpenClawAttachmentImportContextEntries,
 } from '../openclaw.js';
+import { persistDurableChatTurn } from '../chat-turn-persistence.js';
 
 type HermesPersistRouteResult = {
   statusCode: number;
@@ -44,8 +40,6 @@ type HermesPersistRouteResult = {
 };
 
 type NormalizedHermesPersistTurnPayload = Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>;
-
-const hermesPersistTurnInflight = new Map<string, Promise<HermesPersistRouteResult>>();
 
 function isHermesBridgeTimeoutError(err: any): boolean {
   const message = String(err?.message ?? err ?? '');
@@ -841,152 +835,38 @@ async function persistHermesTurnWithDuplicateLock(
   payload: NormalizedHermesPersistTurnPayload,
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<HermesPersistRouteResult> {
-  const key = hermesPersistTurnKey(payload.sessionId, payload.turnId);
-  const existing = hermesPersistTurnInflight.get(key);
-  if (existing) {
-    const result = await existing;
-    if (result.statusCode !== 200) return result;
-    const queued = hermesPersistTurnInflight.get(key);
-    if (queued && queued !== existing) {
-      const queuedResult = await queued;
-      if (queuedResult.statusCode !== 200) return queuedResult;
-      return persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);
-    }
-    const operation = persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);
-    hermesPersistTurnInflight.set(key, operation);
-    try {
-      return await operation;
-    } finally {
-      if (hermesPersistTurnInflight.get(key) === operation) {
-        hermesPersistTurnInflight.delete(key);
-      }
-    }
-  }
-
-  const operation = persistHermesTurnUnlocked(ctx, payload, verifiedAttachmentRefs);
-  hermesPersistTurnInflight.set(key, operation);
   try {
-    return await operation;
-  } finally {
-    if (hermesPersistTurnInflight.get(key) === operation) {
-      hermesPersistTurnInflight.delete(key);
-    }
-  }
-}
-
-async function persistHermesTurnUnlocked(
-  ctx: RequestContext,
-  payload: NormalizedHermesPersistTurnPayload,
-  verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
-): Promise<HermesPersistRouteResult> {
-  const { agent, memoryManager } = ctx;
-  try {
-    let existingState: HermesTurnPersistenceState | null = null;
-    try {
-      existingState = await getPersistedHermesTurnState(memoryManager, payload.sessionId, payload.turnId);
-    } catch {
-      existingState = null;
-    }
-    if (existingState === 'stored') {
-      return {
-        statusCode: 200,
-        body: {
-          ok: true,
-          duplicate: true,
-          turnId: payload.turnId,
-        },
-      };
-    }
-    if (existingState) {
-      if (
-        existingState === payload.persistenceState
-        || persistenceStateRank(payload.persistenceState) < persistenceStateRank(existingState)
-      ) {
-        return {
-          statusCode: 200,
-          body: {
-            ok: true,
-            duplicate: true,
-            turnId: payload.turnId,
-          },
-        };
-      }
-      const transitioned = await recordHermesTurnPersistenceTransition(memoryManager, payload, verifiedAttachmentRefs);
-      if (!transitioned) {
-        return {
-          statusCode: 409,
-          body: {
-            error: 'Existing Hermes turn requires a persistence-state transition path',
-            turnId: payload.turnId,
-          },
-        };
-      }
-      if (payload.persistenceState === 'stored') {
-        await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
-      }
-      return {
-        statusCode: 200,
-        body: {
-          ok: true,
-          transitioned: true,
-          turnId: payload.turnId,
-        },
-      };
-    }
-
-    await memoryManager.storeChatExchange(
-      payload.sessionId,
-      payload.userMessage,
-      payload.assistantReply,
-      payload.toolCalls,
-      {
-        turnId: payload.turnId || randomUUID(),
-        attachmentRefs: verifiedAttachmentRefs,
+    const outcome = await persistDurableChatTurn({
+      memoryManager: ctx.memoryManager,
+      payload: {
+        sessionId: payload.sessionId,
+        turnId: payload.turnId,
+        userMessage: payload.userMessage,
+        assistantReply: payload.assistantReply,
         persistenceState: payload.persistenceState,
         failureReason: payload.failureReason,
+        toolCalls: payload.toolCalls,
+        attachmentRefs: verifiedAttachmentRefs,
       },
-    );
-    if (payload.persistenceState === 'stored') {
-      await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
-    }
-    return { statusCode: 200, body: { ok: true, turnId: payload.turnId } };
+      afterStored: () => importHermesAssistantReply(
+        ctx.agent,
+        payload.sessionId,
+        payload.turnId,
+        payload.assistantReply,
+      ),
+    });
+    return {
+      statusCode: 200,
+      body: {
+        ok: true,
+        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
+        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
+        turnId: payload.turnId,
+      },
+    };
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };
   }
-}
-
-function persistenceStateRank(state: HermesTurnPersistenceState): number {
-  if (state === 'stored') return 3;
-  if (state === 'failed') return 2;
-  return 1;
-}
-
-async function recordHermesTurnPersistenceTransition(
-  memoryManager: RequestContext['memoryManager'],
-  payload: NormalizedHermesPersistTurnPayload,
-  verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
-): Promise<boolean> {
-  const recorder = (memoryManager as unknown as {
-    recordChatTurnPersistenceTransition?: (
-      sessionId: string,
-      turnId: string,
-      persistenceState: HermesTurnPersistenceState,
-      opts?: {
-        failureReason?: string | null;
-        assistantReply?: string;
-        toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
-        attachmentRefs?: OpenClawAttachmentRef[];
-      },
-    ) => Promise<void>;
-  }).recordChatTurnPersistenceTransition;
-  if (typeof recorder !== 'function') return false;
-  await recorder.call(memoryManager, payload.sessionId, payload.turnId, payload.persistenceState, {
-    failureReason: payload.failureReason ?? null,
-    assistantReply: payload.assistantReply,
-    toolCalls: payload.toolCalls,
-    attachmentRefs: verifiedAttachmentRefs,
-  });
-  return true;
 }
 
 async function importHermesAssistantReply(

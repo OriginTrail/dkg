@@ -171,14 +171,7 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
   const issuer = envelope.issuer as EvmAddressV1;
 
   if (envelope.signatureSuite === 'eip191-personal-sign-digest-v1') {
-    verifyCanonicalEip191(envelope);
-    return mintVerifiedControlEnvelopeIssuerSignatureV1({
-      objectDigest,
-      signatureVariantDigest,
-      issuer,
-      signatureSuite: envelope.signatureSuite,
-      verificationEvidence: Object.freeze({ kind: 'eip191' as const }),
-    });
+    return verifyCanonicalEip191EnvelopeV1(envelope);
   }
 
   const call = options.callEvmAtCurrentFinalized;
@@ -288,6 +281,26 @@ export async function verifyControlEnvelopeIssuerSignatureV1(
   }
 }
 
+/**
+ * Synchronous verifier for the EOA-only signature suite. This lets synchronous
+ * durable boundaries consume the same unforgeable capability as the generic
+ * verifier without admitting contract-wallet signatures without a finalized
+ * chain read.
+ */
+export function verifyEip191ControlEnvelopeIssuerSignatureV1(
+  input: SignedControlEnvelopeV1,
+): VerifiedControlEnvelopeIssuerSignatureV1 {
+  const envelope = snapshotEnvelope(input);
+  if (envelope.signatureSuite !== 'eip191-personal-sign-digest-v1') {
+    fail(
+      'CONTROL_SIGNATURE_CHAIN_UNSUPPORTED',
+      'unsupported',
+      'Synchronous control-envelope verification supports only EIP-191 signatures',
+    );
+  }
+  return verifyCanonicalEip191EnvelopeV1(envelope);
+}
+
 /** Reject lookalikes, casts, clones, and serialized copies of verification tokens. */
 export function assertVerifiedControlEnvelopeIssuerSignatureV1(
   value: unknown,
@@ -322,6 +335,23 @@ function mintVerifiedControlEnvelopeIssuerSignatureV1(
   ) as VerifiedControlEnvelopeIssuerSignatureV1;
   VERIFIED_CONTROL_ENVELOPE_ISSUER_SIGNATURES_V1.set(capability as object, immutable);
   return capability;
+}
+
+function verifyCanonicalEip191EnvelopeV1(
+  envelope: SignedControlEnvelopeV1 & {
+    readonly signatureSuite: 'eip191-personal-sign-digest-v1';
+  },
+): VerifiedControlEnvelopeIssuerSignatureV1 {
+  verifyCanonicalEip191(envelope);
+  return mintVerifiedControlEnvelopeIssuerSignatureV1({
+    objectDigest: asDigest32(envelope.objectDigest),
+    signatureVariantDigest: asDigest32(
+      computeControlSignatureVariantDigestHex(envelope.objectDigest, envelope.signature),
+    ),
+    issuer: envelope.issuer as EvmAddressV1,
+    signatureSuite: envelope.signatureSuite,
+    verificationEvidence: Object.freeze({ kind: 'eip191' as const }),
+  });
 }
 
 function snapshotEnvelope(input: SignedControlEnvelopeV1): SignedControlEnvelopeV1 {

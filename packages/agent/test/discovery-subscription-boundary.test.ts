@@ -652,11 +652,15 @@ describe('Context Graph discovery/subscription boundary', () => {
         id: 'explicit-local-create',
         name: 'Explicit Local Create',
       });
+      agent.subscribeToContextGraph('implicit-local-write', { syncMode: 'on-demand' });
+      expect(agent.getSubscribedContextGraphs().get('implicit-local-write')?.syncMode).toBe('on-demand');
+      expect(persisted.has('implicit-local-write')).toBe(false);
       await agent.ensureImplicitSharedMemoryContextGraph('implicit-local-write');
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       for (const id of ['explicit-local-create', 'implicit-local-write']) {
         expect(agent.getSubscribedContextGraphs().get(id)?.subscribed).toBe(true);
+        expect(agent.getSubscribedContextGraphs().get(id)?.syncMode).toBe('always-on');
         expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
         expect((agent as any).gossipRegistered.has(id)).toBe(true);
         expect(persisted.get(id)).toMatchObject({ subscribed: true, syncScoped: true });

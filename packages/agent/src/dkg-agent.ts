@@ -337,6 +337,7 @@ import {
   type PeerDiagnostics,
   type ChatSendResult,
   type ContextGraphSub,
+  type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
   type ContextGraphDiscoveryOptions,
   type ContextGraphSubscriptionRecord,
@@ -407,15 +408,15 @@ import { EndorseVerifyMethods } from './dkg-agent-endorse.js';
 import {
   Rfc64CatalogMethods,
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
-  snapshotRfc64CatalogDeploymentProfileV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
 import { Rfc64CatalogBootstrapMethods } from './dkg-agent-rfc64-catalog-bootstrap.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import {
-  snapshotRfc64PublicCatalogAutoPublishConfigV1,
-  snapshotRfc64PublicCatalogBootstrapConfigV1,
-} from './rfc64/catalog-authority-config-v1.js';
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationInputV1,
+  resolveRfc64PublicCatalogControlsV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64CatalogSyncMethods } from './dkg-agent-rfc64-catalog-sync.js';
 import { ContextGraphRegistryMethods } from './dkg-agent-cg-registry.js';
 import { JoinRequestMethods } from './dkg-agent-join.js';
@@ -451,6 +452,7 @@ export type {
   PeerDiagnostics,
   ChatSendResult,
   ContextGraphSub,
+  ContextGraphSyncMode,
   ContextGraphDiscoveryMetadata,
   ContextGraphDiscoveryOptions,
   ContextGraphSubscriptionRecord,
@@ -607,7 +609,12 @@ function throwStorageAckTimingConflict(): never {
   );
 }
 
-function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConfig {
+type StorageAckNormalizedDKGAgentConfig = Omit<
+  DKGAgentConfig,
+  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
+> & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
+
+function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
   const hasLegacyTiming =
     config.ackHandlerDeadlineMs !== undefined ||
@@ -658,6 +665,42 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConf
   };
 }
 
+function constructConfiguredChainAdapter(
+  config: StorageAckNormalizedDKGAgentConfig,
+): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
+  let operationalKeys = config.chainConfig?.operationalKeys;
+  if (config.chainAdapter) {
+    const chain = config.chainAdapter;
+    if (!operationalKeys?.length && typeof (chain as any).getOperationalPrivateKey === 'function') {
+      operationalKeys = [(chain as any).getOperationalPrivateKey()];
+    }
+    return { chain, operationalKeys };
+  }
+  if (config.chainConfig && operationalKeys?.length) {
+    const evmConfigBase = {
+      rpcUrl: config.chainConfig.rpcUrl,
+      rpcUrls: config.chainConfig.rpcUrls,
+      walletRpcUrls: config.chainConfig.walletRpcUrls,
+      privateKey: operationalKeys[0],
+      additionalKeys: operationalKeys.slice(1),
+      hubAddress: config.chainConfig.hubAddress,
+      tokenAddress: config.chainConfig.tokenAddress,
+      chainId: config.chainConfig.chainId,
+      receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
+      approvalPolicy: config.chainConfig.approvalPolicy,
+      cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
+      minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
+      minPublisherTracWei: config.chainConfig.minPublisherTracWei,
+      contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
+    };
+    const chain = config.chainConfig.adminPrivateKey
+      ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
+      : new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
+    return { chain, operationalKeys };
+  }
+  return { chain: new NoChainAdapter(), operationalKeys };
+}
+
 interface ACKReliableMessenger {
   sendRequestOwned(
     peerId: string,
@@ -702,31 +745,63 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
-    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
-    // an impossible ephemeral configuration before constructing a store or
-    // node so start() can never fail after leaving libp2p half-running.
-    if (inputConfig.rfc64PublicCatalogBootstrap !== undefined && !inputConfig.dataDir) {
-      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
-    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
-    const config = normalizeStorageAckConfig({
+    const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,
       ),
     });
-    const rfc64CatalogDeploymentProfile = snapshotRfc64CatalogDeploymentProfileV1(
-      config.rfc64CatalogDeploymentProfile,
+    const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(normalizedConfig);
+    const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
+    if (
+      normalizedConfig.networkIdentity?.chainId
+      && adapterChainId
+      && normalizedConfig.networkIdentity.chainId !== adapterChainId
+    ) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.chainId (${normalizedConfig.networkIdentity.chainId}) `
+        + `must match the chain adapter id (${adapterChainId})`,
+      );
+    }
+    const constructedAgentChainId = adapterChainId ?? normalizedConfig.networkIdentity?.chainId;
+    const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
+      constructedAgentChainId,
     );
+    const activation = normalizedConfig.rfc64PublicCatalogActivation === undefined
+      ? undefined
+      : resolveRfc64PublicCatalogActivationInputV1(
+        normalizedConfig.rfc64PublicCatalogActivation,
+        chainIdentity,
+      );
+    const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
+      activation,
+      legacyDeploymentProfile: normalizedConfig.rfc64CatalogDeploymentProfile,
+      legacyAutoPublish: normalizedConfig.rfc64PublicCatalogAutoPublish,
+      legacyBootstrap: normalizedConfig.rfc64PublicCatalogBootstrap,
+    }, chainIdentity);
+    const config: StorageAckNormalizedDKGAgentConfig = {
+      ...normalizedConfig,
+      syncContextGraphs: [
+        ...new Set([
+          ...(normalizedConfig.syncContextGraphs ?? []),
+          ...(activation?.selectedContextGraphs ?? []),
+        ]),
+      ],
+    };
+    // RFC-64 bootstrap owns durable catalog and control-object state. Reject
+    // an impossible ephemeral configuration before constructing a store or
+    // node so start() can never fail after leaving libp2p half-running.
+    if (rfc64PublicCatalogControls.requiresDataDir && !config.dataDir) {
+      throw new TypeError('rfc64PublicCatalogBootstrap requires dataDir');
+    }
+    const rfc64CatalogDeploymentProfile = rfc64PublicCatalogControls.deploymentProfile;
     const rfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
       config.rfc64CatalogAccessPolicyAuthority,
     );
-    const rfc64PublicCatalogAutoPublish = snapshotRfc64PublicCatalogAutoPublishConfigV1(
-      config.rfc64PublicCatalogAutoPublish,
-    );
-    const rfc64PublicCatalogBootstrap = snapshotRfc64PublicCatalogBootstrapConfigV1(
-      config.rfc64PublicCatalogBootstrap,
-    );
+    const rfc64PublicCatalogAutoPublishPolicy =
+      rfc64PublicCatalogControls.autoPublishPolicy;
+    const rfc64PublicCatalogBootstrap = rfc64PublicCatalogControls.bootstrap;
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -761,39 +836,6 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     const nodeRole = config.nodeRole ?? 'edge';
-    let chain: ChainAdapter;
-    let opKeys = config.chainConfig?.operationalKeys;
-    if (config.chainAdapter) {
-      chain = config.chainAdapter;
-      if (!opKeys?.length && typeof (chain as any).getOperationalPrivateKey === 'function') {
-        opKeys = [(chain as any).getOperationalPrivateKey()];
-      }
-    } else if (config.chainConfig && opKeys?.length) {
-      const evmConfigBase = {
-        rpcUrl: config.chainConfig.rpcUrl,
-        rpcUrls: config.chainConfig.rpcUrls,
-        walletRpcUrls: config.chainConfig.walletRpcUrls,
-        privateKey: opKeys[0],
-        additionalKeys: opKeys.slice(1),
-        hubAddress: config.chainConfig.hubAddress,
-        tokenAddress: config.chainConfig.tokenAddress,
-        chainId: config.chainConfig.chainId,
-        receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
-        approvalPolicy: config.chainConfig.approvalPolicy,
-        cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
-        minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
-        minPublisherTracWei: config.chainConfig.minPublisherTracWei,
-        contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
-      };
-      if (config.chainConfig.adminPrivateKey) {
-        chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
-      } else {
-        chain = new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
-      }
-    } else {
-      chain = new NoChainAdapter();
-    }
-
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
@@ -814,26 +856,24 @@ export class DKGAgent extends DKGAgentBase {
         `must match computeNetworkId(${genesisId}) (${computedNetworkId})`,
       );
     }
-    const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
-    if (config.networkIdentity?.chainId && adapterChainId && config.networkIdentity.chainId !== adapterChainId) {
-      throw new Error(
-        `DKGAgentConfig.networkIdentity.chainId (${config.networkIdentity.chainId}) ` +
-        `must match the chain adapter id (${adapterChainId})`,
-      );
-    }
     const networkIdentity = {
       ...config.networkIdentity,
       genesisId,
       networkId: computedNetworkId,
-      chainId: adapterChainId ?? config.networkIdentity?.chainId,
+      chainId: constructedAgentChainId,
     };
+    const configWithoutRfc64CatalogControls = { ...config };
+    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
+    delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
+    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
+    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
     const resolvedConfig: ResolvedDKGAgentConfig = {
-      ...config,
+      ...configWithoutRfc64CatalogControls,
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
       rfc64CatalogDeploymentProfile,
-      rfc64PublicCatalogAutoPublish,
+      rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
     };
 
@@ -1228,6 +1268,7 @@ export class DKGAgent extends DKGAgentBase {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = {
       ...existing,
+      syncMode: existing?.syncMode ?? 'always-on',
       name: metadata.name ?? existing?.name,
       subscribed: existing?.subscribed === true,
       synced: existing?.synced === true,
@@ -1254,6 +1295,7 @@ export class DKGAgent extends DKGAgentBase {
     if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
       this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: options.trackSyncScope,
+        syncMode: 'always-on',
       });
     }
 
@@ -2759,7 +2801,14 @@ export class DKGAgent extends DKGAgentBase {
         // OT-RFC-43 A2 (decision 2) — stamp dkg:swmCurrentAssertion on the
         // lifecycle URN so the SWM pointer is observable (and can diverge from
         // WM/VM). Best-effort; never blocks the share result.
-        await agent._stampSwmPointer(contextGraphId, name, promoteAgentAddress, opts?.subGraphName);
+        await agent.afterDurableSwmPromotionV1({
+          contextGraphId,
+          subGraphName: opts?.subGraphName,
+          assertionCoordinate: name,
+          lifecycleAgentAddress: promoteAgentAddress,
+          shareOperationId: shareOperationId ?? null,
+          ctx: createOperationContext('share'),
+        });
         // #1116 (round 9) — the swmShareComplete marker mark/clear now lives INSIDE
         // assertionPromote (co-located with the member-row REPLACE, gated on the
         // same isFullCompletePromote), so it stays in lockstep with the rows for

@@ -9,6 +9,13 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 import {
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+  resolveRfc64PublicCatalogActivationConfigV1,
+  type ResolvedRfc64PublicCatalogActivationConfigV1,
+  type Rfc64PublicCatalogActivationChainIdentityV1,
+  type Rfc64PublicCatalogActivationConfigV1,
+} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
+import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
   findPackageRepoDir,
@@ -477,6 +484,18 @@ export interface GraphSetIndexConfig {
   revalidateMs?: number;
 }
 
+/**
+ * Explicit selected-public RFC-64 activation. Omitted or `enabled: false`
+ * leaves the catalog data plane fail-closed with no accepted policies and no
+ * ordinary-publication hook. The bootstrap manifest is the selected CG set;
+ * the daemon adds only those graph IDs to durable synchronization.
+ */
+export type Rfc64PublicCatalogActivationConfig = Rfc64PublicCatalogActivationConfigV1;
+export type ResolvedRfc64PublicCatalogActivationConfig =
+  ResolvedRfc64PublicCatalogActivationConfigV1;
+export type Rfc64PublicCatalogActivationChainIdentity =
+  Rfc64PublicCatalogActivationChainIdentityV1;
+
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
@@ -570,6 +589,8 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /** Opt-in, bounded RFC-64 catalog activation for explicitly selected public CGs. */
+  rfc64PublicCatalog?: Rfc64PublicCatalogActivationConfig;
   /**
    * Explicitly trusted context graphs that daemon startup may create locally
    * instead of treating as remote subscription targets. Intended for local
@@ -617,6 +638,12 @@ export interface DkgConfig {
   syncReconcilerEnabled?: boolean;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
+  /**
+   * Include `agents` and `ontology` in automatic peer-connect/reconciler
+   * durable sync. Defaults true on Core and false on Edge. Explicit catch-up
+   * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
+   */
+  syncSystemContextGraphsOnConnect?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
@@ -981,6 +1008,19 @@ export function resolveContextGraphs(config: DkgConfig): string[] {
 export function resolveNetworkDefaultContextGraphs(network: NetworkConfig | null | undefined): string[] {
   return network?.defaultContextGraphs ?? [];
 }
+
+/** Resolve the fail-closed operator activation into exact agent inputs. */
+export function resolveRfc64PublicCatalogActivation(
+  config: Pick<DkgConfig, 'rfc64PublicCatalog'>,
+  chainIdentity: Rfc64PublicCatalogActivationChainIdentity,
+): ResolvedRfc64PublicCatalogActivationConfig {
+  return resolveRfc64PublicCatalogActivationConfigV1(
+    config.rfc64PublicCatalog,
+    chainIdentity,
+  );
+}
+
+export { resolveRfc64PublicCatalogActivationChainIdentityV1 };
 
 type NetworkReadinessValidation =
   | { ok: true; messages: [] }

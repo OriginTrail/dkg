@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.12",
+  "version": "10.0.13",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -15,6 +15,9 @@
     "test:scripts": "node --test scripts/lib/__tests__/*.test.mjs",
     "verify:w1-packet": "node scripts/verify-w1-packet.mjs",
     "bench:w1-sync-telemetry:smoke": "node packages/agent/scripts/bench-sync-telemetry.mjs --ci --json --pages 20 --warmup 5 --rounds 2",
+    "characterize:issue-2052:system-records": "pnpm --filter @devnet/issue-2052-system-records characterize",
+    "test:issue-2052:system-records": "pnpm --filter @devnet/issue-2052-system-records test",
+    "typecheck:issue-2052:system-records": "pnpm --filter @devnet/issue-2052-system-records typecheck",
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "turbo test:coverage",
     "bench": "pnpm --filter @origintrail-official/dkg-storage build && esbench --config esbench.config.mjs",

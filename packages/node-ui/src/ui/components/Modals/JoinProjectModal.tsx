@@ -325,6 +325,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState<string | null>(null);
   const [pendingCgId, setPendingCgId] = useState<string | null>(null);
+  const [keepSynced, setKeepSynced] = useState(false);
   // Phase 8: after approval we transition into a wire-workspace step so
   // the joiner can populate a local Cursor workspace from the project's
   // manifest. `wiredCgId` flips the modal into the WireWorkspacePanel;
@@ -345,6 +346,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       setError(null);
       setPhase('idle');
       setPendingCgId(null);
+      setKeepSynced(false);
     }
   }, [open, initialContextGraphId]);
 
@@ -436,7 +438,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         // connection before the daemon snapshots its preferred/fallback peer
         // cohort for the catch-up job. Dial failure remains best-effort.
         await warmInviteCuratorConnection(intent.invite);
-        await subscribeToContextGraph(cgId);
+        await subscribeToContextGraph(cgId, {
+          syncMode: keepSynced ? 'always-on' : 'on-demand',
+        });
         await refreshAndOpenContextGraph(cgId, existing);
         onClose();
       } catch (err: unknown) {
@@ -636,6 +640,27 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               spellCheck={false}
             />
           </div>
+
+          {intent.kind === 'publicSubscribe' && (
+            <label style={{
+              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12,
+              color: 'var(--text-secondary)', cursor: sending ? 'default' : 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={keepSynced}
+                onChange={(event) => setKeepSynced(event.target.checked)}
+                disabled={sending}
+                aria-label="Keep this Context Graph synchronized after restart"
+              />
+              <span>
+                Keep synchronized after restart
+                <span style={{ display: 'block', color: 'var(--text-tertiary)', marginTop: 2 }}>
+                  Off by default. This node otherwise syncs the graph only when you open it.
+                </span>
+              </span>
+            </label>
+          )}
         </div>
 
         <div className="v10-modal-footer">
