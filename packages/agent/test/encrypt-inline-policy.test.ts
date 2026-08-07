@@ -1032,6 +1032,8 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       },
     });
     expect(catalogAuthoring.calls).toHaveLength(0);
+    expect((DKGAgent.prototype as any).recordConfirmedRfc64PublicCatalogAssetV1)
+      .toBeUndefined();
   });
 
   it('keeps a confirmed queued VM publish successful when SWM inventory removal fails', async () => {
