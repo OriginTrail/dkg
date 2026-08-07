@@ -15,6 +15,7 @@ import {
   createSystemRecordProviderV1,
   type SystemRecordProviderArtifactV1,
   type SystemRecordProviderExchangeV1,
+  type SystemRecordProviderLookupV1,
   type SystemRecordProviderRepositoryV1,
 } from '../src/system-records/provider-v1.js';
 import {
@@ -217,20 +218,23 @@ describe('system-record provider V1', () => {
     const rootBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(rootEnvelope);
     const inventoryObject = inventory.objects.get(inventory.descriptor.treeRootDigest)!;
     const admission = frameAdmission();
+    const lookups: SystemRecordProviderLookupV1[] = [];
     const provider = createSystemRecordProviderV1({
       networkId: NETWORK,
       repository: {
-        resolve: async (request) => request.operation === 'get-root'
-          ? {
+        resolve: async (lookup) => {
+          lookups.push(lookup);
+          return lookup.type === 'root' ? {
               objectKind: 'root-descriptor',
               objectDigest: inventory.descriptorDigest,
               canonicalBytes: rootBytes,
             }
-          : {
+            : {
               objectKind: inventoryObject.objectKind,
               objectDigest: inventory.descriptor.treeRootDigest,
               canonicalBytes: inventoryObject.canonicalBytes,
-            },
+            };
+        },
       },
       frameAdmission: admission,
     });
@@ -266,6 +270,15 @@ describe('system-record provider V1', () => {
     });
     expect(inventoryResponse.payload).toEqual(inventoryObject.canonicalBytes);
     expect(admission.active()).toBe(0);
+    expect(lookups).toEqual([
+      { type: 'root' },
+      {
+        type: 'object',
+        objectKind: inventoryObject.objectKind,
+        objectDigest: inventory.descriptor.treeRootDigest,
+        rootDescriptorDigest: inventory.descriptorDigest,
+      },
+    ]);
   });
 
   it('refunds response bytes and frame admission when shutdown aborts a blocked write', async () => {

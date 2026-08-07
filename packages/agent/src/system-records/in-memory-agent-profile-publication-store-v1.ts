@@ -8,7 +8,6 @@ import {
   type SignedAgentProfileHeadEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryTreeSnapshotV1,
-  type SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type {
@@ -20,6 +19,7 @@ import {
   cloneSystemRecordProviderArtifactV1,
   systemRecordProviderArtifactKeyV1,
   type SystemRecordProviderArtifactV1,
+  type SystemRecordProviderLookupV1,
   type SystemRecordProviderRepositoryV1,
 } from './provider-v1.js';
 
@@ -133,8 +133,8 @@ export function createInMemoryAgentProfilePublicationStoreV1(
         throw error;
       }
     },
-    async resolve(request: SystemRecordRequestHeaderV1): Promise<SystemRecordProviderArtifactV1 | null> {
-      if (request.operation === 'get-root') {
+    async resolve(lookup: SystemRecordProviderLookupV1): Promise<SystemRecordProviderArtifactV1 | null> {
+      if (lookup.type === 'root') {
         if (rootEnvelope === null) return null;
         return cloneSystemRecordProviderArtifactV1({
           objectKind: 'root-descriptor',
@@ -142,12 +142,12 @@ export function createInMemoryAgentProfilePublicationStoreV1(
           canonicalBytes: canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(rootEnvelope),
         });
       }
-      if (request.operation === 'get-inventory-object') {
-        if (rootEnvelope === null || request.rootDescriptorDigest !== rootEnvelope.objectDigest) return null;
+      if (lookup.rootDescriptorDigest !== undefined) {
+        if (rootEnvelope === null || lookup.rootDescriptorDigest !== rootEnvelope.objectDigest) return null;
       }
       const artifact = artifacts.get(systemRecordProviderArtifactKeyV1({
-        objectKind: request.objectKind,
-        objectDigest: request.objectDigest,
+        objectKind: lookup.objectKind,
+        objectDigest: lookup.objectDigest,
       }));
       return artifact === undefined
         ? null

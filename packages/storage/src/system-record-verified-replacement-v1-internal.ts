@@ -4,7 +4,6 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   computeKaBundleProjectionDigestV1,
-  decodeWorkspaceEncryptionKey,
   isSafeIri,
   keccak256,
   SENTINEL_NO_PRIVATE_V10,
@@ -13,12 +12,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   assertAgentProfileHeadObjectV1,
-  assertDerivedAgentEncryptionSubjectV1,
+  assertAgentProfileProjectionSchemaV1,
   assertAgentProfileVerifiedAuthoritySummaryV1,
   assertNetworkIdV1,
   canonicalizeAgentProfileHeadObjectV1,
   canonicalizeOwnedSubjectTableObjectV1,
-  AGENT_PROFILE_LINK_PREDICATES_V1,
   classifyAgentProfileOwnedSubjectV1,
   copyBoundedSystemRecordBytesV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -189,28 +187,6 @@ export function assertAuthenticSystemRecordVerifiedReplacementFactsV1(
     throw new Error('verified replacement facts were not produced by this registry');
   }
 }
-
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const DKG = 'https://dkg.network/ontology#';
-const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
-const PROV = 'http://www.w3.org/ns/prov#';
-const SKILL = 'https://dkg.origintrail.io/skill#';
-const IRI_OBJECT_PREDICATES = new Set<string>([
-  RDF_TYPE,
-  ...Object.values(AGENT_PROFILE_LINK_PREDICATES_V1),
-  `${SKILL}skill`,
-  `${SKILL}pricing`,
-  `${DKG}revokedBy`,
-]);
-const PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
-const ALLOWED_TYPE_OBJECTS = Object.freeze({
-  root: new Set([`${DKG}Agent`, `${DKG}CoreNode`, `${DKG}EdgeNode`]),
-  capability: new Set([`${ERC8004}Capability`]),
-  offering: new Set([`${SKILL}SkillOffering`]),
-  registration: new Set([`${PROV}Activity`]),
-  hosting: new Set([`${SKILL}HostingProfile`]),
-  x25519: new Set<string>(),
-});
 
 const ISSUE_KEYS = [
   'networkId',
@@ -488,72 +464,6 @@ function snapshotProjection(
   return Object.freeze(copied);
 }
 
-function validateProjectionSchema(
-  rootSubject: string,
-  ownedSubjectTable: OwnedSubjectTableObjectV1,
-  quads: readonly Readonly<Quad>[],
-): void {
-  const linked = new Set<string>();
-  const seenSubjects = new Set<string>();
-  const ownedSubjects = new Set(ownedSubjectTable);
-  const publicKeys: Uint8Array[] = [];
-  for (const quad of quads) {
-    seenSubjects.add(quad.subject);
-    const subjectKind = classifyAgentProfileOwnedSubjectV1(rootSubject, quad.subject);
-    if (subjectKind === null) throw new Error('verified projection contains an unknown subject kind');
-    const objectIsLiteral = quad.object.startsWith('"');
-    if (IRI_OBJECT_PREDICATES.has(quad.predicate) === objectIsLiteral) {
-      throw new Error('verified projection predicate has an invalid object term kind');
-    }
-    if (quad.predicate === RDF_TYPE && !ALLOWED_TYPE_OBJECTS[subjectKind].has(quad.object)) {
-      throw new Error('verified projection rdf:type object is outside the frozen profile schema');
-    }
-    if (quad.subject === rootSubject) {
-      const linkKind = Object.entries(AGENT_PROFILE_LINK_PREDICATES_V1)
-        .find(([, predicate]) => predicate === quad.predicate)?.[0];
-      if (linkKind !== undefined) {
-        if (objectIsLiteral || !ownedSubjects.has(quad.object)
-          || classifyAgentProfileOwnedSubjectV1(rootSubject, quad.object) !== linkKind) {
-          throw new Error('verified profile link does not target its exact derived-subject kind');
-        }
-        linked.add(quad.object);
-      }
-      if (quad.predicate === PUBLIC_ENCRYPTION_KEY) {
-        const match = /^"([A-Za-z0-9_-]{43})"$/.exec(quad.object);
-        if (match === null) throw new Error('verified profile public encryption key is not canonical');
-        try {
-          publicKeys.push(decodeWorkspaceEncryptionKey(match[1]));
-        } catch (cause) {
-          throw new Error('verified profile public encryption key is invalid', { cause });
-        }
-      }
-    }
-    if (subjectKind === 'x25519' && quad.predicate === `${DKG}revokedBy`
-      && quad.object !== rootSubject) {
-      throw new Error('verified x25519 revocation does not bind the profile root');
-    }
-  }
-  for (const subject of ownedSubjectTable) {
-    if (!seenSubjects.has(subject)) {
-      throw new Error('owned-subject table contains a subject absent from the projection');
-    }
-    const kind = classifyAgentProfileOwnedSubjectV1(rootSubject, subject);
-    if (kind === 'capability' || kind === 'offering' || kind === 'registration' || kind === 'hosting') {
-      if (!linked.has(subject)) throw new Error('verified derived profile subject is not linked from the root');
-    } else if (kind === 'x25519') {
-      const derived = publicKeys.some((key) => {
-        try {
-          assertDerivedAgentEncryptionSubjectV1(rootSubject, subject, key);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-      if (!derived) throw new Error('verified x25519 subject is not derived from a profile public key');
-    }
-  }
-}
-
 function bindingsEqual(
   actual: SystemRecordVerifiedReplacementBindingsV1,
   expected: SystemRecordVerifiedReplacementLaneBindingV1,
@@ -707,7 +617,7 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
         BigInt(head.projectionQuads),
         BigInt(canonicalProjectionBytes.byteLength),
       );
-      validateProjectionSchema(head.rootSubject, subjectTable, projection);
+      assertAgentProfileProjectionSchemaV1(head.rootSubject, subjectTable, projection);
       assertCanonicalProjectionBytesForQuads(
         projection,
         canonicalProjectionBytes,

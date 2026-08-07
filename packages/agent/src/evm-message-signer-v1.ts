@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  assertCanonicalEvmAddress,
+  type EvmAddressV1,
+} from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
 export interface EvmPersonalMessageSignerV1 {
-  readonly address: string;
+  readonly address: EvmAddressV1;
   signMessage(message: Uint8Array): Promise<string>;
 }
 
@@ -45,6 +49,8 @@ export function createEvmPersonalMessageSignerV1(
   input: CreateEvmPersonalMessageSignerInputV1,
 ): EvmPersonalMessageSignerV1 {
   const expectedAddress = ethers.getAddress(input.address).toLowerCase();
+  assertCanonicalEvmAddress(expectedAddress, 'EVM personal-message signer address');
+  const canonicalAddress = expectedAddress as EvmAddressV1;
   if (input.mode === 'custodial') {
     const key = input.privateKey.startsWith('0x')
       ? input.privateKey
@@ -54,7 +60,7 @@ export function createEvmPersonalMessageSignerV1(
       throw new Error(`${input.purpose} custodial key does not match ${expectedAddress}`);
     }
     return Object.freeze({
-      address: expectedAddress,
+      address: canonicalAddress,
       signMessage: async (message: Uint8Array) => {
         assertMessageBytes(message);
         const signature = await wallet.signMessage(message);
@@ -65,7 +71,7 @@ export function createEvmPersonalMessageSignerV1(
   }
 
   return Object.freeze({
-    address: expectedAddress,
+    address: canonicalAddress,
     signMessage: async (message: Uint8Array) => {
       assertMessageBytes(message);
       const compact = input.mode === 'chain-as'

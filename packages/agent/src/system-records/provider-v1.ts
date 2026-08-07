@@ -53,9 +53,18 @@ export function cloneSystemRecordProviderArtifactV1(
   });
 }
 
+export type SystemRecordProviderLookupV1 =
+  | Readonly<{ type: 'root' }>
+  | Readonly<{
+    type: 'object';
+    objectKind: SystemRecordObjectKindV1;
+    objectDigest: Digest32V1;
+    rootDescriptorDigest?: Digest32V1;
+  }>;
+
 export interface SystemRecordProviderRepositoryV1 {
   resolve(
-    request: SystemRecordRequestHeaderV1,
+    lookup: SystemRecordProviderLookupV1,
     signal: AbortSignal,
   ): Promise<SystemRecordProviderArtifactV1 | null>;
 }
@@ -192,7 +201,7 @@ export function createSystemRecordProviderV1(
           let artifact: SystemRecordProviderArtifactV1 | null;
           try {
             artifact = await raceAbort(
-              options.repository.resolve(request, controller.signal),
+              options.repository.resolve(repositoryLookupV1(request), controller.signal),
               controller.signal,
             );
           } catch (error) {
@@ -323,6 +332,18 @@ function encodeProviderErrorResponseV1(
 
 function expectedObjectKind(request: SystemRecordRequestHeaderV1): SystemRecordObjectKindV1 {
   return request.operation === 'get-root' ? 'root-descriptor' : request.objectKind;
+}
+
+function repositoryLookupV1(request: SystemRecordRequestHeaderV1): SystemRecordProviderLookupV1 {
+  if (request.operation === 'get-root') return Object.freeze({ type: 'root' });
+  return Object.freeze({
+    type: 'object',
+    objectKind: request.objectKind,
+    objectDigest: request.objectDigest,
+    ...(request.operation === 'get-inventory-object'
+      ? { rootDescriptorDigest: request.rootDescriptorDigest }
+      : {}),
+  });
 }
 
 function positiveTimeout(value: number): number {

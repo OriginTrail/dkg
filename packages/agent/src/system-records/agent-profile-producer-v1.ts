@@ -20,6 +20,7 @@ import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
+  assertAgentProfileProjectionSchemaV1,
   assertCanonicalRfc3339SecondsV1,
   buildSystemRecordProviderSignatureMessageV1,
   buildSystemRecordSignatureMessageV1,
@@ -28,12 +29,10 @@ import {
   canonicalizeOwnedSubjectTableObjectV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   canonicalizeSystemRecordRootDescriptorObjectV1,
-  classifyAgentProfileOwnedSubjectV1,
   computeAgentProfileHeadObjectDigestV1,
   computeOwnedSubjectTableDigestV1,
   computeSystemRecordStableKeyHashV1,
   digestSystemRecordBytesV1,
-  isAllowedAgentProfilePredicateV1,
   updateSystemRecordInventoryTreeV1,
   verifySignedSystemRecordEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
@@ -556,18 +555,21 @@ function applyInventoryUpdate(
 function validateAndProject(
   prepared: PreparedAgentProfileV1,
 ): readonly Readonly<Quad>[] {
-  const projected = prepared.quads.map((quad) => {
-    const kind = classifyAgentProfileOwnedSubjectV1(prepared.rootEntity, quad.subject);
-    if (kind === null || !isAllowedAgentProfilePredicateV1(kind, quad.predicate)) {
-      throw new Error('profile projection contains a subject or predicate outside schema V1');
-    }
-    return Object.freeze({ ...quad, graph: '' });
-  });
+  const projected = prepared.quads.map((quad) => Object.freeze({ ...quad, graph: '' }));
   projected.sort(compareQuads);
   for (let index = 1; index < projected.length; index += 1) {
     if (compareQuads(projected[index - 1]!, projected[index]!) === 0) {
       throw new Error('profile projection must be canonical and duplicate-free');
     }
+  }
+  try {
+    assertAgentProfileProjectionSchemaV1(
+      prepared.rootEntity,
+      ownedSubjects(prepared.rootEntity, projected),
+      projected,
+    );
+  } catch (cause) {
+    throw new Error('profile projection is outside schema V1', { cause });
   }
   return Object.freeze(projected);
 }
