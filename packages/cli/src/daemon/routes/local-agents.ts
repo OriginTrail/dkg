@@ -317,7 +317,10 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
-import { readPrimeAgentSessions } from '../prime-agent.js';
+import {
+  primeAgentDkgSessionId,
+  readPrimeAgentSessions,
+} from '../prime-agent.js';
 
 import type { RequestContext } from './context.js';
 
@@ -348,11 +351,13 @@ function withPrimeAgentSessionCounts<T extends { id: string; metadata?: Record<s
     };
     if (sessions[0]) {
       metadata.activeSessionId = sessions[0].sessionId;
+      metadata.activeMemorySessionId = primeAgentDkgSessionId(sessions[0].sessionId);
     } else {
       // A zero-session listing must not keep advertising the connect-time
-      // session id: node-ui pins chat to activeSessionId, and a stale id
-      // routes every send into a guaranteed 409.
+      // session ids: node-ui pins history to activeMemorySessionId, and stale
+      // raw/memory ids would route every send into a guaranteed 409.
       delete metadata.activeSessionId;
+      delete metadata.activeMemorySessionId;
     }
     return { ...integration, metadata };
   });

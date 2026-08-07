@@ -1789,6 +1789,8 @@ interface LocalAgentChatRequestOptions {
   signal?: AbortSignal;
   identity?: string;
   sessionId?: string;
+  /** One daemon-owned raw/memory pairing for an explicitly selected session. */
+  liveSession?: LocalAgentLiveSession;
   profile?: string;
   persistUserMessage?: string;
   attachments?: LocalAgentChatAttachmentRef[];
@@ -1887,7 +1889,14 @@ export interface LocalAgentHealthResponse {
   };
   status?: string;
   sessionCount?: number;
-  sessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
+  sessions?: Array<{
+    sessionId: string;
+    rawSessionId?: string;
+    memorySessionId?: string;
+    startedAt?: string;
+    sessionName?: string;
+  }>;
+  targetMemorySessionId?: string;
   busy?: boolean;
   turnState?: 'queued' | 'running';
   clientConnected?: boolean;
@@ -2321,7 +2330,16 @@ export interface LocalAgentIntegration {
   /** The selected Prime session currently owns an agent turn. */
   busy?: boolean;
   /** Live Prime sessions available for an explicit UI routing choice. */
-  liveSessions?: Array<{ sessionId: string; startedAt?: string; sessionName?: string }>;
+  liveSessions?: LocalAgentLiveSession[];
+}
+
+export interface LocalAgentLiveSession {
+  /** DKG memory-session id used for history and UI selection. */
+  sessionId: string;
+  /** Prime-owned id sent to the bridge route. */
+  rawSessionId: string;
+  startedAt?: string;
+  sessionName?: string;
 }
 
 export interface LocalAgentConnectResult {
@@ -2352,6 +2370,7 @@ interface LocalAgentSurface {
   resolveChatContext?: (args: {
     integrationId: string;
     sessionId?: string;
+    liveSession?: LocalAgentLiveSession;
     profile?: string;
   }) => Record<string, unknown>;
   fetchHealth?: () => Promise<LocalAgentHealthResponse>;
@@ -2387,12 +2406,16 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   'prime-agent': {
     connectSupported: true,
     chatSupported: true,
-    // A Prime Agent session id is a uuidv7 minted by the agent itself, so the
-    // node must not synthesise one. The integrations endpoint already elects a
-    // live session; pin the UI conversation to that exact id instead of asking
-    // the daemon to run a second most-recently-active election on every turn.
-    defaultSessionId: ({ record }) => firstTrimmedString(record?.metadata?.activeSessionId) ?? undefined,
-    resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
+    // The daemon owns Prime's raw-vs-memory session contract. The UI consumes
+    // its explicit fields and never reconstructs or strips the memory prefix.
+    defaultSessionId: ({ record, health }) => buildPrimeAgentDefaultSessionId(record, health),
+    resolveChatContext: ({ sessionId, liveSession }) => {
+      if (!liveSession) return {};
+      if (sessionId && liveSession.sessionId !== sessionId) {
+        throw new Error('Prime Agent live session does not match the selected conversation');
+      }
+      return { sessionId: liveSession.rawSessionId };
+    },
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,
   },
@@ -2529,6 +2552,16 @@ function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord
   return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
 }
 
+function buildPrimeAgentDefaultSessionId(
+  record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
+): string | undefined {
+  return firstTrimmedString(
+    record?.metadata?.activeMemorySessionId,
+    health?.sessions?.[0]?.memorySessionId,
+  ) ?? undefined;
+}
+
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {
   if (!memory) return null;
   if (typeof memory === 'string') return memory;
@@ -2646,7 +2679,18 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
     && health?.busy === true
     && health.clientConnected === false;
   const liveSessions = id === 'prime-agent' && Array.isArray(health?.sessions)
-    ? health.sessions.filter((session) => typeof session?.sessionId === 'string' && session.sessionId.trim())
+    ? health.sessions
+        .filter((session) => (
+          typeof session?.rawSessionId === 'string'
+          && session.rawSessionId.trim()
+          && typeof session.memorySessionId === 'string'
+          && session.memorySessionId.trim()
+        ))
+        .map((session) => ({
+          ...session,
+          sessionId: session.memorySessionId!.trim(),
+          rawSessionId: session.rawSessionId!.trim(),
+        }))
     : undefined;
   const profile = id === 'hermes'
     ? firstTrimmedString(health?.profile, record.metadata?.profileName, record.metadata?.profile) ?? undefined
@@ -2898,17 +2942,21 @@ export async function streamLocalAgentChat(
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
-    const { sessionId, profile, ...transportOpts } = opts;
-    const chatOptions = (resolvedSessionId?: string) => ({
+    const { sessionId, liveSession, profile, ...transportOpts } = opts;
+    const chatOptions = (
+      resolvedSessionId?: string,
+      resolvedLiveSession?: LocalAgentLiveSession,
+    ) => ({
       ...transportOpts,
       ...surface.resolveChatContext?.({
         integrationId: normalizedId,
         sessionId: resolvedSessionId,
+        liveSession: resolvedLiveSession,
         profile,
       }),
     });
     try {
-      return await surface.streamChat(text, chatOptions(sessionId));
+      return await surface.streamChat(text, chatOptions(sessionId, liveSession));
     } catch (err) {
       // A Prime session id is an automatic live-session pin, not a durable
       // user-owned conversation id. If Prime restarted after the panel pinned
@@ -2916,7 +2964,7 @@ export async function streamLocalAgentChat(
       // once without the stale id so the daemon can elect the current head.
       if (
         normalizedId === 'prime-agent'
-        && sessionId
+        && liveSession
         && err instanceof LocalAgentApiError
         && err.code === 'PRIME_AGENT_NO_SESSION'
       ) {

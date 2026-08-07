@@ -549,11 +549,17 @@ export function PanelRight() {
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
+      const liveSession = integration.id === 'prime-agent'
+        ? integration.liveSessions?.find(
+            (session) => session.sessionId === conversation.sessionId,
+          )
+        : undefined;
 
       const result = await streamLocalAgentChat(integrationId, outboundText, {
         correlationId,
         signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
+        liveSession,
         profile: integration.profile,
         persistUserMessage: outboundText ? undefined : messageText,
         attachments,

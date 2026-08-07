@@ -157,6 +157,72 @@ describe('PanelRight component', () => {
     ]);
   }, 10_000);
 
+  it('sends a selected Prime session as one raw-and-memory pairing', async () => {
+    const memorySessionId = 'prime-agent:dkg-ui:s1';
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'prime-agent',
+      name: 'Prime Agent',
+      description: 'Prime bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: false,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'chat_ready',
+      statusLabel: 'Chat ready',
+      detail: 'ready',
+      source: 'live',
+      defaultSessionId: memorySessionId,
+      liveSessions: [{ sessionId: memorySessionId, rawSessionId: 's1' }],
+    }] });
+    streamLocalAgentChatMock.mockResolvedValue({
+      text: 'Prime reply',
+      correlationId: 'prime-correlation',
+      turnId: 'prime-correlation',
+      sessionId: memorySessionId,
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await waitForAssertion(() => expect(container.textContent).toContain('Prime Agent'));
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Hello Prime');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(streamLocalAgentChatMock).toHaveBeenCalledWith(
+        'prime-agent',
+        'Hello Prime',
+        expect.objectContaining({
+          sessionId: memorySessionId,
+          liveSession: { sessionId: memorySessionId, rawSessionId: 's1' },
+        }),
+      );
+    });
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it('renders, loads agent state, and sends chat with injected context entries', async () => {
     const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');

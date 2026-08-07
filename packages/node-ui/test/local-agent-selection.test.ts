@@ -1,6 +1,6 @@
 /**
  * Pins the session-pin plumbing this side of the wire: an integration's
- * defaultSessionId (mapped from the daemon's metadata.activeSessionId) must
+ * defaultSessionId (provided by daemon metadata.activeMemorySessionId) must
  * reach an outgoing chat request whenever the panel holds no sticky selection,
  * and a sticky selection must win over the pin. The api-level pass-through of
  * an explicit sessionId is covered separately in ui-api-stream.test.ts — this
@@ -8,7 +8,7 @@
  * request body.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { LocalAgentApiError, streamLocalAgentChat, type LocalAgentIntegration } from '../src/ui/api.js';
 import {
@@ -20,7 +20,7 @@ const pinnedIntegration = {
   id: 'prime-agent',
   name: 'Prime Agent',
   persistentChat: true,
-  defaultSessionId: '019f-session-a',
+  defaultSessionId: 'prime-agent:dkg-ui:019f-session-a',
 } as unknown as LocalAgentIntegration;
 
 describe('prime-agent session pin plumbing', () => {
@@ -30,27 +30,27 @@ describe('prime-agent session pin plumbing', () => {
       sessionId: null,
       defaultSessionId: pinnedIntegration.defaultSessionId,
     });
-    expect(conversation.sessionId).toBe('019f-session-a');
-    expect(conversation.stateKey).toBe('019f-session-a');
+    expect(conversation.sessionId).toBe('prime-agent:dkg-ui:019f-session-a');
+    expect(conversation.stateKey).toBe('prime-agent:dkg-ui:019f-session-a');
   });
 
   it('lets a sticky selection win over the pin, and a cleared selection fall back to it', () => {
     expect(
       resolveLocalAgentConversation({
         integrationId: 'prime-agent',
-        sessionId: '019f-session-b',
-        defaultSessionId: '019f-session-a',
+        sessionId: 'prime-agent:dkg-ui:019f-session-b',
+        defaultSessionId: 'prime-agent:dkg-ui:019f-session-a',
       }).sessionId,
-    ).toBe('019f-session-b');
+    ).toBe('prime-agent:dkg-ui:019f-session-b');
     // The self-heal re-homes a dead-pinned conversation by resolving against
     // the refreshed pin as an explicit session — same resolution shape.
     expect(
       resolveLocalAgentConversation({
         integrationId: 'prime-agent',
         sessionId: null,
-        defaultSessionId: '019f-session-c',
+        defaultSessionId: 'prime-agent:dkg-ui:019f-session-c',
       }).sessionId,
-    ).toBe('019f-session-c');
+    ).toBe('prime-agent:dkg-ui:019f-session-c');
   });
 
   it('selection state carries the pin into the selected conversation', () => {
@@ -61,7 +61,7 @@ describe('prime-agent session pin plumbing', () => {
       localMessagesByConversation: {},
       sessions: [],
     });
-    expect(state.selectedConversation?.sessionId).toBe('019f-session-a');
+    expect(state.selectedConversation?.sessionId).toBe('prime-agent:dkg-ui:019f-session-a');
   });
 
   it('sends the pin-resolved conversation sessionId in the outgoing request body', async () => {
@@ -94,6 +94,10 @@ describe('prime-agent session pin plumbing', () => {
       });
       await streamLocalAgentChat('prime-agent', 'hello', {
         sessionId: conversation.sessionId ?? undefined,
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:019f-session-a',
+          rawSessionId: '019f-session-a',
+        },
       });
       expect(payload).toMatchObject({ text: 'hello', sessionId: '019f-session-a' });
     } finally {
@@ -119,10 +123,35 @@ describe('prime-agent session pin plumbing', () => {
 
     try {
       let caught: unknown;
-      await streamLocalAgentChat('prime-agent', 'hello', { sessionId: '019f-dead' })
+      await streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: 'prime-agent:dkg-ui:019f-dead',
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:019f-dead',
+          rawSessionId: '019f-dead',
+        },
+      })
         .catch((err) => { caught = err; });
       expect(caught).toBeInstanceOf(LocalAgentApiError);
       expect(caught).toMatchObject({ code: 'PRIME_AGENT_NO_SESSION', status: 409 });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('rejects a mismatched raw-and-memory Prime session pair before transport', async () => {
+    const savedFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof globalThis.fetch;
+
+    try {
+      await expect(streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: 'prime-agent:dkg-ui:session-a',
+        liveSession: {
+          sessionId: 'prime-agent:dkg-ui:session-b',
+          rawSessionId: 'session-b',
+        },
+      })).rejects.toThrow('Prime Agent live session does not match the selected conversation');
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = savedFetch;
     }

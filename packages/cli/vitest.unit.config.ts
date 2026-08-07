@@ -168,6 +168,9 @@ export default defineConfig({
           // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.part-*.test.ts',
           'test/daemon-hermes.test.ts',
+          'test/daemon-prime-agent.test.ts',
+          'test/daemon-prime-agent-persistence.test.ts',
+          'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
