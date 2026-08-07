@@ -198,9 +198,11 @@ export function prepareAgentProfileV1(
   now: () => Date = () => new Date(),
 ): PreparedAgentProfileV1 {
   const lastSeen = config.lastSeen ?? now().toISOString();
-  const built = buildAgentProfile({ ...config, lastSeen });
-  const publicationQuads = built.quads.map((quad) => Object.freeze({ ...quad }));
-  const projectionQuads = built.quads.map((quad) => Object.freeze({ ...quad, graph: '' }));
+  const built = buildAgentProfileModelV1({ ...config, lastSeen });
+  const publicationQuads = renderAgentProfilePublicationV1(built)
+    .map((quad) => Object.freeze(quad));
+  const projectionQuads = renderAgentProfileProjectionV1(built)
+    .map((quad) => Object.freeze(quad));
   return Object.freeze({
     publicationQuads: Object.freeze(publicationQuads),
     projectionQuads: Object.freeze(projectionQuads),
@@ -229,17 +231,42 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   quads: Quad[];
   rootEntity: string;
 } {
+  const built = buildAgentProfileModelV1(config);
+  return {
+    quads: renderAgentProfilePublicationV1(built),
+    rootEntity: built.rootEntity,
+  };
+}
+
+interface AgentProfileFactV1 {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+}
+
+interface AgentProfileModelV1 {
+  readonly projectionFacts: readonly AgentProfileFactV1[];
+  readonly publicationOnlyFacts: readonly AgentProfileFactV1[];
+  readonly rootEntity: string;
+}
+
+/**
+ * Canonical profile model. Projection facts are governed by schema V1, while the
+ * separate publication-only lane makes future legacy extensions an explicit choice.
+ */
+function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModelV1 {
   // A-12: normalise the DID subject so profile + endorsement subjects
   // converge for the same wallet regardless of the source casing. See
   // `canonicalAgentDidSubject` for rationale.
   const identity = agentProfileAdvertisedIdentityV1(config);
   const entity = identity.rootEntity;
-  const quads: Quad[] = [];
+  const projectionFacts: AgentProfileFactV1[] = [];
+  const publicationOnlyFacts: AgentProfileFactV1[] = [];
   const role = config.nodeRole ?? 'edge';
   const profileTimestamp = config.lastSeen ?? new Date().toISOString();
 
   const q = (s: string, p: string, o: string) =>
-    quads.push({ subject: s, predicate: p, object: o, graph: AGENT_REGISTRY_GRAPH });
+    projectionFacts.push({ subject: s, predicate: p, object: o });
 
   // Type: dkg:Agent + role-specific subclass
   q(entity, RDF_TYPE, `${DKG}Agent`);
@@ -352,5 +379,18 @@ export function buildAgentProfile(config: AgentProfileConfig): {
     }
   }
 
-  return { quads, rootEntity: entity };
+  return { projectionFacts, publicationOnlyFacts, rootEntity: entity };
+}
+
+function renderAgentProfilePublicationV1(
+  model: AgentProfileModelV1,
+): Quad[] {
+  return [...model.projectionFacts, ...model.publicationOnlyFacts]
+    .map((fact) => ({ ...fact, graph: AGENT_REGISTRY_GRAPH }));
+}
+
+function renderAgentProfileProjectionV1(
+  model: AgentProfileModelV1,
+): AgentProfileProjectionQuadV1[] {
+  return model.projectionFacts.map((fact) => ({ ...fact, graph: '' }));
 }

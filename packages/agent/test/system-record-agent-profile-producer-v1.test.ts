@@ -1,4 +1,5 @@
 import {
+  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
   buildSystemRecordSignatureMessageV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
@@ -266,6 +267,80 @@ describe('agent-profile system-record producer V1', () => {
     ))).rejects.toThrow(expected);
     expect(install).not.toHaveBeenCalled();
     expect(prepareCommit).not.toHaveBeenCalled();
+  });
+
+  it('rejects an ordinary update over a signed tombstone before install or commit', async () => {
+    const fixture = await producerFixture();
+    const initialProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    await produce(initialProducer, fixture.prepared, fixture.publication);
+    const activeEnvelope = fixture.store.snapshot().currentHead!;
+    const active = activeEnvelope.object;
+    const tombstone = {
+      objectType: 'agent-profile-head',
+      kind: 'agents',
+      state: 'tombstone',
+      networkId: active.networkId,
+      peerId: active.peerId,
+      peerPublicKey: active.peerPublicKey,
+      authoritySequence: active.authoritySequence,
+      version: '1',
+      previousHeadDigest: activeEnvelope.objectDigest,
+      evmIssuer: active.evmIssuer,
+      rootSubject: active.rootSubject,
+      projectionSchemaDigest: active.projectionSchemaDigest,
+      issuedAt: '2026-08-07T12:10:00Z',
+      ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+      ownedSubjectCount: '0',
+      projectionBytes: '0',
+      projectionQuads: '0',
+    } as AgentProfileHeadObjectV1;
+    const tombstoneEnvelope = await signHeadEnvelope(
+      tombstone,
+      fixture.peerSigner,
+      fixture.evmSigner,
+    );
+    const prepareCommit = vi.fn(fixture.store.prepareCommit.bind(fixture.store));
+    const store: AgentProfileProducerPublicationStoreV1 = {
+      snapshot: () => {
+        const snapshot = fixture.store.snapshot();
+        return Object.freeze({ ...snapshot, currentHead: tombstoneEnvelope });
+      },
+      resolveArtifact: (reference) => fixture.store.resolveArtifact(reference),
+      prepareCommit,
+    };
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store,
+      fence: () => {},
+      install,
+    });
+    const nextPrepared = makePrepared(
+      fixture.peerSigner,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00.000Z',
+    );
+    const lease = await producer.prepare(nextPrepared);
+
+    await expect(lease.complete(await publicationFor(
+      nextPrepared,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00Z',
+    ))).rejects.toThrow(/tombstoned profile/);
+    expect(install).not.toHaveBeenCalled();
+    expect(prepareCommit).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead?.objectDigest).toBe(activeEnvelope.objectDigest);
   });
 
   it('rejects a concurrent stale writer before installing or replacing the winning head', async () => {
