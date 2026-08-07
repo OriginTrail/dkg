@@ -582,7 +582,7 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'hung turn', correlationId: 'c-hard-timeout' }),
     });
-    await new Promise((r) => setTimeout(r, 10));
+    await until(() => sent.length === 1);
     startBridgeRun({
       sessionManager: { getSessionId: () => 'sess-hard-timeout' },
       abort: () => { abortCount += 1; },
