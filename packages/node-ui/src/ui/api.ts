@@ -68,6 +68,90 @@ export class LocalAgentApiError extends Error {
   }
 }
 
+// ── dRAG answering (OT-RFC-55) ──────────────────────────────────────────────
+
+// The citation wire shape is owned by dkg-core (VerifiableCitation); alias it
+// instead of mirroring so proof/seal/checks changes cannot drift out of sync.
+// Type-only import — erased at compile time, nothing enters the browser bundle.
+export type DragCitation = import('@origintrail-official/dkg-core').VerifiableCitation;
+
+export interface DragPerNode { peerId: string; factsCited: number; verified: number; error?: string }
+
+/** A conclusion derived by EYE with verified supporting citations (not an exact/minimal proof). */
+export interface DragDerived {
+  conclusion: { subject: string; predicate: string; object: string };
+  rule?: string;
+  support: DragCitation[];
+}
+export interface DragReasoning {
+  engine: string;
+  derived: DragDerived[];
+  /** Citations for the rule-KAs applied (verifiable rules). */
+  rules?: DragCitation[];
+  note?: string;
+}
+
+export interface DragAnswer {
+  question: string;
+  contextGraphId: string;
+  scope: string;
+  answer: string;
+  llm: boolean;
+  citations: DragCitation[];
+  facts: Array<{ subject: string; predicate: string; object: string; source: number }>;
+  perNode?: DragPerNode[];
+  reasoning?: DragReasoning;
+  settlement?: { ok: boolean; asset: string; amount: string; payTo: string; txRef?: string };
+  stats: {
+    keywords: string[];
+    verified: number;
+    factsCited: number;
+    servingNodes?: number;
+    nodesAnswered?: number;
+    scopeVerified?: boolean;
+    rejected?: number;
+    notEvaluated?: number;
+    peersSkipped?: number;
+    retrieval?: string;
+    [k: string]: unknown;
+  };
+}
+
+export interface DragAnswerRequest {
+  question: string;
+  contextGraphId: string;
+  scope?: 'local' | 'network';
+  /** Retrieval mode (public, local scope): default | keyword | semantic. Omit = node default. */
+  retrieval?: 'default' | 'keyword' | 'semantic';
+  /** Run EYE locally and return conclusions with verified supporting evidence. */
+  reason?: boolean;
+  /** Optional N3 rules to apply (in addition to any verifiable rule-KAs in the CG). */
+  rules?: string;
+}
+
+async function rawAnswer(body: unknown): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${BASE}/api/answer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  const parsed = await res.json().catch(() => ({}));
+  return { status: res.status, body: parsed };
+}
+
+/** Ask a dRAG question through the production answer surface. */
+export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer> {
+  const base: Record<string, unknown> = { question: req.question, contextGraphId: req.contextGraphId };
+  if (req.scope) base.scope = req.scope;
+  if (req.retrieval) base.retrieval = req.retrieval;
+  if (req.reason) base.reason = true;
+  if (req.rules && req.rules.trim()) base.rules = req.rules;
+
+  const { status, body } = await rawAnswer(base);
+  if (status !== 200) throw new HttpError(status, body?.error ?? `HTTP ${status}`, body);
+  return body as DragAnswer;
+}
+
 // --- Status ---
 export const fetchStatus = () => get<any>('/api/status');
 
@@ -1417,7 +1501,7 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    const key = `${subGraph ?? ''}\u0000${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);

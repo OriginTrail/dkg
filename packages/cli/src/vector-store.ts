@@ -31,6 +31,8 @@ export interface VectorSearchOpts {
   memoryLayers: Array<'wm' | 'swm' | 'vm'>;
   limit: number;
   minSimilarity?: number;
+  /** Restrict to one embedding model so a query never scores vectors from a different (same-dimension) embedding space. */
+  model?: string;
 }
 
 export interface VectorSearchResult {
@@ -47,6 +49,8 @@ export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
   readonly model: string;
   readonly dimensions: number;
+  /** Process-local identity for safely reusing a retriever/provider instance. */
+  readonly cacheKey?: string;
 }
 
 export class VectorStore {
@@ -116,11 +120,12 @@ export class VectorStore {
    */
   async search(queryEmbedding: number[], opts: VectorSearchOpts): Promise<VectorSearchResult[]> {
     const layerPlaceholders = opts.memoryLayers.map(() => '?').join(',');
+    const modelClause = opts.model ? ' AND model = ?' : '';
     const rows = this.db.prepare(`
       SELECT id, embedding, dimensions, entity_uri, source_uri, label, snippet, memory_layer
       FROM embeddings
-      WHERE context_graph_id = ? AND memory_layer IN (${layerPlaceholders})
-    `).all(opts.contextGraphId, ...opts.memoryLayers) as Array<{
+      WHERE context_graph_id = ? AND memory_layer IN (${layerPlaceholders})${modelClause}
+    `).all(opts.contextGraphId, ...opts.memoryLayers, ...(opts.model ? [opts.model] : [])) as Array<{
       id: string;
       embedding: Buffer;
       dimensions: number;
@@ -168,13 +173,43 @@ export class VectorStore {
     return 0;
   }
 
-  async count(contextGraphId?: string): Promise<number> {
+  /**
+   * Count embedding rows, optionally scoped by context graph, model, and memory
+   * layer. `memoryLayer` matters when a CG holds vectors from more than one layer
+   * (e.g. WM/SWM agent-memory rows alongside dRAG's VM rows under the same model):
+   * a caller comparing against a layer-specific source count MUST pass the layer
+   * so both sides count the same rows.
+   */
+  async count(contextGraphId?: string, model?: string, memoryLayer?: string): Promise<number> {
+    const clauses: string[] = [];
+    const args: string[] = [];
     if (contextGraphId) {
-      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM embeddings WHERE context_graph_id = ?').get(contextGraphId) as { cnt: number };
-      return row.cnt;
+      clauses.push('context_graph_id = ?');
+      args.push(contextGraphId);
     }
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM embeddings').get() as { cnt: number };
+    if (model) {
+      clauses.push('model = ?');
+      args.push(model);
+    }
+    if (memoryLayer) {
+      clauses.push('memory_layer = ?');
+      args.push(memoryLayer);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM embeddings${where}`).get(...args) as { cnt: number };
     return row.cnt;
+  }
+
+  /**
+   * All embedding ids for a CG (optionally a single model). The indexer uses
+   * this to skip entities already embedded, so re-indexing only embeds the
+   * delta (incremental indexing) rather than re-embedding the whole graph.
+   */
+  async listIds(contextGraphId: string, model?: string): Promise<Set<string>> {
+    const rows = model
+      ? (this.db.prepare('SELECT id FROM embeddings WHERE context_graph_id = ? AND model = ?').all(contextGraphId, model) as Array<{ id: string }>)
+      : (this.db.prepare('SELECT id FROM embeddings WHERE context_graph_id = ?').all(contextGraphId) as Array<{ id: string }>);
+    return new Set(rows.map((r) => r.id));
   }
 
   close(): void {
@@ -210,42 +245,4 @@ function cosineSimilarity(a: number[], b: number[]): number {
   }
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
   return denom === 0 ? 0 : dot / denom;
-}
-
-/**
- * OpenAI-compatible embedding provider.
- */
-export class OpenAIEmbeddingProvider implements EmbeddingProvider {
-  readonly model: string;
-  readonly dimensions: number;
-  private readonly apiKey: string;
-  private readonly baseURL: string;
-
-  constructor(opts: { apiKey: string; model?: string; dimensions?: number; baseURL?: string }) {
-    this.apiKey = opts.apiKey;
-    this.model = opts.model ?? 'text-embedding-3-small';
-    this.dimensions = opts.dimensions ?? 1536;
-    this.baseURL = (opts.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
-  }
-
-  async embed(text: string): Promise<number[]> {
-    const truncated = text.length > 8000 ? text.slice(0, 8000) : text;
-    const resp = await fetch(`${this.baseURL}/embeddings`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.model,
-        input: truncated,
-        dimensions: this.dimensions,
-      }),
-    });
-    if (!resp.ok) {
-      throw new Error(`Embedding API error: ${resp.status} ${resp.statusText}`);
-    }
-    const json = await resp.json() as { data: Array<{ embedding: number[] }> };
-    return json.data[0].embedding;
-  }
 }

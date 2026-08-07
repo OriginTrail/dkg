@@ -1140,6 +1140,11 @@ export interface Rfc64PublicCatalogBootstrapConfigV1 {
 
 export interface DKGAgentConfig {
   name: string;
+  /**
+   * Serve unauthenticated public-CG dRAG requests over libp2p. Default false:
+   * operators must explicitly opt into the associated store/chain workload.
+   */
+  dragNetworkServing?: boolean;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */

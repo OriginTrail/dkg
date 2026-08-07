@@ -352,6 +352,7 @@ export {
   ExtractionPipelineRegistry,
 } from './extraction-pipeline.js';
 export * from './transducers.js';
+export { RateLimiter, type RateLimitConfig } from './rate-limiter.js';
 export {
   ASSERTION_SEAL_PREDICATES,
   ASSERTION_PUBLISH_RECEIPT_PREDICATES,

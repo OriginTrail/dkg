@@ -179,7 +179,11 @@ import {
 } from '../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
+import { VectorStore, type EmbeddingProvider } from '../vector-store.js';
+import { OpenAIEmbeddingProvider } from './embedding-providers.js';
+import { VectorEntityRetriever } from './drag-retriever.js';
+import { defaultDragEmbedder } from './drag-embedder.js';
+import { warmDragIndexIfAllowed } from './drag-warm-policy.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
@@ -1716,6 +1720,7 @@ export async function runDaemonInner(
   const agent = await DKGAgent.create({
     kaNumberAllocator,
     name: config.name,
+    dragNetworkServing: config.drag?.networkServing === true,
     genesisId: network?.genesisId,
     networkIdentity: {
       genesisId: network?.genesisId,
@@ -2266,7 +2271,7 @@ export async function runDaemonInner(
     promoteWorkerLifecycle = startPromoteWorkerDaemonLifecycle({
       agent,
       log,
-      emitMemoryGraphChanged,
+      emitMemoryGraphChanged: onMemoryGraphChanged,
       isShuttingDown: () => shuttingDown,
       enabled: promoteWorkerConfig?.enabled !== false,
       workerConfig: {
@@ -2970,6 +2975,10 @@ export async function runDaemonInner(
       // (ADR-002/A3 layers a MEMBERSHIP-GATED, remote-only `assertion_activity`
       // emitter on top of this handler as the legitimate scoped replacement.)
       if (data.contextGraphId) {
+        // Set ONLY on gossipsub-received publishes by publish-handler.ts; the
+        // LOCAL publisher emit (dkg-publisher KC_PUBLISHED) carries no `from`.
+        const remotePublisherPeer =
+          typeof data.from === "string" && data.from.length > 0 ? data.from : undefined;
         emitMemoryGraphChanged({
           contextGraphId: data.contextGraphId,
           layers: ["vm"],
@@ -2980,16 +2989,24 @@ export async function runDaemonInner(
             triples: typeof data.tripleCount === "number" ? data.tripleCount : undefined,
           },
         });
+        // dRAG warm: a LOCAL publish (no `from`) always warms — this handler is
+        // that path's only warm trigger. A REMOTE publish is MEMBERSHIP-GATED:
+        // KC_PUBLISHED fires for ANY CG overheard on gossip, and a foreign CG
+        // must not trigger embedder/index work (gossip spam would amplify into
+        // model calls).
+        if (!remotePublisherPeer || localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
+          void warmDragIndexIfAllowed(
+            agent,
+            data.contextGraphId,
+            config.drag?.allowPrivateModelCalls === true,
+          );
+        }
         // ADR-002 / CR-2: cross-node `published` activity for a collaborator's
-        // publish. REMOTE-ONLY — gate on `data.from` (the gossip payload's
-        // sender peer id, set ONLY on gossipsub-received publishes by
-        // publish-handler.ts; the LOCAL publisher emit carries no `from`).
-        // This prevents double-counting: a local publish is recorded by
-        // routes/memory.ts, a remote one here. Membership-gated so we only
-        // record activity for CGs this node is actually involved in (not
-        // every CG overheard on gossip — the dominant noise ADR-001 removed).
-        const remotePublisherPeer =
-          typeof data.from === "string" && data.from.length > 0 ? data.from : undefined;
+        // publish. REMOTE-ONLY — gate on `remotePublisherPeer`. This prevents
+        // double-counting: a local publish is recorded by routes/memory.ts, a
+        // remote one here. Membership-gated so we only record activity for CGs
+        // this node is actually involved in (not every CG overheard on gossip —
+        // the dominant noise ADR-001 removed).
         if (remotePublisherPeer && localNodeInvolvedInContextGraph(dashDb, data.contextGraphId)) {
           recordAssertionActivity(dashDb, {
             contextGraphId: data.contextGraphId,
@@ -3042,6 +3059,23 @@ export async function runDaemonInner(
       ...event,
       timestamp: new Date().toISOString(),
     });
+  }
+  // Domain-level memory-change hook: SSE refresh PLUS dRAG semantic-index warm,
+  // so the first query against fresh facts is not the one that pays for
+  // embedding. Kept separate from the SSE emitter above (a notification helper
+  // must stay side-effect free) and used only by paths acting on memory this
+  // node actually holds — routes, promote worker, sync, agent tool writes. The
+  // gossip KC_PUBLISHED handler warms separately behind a membership gate. The
+  // event has no authenticated caller, so the warm policy fails closed unless
+  // the CG is proven public or private model calls are explicitly on.
+  function onMemoryGraphChanged(event: MemoryGraphChangedEvent) {
+    if (!event.contextGraphId) return;
+    emitMemoryGraphChanged(event);
+    void warmDragIndexIfAllowed(
+      agent,
+      event.contextGraphId,
+      config.drag?.allowPrivateModelCalls === true,
+    );
   }
   // A5: single generic `notification` SSE refresh for the bell pane. Fired
   // once per scoped notification write (join_* + assertion_activity) so the
@@ -3147,7 +3181,7 @@ export async function runDaemonInner(
       if (data.dataSynced) layers.push("vm");
       if (data.sharedMemorySynced) layers.push("swm");
       if (data.contextGraphId && layers.length > 0) {
-        emitMemoryGraphChanged({
+        onMemoryGraphChanged({
           contextGraphId: data.contextGraphId,
           layers,
           operation: "project_synced",
@@ -3172,7 +3206,7 @@ export async function runDaemonInner(
       const counts = data.counts && typeof data.counts === "object"
         ? data.counts as MemoryGraphChangedEvent["counts"]
         : undefined;
-      emitMemoryGraphChanged({
+      onMemoryGraphChanged({
         contextGraphId: String(data.contextGraphId),
         layers,
         ...(typeof data.subGraphName === "string" ? { subGraphName: data.subGraphName } : {}),
@@ -3229,7 +3263,7 @@ export async function runDaemonInner(
         quads,
         opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
       );
-      emitMemoryGraphChanged({
+      onMemoryGraphChanged({
         contextGraphId,
         layers: ["wm"],
         subGraphName: opts?.subGraphName,
@@ -3397,6 +3431,22 @@ export async function runDaemonInner(
       apiKey: config.llm.apiKey,
       baseURL: config.llm.baseURL,
     });
+  }
+
+  // OT-RFC-55 Phase 1: attach a semantic entry-point retriever to the agent so
+  // dRAG uses embed→ANN→anchor→graph-expand instead of keyword scans on the
+  // authenticated local route. The opt-in unauthenticated network responder
+  // always forces its bounded keyword path. Embedder selection
+  // (config.drag.embedder, overridable by the DKG_DRAG_EMBEDDER env var):
+  //   local   → offline MiniLM (needs `npm i @huggingface/transformers`)
+  //   openai  → the configured OpenAI-compatible model (e.g. local Ollama)
+  //   hashing → zero-dep lexical control (testing only)
+  //   (unset) → keyword (no retriever attached).
+  // Default is KEYWORD (predictable) — semantic is opt-in, never the silent
+  // default, since a model is not always present and lexical fallbacks misrank.
+  const dragEmbedder = defaultDragEmbedder(config);
+  if (dragEmbedder) {
+    agent.attachEntityRetriever(new VectorEntityRetriever(vectorStore, dragEmbedder, agent.store));
   }
 
   // In-memory extraction job status tracker. Synchronous extractions (the V10.0
@@ -3674,7 +3724,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
-        emitMemoryGraphChanged,
+        emitMemoryGraphChanged: onMemoryGraphChanged,
         emitNotification,
       });
     } catch (err: any) {

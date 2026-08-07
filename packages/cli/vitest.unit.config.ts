@@ -121,6 +121,7 @@ export default defineConfig({
           'test/daemon-snapshot-page-index-wiring.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
+          'test/drag-warm-policy.test.ts',
           'test/snapshot-page-index-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.

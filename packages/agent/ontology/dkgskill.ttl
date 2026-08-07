@@ -177,3 +177,9 @@ dkgskill:contextGraphsServed a owl:DatatypeProperty ;
     rdfs:range xsd:string ;
     rdfs:label "contextGraphs served" ;
     rdfs:comment "Context graph ID this node serves. Multi-valued: one triple per CG." .
+
+dkgskill:dragContextGraphsServed a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:HostingProfile ;
+    rdfs:range xsd:string ;
+    rdfs:label "dRAG context graphs served" ;
+    rdfs:comment "Public context graph ID for which this node explicitly serves the dRAG answer protocol. Multi-valued: one triple per CG." .

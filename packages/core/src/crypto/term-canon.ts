@@ -338,7 +338,8 @@ function expandToPlainDecimal(s: string): string {
 
 function stripTrailingZeros(s: string): string {
   if (!s.includes('.')) return s;
-  return s.replace(/0+$/, '').replace(/\.$/, '');
+  const trimmed = trimTrailingAsciiZeros(s);
+  return trimmed.endsWith('.') ? trimmed.slice(0, -1) : trimmed;
 }
 
 // ── date/time family ───────────────────────────────────────────────────────────
@@ -366,7 +367,7 @@ function splitTzToOffset(s: string): { body: string; offsetMin: number; hadTz: b
 // empty. Truncate, NOT round (matches Blazegraph). (OT-RFC-57)
 function normFrac(frac: string | undefined): string {
   if (frac === undefined) return '';
-  const d = frac.slice(1, 4).replace(/0+$/, ''); // at most 3 digits, then strip trailing zeros
+  const d = trimTrailingAsciiZeros(frac.slice(1, 4)); // at most 3 digits, then strip trailing zeros
   return d === '' ? '' : `.${d}`;
 }
 
@@ -607,7 +608,7 @@ function canonDuration(lex: string, dt: string): string {
   if (H > 0n) time += `${H}H`;
   if (Min > 0n) time += `${Min}M`;
   if (S > 0n || fracRem > 0n) {
-    const fracStr = fracRem === 0n ? '' : `.${fracRem.toString().padStart(18, '0').replace(/0+$/, '')}`;
+    const fracStr = fracRem === 0n ? '' : `.${trimTrailingAsciiZeros(fracRem.toString().padStart(18, '0'))}`;
     time += `${S}${fracStr}S`;
   }
   const body = time ? `${date}T${time}` : date;

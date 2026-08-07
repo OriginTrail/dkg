@@ -151,6 +151,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
+import type { EntityRetriever } from './drag/retriever.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
@@ -584,6 +585,13 @@ export class DKGAgentBase {
   readonly queryEngine: DKGQueryEngine;
   readonly discovery: DiscoveryClient;
   readonly profileManager: ProfileManager;
+  /**
+   * OT-RFC-55 Phase 1 — optional semantic entry-point retriever for dRAG,
+   * attached by the daemon (which owns the vector store + embedder) after
+   * construction. When set, `dragAnswerLocal` uses embed→ANN→anchor→graph-expand
+   * instead of keyword retrieval. Absent ⇒ keyword fallback.
+   */
+  entityRetriever?: EntityRetriever;
   /**
    * Lazily-constructed WM→SWM async-promote queue (see
    * `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md`). Routes call into it via

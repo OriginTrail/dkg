@@ -516,6 +516,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
         pricingModel: s.pricePerCall ? 'PerInvocation' as const : 'Free' as const,
       })),
       ...(publicServed.length > 0 ? { contextGraphsServed: publicServed } : {}),
+      ...(this.config.dragNetworkServing === true && publicServed.length > 0
+        ? { dragContextGraphsServed: publicServed }
+        : {}),
     };
 
     const profileCtx = createOperationContext('publish');

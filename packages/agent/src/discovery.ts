@@ -105,6 +105,32 @@ export class DiscoveryClient {
   }
 
   /**
+   * OT-RFC-55 §5.1 — the READ side of the "context-oracle" phonebook: which peers
+   * advertise that they serve dRAG answers for the (public) context graph
+   * `contextGraphId`. Reads the capability-specific
+   * `skill:dragContextGraphsServed` triples published by {@link buildAgentProfile}
+   * into the agents registry CG. A generic CG host is not necessarily a dRAG
+   * responder because network serving is explicit opt-in.
+   *
+   * Strictly local (over this node's synced copy of the agents CG), so coverage is
+   * bounded by agents-CG gossip freshness — same caveat as {@link findAgents}.
+   */
+  async findNodesServingCG(contextGraphId: string): Promise<string[]> {
+    const sparql = `
+      SELECT DISTINCT ?peerId WHERE {
+        ?agent <${DKG}peerId> ?peerId ;
+               <${SKILL}hostingProfile> ?hosting .
+        ?hosting <${SKILL}dragContextGraphsServed> "${escapeSparqlLiteral(contextGraphId)}" .
+      }
+    `;
+    const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const peers = result.bindings
+      .map((row) => stripQuotes(row['peerId']))
+      .filter((p): p is string => typeof p === 'string' && p.length > 0);
+    return Array.from(new Set(peers));
+  }
+
+  /**
    * Deterministic, duplicate-free wallet-to-peer lookup for bounded recovery.
    * Rich profile rows are deliberately not selected here: OPTIONAL profile
    * properties can multiply rows before LIMIT and permanently hide a peer.

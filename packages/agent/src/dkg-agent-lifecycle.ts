@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_DRAG_ANSWER, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -545,6 +545,7 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createDragRemoteHandler } from './drag/remote-handler.js';
 import {
   captureContextGraphBindingGeneration,
   clearContextGraphBindingGeneration,
@@ -1779,6 +1780,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
       return queryRemoteHandler.handler(data, peerIdObj);
     });
+    // OT-RFC-55 dRAG (P3): raw, request/response-only protocol. It deliberately
+    // bypasses the durable messenger/outbox: an answer is a one-shot response,
+    // so retrying it after the request owner has gone would waste work and retain
+    // large responses in the idempotency DB. Serving is explicit operator opt-in.
+    if (this.config.dragNetworkServing === true) {
+      const dragRemoteHandler = createDragRemoteHandler({
+        isContextGraphPublic: (contextGraphId) =>
+          this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+        answerLocal: (request, options) => this.dragAnswerLocal(request, options),
+      });
+      this.router.register(PROTOCOL_DRAG_ANSWER, (data, peerId) =>
+        dragRemoteHandler(data, peerId.toString()));
+    }
     // PROTOCOL_SWM_SENDER_KEY migrated onto the substrate in rc.9 PR-8.
     // messenger.register handles envelope unwrap + receiver dedup
     // before the in-process handleSwmSenderKeyPackage call.

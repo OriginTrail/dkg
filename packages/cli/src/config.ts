@@ -367,6 +367,61 @@ export interface LlmConfig {
   baseURL?: string;
 }
 
+/** dRAG (OT-RFC-55) — verifiable answering over context graphs. */
+export interface DragConfig {
+  /** Serve public-CG dRAG requests to remote peers. Explicit opt-in; default false. */
+  networkServing?: boolean;
+  /**
+   * Permit semantic embedding/synthesis over private CG content. Default false:
+   * operators must explicitly accept that a configured model endpoint may see
+   * the question and context-graph entity text used for indexing/synthesis.
+   */
+  allowPrivateModelCalls?: boolean;
+  /**
+   * Retrieval strategy. `keyword` (default) is a predictable substring match;
+   * `local` runs an offline MiniLM model (needs the optional
+   * `@huggingface/transformers` dependency); `openai` uses an OpenAI-compatible
+   * embeddings API (e.g. a local Ollama via `embedderBaseURL`); `hashing` is a
+   * zero-dependency lexical baseline (mostly a control for testing). When set to
+   * a model, semantic retrieval is the node default; otherwise keyword.
+   */
+  embedder?: 'keyword' | 'hashing' | 'local' | 'openai';
+  /** Embedding model id for `local`/`openai` (defaults per provider). */
+  embedderModel?: string;
+  /** Base URL for an OpenAI-compatible embeddings API (falls back to `llm.baseURL`). */
+  embedderBaseURL?: string;
+  /** API key for the embeddings API (falls back to `llm.apiKey`). */
+  embedderApiKey?: string;
+  /** x402 payment settings. Disabled by default — answers are free. */
+  payments?: { enabled?: boolean };
+  /** Cap on entities retrieved per answer (default 25). */
+  maxKas?: number;
+  /** Default cap on cited facts per answer (default 12). */
+  maxCitations?: number;
+  /**
+   * EYE reasoning tier (retrieve→verify→reason→derive). Runs per-request when an
+   * answer is requested with `reason:true`; explicit operator opt-in, default
+   * false. Needs
+   * the optional `eyereasoner` dependency + rules (a rule-KA in the CG or request N3).
+   */
+  reasoning?: boolean;
+  /** Cap on KAs gathered for reasoning (default 200). */
+  reasoningMaxKas?: number;
+  /**
+   * Governance allowlist for auto-discovered rule-KAs: if set, only rules whose
+   * on-chain author is in this list are trusted (0x addresses, case-insensitive).
+   * Use on PUBLIC CGs where any publisher could plant a rule. Unset = trust every
+   * verified rule-KA in the CG (fine for curated CGs the operator controls).
+   */
+  reasoningRuleAuthors?: string[];
+  /**
+   * Allow per-request retrieval/embedder/price overrides (`embedder`,
+   * `simulatePrice`) on POST /api/answer. For development + testing only;
+   * default false (keeps the public answer contract clean).
+   */
+  experimentalOverrides?: boolean;
+}
+
 export type LocalAgentIntegrationStatus =
   | 'disconnected'
   | 'configured'
@@ -593,6 +648,8 @@ export interface DkgConfig {
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  /** dRAG (OT-RFC-55) — verifiable answering over context graphs. */
+  drag?: DragConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */

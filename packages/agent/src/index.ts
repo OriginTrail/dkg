@@ -124,6 +124,8 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { EntityRetriever, EntityRetrievalResult, RetrievedAnchor } from './drag/retriever.js';
+export type { DragFact, DragAnswerResult, DragNetworkAnswerResult, DragPerNode } from './dkg-agent-drag.js';
 export type {
   AcceptRfc64CatalogAccessSnapshotParamsV1,
   PublishAuthorCatalogExactSetSuccessorParamsV1,

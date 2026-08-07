@@ -18,6 +18,7 @@ import { DkgClient } from './client.js';
 import { registerReadTools } from './tools.js';
 import { registerAssertionTools } from './tools/assertions.js';
 import { registerMemorySearchTool } from './tools/memory-search.js';
+import { registerAnswerTool } from './tools/answer.js';
 import { registerSetupTools } from './tools/setup.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerChatTools } from './tools/chat.js';
@@ -55,6 +56,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   registerReadTools(server, client, config);
   registerAssertionTools(server, client, config);
   registerMemorySearchTool(server, client, config);
+  registerAnswerTool(server, client, config);
   registerSetupTools(server, client, config);
   registerHealthTools(server, client, config);
   registerChatTools(server, client, config);
