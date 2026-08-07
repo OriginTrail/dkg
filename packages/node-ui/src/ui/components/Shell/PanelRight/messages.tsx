@@ -1,4 +1,5 @@
 import React from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 import type { LocalAgentHistoryMessage } from '../../../api.js';
 import { MarkdownMessage } from '../../chat/MarkdownMessage.js';
 import { buildAttachmentSummary } from './attachments.js';
@@ -166,7 +167,14 @@ export function renderMessageContent(
   if (role === 'assistant' && streaming && normalized.trim() === '' && !normalizedFailure) {
     return (
       <span className="v10-chat-thinking" role="status" aria-live="polite">
-        Thinking…
+        <ThinkingOrb
+          aria-hidden="true"
+          className="v10-chat-thinking-orb"
+          state="connecting"
+          size={20}
+          theme="auto"
+        />
+        <span>Thinking…</span>
       </span>
     );
   }
@@ -205,4 +213,3 @@ export function renderMessageContent(
     </span>
   );
 }
-

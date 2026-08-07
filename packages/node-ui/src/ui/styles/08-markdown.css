@@ -301,16 +301,22 @@
   vertical-align: text-bottom;
 }
 
-/* Pre-first-token "thinking" indicator (ChatGPT-style sheen sweep).
+/* Pre-first-token "thinking" indicator (inline connecting orb + subtle sheen).
    `color: var(--text-secondary)` is declared first as the graceful
    fallback — if `background-clip: text` is unsupported the word still
    shows at the AA-clearing secondary tone (5.58:1 dark / 7.17:1
    light). The animated highlight only sweeps brighter (toward
    --text-primary), so contrast never drops below the base. */
 .v10-chat-thinking {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
+  line-height: 20px;
   color: var(--text-secondary);
+}
+
+.v10-chat-thinking > span {
   background: linear-gradient(
     90deg,
     var(--text-secondary) 0%,
@@ -325,6 +331,12 @@
   -webkit-text-fill-color: transparent;
   animation: v10-thinking-sheen 1.6s ease-in-out infinite;
 }
+
+.v10-chat-thinking-orb {
+  flex: 0 0 20px;
+  opacity: 0.86;
+}
+
 @keyframes v10-thinking-sheen {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
@@ -332,6 +344,9 @@
 @media (prefers-reduced-motion: reduce) {
   /* Static, fully legible — no sweep. */
   .v10-chat-thinking {
+    gap: 6px;
+  }
+  .v10-chat-thinking > span {
     animation: none;
     background: none;
     -webkit-text-fill-color: var(--text-secondary);

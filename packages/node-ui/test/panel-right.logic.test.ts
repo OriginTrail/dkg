@@ -519,6 +519,7 @@ describe('ConnectedAgentsTab rendering', () => {
       localSending: true,
     });
     expect(markup).toContain('v10-chat-thinking');
+    expect(markup).toContain('v10-chat-thinking-orb');
     expect(markup).toContain('Thinking');
     expect(markup).toContain('role="status"');
     // No inline caret yet — there is no text node to anchor it to.
