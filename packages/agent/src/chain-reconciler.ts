@@ -73,6 +73,12 @@ export interface PendingOrdinalRecoveryResult {
    */
   continuationOrdinal: number | undefined;
   /**
+   * Recovery has bounded work that should be scheduled immediately. This is
+   * deliberately separate from the ordered scan cursor so implementation-
+   * specific retries cannot starve untouched ordinals.
+   */
+  hasImmediateRecoveryWork: boolean;
+  /**
    * True only when recovery intentionally skipped networking because its
    * per-CG cooldown is active. This preserves the continuation without
    * scheduling an immediate retry; ordinary no-eligible-peer outcomes keep
@@ -200,6 +206,7 @@ export async function reconcileContextGraph(
   let recoveryContinuationOrdinal: number | undefined;
   let recoveryAttempted = false;
   let recoveryCooldownOnly = false;
+  let recoveryHasImmediateWork = false;
   const outstandingBefore = ordinalsToReconcile(state, head);
   const configuredLimit = deps.maxOrdinalsPerPass;
   const passLimit = configuredLimit === undefined
@@ -288,6 +295,7 @@ export async function reconcileContextGraph(
         recoveryContinuationOrdinal = recovery.continuationOrdinal;
         recoveryAttempted = recovery.attemptedOrdinals.length > 0;
         recoveryCooldownOnly = recovery.cooldownOnly === true;
+        recoveryHasImmediateWork = recovery.hasImmediateRecoveryWork;
       }
     }
 
@@ -332,7 +340,9 @@ export async function reconcileContextGraph(
     && !recoveryCooldownOnly
     && (
       recoveryAttempted
-        ? recoveryContinuationOrdinal !== undefined || hasUnvisitedCandidates
+        ? recoveryContinuationOrdinal !== undefined
+          || recoveryHasImmediateWork
+          || hasUnvisitedCandidates
         : hasUnvisitedCandidates
     );
 
