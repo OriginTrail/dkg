@@ -191,6 +191,78 @@ describe('context graph catch-up readiness classification', () => {
     expect(classification.eventPayload).toBeUndefined();
   });
 
+  it('does not let clean shared memory mask incomplete durable VM', () => {
+    const result = mixedPeerResult(0);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.peersSucceeded = 1;
+    result.sharedMemorySynced = 7;
+    result.cleanPlaneCompletions!.sharedMemory.verifiedDataPeers = 1;
+    result.diagnostics!.sharedMemory.fetchedDataTriples = 7;
+    result.diagnostics!.sharedMemory.insertedDataTriples = 7;
+    result.diagnostics!.sharedMemory.completedPhases = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      statePatch: {
+        // The existing compatibility/write-readiness bit may be opened by a
+        // persisted usable plane; the terminal job verdict may not.
+        synced: true,
+        sharedMemorySynced: true,
+      },
+      readinessPatch: {
+        durableVerified: false,
+        sharedMemoryVerified: true,
+      },
+      eventPayload: {
+        dataSynced: 0,
+        sharedMemorySynced: 7,
+      },
+    });
+    expect(classification.error).toContain('incomplete plane remains unready');
+  });
+
+  it('does not let previously verified shared memory mask a later durable-only request', () => {
+    const result = mixedPeerResult(0);
+    result.dataSynced = 0;
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.peersSucceeded = 1;
+    result.diagnostics!.durable.fetchedDataTriples = 0;
+    result.diagnostics!.durable.insertedDataTriples = 0;
+    result.diagnostics!.durable.fetchedMetaTriples = 8;
+    result.diagnostics!.durable.insertedMetaTriples = 8;
+    result.diagnostics!.durable.metaOnlyResponses = 1;
+    result.diagnostics!.durable.timedOutPhases = 0;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup: {
+        version: CONTEXT_GRAPH_READINESS_VERSION,
+        durableVerified: false,
+        sharedMemoryVerified: true,
+        updatedAt: Date.now(),
+      },
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+    });
+  });
+
   // Emptiness is only provable as a whole-round verdict: an empty response is
   // byte-identical whether the peer hosts an empty graph or has never heard of
   // it, so a clean-empty peer proves the plane only when NOBODY in the round

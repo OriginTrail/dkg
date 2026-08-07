@@ -537,8 +537,13 @@ export function classifyContextGraphCatchupReadiness(input: {
     // back into line, so letting them diverge here would be corrected away on
     // the next pass anyway — after a window in which the graph looked writable.
     const overallVerifiedPersisted = durableVerifiedPersisted || sharedMemoryVerifiedPersisted;
-    const overallVerified = durableVerified || sharedMemoryVerified;
-    const missingGraphProof = !overallVerified;
+    // Durable VM is part of every catch-up request. Shared-memory proof may
+    // make the subscription usable, but it must never make the request itself
+    // report `done` while finalized VM is still incomplete. This distinction
+    // matters for mixed SWM/VM callers: `statePatch.synced` remains the
+    // compatibility/write-readiness bit below, while `jobStatus` truthfully
+    // covers every requested plane.
+    const missingRequestedDurable = !durableVerified;
     const missingRequestedSharedMemory =
       input.includeSharedMemory && !sharedMemoryVerified;
     const madeIncompleteProgress =
@@ -547,7 +552,7 @@ export function classifyContextGraphCatchupReadiness(input: {
 
     let jobStatus: ContextGraphCatchupReadinessClassification['jobStatus'] = 'done';
     let error: string | undefined;
-    if (missingGraphProof || missingRequestedSharedMemory) {
+    if (missingRequestedDurable || missingRequestedSharedMemory) {
       jobStatus = 'unreachable';
       if (madeIncompleteProgress) {
         // The base sentence is byte-identical to what it has always been; the
@@ -561,8 +566,10 @@ export function classifyContextGraphCatchupReadiness(input: {
             result.diagnostics?.sharedMemory?.continuationPasses,
             result.diagnostics?.sharedMemory?.continuationStopReason,
           );
-      } else if (input.isPrivate && missingGraphProof) {
+      } else if (input.isPrivate && missingRequestedDurable && !sharedMemoryVerified) {
         error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
+      } else if (input.isPrivate && missingRequestedDurable) {
+        error = 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.';
       } else if (input.isPrivate) {
         error = 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
       } else {
