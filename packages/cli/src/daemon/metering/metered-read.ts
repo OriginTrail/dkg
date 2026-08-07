@@ -90,7 +90,7 @@ export function authoriseMeteredRead(args: {
   scheduleDigest: string;
   priceVectorDigest: string;
   now?: number;
-}): { ok: false; status: number; code: string; detail?: string } | { ok: true; principal: string; label: string } {
+}): { ok: false; status: number; code: string; detail?: string } | { ok: true; principal: string; label: string; bindingMode: "eip191" | "registry" } {
   const { request: r, cfg, home, chainId } = args;
   const now = args.now ?? Date.now();
 
@@ -129,6 +129,24 @@ export function authoriseMeteredRead(args: {
   //    production read stays in shadow.
   const principal = r.delegation.tabPrincipal;
   const willBill = !isExempt(principal, cfg);
+
+  // Binding mode: EIP-191 self-proof vs operator registry. anchor.label is
+  // "self-proved:<addr>" only for a verified EIP-191 proof.
+  const bindingMode: "eip191" | "registry" = anchor.label.startsWith("self-proved:") ? "eip191" : "registry";
+
+  // OpenClaw-found: the policy "registry authorizes only the zero-value
+  // preflight; a funded call requires EIP-191" was stated in the design and in
+  // chat, but NOT enforced here — a registry-only anchor would authorize a
+  // BILLABLE read. Enforce it as an affirmative positive check: a funded call
+  // must present a verified EIP-191 proof, never merely "fail to be
+  // unregistered". Defence in depth over the anchor's precedence rule.
+  if (willBill && bindingMode !== "eip191") {
+    return {
+      ok: false, status: 403, code: "E_FUNDED_REQUIRES_BINDING",
+      detail: "A billable read requires a verified EIP-191 wallet binding. Registry approval authorizes the zero-value preflight only.",
+    };
+  }
+
   if (willBill && !activeOpening(home, principal)) {
     return { ok: false, status: 402, code: "E_NO_OPEN_TAB", detail: "This principal has no open tab to bill against." };
   }
@@ -143,7 +161,7 @@ export function authoriseMeteredRead(args: {
     };
   }
 
-  return { ok: true, principal, label: anchor.label };
+  return { ok: true, principal, label: anchor.label, bindingMode };
 }
 
 /**

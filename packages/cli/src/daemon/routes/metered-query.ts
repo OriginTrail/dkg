@@ -135,6 +135,7 @@ export async function handleMeteredQueryRoutes(ctx: RequestContext): Promise<voi
     result,
     metering: {
       principal: outcome.principal,
+      bindingMode: auth.bindingMode,
       billed: outcome.billed,
       costMicroTrac: outcome.costMicroTrac,
       tab: outcome.tab,

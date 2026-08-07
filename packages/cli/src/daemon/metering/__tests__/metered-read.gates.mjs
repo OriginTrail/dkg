@@ -24,14 +24,25 @@ const D = await import(join(dist, "metering/deposit-rail.js"));
 const C = await import(join(dist, "metering/capability.js"));
 const RM = await import(join(dist, "metering/read-meter.js"));
 const S = await import(join(dist, "metering/stage3-endpoint.js"));
+const B = await import(join(dist, "metering/evm-binding.js"));
+const { Wallet } = await import("ethers");
+
+// EIP-191 proof helper: the EVM owner signs a binding over the ed25519 key.
+const CHAINID = 8453;
+async function mkProof(evm, ed25519Pub) {
+  const base = { domain: B.BINDING_DOMAIN, principal: evm.address, walletPublicKeyPem: ed25519Pub,
+    chainId: CHAINID, notAfter: new Date(Date.now() + 7 * 864e5).toISOString() };
+  return { ...base, evmSignature: await evm.signMessage(B.bindingStatement(base)) };
+}
 
 let pass = 0, fail = 0;
 const ok = (n, c, d) => { if (c) { pass++; console.log(`  ✓ ${n}`); } else { fail++; console.log(`  ✗ ${n}${d ? ` — ${d}` : ""}`); } };
 
 L.setDebitGate((h, p, now) => D.debitAllowed(h, p, now));
 
-const BUYER = "0x8A87ea7c0fBC3431f20B5B26dd9f7f32571Aa2ba";
-const OTHER = "0x1111111111111111111111111111111111111111";
+const buyerEvm = Wallet.createRandom(), otherEvm = Wallet.createRandom();
+const BUYER = buyerEvm.address;
+const OTHER = otherEvm.address;
 const PROVIDER = "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab";
 const CHAIN = 8453;
 const wallet = generateKeyPairSync("ed25519"), session = generateKeyPairSync("ed25519");
@@ -65,9 +76,10 @@ const shadowCfg = { mode: "shadow", readAskMicroPer1k: 100, exemptPrincipals: ne
 const SPARQL = "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 5";
 const BODY = JSON.stringify({ bindings: Array.from({ length: 20 }, (_, i) => ({ s: `urn:x:${i}` })) });
 
+const buyerProof = await mkProof(buyerEvm, pem(wallet.publicKey, "pub"));
 const authArgs = (over = {}) => ({
   home, chainId: CHAIN, cfg: enforceCfg,
-  request: { delegation: delegation(), sparql: SPARQL, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+  request: { delegation: delegation(), sparql: SPARQL, bindingProof: buyerProof, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
   state: freshState(),
   route: "POST /api/metering/read", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main",
   scheduleDigest: sched, priceVectorDigest: sched, ...over,
@@ -98,9 +110,10 @@ console.log("authorisation follows the DELEGATION, not the transport token:");
 
   // A principal with no tab cannot read on credit.
   const noTab = delegation({ tabPrincipal: OTHER, capabilityId: "cap-other" }, otherWallet);
+  const otherProof = await mkProof(otherEvm, pem(otherWallet.publicKey, "pub"));
   const c = M.authoriseMeteredRead(authArgs({
     cfg: { ...enforceCfg, enforcedPrincipals: new Set([BUYER, OTHER]) },
-    request: { delegation: noTab, sparql: SPARQL, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+    request: { delegation: noTab, sparql: SPARQL, bindingProof: otherProof, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
   }));
   ok("a principal with no open tab is refused 402, not served on credit",
     c.ok === false && c.status === 402 && c.code === "E_NO_OPEN_TAB", JSON.stringify(c));
@@ -181,13 +194,40 @@ console.log("\nfunds run out honestly:");
     L.balance(home, BUYER).balance === before && before >= 0, String(L.balance(home, BUYER).balance));
 }
 
+console.log("\nfunded call requires EIP-191, not just registry (OpenClaw-found):");
+{
+  // BUYER is registry-approved in this suite's fixture but has NO EIP-191 proof.
+  // A billable read for it must now be refused; the zero-value path still works.
+  const billable = M.authoriseMeteredRead({
+    home, chainId: CHAIN, cfg: enforceCfg,
+    request: { delegation: delegation(), sparql: SPARQL, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+    state: freshState(), route: "POST /api/metering/read", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main",
+    scheduleDigest: sched, priceVectorDigest: sched,
+  });
+  ok("a BILLABLE read on a registry-only anchor is refused E_FUNDED_REQUIRES_BINDING",
+    billable.ok === false && billable.code === "E_FUNDED_REQUIRES_BINDING", JSON.stringify(billable));
+
+  // The SAME principal, same registry anchor, in SHADOW mode is allowed — the
+  // registry legitimately authorizes the zero-value path.
+  const shadowRead = M.authoriseMeteredRead({
+    home, chainId: CHAIN, cfg: shadowCfg,
+    request: { delegation: delegation(), sparql: SPARQL, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+    state: freshState(), route: "POST /api/metering/read", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main",
+    scheduleDigest: sched, priceVectorDigest: sched,
+  });
+  ok("...but the SAME registry anchor is fine in shadow (zero-value)", shadowRead.ok === true, JSON.stringify(shadowRead));
+  ok("the authorised read reports its binding mode for audit", shadowRead.ok && shadowRead.bindingMode === "registry");
+}
+
 console.log("\ngradual release — at most one un-countersigned billable leg (Q3):");
 {
   const { createHash } = await import("node:crypto");
   const sha = (b) => createHash("sha256").update(b).digest("hex");
   // Fresh principal + tab so prior debits in this file do not pollute the count.
-  const GR = "0x9999999999999999999999999999999999999999";
+  const grEvm = Wallet.createRandom();
+  const GR = grEvm.address;
   const grWallet = generateKeyPairSync("ed25519");
+  const grProof = await mkProof(grEvm, pem(grWallet.publicKey, "pub"));
   writeFileSync(join(process.env.DKG_HOME, "metering", "buyer-registry.json"), JSON.stringify({
     principals: {
       [BUYER.toLowerCase()]: { label: "buyer", walletPublicKeyPem: pem(wallet.publicKey, "pub") },
@@ -221,7 +261,7 @@ console.log("\ngradual release — at most one un-countersigned billable leg (Q3
   })();
   const blocked = M.authoriseMeteredRead({
     home, chainId: CHAIN, cfg: { ...enforceCfg, enforcedPrincipals: new Set([GR]) },
-    request: { delegation: grDeleg, sparql: SPARQL, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+    request: { delegation: grDeleg, sparql: SPARQL, bindingProof: grProof, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
     state: freshState(), route: "POST /api/metering/read", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main", scheduleDigest: sched, priceVectorDigest: sched,
   });
   ok("the NEXT billable read is refused 409 while a leg is un-countersigned",
