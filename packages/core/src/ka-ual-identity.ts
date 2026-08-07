@@ -23,6 +23,25 @@ export const MAX_KA_ID_V1 = (1n << 256n) - 1n;
 const EVM_ADDRESS_ANY_CASE = /^0x[0-9a-fA-F]{40}$/;
 const CANONICAL_UNSIGNED_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 
+/**
+ * Can this author receive a graph-scoped KA number?
+ *
+ * The rootless KA id packs the author into its high 160 bits, so only a
+ * 20-byte EVM address can own a number — the allocator rejects anything else
+ * (`ethers.getAddress` throws). A node with no registered default agent falls
+ * back to its libp2p peerId, which fails here, and the caller then falls back
+ * to the legacy name-keyed WM graph instead of hard-failing.
+ *
+ * This is a policy-level rule, not formatting: it decides whether create and
+ * legacy-WM migration use graph-scoped identity or legacy storage, so the
+ * agent-side allocator resolver and the publisher's own self-allocation guard
+ * MUST agree. Same reasoning as this module's UAL rule — one home, so the two
+ * sides cannot drift.
+ */
+export function isAllocatableKaAuthorV1(author: string | undefined): boolean {
+  return typeof author === 'string' && EVM_ADDRESS_ANY_CASE.test(author);
+}
+
 export class KaUalIdentityError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);

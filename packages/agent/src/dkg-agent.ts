@@ -87,6 +87,7 @@ import {
   pickNetworkTunables,
   ENTITY_PRED_ALT,
   LegacyKnowledgeAssetReadOnlyError,
+  isAllocatableKaAuthorV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
@@ -2576,28 +2577,60 @@ export class DKGAgent extends DKGAgentBase {
   get assertion() {
     const agent = this;
     const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    // The single identity-allocation lane for every operation that can mint a
+    // graph-scoped KA number (create + legacy-WM migrate). Both operations
+    // MUST allocate identity for the same resolved author, so the gate lives
+    // in one place:
+    //
+    // Gate on a valid 0x EVM author: when no default agent is registered,
+    // `agentAddress` falls back to the libp2p peerId, which the allocator
+    // rejects (`ethers.getAddress` throws). A peerId-author draft falls back
+    // to the legacy name-keyed WM graph instead of hard-failing. Mirrors the
+    // publisher's own self-allocation guard.
+    // Allow an explicit author (the daemon's import-file route acts for the
+    // request's agent) so the kaNumber mints for the RIGHT address and data
+    // lands in that agent's per-KA …/_working_memory/{addr}/{number} graph
+    // (not the default agent's, and not the legacy name-keyed fallback used
+    // when no number is minted).
+    const resolveAuthorAndAllocator = (explicitAuthor: string | undefined): {
+      author: string;
+      allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
+    } => {
+      const author = explicitAuthor ?? agentAddress;
+      const isEvmAuthor = isAllocatableKaAuthorV1(author);
+      // The allocator MUST consume `author`'s lane, never the outer default:
+      // the number is minted into the reserved UAL the lifecycle is stamped
+      // with, so allocating from a different address strands the draft under
+      // one author with an identity from another (finalize then fails with
+      // KaIdNamespaceMismatch, OT-RFC-43 §F2).
+      const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
+        ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, author)
+        : undefined;
+      return { author, allocateKaNumber };
+    };
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<string> {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
         // KA's identity from the first write. assertionCreate only allocates when the
         // draft has no preserved kaId (the re-open guard lives there), so passing the
         // callback is safe — re-opens reuse the preserved identity.
-        //
-        // Gate on a valid 0x EVM author: when no default agent is registered,
-        // `agentAddress` falls back to the libp2p peerId, which the allocator rejects
-        // (`ethers.getAddress` throws). A peerId-author draft falls back to the legacy
-        // name-keyed WM graph instead of hard-failing create. Mirrors the publisher's
-        // own self-allocation guard.
-        // Allow an explicit author (the daemon's import-file route acts for the request's
-        // agent) so the kaNumber mints for the RIGHT address and data lands in that agent's
-        // per-KA …/_working_memory/{addr}/{number} graph (not the default agent's, and not
-        // the legacy name-keyed fallback used when no number is minted).
-        const author = opts?.agentAddress ?? agentAddress;
-        const isEvmAuthor = /^0x[a-fA-F0-9]{40}$/.test(author);
-        const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
-          ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, author)
-          : undefined;
+        const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
         return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, { allocateKaNumber });
+      },
+
+      async migrateLegacyRootScopedWorkingMemory(
+        contextGraphId: string,
+        name: string,
+        opts?: { subGraphName?: string; agentAddress?: string },
+      ) {
+        const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
+        return agent.publisher.migrateLegacyRootScopedWorkingMemory(
+          contextGraphId,
+          name,
+          author,
+          opts?.subGraphName,
+          { allocateKaNumber },
+        );
       },
 
       /**

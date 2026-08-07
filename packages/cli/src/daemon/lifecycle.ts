@@ -416,6 +416,7 @@ import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
+import { buildMemoryToolContext } from './memory-tool-context.js';
 import {
   createPromoteWorkerSupervisor,
   type PromoteWorkerConfig,
@@ -3204,68 +3205,10 @@ export async function runDaemonInner(
     }
   });
 
-  const agentToolsContext = {
-    query: (
-      sparql: string,
-      opts?: {
-        contextGraphId?: string;
-        graphSuffix?: "_shared_memory";
-        includeSharedMemory?: boolean;
-        view?: "working-memory" | "shared-working-memory" | "verifiable-memory";
-        agentAddress?: string;
-        assertionName?: string;
-        subGraphName?: string;
-      },
-    ) => agent.query(sparql, opts),
-    createAssertion: async (
-      contextGraphId: string,
-      name: string,
-      opts?: { subGraphName?: string },
-    ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> => {
-      try {
-        const assertionUri = await agent.assertion.create(
-          contextGraphId,
-          name,
-          opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
-        );
-        return { assertionUri, alreadyExists: false };
-      } catch (err: any) {
-        if (err?.message?.includes("already exists")) {
-          return { assertionUri: null, alreadyExists: true };
-        }
-        throw err;
-      }
-    },
-    writeAssertion: async (
-      contextGraphId: string,
-      name: string,
-      quads: any[],
-      opts?: { subGraphName?: string },
-    ): Promise<{ written: number }> => {
-      await agent.assertion.write(
-        contextGraphId,
-        name,
-        quads,
-        opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
-      );
-      emitMemoryGraphChanged({
-        contextGraphId,
-        layers: ["wm"],
-        subGraphName: opts?.subGraphName,
-        operation: "assertion_written",
-        source: "agent_tool",
-        counts: { triples: quads.length },
-      });
-      return { written: quads.length };
-    },
-    createContextGraph: (opts: {
-      id: string;
-      name: string;
-      description?: string;
-      private?: boolean;
-    }) => agent.createContextGraph(opts),
-    listContextGraphs: () => agent.listContextGraphs(),
-  };
+  // The chat-memory glue (query/create/write surface + the legacy chat-WM
+  // migration behind `createAssertion`) lives in `buildMemoryToolContext` so
+  // the daemon-wiring contract stays unit-testable without a real agent.
+  const agentToolsContext = buildMemoryToolContext(agent, emitMemoryGraphChanged);
   // See `resolveMemoryAgentAddress` for the write/read-URI invariant
   // this encodes (issue #277). The helper is exported purely so the
   // daemon-wiring contract stays unit-testable without a real agent.

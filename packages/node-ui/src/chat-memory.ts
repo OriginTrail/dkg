@@ -18,20 +18,25 @@ export interface MemoryToolContext {
     },
   ) => Promise<any>;
   /**
-   * Create a per-agent Working Memory assertion graph. Idempotent: "already
-   * exists" is resolved quietly, any other error surfaces.
+   * ENSURE a per-agent Working Memory assertion graph exists and is
+   * writable. Idempotent: "already exists" is resolved quietly, any other
+   * error surfaces. The implementation owns whatever storage upgrades that
+   * takes — the daemon, for example, migrates a legacy root-scoped
+   * `agent-context/chat-turns` draft here before creating (#2149). The
+   * manager only describes the assertion it wants; it never orchestrates
+   * publisher storage concerns.
    */
   createAssertion: (
     contextGraphId: string,
     name: string,
-    opts?: { subGraphName?: string },
+    opts?: { subGraphName?: string; agentAddress?: string },
   ) => Promise<{ assertionUri: string | null; alreadyExists: boolean }>;
   /** Append quads into an existing Working Memory assertion graph. */
   writeAssertion: (
     contextGraphId: string,
     name: string,
     quads: any[],
-    opts?: { subGraphName?: string },
+    opts?: { subGraphName?: string; agentAddress?: string },
   ) => Promise<{ written: number }>;
   createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
   listContextGraphs: () => Promise<any[]>;
@@ -154,8 +159,11 @@ export interface ImportResult {
  * extraction). v1 of the openclaw-dkg-primary-memory work intentionally
  * defers that migration; follow-up work tracks it.
  */
-const AGENT_CONTEXT_GRAPH = 'agent-context';
-const CHAT_TURNS_ASSERTION = 'chat-turns';
+// Exported so the daemon's MemoryToolContext implementation can key
+// chat-specific ensure behavior (the legacy-WM migration for exactly this
+// assertion, #2149) off the same identifiers the manager writes with.
+export const AGENT_CONTEXT_GRAPH = 'agent-context';
+export const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -487,6 +495,27 @@ export class ChatMemoryManager {
     };
   }
 
+  private wmMutationOpts(): { agentAddress?: string } {
+    return { agentAddress: this.agentAddress };
+  }
+
+  /**
+   * The ONE route every chat-turn mutation takes. Target graph, assertion
+   * name, and the resolved-agent mutation options are owned here, so a new
+   * write path cannot silently land in a different graph or skip the
+   * agentAddress that reads resolve under (#277, #2149).
+   */
+  private async writeChatTurns(
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+  ): Promise<void> {
+    await this.tools.writeAssertion(
+      this.agentContextGraph,
+      this.chatTurnsAssertion,
+      quads,
+      this.wmMutationOpts(),
+    );
+  }
+
   /**
    * Lazy creation of the chat-turn context graph + assertion. Runs on the
    * first `storeChatExchange` / `ensureInitialized` call and is idempotent
@@ -520,7 +549,11 @@ export class ChatMemoryManager {
     const assertionKey = `${this.agentContextGraph}::${this.chatTurnsAssertion}`;
     if (!this.assertionEnsured.has(assertionKey)) {
       try {
-        await this.tools.createAssertion(this.agentContextGraph, this.chatTurnsAssertion);
+        await this.tools.createAssertion(
+          this.agentContextGraph,
+          this.chatTurnsAssertion,
+          this.wmMutationOpts(),
+        );
         this.assertionEnsured.add(assertionKey);
       } catch (err: any) {
         if (err?.message?.includes('already exists')) {
@@ -641,7 +674,7 @@ export class ChatMemoryManager {
       }
     }
 
-    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+    await this.writeChatTurns(quads);
     this.knownSessions.add(sessionId);
 
     // Fire-and-forget: extract entity mentions and write them as separate triples
@@ -758,7 +791,7 @@ export class ChatMemoryManager {
         graph: '',
       });
     }
-    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+    await this.writeChatTurns(quads);
   }
 
   private async extractAndWriteMentions(
@@ -806,7 +839,7 @@ export class ChatMemoryManager {
     }
 
     if (quads.length > 0) {
-      await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+      await this.writeChatTurns(quads);
     }
   }
 
@@ -881,7 +914,7 @@ export class ChatMemoryManager {
         { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${new Date().toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       );
     }
-    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+    await this.writeChatTurns(quads);
     return triples.length;
   }
 

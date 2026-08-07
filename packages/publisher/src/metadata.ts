@@ -1900,6 +1900,11 @@ export const VM_CURRENT_ASSERTION_PRED = `${DKG}vmCurrentAssertion`;
 export const KA_ID_PRED = `${DKG}kaId`;
 export const RESERVED_UAL_PRED = `${DKG}reservedUal`;
 export const PROV_WAS_REVISION_OF = `${PROV}wasRevisionOf`;
+// In-flight lane markers stamped on the lifecycle URN while a share /
+// promote operation is outstanding. Their presence means the draft is NOT
+// purely local — the legacy-WM migration eligibility gate keys off them.
+export const SHARE_OPERATION_ID_PRED = `${DKG}shareOperationId`;
+export const PROMOTE_OPERATION_INTENT_PRED = `${DKG}promoteOperationIntent`;
 
 /** OT-RFC-43 §10.5.4 per-layer / overall KA status enum (string-stable). */
 export type KaStatus = 'draft-open' | 'wm-sealed' | 'swm-shared' | 'vm-confirmed';
