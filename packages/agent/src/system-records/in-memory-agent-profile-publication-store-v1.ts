@@ -4,6 +4,7 @@ import {
   SYSTEM_RECORD_MAX_OBJECT_CACHE_BYTES,
   SYSTEM_RECORD_MAX_OBJECT_CACHE_OBJECTS,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
+  parseCanonicalSystemRecordInventoryInternalObjectV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
   type SignedAgentProfileHeadEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
@@ -17,12 +18,12 @@ import {
   type AgentProfileProducerPublicationStoreV1,
 } from './agent-profile-producer-v1.js';
 import {
-  cloneSystemRecordProviderArtifactV1,
-  systemRecordProviderArtifactKeyV1,
-  type SystemRecordProviderArtifactV1,
-  type SystemRecordProviderLookupV1,
-  type SystemRecordProviderRepositoryV1,
-} from './provider-v1.js';
+  cloneSystemRecordArtifactV1,
+  systemRecordArtifactKeyV1,
+  type SystemRecordArtifactLookupV1,
+  type SystemRecordArtifactRepositoryV1,
+  type SystemRecordArtifactV1,
+} from './artifact-v1.js';
 
 export interface InMemoryAgentProfilePublicationStoreOptionsV1 {
   readonly maxObjects?: number;
@@ -30,7 +31,7 @@ export interface InMemoryAgentProfilePublicationStoreOptionsV1 {
 }
 
 export interface InMemoryAgentProfilePublicationStoreV1
-  extends AgentProfileProducerPublicationStoreV1, SystemRecordProviderRepositoryV1 {}
+  extends AgentProfileProducerPublicationStoreV1, SystemRecordArtifactRepositoryV1 {}
 
 /** Default-off test/composition store. Production lifecycle must supply durable storage. */
 export function createInMemoryAgentProfilePublicationStoreV1(
@@ -44,12 +45,12 @@ export function createInMemoryAgentProfilePublicationStoreV1(
     || maxBytes > SYSTEM_RECORD_MAX_OBJECT_CACHE_BYTES) {
     throw new TypeError('publication-store caps must be positive safe integers');
   }
-  const artifacts = new Map<string, SystemRecordProviderArtifactV1>();
+  const artifacts = new Map<string, SystemRecordArtifactV1>();
+  const rootEnvelopes = new Map<string, SignedSystemRecordRootDescriptorEnvelopeV1>();
   let inventory: SystemRecordInventoryTreeSnapshotV1 | null = null;
   let currentHead: SignedAgentProfileHeadEnvelopeV1 | null = null;
   let rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1 | null = null;
   let bytes = 0;
-  let rootBytes = 0;
   let prepared = false;
   return Object.freeze({
     snapshot() {
@@ -59,12 +60,12 @@ export function createInMemoryAgentProfilePublicationStoreV1(
       });
     },
     resolveArtifact(
-      reference: Pick<SystemRecordProviderArtifactV1, 'objectKind' | 'objectDigest'>,
-    ): SystemRecordProviderArtifactV1 | null {
-      const artifact = artifacts.get(systemRecordProviderArtifactKeyV1(reference));
+      reference: Pick<SystemRecordArtifactV1, 'objectKind' | 'objectDigest'>,
+    ): SystemRecordArtifactV1 | null {
+      const artifact = artifacts.get(systemRecordArtifactKeyV1(reference));
       return artifact === undefined
         ? null
-        : cloneSystemRecordProviderArtifactV1(artifact);
+        : cloneSystemRecordArtifactV1(artifact);
     },
     prepareCommit(input: AgentProfileProducerPublicationCommitV1): AgentProfileProducerPublicationCommitLeaseV1 {
       if (prepared) throw new Error('publication store already has a prepared commit');
@@ -82,7 +83,7 @@ export function createInMemoryAgentProfilePublicationStoreV1(
         let addedObjects = 0;
         let addedBytes = 0;
         for (const artifact of publicationArtifacts) {
-          const key = systemRecordProviderArtifactKeyV1(artifact);
+          const key = systemRecordArtifactKeyV1(artifact);
           const existing = artifacts.get(key);
           if (existing !== undefined) {
             if (!Buffer.from(existing.canonicalBytes).equals(Buffer.from(artifact.canonicalBytes))) {
@@ -94,9 +95,16 @@ export function createInMemoryAgentProfilePublicationStoreV1(
           addedBytes += artifact.canonicalBytes.byteLength;
         }
         const nextRootBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(input.rootEnvelope);
-        const nextObjectCount = artifacts.size + addedObjects + 1;
+        const existingRoot = rootEnvelopes.get(input.rootEnvelope.objectDigest);
+        if (existingRoot !== undefined && !Buffer.from(
+          canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(existingRoot),
+        ).equals(Buffer.from(nextRootBytes))) {
+          throw new Error('content-addressed provider root collision');
+        }
+        const addsRoot = existingRoot === undefined;
+        const nextObjectCount = artifacts.size + addedObjects + rootEnvelopes.size + (addsRoot ? 1 : 0);
         if (nextObjectCount > maxObjects
-          || bytes + addedBytes - rootBytes + nextRootBytes.byteLength > maxBytes) {
+          || bytes + addedBytes + (addsRoot ? nextRootBytes.byteLength : 0) > maxBytes) {
           throw new Error('system-record provider cache capacity exhausted');
         }
         const nextHead = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
@@ -114,15 +122,15 @@ export function createInMemoryAgentProfilePublicationStoreV1(
             }
             for (const artifact of publicationArtifacts) {
               artifacts.set(
-                systemRecordProviderArtifactKeyV1(artifact),
-                cloneSystemRecordProviderArtifactV1(artifact),
+                systemRecordArtifactKeyV1(artifact),
+                cloneSystemRecordArtifactV1(artifact),
               );
             }
             inventory = input.inventory;
-            rootEnvelope = Object.freeze(structuredClone(input.rootEnvelope));
+            rootEnvelope = existingRoot ?? Object.freeze(structuredClone(input.rootEnvelope));
+            if (addsRoot) rootEnvelopes.set(rootEnvelope.objectDigest, rootEnvelope);
             currentHead = nextHead;
-            bytes += addedBytes - rootBytes + nextRootBytes.byteLength;
-            rootBytes = nextRootBytes.byteLength;
+            bytes += addedBytes + (addsRoot ? nextRootBytes.byteLength : 0);
             live = false;
             prepared = false;
           },
@@ -137,25 +145,57 @@ export function createInMemoryAgentProfilePublicationStoreV1(
         throw error;
       }
     },
-    async resolve(lookup: SystemRecordProviderLookupV1): Promise<SystemRecordProviderArtifactV1 | null> {
+    async resolve(lookup: SystemRecordArtifactLookupV1): Promise<SystemRecordArtifactV1 | null> {
       if (lookup.type === 'root') {
         if (rootEnvelope === null) return null;
-        return cloneSystemRecordProviderArtifactV1({
+        return cloneSystemRecordArtifactV1({
           objectKind: 'root-descriptor',
           objectDigest: rootEnvelope.objectDigest,
           canonicalBytes: canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(rootEnvelope),
         });
       }
-      if (lookup.rootDescriptorDigest !== undefined) {
-        if (rootEnvelope === null || lookup.rootDescriptorDigest !== rootEnvelope.objectDigest) return null;
+      if (lookup.type === 'inventory-object') {
+        const requestedRoot = rootEnvelopes.get(lookup.rootDescriptorDigest);
+        if (requestedRoot === undefined
+          || !inventoryLookupMatchesV1(requestedRoot, lookup, artifacts)) return null;
       }
-      const artifact = artifacts.get(systemRecordProviderArtifactKeyV1({
+      const artifact = artifacts.get(systemRecordArtifactKeyV1({
         objectKind: lookup.objectKind,
         objectDigest: lookup.objectDigest,
       }));
       return artifact === undefined
         ? null
-        : cloneSystemRecordProviderArtifactV1(artifact);
+        : cloneSystemRecordArtifactV1(artifact);
     },
   });
+}
+
+function inventoryLookupMatchesV1(
+  rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1,
+  lookup: Extract<SystemRecordArtifactLookupV1, { type: 'inventory-object' }>,
+  artifacts: ReadonlyMap<string, SystemRecordArtifactV1>,
+): boolean {
+  let expectedDigest = rootEnvelope.object.treeRootDigest;
+  let expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined;
+  for (let depth = 0; depth < lookup.path.length; depth += 1) {
+    const parent = artifacts.get(systemRecordArtifactKeyV1({
+      objectKind: 'inventory-internal',
+      objectDigest: expectedDigest,
+    }));
+    if (parent === undefined) return false;
+    try {
+      const internal = parseCanonicalSystemRecordInventoryInternalObjectV1(
+        parent.canonicalBytes,
+        depth === 0,
+      );
+      const entry = internal.entries[lookup.path[depth]!];
+      if (entry === undefined) return false;
+      expectedDigest = entry.childDigest;
+      expectedKind = entry.childKind;
+    } catch {
+      return false;
+    }
+  }
+  return expectedDigest === lookup.objectDigest
+    && (expectedKind === undefined || expectedKind === lookup.objectKind);
 }

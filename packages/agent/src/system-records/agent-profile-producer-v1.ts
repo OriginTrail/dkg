@@ -61,9 +61,9 @@ import {
 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import {
-  systemRecordProviderArtifactKeyV1,
-  type SystemRecordProviderArtifactV1,
-} from './provider-v1.js';
+  systemRecordArtifactKeyV1,
+  type SystemRecordArtifactV1,
+} from './artifact-v1.js';
 
 const UTF8 = new TextEncoder();
 
@@ -112,7 +112,7 @@ export interface AgentProfileProducerPublicationCommitV1 {
 }
 
 type AgentProfileProducerArtifactV1<Kind extends SystemRecordObjectKindV1> = Readonly<
-  Omit<SystemRecordProviderArtifactV1, 'objectKind'> & { objectKind: Kind }
+  Omit<SystemRecordArtifactV1, 'objectKind'> & { objectKind: Kind }
 >;
 
 export interface AgentProfileProducerPublicationArtifactsV1 {
@@ -126,7 +126,7 @@ export interface AgentProfileProducerPublicationArtifactsV1 {
 
 export function flattenAgentProfileProducerPublicationArtifactsV1(
   artifacts: AgentProfileProducerPublicationArtifactsV1,
-): readonly SystemRecordProviderArtifactV1[] {
+): readonly SystemRecordArtifactV1[] {
   return Object.freeze([
     artifacts.head,
     artifacts.bundle,
@@ -147,8 +147,8 @@ export interface AgentProfileProducerPublicationStoreV1 {
   }>;
   /** Resolve retained authority history by content address, without wire semantics. */
   resolveArtifact(
-    reference: Pick<SystemRecordProviderArtifactV1, 'objectKind' | 'objectDigest'>,
-  ): SystemRecordProviderArtifactV1 | null | Promise<SystemRecordProviderArtifactV1 | null>;
+    reference: Pick<SystemRecordArtifactV1, 'objectKind' | 'objectDigest'>,
+  ): SystemRecordArtifactV1 | null | Promise<SystemRecordArtifactV1 | null>;
   /** Atomically verify and reserve the expected snapshot until commit or abort. */
   prepareCommit(
     input: AgentProfileProducerPublicationCommitV1,
@@ -404,7 +404,7 @@ export function createAgentProfileProducerV1(
     });
     const artifacts = flattenAgentProfileProducerPublicationArtifactsV1(publicationArtifactSet);
     const artifactsByKey = new Map(
-      artifacts.map((artifact) => [systemRecordProviderArtifactKeyV1(artifact), artifact]),
+      artifacts.map((artifact) => [systemRecordArtifactKeyV1(artifact), artifact]),
     );
     const verifiedClosure = await buildAgentProfileVerificationClosureV1(headDigest, {
       nowMs: verifierNowMs,
@@ -413,7 +413,7 @@ export function createAgentProfileProducerV1(
           objectKind,
           objectDigest: digest,
         } as const;
-        const artifact = artifactsByKey.get(systemRecordProviderArtifactKeyV1(reference))
+        const artifact = artifactsByKey.get(systemRecordArtifactKeyV1(reference))
           ?? await options.store.resolveArtifact(reference);
         return artifact === undefined
           || artifact === null

@@ -37,10 +37,9 @@ import {
   type InMemoryAgentProfilePublicationStoreV1,
 } from '../../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 import {
-  systemRecordProviderArtifactKeyV1,
-  type SystemRecordProviderArtifactV1,
-  type SystemRecordProviderLookupV1,
-} from '../../src/system-records/provider-v1.js';
+  type SystemRecordArtifactLookupV1,
+  type SystemRecordArtifactV1,
+} from '../../src/system-records/artifact-v1.js';
 
 export const NETWORK = 'base:84532' as const;
 export const OTHER_PRIVATE_KEY = `0x${'22'.repeat(32)}`;
@@ -227,7 +226,7 @@ export async function signTransitionEnvelope(
 export function envelopeArtifact(
   objectKind: 'agent-profile-head' | 'authority-transition',
   envelope: SignedAgentProfileHeadEnvelopeV1 | SignedAgentProfileAuthorityTransitionEnvelopeV1,
-): SystemRecordProviderArtifactV1 {
+): SystemRecordArtifactV1 {
   return Object.freeze({
     objectKind,
     objectDigest: envelope.objectDigest,
@@ -256,11 +255,11 @@ export function observingStore(
   });
 }
 
-export function rootRequest(): SystemRecordProviderLookupV1 {
+export function rootRequest(): SystemRecordArtifactLookupV1 {
   return { type: 'root' };
 }
 
-export function controlRequest(digest: Digest32V1): SystemRecordProviderLookupV1 {
+export function controlRequest(digest: Digest32V1): SystemRecordArtifactLookupV1 {
   return { type: 'object', objectKind: 'agent-profile-head', objectDigest: digest };
 }
 

@@ -12,11 +12,13 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  type SystemRecordArtifactLookupV1,
+  type SystemRecordArtifactRepositoryV1,
+  type SystemRecordArtifactV1,
+} from '../src/system-records/artifact-v1.js';
+import {
   createSystemRecordProviderV1,
-  type SystemRecordProviderArtifactV1,
   type SystemRecordProviderExchangeV1,
-  type SystemRecordProviderLookupV1,
-  type SystemRecordProviderRepositoryV1,
 } from '../src/system-records/provider-v1.js';
 import {
   createSystemRecordProviderTokenBucketV1,
@@ -58,7 +60,7 @@ describe('system-record provider V1', () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const resolveStarted = Promise.withResolvers<void>();
-    const repo: SystemRecordProviderRepositoryV1 = {
+    const repo: SystemRecordArtifactRepositoryV1 = {
       async resolve() {
         resolveStarted.resolve();
         await blocked;
@@ -218,7 +220,7 @@ describe('system-record provider V1', () => {
     const rootBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(rootEnvelope);
     const inventoryObject = inventory.objects.get(inventory.descriptor.treeRootDigest)!;
     const admission = frameAdmission();
-    const lookups: SystemRecordProviderLookupV1[] = [];
+    const lookups: SystemRecordArtifactLookupV1[] = [];
     const provider = createSystemRecordProviderV1({
       networkId: NETWORK,
       repository: {
@@ -273,7 +275,8 @@ describe('system-record provider V1', () => {
     expect(lookups).toEqual([
       { type: 'root' },
       {
-        type: 'object',
+        type: 'inventory-object',
+        path: [],
         objectKind: inventoryObject.objectKind,
         objectDigest: inventory.descriptor.treeRootDigest,
         rootDescriptorDigest: inventory.descriptorDigest,
@@ -420,8 +423,8 @@ describe('system-record provider V1', () => {
 });
 
 function repository(
-  artifact: SystemRecordProviderArtifactV1 | null,
-): SystemRecordProviderRepositoryV1 {
+  artifact: SystemRecordArtifactV1 | null,
+): SystemRecordArtifactRepositoryV1 {
   return { resolve: async () => artifact };
 }
 

@@ -33,8 +33,9 @@ import {
   type InMemoryAgentProfilePublicationStoreV1,
 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 import {
-  systemRecordProviderArtifactKeyV1,
-} from '../src/system-records/provider-v1.js';
+  systemRecordArtifactKeyV1,
+  type SystemRecordArtifactV1,
+} from '../src/system-records/artifact-v1.js';
 import {
   DEPLOYMENT,
   NETWORK,
@@ -105,14 +106,14 @@ describe('agent-profile system-record producer V1', () => {
       throw new Error('published inventory object is missing');
     }
     await expect(store.resolve({
-      type: 'object', rootDescriptorDigest: result.rootDescriptorDigest,
+      type: 'inventory-object', rootDescriptorDigest: result.rootDescriptorDigest, path: [],
       objectKind: inventoryObject.objectKind, objectDigest: inventoryDigest,
     }, new AbortController().signal)).resolves.toMatchObject({
       objectKind: inventoryObject.objectKind,
       objectDigest: inventoryDigest,
     });
     await expect(store.resolve({
-      type: 'object', rootDescriptorDigest: `0x${'ff'.repeat(32)}`,
+      type: 'inventory-object', rootDescriptorDigest: `0x${'ff'.repeat(32)}`, path: [],
       objectKind: inventoryObject.objectKind, objectDigest: inventoryDigest,
     }, new AbortController().signal)).resolves.toBeNull();
   });
@@ -146,6 +147,125 @@ describe('agent-profile system-record producer V1', () => {
     expect(second.inventoryWrites).toBeLessThanOrEqual(6);
     expect(second.inventoryWriteBytes).toBeLessThanOrEqual(1024 * 1024);
     expect(fixture.store.snapshot().inventory?.descriptor.totalRows).toBe('1');
+  });
+
+  it('serves an advertised inventory root after a newer root commits', async () => {
+    const fixture = await producerFixture();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    const first = await produce(producer, fixture.prepared, fixture.publication);
+    const firstInventory = fixture.store.snapshot().inventory!;
+    const firstTreeDigest = firstInventory.descriptor.treeRootDigest;
+    const firstTreeObject = firstInventory.objects.get(firstTreeDigest)!;
+    const nextPrepared = makePrepared(
+      fixture.peerSigner,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00.000Z',
+    );
+
+    await produce(
+      producer,
+      nextPrepared,
+      await publicationFor(nextPrepared, fixture.evmSigner.address, '2026-08-07T12:20:00Z'),
+    );
+
+    await expect(fixture.store.resolve({
+      type: 'inventory-object',
+      rootDescriptorDigest: first.rootDescriptorDigest,
+      path: [],
+      objectKind: firstTreeObject.objectKind,
+      objectDigest: firstTreeDigest,
+    }, new AbortController().signal)).resolves.toMatchObject({
+      objectKind: firstTreeObject.objectKind,
+      objectDigest: firstTreeDigest,
+    });
+    await expect(fixture.store.resolve({
+      type: 'inventory-object',
+      rootDescriptorDigest: first.rootDescriptorDigest,
+      path: [0],
+      objectKind: firstTreeObject.objectKind,
+      objectDigest: firstTreeDigest,
+    }, new AbortController().signal)).resolves.toBeNull();
+  });
+
+  it.each([
+    [
+      'belongs to a different stable record',
+      (head: SignedAgentProfileHeadEnvelopeV1): SignedAgentProfileHeadEnvelopeV1 => ({
+        ...head,
+        object: { ...head.object, peerId: '12D3KooWDifferentStableRecord111111111111111111111111' },
+      }),
+      /different stable record/,
+    ],
+    [
+      'has an invalid signature',
+      (head: SignedAgentProfileHeadEnvelopeV1): SignedAgentProfileHeadEnvelopeV1 => ({
+        ...head,
+        signatures: head.signatures.map((signature, index) => index === 0
+          ? { ...signature, signature: Buffer.alloc(64).toString('base64url') }
+          : signature),
+      }),
+      /stored profile head signature verification failed/,
+    ],
+  ])('rejects a previous head that %s before installing or committing', async (
+    _label,
+    mutateHead,
+    expected,
+  ) => {
+    const fixture = await producerFixture();
+    const initialProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    await produce(initialProducer, fixture.prepared, fixture.publication);
+    const prepareCommit = vi.fn(fixture.store.prepareCommit.bind(fixture.store));
+    const store: AgentProfileProducerPublicationStoreV1 = {
+      snapshot: () => {
+        const snapshot = fixture.store.snapshot();
+        return Object.freeze({
+          ...snapshot,
+          currentHead: mutateHead(snapshot.currentHead!),
+        });
+      },
+      resolveArtifact: (reference) => fixture.store.resolveArtifact(reference),
+      prepareCommit,
+    };
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store,
+      fence: () => {},
+      install,
+    });
+    const nextPrepared = makePrepared(
+      fixture.peerSigner,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00.000Z',
+    );
+    const lease = await producer.prepare(nextPrepared);
+
+    await expect(lease.complete(await publicationFor(
+      nextPrepared,
+      fixture.evmSigner.address,
+      '2026-08-07T12:20:00Z',
+    ))).rejects.toThrow(expected);
+    expect(install).not.toHaveBeenCalled();
+    expect(prepareCommit).not.toHaveBeenCalled();
   });
 
   it('rejects a concurrent stale writer before installing or replacing the winning head', async () => {
@@ -318,17 +438,17 @@ describe('agent-profile system-record producer V1', () => {
       authoritySequence: '1',
       acceptedTransitionDigest: transitionEnvelope.objectDigest,
     }, prior.peerSigner, nextSigner);
-    const history = new Map<string, SystemRecordProviderArtifactV1>();
+    const history = new Map<string, SystemRecordArtifactV1>();
     for (const artifact of [
       envelopeArtifact('agent-profile-head', priorEnvelope),
       envelopeArtifact('authority-transition', transitionEnvelope),
     ]) {
-      history.set(systemRecordProviderArtifactKeyV1(artifact), artifact);
+      history.set(systemRecordArtifactKeyV1(artifact), artifact);
     }
     let pendingCommit: AgentProfileProducerPublicationCommitV1 | null = null;
     const store: AgentProfileProducerPublicationStoreV1 = {
       snapshot: () => Object.freeze({ inventory: null, currentHead: transitionedEnvelope }),
-      resolveArtifact: (reference) => history.get(systemRecordProviderArtifactKeyV1(reference)) ?? null,
+      resolveArtifact: (reference) => history.get(systemRecordArtifactKeyV1(reference)) ?? null,
       prepareCommit: (input) => {
         pendingCommit = input;
         return Object.freeze({ commit: () => {}, abort: () => {} });

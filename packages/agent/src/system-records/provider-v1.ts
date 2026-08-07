@@ -14,12 +14,16 @@ import {
   encodeSystemRecordResponseFrameV1,
   verifySystemRecordResponsePayloadV1,
   type NetworkIdV1,
-  type Digest32V1,
   type SystemRecordObjectKindV1,
   type SystemRecordRequestHeaderV1,
   type SystemRecordResponseStatusV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
+import type {
+  SystemRecordArtifactLookupV1,
+  SystemRecordArtifactRepositoryV1,
+  SystemRecordArtifactV1,
+} from './artifact-v1.js';
 import {
   createSystemRecordProviderPermitGateV1,
   createSystemRecordProviderTokenBucketV1,
@@ -30,44 +34,6 @@ import {
 } from './transport-v1.js';
 
 const EMPTY = new Uint8Array();
-
-export interface SystemRecordProviderArtifactV1 {
-  readonly objectKind: SystemRecordObjectKindV1;
-  readonly objectDigest: Digest32V1;
-  readonly canonicalBytes: Uint8Array;
-}
-
-export function systemRecordProviderArtifactKeyV1(
-  artifact: Pick<SystemRecordProviderArtifactV1, 'objectKind' | 'objectDigest'>,
-): string {
-  return `${artifact.objectKind}:${artifact.objectDigest}`;
-}
-
-export function cloneSystemRecordProviderArtifactV1(
-  artifact: SystemRecordProviderArtifactV1,
-): SystemRecordProviderArtifactV1 {
-  return Object.freeze({
-    objectKind: artifact.objectKind,
-    objectDigest: artifact.objectDigest,
-    canonicalBytes: Uint8Array.from(artifact.canonicalBytes),
-  });
-}
-
-export type SystemRecordProviderLookupV1 =
-  | Readonly<{ type: 'root' }>
-  | Readonly<{
-    type: 'object';
-    objectKind: SystemRecordObjectKindV1;
-    objectDigest: Digest32V1;
-    rootDescriptorDigest?: Digest32V1;
-  }>;
-
-export interface SystemRecordProviderRepositoryV1 {
-  resolve(
-    lookup: SystemRecordProviderLookupV1,
-    signal: AbortSignal,
-  ): Promise<SystemRecordProviderArtifactV1 | null>;
-}
 
 export interface SystemRecordProviderExchangeV1 {
   readRequestFrame(signal: AbortSignal): Promise<Uint8Array>;
@@ -106,7 +72,7 @@ export interface SystemRecordProviderStatsV1 {
 
 export interface CreateSystemRecordProviderOptionsV1 {
   readonly networkId: NetworkIdV1;
-  readonly repository: SystemRecordProviderRepositoryV1;
+  readonly repository: SystemRecordArtifactRepositoryV1;
   readonly frameAdmission: SystemRecordProviderFrameAdmissionV1;
   readonly tokenBucket?: SystemRecordProviderTokenBucketV1;
   readonly permitGate?: SystemRecordProviderPermitGateV1;
@@ -198,7 +164,7 @@ export function createSystemRecordProviderV1(
         const reservation = options.frameAdmission.tryReserve(successFrameCapacity);
         if (reservation === null) return reset(exchange, 'memory-capacity');
         try {
-          let artifact: SystemRecordProviderArtifactV1 | null;
+          let artifact: SystemRecordArtifactV1 | null;
           try {
             artifact = await raceAbort(
               options.repository.resolve(repositoryLookupV1(request), controller.signal),
@@ -334,15 +300,21 @@ function expectedObjectKind(request: SystemRecordRequestHeaderV1): SystemRecordO
   return request.operation === 'get-root' ? 'root-descriptor' : request.objectKind;
 }
 
-function repositoryLookupV1(request: SystemRecordRequestHeaderV1): SystemRecordProviderLookupV1 {
+function repositoryLookupV1(request: SystemRecordRequestHeaderV1): SystemRecordArtifactLookupV1 {
   if (request.operation === 'get-root') return Object.freeze({ type: 'root' });
+  if (request.operation === 'get-inventory-object') {
+    return Object.freeze({
+      type: 'inventory-object',
+      rootDescriptorDigest: request.rootDescriptorDigest,
+      path: Object.freeze([...request.path]),
+      objectKind: request.objectKind,
+      objectDigest: request.objectDigest,
+    });
+  }
   return Object.freeze({
     type: 'object',
     objectKind: request.objectKind,
     objectDigest: request.objectDigest,
-    ...(request.operation === 'get-inventory-object'
-      ? { rootDescriptorDigest: request.rootDescriptorDigest }
-      : {}),
   });
 }
 
