@@ -52,7 +52,18 @@ export function createInMemoryAgentProfilePublicationStoreV1(
   let prepared = false;
   return Object.freeze({
     snapshot() {
-      return Object.freeze({ inventory, currentHead });
+      return Object.freeze({
+        inventory: inventory === null ? null : structuredClone(inventory),
+        currentHead: currentHead === null ? null : structuredClone(currentHead),
+      });
+    },
+    resolveArtifact(
+      reference: Pick<SystemRecordProviderArtifactV1, 'objectKind' | 'objectDigest'>,
+    ): SystemRecordProviderArtifactV1 | null {
+      const artifact = artifacts.get(systemRecordProviderArtifactKeyV1(reference));
+      return artifact === undefined
+        ? null
+        : cloneSystemRecordProviderArtifactV1(artifact);
     },
     prepareCommit(input: AgentProfileProducerPublicationCommitV1): AgentProfileProducerPublicationCommitLeaseV1 {
       if (prepared) throw new Error('publication store already has a prepared commit');

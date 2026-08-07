@@ -117,6 +117,10 @@ export interface AgentProfileProducerPublicationStoreV1 {
     inventory: SystemRecordInventoryTreeSnapshotV1 | null;
     currentHead: SignedAgentProfileHeadEnvelopeV1 | null;
   }>;
+  /** Resolve retained authority history by content address, without wire semantics. */
+  resolveArtifact(
+    reference: Pick<SystemRecordProviderArtifactV1, 'objectKind' | 'objectDigest'>,
+  ): SystemRecordProviderArtifactV1 | null | Promise<SystemRecordProviderArtifactV1 | null>;
   /** Atomically verify and reserve the expected snapshot until commit or abort. */
   prepareCommit(
     input: AgentProfileProducerPublicationCommitV1,
@@ -246,6 +250,9 @@ export function createAgentProfileProducerV1(
       authoritySequence,
       version,
       ...(previous === null ? {} : { previousHeadDigest: previous.objectDigest }),
+      ...(previous?.object.acceptedTransitionDigest === undefined ? {} : {
+        acceptedTransitionDigest: previous.object.acceptedTransitionDigest,
+      }),
       evmIssuer,
       rootSubject: prepared.rootEntity,
       projectionSchemaDigest: publication.projectionSchemaDigest,
@@ -359,11 +366,14 @@ export function createAgentProfileProducerV1(
     const verifiedClosure = await buildAgentProfileVerificationClosureV1(headDigest, {
       nowMs: Date.parse(issuedAt),
       resolve: async ({ objectKind, digest }) => {
-        const artifact = artifactsByKey.get(systemRecordProviderArtifactKeyV1({
+        const reference = {
           objectKind,
           objectDigest: digest,
-        }));
+        } as const;
+        const artifact = artifactsByKey.get(systemRecordProviderArtifactKeyV1(reference))
+          ?? await options.store.resolveArtifact(reference);
         return artifact === undefined
+          || artifact === null
           ? undefined
           : {
               objectKind: artifact.objectKind,

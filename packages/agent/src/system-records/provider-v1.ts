@@ -109,6 +109,28 @@ export interface SystemRecordProviderV1 {
   close(): void;
 }
 
+interface ProviderResponseSenderV1 {
+  sendSuccess(frame: Uint8Array): Promise<SystemRecordProviderServeOutcomeV1>;
+  sendError(
+    requestId: string,
+    status: Exclude<SystemRecordResponseStatusV1, 'ok' | 'busy'>,
+  ): Promise<SystemRecordProviderServeOutcomeV1>;
+  release(): void;
+}
+
+interface CreateProviderResponseSenderOptionsV1 {
+  readonly exchange: SystemRecordProviderExchangeV1;
+  readonly signal: AbortSignal;
+  readonly frameAdmission: SystemRecordProviderFrameAdmissionV1;
+  readonly tokenBucket: SystemRecordProviderTokenBucketV1;
+  readonly reset: (
+    reason: SystemRecordProviderResetReasonV1,
+  ) => SystemRecordProviderServeOutcomeV1;
+  readonly onServed: () => void;
+  readonly abortedReason: () => 'closed' | 'deadline' | 'invalid-frame';
+  readonly initialReservationBytes?: number;
+}
+
 /** Bounded request/response provider. Protocol registration remains lifecycle-owned. */
 export function createSystemRecordProviderV1(
   options: CreateSystemRecordProviderOptionsV1,
@@ -156,7 +178,6 @@ export function createSystemRecordProviderV1(
         timeoutMs,
       );
       timeout.unref?.();
-      let successReservation: ReturnType<SystemRecordProviderFrameAdmissionV1['tryReserve']> = null;
       try {
         let request: SystemRecordRequestHeaderV1;
         try {
@@ -175,98 +196,72 @@ export function createSystemRecordProviderV1(
         }
 
         if (request.networkId !== options.networkId) {
-          return await writeError(exchange, request.requestId, 'unsupported');
+          const responder = createProviderResponseSenderV1({
+            exchange,
+            signal: controller.signal,
+            frameAdmission: options.frameAdmission,
+            tokenBucket: bucket,
+            reset: (reason) => reset(exchange, reason),
+            onServed: () => { served += 1; },
+            abortedReason,
+          })!;
+          try {
+            return await responder.sendError(request.requestId, 'unsupported');
+          } finally {
+            responder.release();
+          }
         }
 
         const successFrameCapacity = maximumSuccessFrameBytes(request);
-        successReservation = options.frameAdmission.tryReserve(successFrameCapacity);
-        if (successReservation === null) return reset(exchange, 'memory-capacity');
-
-        let artifact: SystemRecordProviderArtifactV1 | null;
+        const responder = createProviderResponseSenderV1({
+          exchange,
+          signal: controller.signal,
+          frameAdmission: options.frameAdmission,
+          tokenBucket: bucket,
+          reset: (reason) => reset(exchange, reason),
+          onServed: () => { served += 1; },
+          abortedReason,
+          initialReservationBytes: successFrameCapacity,
+        });
+        if (responder === null) return reset(exchange, 'memory-capacity');
         try {
-          artifact = await raceAbort(
-            options.repository.resolve(request, controller.signal),
-            controller.signal,
-          );
-        } catch (error) {
-          if (controller.signal.aborted) return reset(exchange, abortedReason());
-          return await writeError(exchange, request.requestId, 'internal');
-        }
-        if (artifact === null) return await writeError(exchange, request.requestId, 'not-found');
-        if (!(artifact.canonicalBytes instanceof Uint8Array)
-          || artifact.canonicalBytes.byteLength < 1
-          || artifact.canonicalBytes.byteLength > SYSTEM_RECORD_OBJECT_CAPS_V1[artifact.objectKind]
-          || artifact.objectKind !== expectedObjectKind(request)
-          || (request.operation !== 'get-root' && artifact.objectDigest !== request.objectDigest)) {
-          return await writeError(exchange, request.requestId, 'internal');
-        }
-        const payloadBytes = artifact.canonicalBytes.byteLength.toString();
-        assertCanonicalDecimalU64(payloadBytes, 'system-record response payloadBytes');
-        const response = encodeSystemRecordResponseFrameV1({
-          wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
-          requestId: request.requestId,
-          status: 'ok',
-          objectKind: artifact.objectKind,
-          objectDigest: artifact.objectDigest,
-          payloadBytes,
-        }, artifact.canonicalBytes);
-        try {
-          const decoded = decodeSystemRecordResponseFrameV1(response);
-          verifySystemRecordResponsePayloadV1(request, decoded.header, decoded.payload);
-        } catch {
-          return await writeError(exchange, request.requestId, 'internal');
-        }
-        const reservation = successReservation;
-        successReservation = null;
-        return await sendResponse(exchange, response, reservation);
-
-        async function writeError(
-          target: SystemRecordProviderExchangeV1,
-          requestId: string,
-          status: Exclude<SystemRecordResponseStatusV1, 'ok' | 'busy'>,
-        ): Promise<SystemRecordProviderServeOutcomeV1> {
-          successReservation?.release();
-          successReservation = null;
-          const errorCode = status === 'not-found'
-            ? 'not_found'
-            : status === 'invalid-request'
-              ? 'invalid_request'
-              : status;
+          let artifact: SystemRecordProviderArtifactV1 | null;
+          try {
+            artifact = await raceAbort(
+              options.repository.resolve(request, controller.signal),
+              controller.signal,
+            );
+          } catch (error) {
+            if (controller.signal.aborted) return reset(exchange, abortedReason());
+            return await responder.sendError(request.requestId, 'internal');
+          }
+          if (artifact === null) return await responder.sendError(request.requestId, 'not-found');
+          if (!(artifact.canonicalBytes instanceof Uint8Array)
+            || artifact.canonicalBytes.byteLength < 1
+            || artifact.canonicalBytes.byteLength > SYSTEM_RECORD_OBJECT_CAPS_V1[artifact.objectKind]
+            || artifact.objectKind !== expectedObjectKind(request)
+            || (request.operation !== 'get-root' && artifact.objectDigest !== request.objectDigest)) {
+            return await responder.sendError(request.requestId, 'internal');
+          }
+          const payloadBytes = artifact.canonicalBytes.byteLength.toString();
+          assertCanonicalDecimalU64(payloadBytes, 'system-record response payloadBytes');
           const response = encodeSystemRecordResponseFrameV1({
             wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
-            requestId,
-            status,
-            payloadBytes: '0',
-            errorCode,
-          }, EMPTY);
-          return await sendResponse(target, response);
-        }
-
-        async function sendResponse(
-          target: SystemRecordProviderExchangeV1,
-          response: Uint8Array,
-          admitted: Exclude<ReturnType<SystemRecordProviderFrameAdmissionV1['tryReserve']>, null>
-            | null = null,
-        ): Promise<SystemRecordProviderServeOutcomeV1> {
-          const reservation = admitted ?? options.frameAdmission.tryReserve(response.byteLength);
-          if (reservation === null) return reset(target, 'memory-capacity');
-          let responseTokens: ReturnType<SystemRecordProviderTokenBucketV1['tryReserveResponse']> = null;
+            requestId: request.requestId,
+            status: 'ok',
+            objectKind: artifact.objectKind,
+            objectDigest: artifact.objectDigest,
+            payloadBytes,
+          }, artifact.canonicalBytes);
           try {
-            reservation.shrinkTo(response.byteLength);
-            responseTokens = bucket.tryReserveResponse(response.byteLength);
-            if (responseTokens === null) return reset(target, 'response-rate');
-            try {
-              await raceAbort(target.writeResponseFrame(response, controller.signal), controller.signal);
-            } catch (error) {
-              return reset(target, controller.signal.aborted ? abortedReason() : 'write-failed');
-            }
-            responseTokens.commit();
-            served += 1;
-            return 'served';
-          } finally {
-            responseTokens?.release();
-            reservation.release();
+            const decoded = decodeSystemRecordResponseFrameV1(response);
+            verifySystemRecordResponsePayloadV1(request, decoded.header, decoded.payload);
+          } catch {
+            return await responder.sendError(request.requestId, 'internal');
           }
+          return await responder.sendSuccess(response);
+        } finally {
+          responder.release();
         }
 
         function abortedReason(): 'closed' | 'deadline' | 'invalid-frame' {
@@ -275,7 +270,6 @@ export function createSystemRecordProviderV1(
         }
       } finally {
         clearTimeout(timeout);
-        successReservation?.release();
         activeControllers.delete(controller);
         permit.release();
       }
@@ -304,6 +298,86 @@ function maximumSuccessFrameBytes(request: SystemRecordRequestHeaderV1): number 
     SYSTEM_RECORD_MAX_FRAME_BYTES,
     4 + SYSTEM_RECORD_MAX_HEADER_BYTES + SYSTEM_RECORD_OBJECT_CAPS_V1[expectedObjectKind(request)],
   );
+}
+
+function createProviderResponseSenderV1(
+  options: CreateProviderResponseSenderOptionsV1 & { readonly initialReservationBytes: number },
+): ProviderResponseSenderV1 | null;
+function createProviderResponseSenderV1(
+  options: CreateProviderResponseSenderOptionsV1 & { readonly initialReservationBytes?: undefined },
+): ProviderResponseSenderV1;
+function createProviderResponseSenderV1(
+  options: CreateProviderResponseSenderOptionsV1,
+): ProviderResponseSenderV1 | null {
+  let reservation = options.initialReservationBytes === undefined
+    ? null
+    : options.frameAdmission.tryReserve(options.initialReservationBytes);
+  if (options.initialReservationBytes !== undefined && reservation === null) return null;
+  let released = false;
+
+  const sendFrame = async (
+    frame: Uint8Array,
+    admitted = takeReservation(),
+  ): Promise<SystemRecordProviderServeOutcomeV1> => {
+    const frameReservation = admitted ?? options.frameAdmission.tryReserve(frame.byteLength);
+    if (frameReservation === null) return options.reset('memory-capacity');
+    let responseTokens: ReturnType<SystemRecordProviderTokenBucketV1['tryReserveResponse']> = null;
+    try {
+      frameReservation.shrinkTo(frame.byteLength);
+      responseTokens = options.tokenBucket.tryReserveResponse(frame.byteLength);
+      if (responseTokens === null) return options.reset('response-rate');
+      try {
+        await raceAbort(
+          options.exchange.writeResponseFrame(frame, options.signal),
+          options.signal,
+        );
+      } catch {
+        return options.reset(options.signal.aborted ? options.abortedReason() : 'write-failed');
+      }
+      responseTokens.commit();
+      options.onServed();
+      return 'served';
+    } finally {
+      responseTokens?.release();
+      frameReservation.release();
+    }
+  };
+
+  const takeReservation = () => {
+    const current = reservation;
+    reservation = null;
+    return current;
+  };
+
+  return Object.freeze({
+    sendSuccess(frame: Uint8Array) {
+      return sendFrame(frame);
+    },
+    sendError(
+      requestId: string,
+      status: Exclude<SystemRecordResponseStatusV1, 'ok' | 'busy'>,
+    ) {
+      takeReservation()?.release();
+      const errorCode = status === 'not-found'
+        ? 'not_found'
+        : status === 'invalid-request'
+          ? 'invalid_request'
+          : status;
+      const response = encodeSystemRecordResponseFrameV1({
+        wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
+        requestId,
+        status,
+        payloadBytes: '0',
+        errorCode,
+      }, EMPTY);
+      return sendFrame(response, null);
+    },
+    release() {
+      if (released) return;
+      released = true;
+      takeReservation()?.release();
+    },
+  });
 }
 
 function expectedObjectKind(request: SystemRecordRequestHeaderV1): SystemRecordObjectKindV1 {

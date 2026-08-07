@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createEvmPersonalMessageSignerV1 } from '../src/evm-message-signer-v1.js';
 
@@ -49,6 +49,27 @@ describe('shared EVM personal-message signer V1', () => {
       purpose: 'fixture',
     });
     await expect(wrongSigner.signMessage(MESSAGE)).rejects.toThrow(/cannot sign for/);
+  });
+
+  it('signs through a matching default chain signer', async () => {
+    const wallet = new ethers.Wallet(KEY);
+    const signMessage = vi.fn(async (message: Uint8Array) => {
+      const signature = ethers.Signature.from(await wallet.signMessage(message));
+      return {
+        r: ethers.getBytes(signature.r),
+        vs: ethers.getBytes(signature.yParityAndS),
+      };
+    });
+    const signer = createEvmPersonalMessageSignerV1({
+      mode: 'chain-default',
+      address: wallet.address,
+      signMessage,
+      purpose: 'fixture',
+    });
+
+    const signature = await signer.signMessage(MESSAGE);
+    expect(signMessage).toHaveBeenCalledWith(MESSAGE);
+    expect(ethers.verifyMessage(MESSAGE, signature).toLowerCase()).toBe(signer.address);
   });
 
   it('rejects a custodial key that does not own the requested address', () => {

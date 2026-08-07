@@ -8,18 +8,31 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import {
+  buildSystemRecordSignatureMessageV1,
+  canonicalizeSignedSystemRecordEnvelopeV1,
+  computeAgentProfileAuthorityTransitionDigestV1,
+  computeAgentProfileHeadObjectDigestV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
+  type AgentProfileAuthorityTransitionV1,
+  type AgentProfileHeadObjectV1,
   type Digest32V1,
+  type SignedAgentProfileAuthorityTransitionEnvelopeV1,
+  type SignedAgentProfileHeadEnvelopeV1,
   type SystemRecordPeerPublicKeyV1,
   type SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
-import { createEvmPersonalMessageSignerV1 } from '../src/evm-message-signer-v1.js';
+import {
+  createEvmPersonalMessageSignerV1,
+  type EvmPersonalMessageSignerV1,
+} from '../src/evm-message-signer-v1.js';
 import { prepareAgentProfileV1, type PreparedAgentProfileV1 } from '../src/profile.js';
 import {
   createAgentProfileProducerV1,
+  type AgentProfileProducerPublicationCommitV1,
+  type AgentProfileProducerPublicationStoreV1,
   type AgentProfileProducerV1,
   type AgentProfilePublicationBindingV1,
   type SystemRecordPeerSignerV1,
@@ -28,6 +41,10 @@ import {
   createInMemoryAgentProfilePublicationStoreV1,
   type InMemoryAgentProfilePublicationStoreV1,
 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
+import {
+  systemRecordProviderArtifactKeyV1,
+  type SystemRecordProviderArtifactV1,
+} from '../src/system-records/provider-v1.js';
 
 const NETWORK = 'base:84532' as const;
 const SCHEMA_DIGEST = `0x${'ab'.repeat(32)}` as Digest32V1;
@@ -195,6 +212,126 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().currentHead?.objectDigest).toBe(first.headDigest);
   });
 
+  it('preserves verified authority lineage on a post-transition heartbeat', async () => {
+    const prior = await producerFixture();
+    const priorProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: prior.peerSigner,
+      evmSigner: prior.evmSigner,
+      store: prior.store,
+      fence: () => {},
+      install: () => {},
+    });
+    await produce(priorProducer, prior.prepared, prior.publication);
+    const priorEnvelope = prior.store.snapshot().currentHead!;
+
+    const nextSigner = createEvmPersonalMessageSignerV1({
+      mode: 'custodial',
+      address: new ethers.Wallet(OTHER_PRIVATE_KEY).address,
+      privateKey: OTHER_PRIVATE_KEY,
+      purpose: 'post-transition profile test',
+    });
+    const transitionedPrepared = makePrepared(
+      prior.peerSigner,
+      nextSigner.address,
+      '2026-08-07T12:20:00.000Z',
+    );
+    const transitionedPublication = await publicationFor(
+      transitionedPrepared,
+      nextSigner.address,
+      '2026-08-07T12:20:00Z',
+      OTHER_PRIVATE_KEY,
+    );
+    const bootstrapStore = createInMemoryAgentProfilePublicationStoreV1();
+    const bootstrapProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: prior.peerSigner,
+      evmSigner: nextSigner,
+      store: bootstrapStore,
+      fence: () => {},
+      install: () => {},
+    });
+    await produce(bootstrapProducer, transitionedPrepared, transitionedPublication);
+    const bootstrapEnvelope = bootstrapStore.snapshot().currentHead!;
+
+    const transition: AgentProfileAuthorityTransitionV1 = {
+      objectType: 'authority-transition',
+      kind: 'agents',
+      mode: 'co-signed',
+      networkId: NETWORK,
+      peerId: prior.peerSigner.peerId,
+      peerPublicKey: prior.peerSigner.publicKey,
+      priorAuthoritySequence: '0',
+      nextAuthoritySequence: '1',
+      priorHeadDigest: priorEnvelope.objectDigest,
+      priorEvmIssuer: prior.evmSigner.address,
+      nextEvmIssuer: nextSigner.address,
+      nextRoot: transitionedPrepared.rootEntity,
+      issuedAt: '2026-08-07T12:10:00Z',
+    };
+    const transitionEnvelope = await signTransitionEnvelope(
+      transition,
+      prior.peerSigner,
+      prior.evmSigner,
+      nextSigner,
+    );
+    const transitionedEnvelope = await signHeadEnvelope({
+      ...bootstrapEnvelope.object,
+      authoritySequence: '1',
+      acceptedTransitionDigest: transitionEnvelope.objectDigest,
+    }, prior.peerSigner, nextSigner);
+    const history = new Map<string, SystemRecordProviderArtifactV1>();
+    for (const artifact of [
+      envelopeArtifact('agent-profile-head', priorEnvelope),
+      envelopeArtifact('authority-transition', transitionEnvelope),
+    ]) {
+      history.set(systemRecordProviderArtifactKeyV1(artifact), artifact);
+    }
+    let pendingCommit: AgentProfileProducerPublicationCommitV1 | null = null;
+    const store: AgentProfileProducerPublicationStoreV1 = {
+      snapshot: () => Object.freeze({ inventory: null, currentHead: transitionedEnvelope }),
+      resolveArtifact: (reference) => history.get(systemRecordProviderArtifactKeyV1(reference)) ?? null,
+      prepareCommit: (input) => {
+        pendingCommit = input;
+        return Object.freeze({ commit: () => {}, abort: () => {} });
+      },
+    };
+    const heartbeatPrepared = makePrepared(
+      prior.peerSigner,
+      nextSigner.address,
+      '2026-08-07T12:30:00.000Z',
+    );
+    const heartbeatProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: prior.peerSigner,
+      evmSigner: nextSigner,
+      store,
+      fence: () => {},
+      install: () => {},
+    });
+
+    const result = await produce(
+      heartbeatProducer,
+      heartbeatPrepared,
+      await publicationFor(
+        heartbeatPrepared,
+        nextSigner.address,
+        '2026-08-07T12:30:00Z',
+        OTHER_PRIVATE_KEY,
+      ),
+    );
+    const headArtifact = pendingCommit!.artifacts.find(
+      (artifact) => artifact.objectKind === 'agent-profile-head',
+    )!;
+    const heartbeatEnvelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
+      headArtifact.canonicalBytes,
+    );
+    expect(result).toMatchObject({ authoritySequence: '1', version: '1' });
+    expect(heartbeatEnvelope.object.acceptedTransitionDigest)
+      .toBe(transitionEnvelope.objectDigest);
+    expect(heartbeatEnvelope.object.previousHeadDigest).toBe(transitionedEnvelope.objectDigest);
+  });
+
   it('preflights provider capacity before materialization and releases a failed commit lease', async () => {
     const fixture = await producerFixture(createInMemoryAgentProfilePublicationStoreV1({
       maxObjects: 1,
@@ -263,6 +400,27 @@ describe('agent-profile system-record producer V1', () => {
       await publicationFor(nextPrepared, fixture.evmSigner.address, '2026-08-07T12:20:00Z'),
     )).rejects.toThrow(/cache capacity exhausted/);
     expect(store.snapshot().currentHead?.objectDigest).toBe(first.headDigest);
+  });
+
+  it('does not expose mutable store state through snapshots', async () => {
+    const fixture = await producerFixture();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => {},
+    });
+    const published = await produce(producer, fixture.prepared, fixture.publication);
+    const snapshot = fixture.store.snapshot();
+    (snapshot.inventory!.objects as Map<unknown, unknown>).clear();
+    (snapshot.currentHead!.object as { version: string }).version = '99';
+
+    const fresh = fixture.store.snapshot();
+    expect(fresh.inventory!.objects.size).toBeGreaterThan(0);
+    expect(fresh.currentHead?.objectDigest).toBe(published.headDigest);
+    expect(fresh.currentHead?.object.version).toBe('0');
   });
 
   it('fails closed when the publication seal is not for the exact prepared bytes', async () => {
@@ -504,6 +662,7 @@ async function publicationFor(
   prepared: PreparedAgentProfileV1,
   address: string,
   issuedAt: string,
+  privateKey = PRIVATE_KEY,
 ): Promise<AgentProfilePublicationBindingV1> {
   const canonicalAddress = address.toLowerCase();
   const reservedKaId = (BigInt(canonicalAddress) << 96n) | 7n;
@@ -515,7 +674,7 @@ async function publicationFor(
     authorAddress: canonicalAddress,
     reservedKaId,
   });
-  const signature = ethers.Signature.from(await new ethers.Wallet(PRIVATE_KEY).signTypedData(
+  const signature = ethers.Signature.from(await new ethers.Wallet(privateKey).signTypedData(
     typedData.domain,
     typedData.types,
     typedData.message,
@@ -547,6 +706,90 @@ async function publicationFor(
   });
 }
 
+async function signHeadEnvelope(
+  object: AgentProfileHeadObjectV1,
+  peerSigner: SystemRecordPeerSignerV1,
+  evmSigner: EvmPersonalMessageSignerV1,
+): Promise<SignedAgentProfileHeadEnvelopeV1> {
+  const objectDigest = computeAgentProfileHeadObjectDigestV1(object);
+  const [peerSignature, evmSignature] = await Promise.all([
+    peerSigner.sign(buildSystemRecordSignatureMessageV1(object, objectDigest, 'peer')),
+    evmSigner.signMessage(buildSystemRecordSignatureMessageV1(object, objectDigest, 'current-evm')),
+  ]);
+  return Object.freeze({
+    object,
+    objectDigest,
+    signatures: Object.freeze([
+      Object.freeze({
+        role: 'peer' as const,
+        suite: 'ed25519-v1' as const,
+        signer: peerSigner.peerId,
+        evidence: Object.freeze({ kind: 'none' as const }),
+        signature: Buffer.from(peerSignature).toString('base64url'),
+      }),
+      Object.freeze({
+        role: 'current-evm' as const,
+        suite: 'eip191-personal-sign-digest-v1' as const,
+        signer: evmSigner.address,
+        evidence: Object.freeze({ kind: 'none' as const }),
+        signature: evmSignature,
+      }),
+    ]),
+  });
+}
+
+async function signTransitionEnvelope(
+  object: AgentProfileAuthorityTransitionV1,
+  peerSigner: SystemRecordPeerSignerV1,
+  priorSigner: EvmPersonalMessageSignerV1,
+  nextSigner: EvmPersonalMessageSignerV1,
+): Promise<SignedAgentProfileAuthorityTransitionEnvelopeV1> {
+  const objectDigest = computeAgentProfileAuthorityTransitionDigestV1(object);
+  const [peerSignature, priorSignature, nextSignature] = await Promise.all([
+    peerSigner.sign(buildSystemRecordSignatureMessageV1(object, objectDigest, 'peer')),
+    priorSigner.signMessage(buildSystemRecordSignatureMessageV1(object, objectDigest, 'prior-evm')),
+    nextSigner.signMessage(buildSystemRecordSignatureMessageV1(object, objectDigest, 'next-evm')),
+  ]);
+  return Object.freeze({
+    object,
+    objectDigest,
+    signatures: Object.freeze([
+      Object.freeze({
+        role: 'peer' as const,
+        suite: 'ed25519-v1' as const,
+        signer: peerSigner.peerId,
+        evidence: Object.freeze({ kind: 'none' as const }),
+        signature: Buffer.from(peerSignature).toString('base64url'),
+      }),
+      Object.freeze({
+        role: 'prior-evm' as const,
+        suite: 'eip191-personal-sign-digest-v1' as const,
+        signer: priorSigner.address,
+        evidence: Object.freeze({ kind: 'none' as const }),
+        signature: priorSignature,
+      }),
+      Object.freeze({
+        role: 'next-evm' as const,
+        suite: 'eip191-personal-sign-digest-v1' as const,
+        signer: nextSigner.address,
+        evidence: Object.freeze({ kind: 'none' as const }),
+        signature: nextSignature,
+      }),
+    ]),
+  });
+}
+
+function envelopeArtifact(
+  objectKind: 'agent-profile-head' | 'authority-transition',
+  envelope: SignedAgentProfileHeadEnvelopeV1 | SignedAgentProfileAuthorityTransitionEnvelopeV1,
+): SystemRecordProviderArtifactV1 {
+  return Object.freeze({
+    objectKind,
+    objectDigest: envelope.objectDigest,
+    canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(envelope),
+  });
+}
+
 function projectionContentDigest(prepared: PreparedAgentProfileV1): Digest32V1 {
   const quads = [...prepared.quads].sort((left, right) => Buffer.compare(
     tripleContentV10(left.subject, left.predicate, left.object),
@@ -568,6 +811,7 @@ function observingStore(
   return Object.freeze({
     snapshot: () => inner.snapshot(),
     resolve: (request, signal) => inner.resolve(request, signal),
+    resolveArtifact: (reference) => inner.resolveArtifact(reference),
     async prepareCommit(input) {
       const lease = await inner.prepareCommit(input);
       return Object.freeze({
