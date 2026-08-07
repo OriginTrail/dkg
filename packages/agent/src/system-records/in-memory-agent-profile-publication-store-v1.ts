@@ -10,10 +10,11 @@ import {
   type SystemRecordInventoryTreeSnapshotV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type {
-  AgentProfileProducerPublicationCommitLeaseV1,
-  AgentProfileProducerPublicationCommitV1,
-  AgentProfileProducerPublicationStoreV1,
+import {
+  flattenAgentProfileProducerPublicationArtifactsV1,
+  type AgentProfileProducerPublicationCommitLeaseV1,
+  type AgentProfileProducerPublicationCommitV1,
+  type AgentProfileProducerPublicationStoreV1,
 } from './agent-profile-producer-v1.js';
 import {
   cloneSystemRecordProviderArtifactV1,
@@ -75,9 +76,12 @@ export function createInMemoryAgentProfilePublicationStoreV1(
       // cannot obtain a second lease and make the installed projection stale.
       prepared = true;
       try {
+        const publicationArtifacts = flattenAgentProfileProducerPublicationArtifactsV1(
+          input.publicationArtifacts,
+        );
         let addedObjects = 0;
         let addedBytes = 0;
-        for (const artifact of input.artifacts) {
+        for (const artifact of publicationArtifacts) {
           const key = systemRecordProviderArtifactKeyV1(artifact);
           const existing = artifacts.get(key);
           if (existing !== undefined) {
@@ -95,9 +99,9 @@ export function createInMemoryAgentProfilePublicationStoreV1(
           || bytes + addedBytes - rootBytes + nextRootBytes.byteLength > maxBytes) {
           throw new Error('system-record provider cache capacity exhausted');
         }
-        const headArtifact = input.artifacts.find((artifact) => artifact.objectKind === 'agent-profile-head');
-        if (headArtifact === undefined) throw new Error('publication commit omitted the active head');
-        const nextHead = parseCanonicalSignedAgentProfileHeadEnvelopeV1(headArtifact.canonicalBytes);
+        const nextHead = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
+          input.publicationArtifacts.head.canonicalBytes,
+        );
         let live = true;
         return Object.freeze({
           commit(): void {
@@ -108,7 +112,7 @@ export function createInMemoryAgentProfilePublicationStoreV1(
               prepared = false;
               throw new Error('publication store snapshot changed during commit');
             }
-            for (const artifact of input.artifacts) {
+            for (const artifact of publicationArtifacts) {
               artifacts.set(
                 systemRecordProviderArtifactKeyV1(artifact),
                 cloneSystemRecordProviderArtifactV1(artifact),

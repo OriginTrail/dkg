@@ -61,7 +61,6 @@ import {
 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import {
-  cloneSystemRecordProviderArtifactV1,
   systemRecordProviderArtifactKeyV1,
   type SystemRecordProviderArtifactV1,
 } from './provider-v1.js';
@@ -107,9 +106,33 @@ export interface AgentProfileProducerPublicationCommitV1 {
   /** Snapshot preconditions reserved before materialization begins. */
   readonly expectedHeadDigest: Digest32V1 | null;
   readonly expectedRootDescriptorDigest: Digest32V1 | null;
-  readonly artifacts: readonly SystemRecordProviderArtifactV1[];
+  readonly publicationArtifacts: AgentProfileProducerPublicationArtifactsV1;
   readonly inventory: SystemRecordInventoryTreeSnapshotV1;
   readonly rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1;
+}
+
+type AgentProfileProducerArtifactV1<Kind extends SystemRecordObjectKindV1> = Readonly<
+  Omit<SystemRecordProviderArtifactV1, 'objectKind'> & { objectKind: Kind }
+>;
+
+export interface AgentProfileProducerPublicationArtifactsV1 {
+  readonly head: AgentProfileProducerArtifactV1<'agent-profile-head'>;
+  readonly bundle: AgentProfileProducerArtifactV1<'profile-bundle'>;
+  readonly ownedSubjectTable: AgentProfileProducerArtifactV1<'owned-subject-table'>;
+  readonly inventoryObjects: readonly AgentProfileProducerArtifactV1<
+    'inventory-internal' | 'inventory-leaf'
+  >[];
+}
+
+export function flattenAgentProfileProducerPublicationArtifactsV1(
+  artifacts: AgentProfileProducerPublicationArtifactsV1,
+): readonly SystemRecordProviderArtifactV1[] {
+  return Object.freeze([
+    artifacts.head,
+    artifacts.bundle,
+    artifacts.ownedSubjectTable,
+    ...artifacts.inventoryObjects,
+  ]);
 }
 
 export interface AgentProfileProducerPublicationCommitLeaseV1 {
@@ -369,7 +392,7 @@ export function createAgentProfileProducerV1(
     )) {
       throw new Error('new profile inventory root signature verification failed');
     }
-    const artifacts = publicationArtifacts({
+    const publicationArtifactSet = publicationArtifacts({
       envelope,
       envelopeBytes,
       bundle,
@@ -379,6 +402,7 @@ export function createAgentProfileProducerV1(
       inventory,
       inventoryUpdate,
     });
+    const artifacts = flattenAgentProfileProducerPublicationArtifactsV1(publicationArtifactSet);
     const artifactsByKey = new Map(
       artifacts.map((artifact) => [systemRecordProviderArtifactKeyV1(artifact), artifact]),
     );
@@ -411,7 +435,7 @@ export function createAgentProfileProducerV1(
     const commitLease = await options.store.prepareCommit({
       expectedHeadDigest: previous?.objectDigest ?? null,
       expectedRootDescriptorDigest: snapshot.inventory?.descriptorDigest ?? null,
-      artifacts,
+      publicationArtifacts: publicationArtifactSet,
       inventory,
       rootEnvelope,
     });
@@ -507,30 +531,35 @@ interface PublicationArtifactsInputV1 {
 
 function publicationArtifacts(
   input: PublicationArtifactsInputV1,
-): readonly SystemRecordProviderArtifactV1[] {
-  const artifacts: SystemRecordProviderArtifactV1[] = [
-    freezeArtifact('agent-profile-head', input.envelope.objectDigest, input.envelopeBytes),
-    freezeArtifact('profile-bundle', input.bundleDigest, input.bundle),
-    freezeArtifact('owned-subject-table', input.ownedSubjectTableDigest, input.ownedSubjectTableBytes),
-  ];
+): AgentProfileProducerPublicationArtifactsV1 {
   const inventoryObjects = input.inventoryUpdate === null
     ? [...input.inventory.objects.entries()].map(([digest, stored]) => ({ digest, ...stored }))
     : input.inventoryUpdate.writes;
-  for (const object of inventoryObjects) {
-    artifacts.push(freezeArtifact(object.objectKind, object.digest, object.canonicalBytes));
-  }
-  return Object.freeze(artifacts);
+  return Object.freeze({
+    head: freezeArtifact('agent-profile-head', input.envelope.objectDigest, input.envelopeBytes),
+    bundle: freezeArtifact('profile-bundle', input.bundleDigest, input.bundle),
+    ownedSubjectTable: freezeArtifact(
+      'owned-subject-table',
+      input.ownedSubjectTableDigest,
+      input.ownedSubjectTableBytes,
+    ),
+    inventoryObjects: Object.freeze(inventoryObjects.map((object) => freezeArtifact(
+      object.objectKind,
+      object.digest,
+      object.canonicalBytes,
+    ))),
+  });
 }
 
-function freezeArtifact(
-  objectKind: SystemRecordObjectKindV1,
+function freezeArtifact<const Kind extends SystemRecordObjectKindV1>(
+  objectKind: Kind,
   objectDigest: Digest32V1,
   bytes: Uint8Array,
-): SystemRecordProviderArtifactV1 {
-  return cloneSystemRecordProviderArtifactV1({
+): AgentProfileProducerArtifactV1<Kind> {
+  return Object.freeze({
     objectKind,
     objectDigest,
-    canonicalBytes: bytes,
+    canonicalBytes: Uint8Array.from(bytes),
   });
 }
 

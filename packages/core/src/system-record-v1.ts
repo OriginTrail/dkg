@@ -6,6 +6,7 @@
  */
 export * from './system-record-limits-v1.js';
 export * from './system-record-objects-v1.js';
+export * from './agent-profile-projection-schema-v1.js';
 export * from './system-record-applied-state-v1.js';
 export * from './system-record-inventory-v1.js';
 export * from './system-record-wire-v1.js';

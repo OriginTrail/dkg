@@ -81,16 +81,39 @@ describe('agent-profile system-record producer V1', () => {
     expect(snapshot.inventory?.descriptorDigest).toBe(result.rootDescriptorDigest);
     const head = await store.resolve(controlRequest(result.headDigest), new AbortController().signal);
     expect(head?.objectKind).toBe('agent-profile-head');
-    expect(parseCanonicalSignedAgentProfileHeadEnvelopeV1(head!.canonicalBytes).object.version).toBe('0');
+    if (head === null) throw new Error('published profile head is missing');
+    const parsedHead = parseCanonicalSignedAgentProfileHeadEnvelopeV1(head.canonicalBytes);
+    expect(parsedHead.object.version).toBe('0');
+    const bundle = await store.resolve({
+      type: 'object', objectKind: 'profile-bundle', objectDigest: parsedHead.object.bundleDigest,
+    }, new AbortController().signal);
+    expect(bundle?.objectKind).toBe('profile-bundle');
+    const subjectTable = await store.resolve({
+      type: 'object', objectKind: 'owned-subject-table',
+      objectDigest: parsedHead.object.ownedSubjectTableDigest,
+    }, new AbortController().signal);
+    expect(subjectTable?.objectKind).toBe('owned-subject-table');
     const root = await store.resolve(rootRequest(), new AbortController().signal);
     expect(root?.objectKind).toBe('root-descriptor');
     expect(root?.objectDigest).toBe(result.rootDescriptorDigest);
-    const inventoryObject = snapshot.inventory?.objects.get(snapshot.inventory.descriptor.treeRootDigest);
+    const inventoryDigest = snapshot.inventory?.descriptor.treeRootDigest;
+    const inventoryObject = inventoryDigest === undefined
+      ? undefined
+      : snapshot.inventory?.objects.get(inventoryDigest);
     expect(inventoryObject).toBeDefined();
-    if (inventoryObject === undefined) throw new Error('published inventory object is missing');
+    if (inventoryObject === undefined || inventoryDigest === undefined) {
+      throw new Error('published inventory object is missing');
+    }
+    await expect(store.resolve({
+      type: 'object', rootDescriptorDigest: result.rootDescriptorDigest,
+      objectKind: inventoryObject.objectKind, objectDigest: inventoryDigest,
+    }, new AbortController().signal)).resolves.toMatchObject({
+      objectKind: inventoryObject.objectKind,
+      objectDigest: inventoryDigest,
+    });
     await expect(store.resolve({
       type: 'object', rootDescriptorDigest: `0x${'ff'.repeat(32)}`,
-      objectKind: inventoryObject.objectKind, objectDigest: inventoryObject.objectDigest,
+      objectKind: inventoryObject.objectKind, objectDigest: inventoryDigest,
     }, new AbortController().signal)).resolves.toBeNull();
   });
 
@@ -336,9 +359,7 @@ describe('agent-profile system-record producer V1', () => {
         OTHER_PRIVATE_KEY,
       ),
     );
-    const headArtifact = pendingCommit!.artifacts.find(
-      (artifact) => artifact.objectKind === 'agent-profile-head',
-    )!;
+    const headArtifact = pendingCommit!.publicationArtifacts.head;
     const heartbeatEnvelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
       headArtifact.canonicalBytes,
     );
