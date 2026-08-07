@@ -228,6 +228,23 @@ describe('system-record provider V1', () => {
     expect(provider.stats()).toMatchObject({ served: 1, active: 0, queued: 0 });
   });
 
+  it('returns an internal response and releases resources when repository lookup fails', async () => {
+    const admission = frameAdmission();
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: { resolve: async () => { throw new Error('backend failed'); } },
+      frameAdmission: admission,
+    });
+    const exchange = fixtureExchange(bundleRequest());
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('served');
+    const response = decodeSystemRecordResponseFrameV1(exchange.written[0]!);
+    expect(response.header.status).toBe('internal');
+    expect(response.payload).toHaveLength(0);
+    expect(admission.active()).toBe(0);
+    expect(provider.stats()).toMatchObject({ served: 1, active: 0, queued: 0 });
+  });
+
   it('refuses a corrupted cache object instead of serving bytes under its requested digest', async () => {
     const corruptedBytes = Uint8Array.of(9, 9, 9);
     expect(digestSystemRecordBytesV1(

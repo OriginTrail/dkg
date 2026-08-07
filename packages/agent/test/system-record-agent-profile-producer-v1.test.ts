@@ -799,6 +799,40 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
+  it('rejects a head issue time before assertion finalization without side effects', async () => {
+    const fixture = await producerFixture();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const evmSignMessage = vi.fn(fixture.evmSigner.signMessage);
+    const prepareCommit = vi.fn(fixture.store.prepareCommit.bind(fixture.store));
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: { ...fixture.evmSigner, signMessage: evmSignMessage },
+      store: {
+        snapshot: () => fixture.store.snapshot(),
+        resolveArtifact: (reference) => fixture.store.resolveArtifact(reference),
+        prepareCommit,
+      },
+      fence: () => {},
+      install,
+    });
+
+    await expect(produce(producer, fixture.prepared, {
+      ...fixture.publication,
+      seal: {
+        ...fixture.publication.seal,
+        assertionFinalizedAt: '2026-08-07T13:00:00.000Z',
+      },
+    })).rejects.toThrow(/issuedAt predates assertion finalization/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(evmSignMessage).not.toHaveBeenCalled();
+    expect(prepareCommit).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
   it.each([
     [
       'a foreign UAL network',
@@ -914,11 +948,60 @@ describe('agent-profile system-record producer V1', () => {
       ...fixture.publication,
       issuedAt: '2026-08-06T00:00:00Z',
       validUntil: '2026-08-06T01:00:00Z',
+      seal: {
+        ...fixture.publication.seal,
+        assertionFinalizedAt: '2026-08-06T00:00:00.000Z',
+      },
     })).rejects.toThrow(/already expired/);
     expect(peerSign).not.toHaveBeenCalled();
     expect(evmSignMessage).not.toHaveBeenCalled();
     expect(install).not.toHaveBeenCalled();
     expect(prepareCommit).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
+  it('rejects an oversized encoded profile bundle before signing, install, or commit', async () => {
+    const fixture = await producerFixture();
+    const multiaddrs = Array.from({ length: 6_000 }, (_, index) => (
+      `/dns4/profile-${index.toString().padStart(4, '0')}-${'a'.repeat(96)}.example/tcp/4001`
+    ));
+    const prepared = prepareAgentProfileV1({
+      peerId: fixture.peerSigner.peerId,
+      publicKey: Buffer.from(fixture.peerSigner.publicKey, 'base64url').toString('base64'),
+      agentAddress: fixture.evmSigner.address,
+      name: 'Oversized profile fixture',
+      nodeRole: 'edge',
+      lastSeen: '2026-08-07T12:00:00.000Z',
+      skills: [],
+      multiaddrs,
+    });
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const evmSignMessage = vi.fn(fixture.evmSigner.signMessage);
+    const prepareCommit = vi.fn(fixture.store.prepareCommit.bind(fixture.store));
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: { ...fixture.evmSigner, signMessage: evmSignMessage },
+      store: {
+        snapshot: () => fixture.store.snapshot(),
+        resolveArtifact: (reference) => fixture.store.resolveArtifact(reference),
+        prepareCommit,
+      },
+      fence: () => {},
+      install,
+    });
+
+    await expect(produce(
+      producer,
+      prepared,
+      await publicationFor(prepared, fixture.evmSigner.address, '2026-08-07T12:00:00Z'),
+    )).rejects.toThrow(/profile bundle exceeds/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(evmSignMessage).not.toHaveBeenCalled();
+    expect(prepareCommit).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
