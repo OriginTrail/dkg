@@ -92,6 +92,15 @@ describe('agent-profile system-record producer V1', () => {
     const root = await store.resolve(rootRequest(), new AbortController().signal);
     expect(root?.objectKind).toBe('root-descriptor');
     expect(root?.objectDigest).toBe(result.rootDescriptorDigest);
+    const inventoryObject = snapshot.inventory?.objects.get(snapshot.inventory.descriptor.treeRootDigest);
+    expect(inventoryObject).toBeDefined();
+    if (inventoryObject === undefined) throw new Error('published inventory object is missing');
+    await expect(store.resolve({
+      wireVersion: '1', requestId: '2'.repeat(32), kind: 'agents', networkId: NETWORK,
+      operation: 'get-inventory-object', rootDescriptorDigest: `0x${'ff'.repeat(32)}`,
+      path: [], objectKind: inventoryObject.objectKind,
+      objectDigest: inventoryObject.objectDigest, payloadBytes: '0',
+    }, new AbortController().signal)).resolves.toBeNull();
   });
 
   it('advances one COW path for an ordinary same-authority heartbeat', async () => {
