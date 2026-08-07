@@ -923,6 +923,39 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
+  it('does not synthesize done from existing SWM-only provenance when VM is unverified', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      includeSharedMemory: false,
+      result: privateSharedMemoryOnlyResult(),
+      readiness: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.runCalls).toBe(1);
+    expect(result.job.status).toBe('unreachable');
+    expect(result.state).toMatchObject({
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: false,
+      sharedMemoryVerified: true,
+    });
+  });
+
   it('only returns synthetic done when all ready flags include metaSynced=true', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,

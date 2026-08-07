@@ -263,6 +263,40 @@ describe('context graph catch-up readiness classification', () => {
     });
   });
 
+  it('reports the private durable-VM shortfall when SWM was already verified', () => {
+    const result = mixedPeerResult(0);
+    result.dataSynced = 0;
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.peersSucceeded = 1;
+    result.diagnostics!.durable.fetchedDataTriples = 0;
+    result.diagnostics!.durable.insertedDataTriples = 0;
+    result.diagnostics!.durable.fetchedMetaTriples = 8;
+    result.diagnostics!.durable.insertedMetaTriples = 8;
+    result.diagnostics!.durable.metaOnlyResponses = 1;
+    result.diagnostics!.durable.timedOutPhases = 0;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup: {
+        version: CONTEXT_GRAPH_READINESS_VERSION,
+        durableVerified: false,
+        sharedMemoryVerified: true,
+        updatedAt: Date.now(),
+      },
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      error: 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+    });
+  });
+
   // Emptiness is only provable as a whole-round verdict: an empty response is
   // byte-identical whether the peer hosts an empty graph or has never heard of
   // it, so a clean-empty peer proves the plane only when NOBODY in the round

@@ -240,6 +240,32 @@ export function missingMetadataReadinessPatches(): MissingMetadataReadinessPatch
   };
 }
 
+interface ContextGraphPlaneReadinessVerdict {
+  /** Compatibility/write-readiness: either persisted usable plane opens the graph. */
+  readonly writeReady: boolean;
+  /** Catch-up completion: durable VM plus SWM when the caller requested it. */
+  readonly requestedPlanesVerified: boolean;
+  readonly missingRequestedDurable: boolean;
+  readonly missingRequestedSharedMemory: boolean;
+}
+
+function contextGraphPlaneReadinessVerdict(input: {
+  durableVerified: boolean;
+  sharedMemoryVerified: boolean;
+  includeSharedMemory: boolean;
+}): ContextGraphPlaneReadinessVerdict {
+  const missingRequestedDurable = !input.durableVerified;
+  const missingRequestedSharedMemory =
+    input.includeSharedMemory && !input.sharedMemoryVerified;
+  return {
+    writeReady: input.durableVerified || input.sharedMemoryVerified,
+    requestedPlanesVerified:
+      !missingRequestedDurable && !missingRequestedSharedMemory,
+    missingRequestedDurable,
+    missingRequestedSharedMemory,
+  };
+}
+
 export function classifyExistingContextGraphReadiness(input: {
   subscription: ContextGraphSubscriptionReadinessState;
   readiness: ContextGraphReadinessProvenance;
@@ -252,15 +278,18 @@ export function classifyExistingContextGraphReadiness(input: {
 } {
   const currentReadinessProvenance =
     input.readiness.version >= CONTEXT_GRAPH_READINESS_VERSION;
-  const overallReadinessVerified =
-    input.readiness.durableVerified || input.readiness.sharedMemoryVerified;
-  const requestedPlanesVerified =
-    currentReadinessProvenance &&
-    overallReadinessVerified &&
-    (!input.includeSharedMemory || input.readiness.sharedMemoryVerified);
+  const durableVerified =
+    currentReadinessProvenance && input.readiness.durableVerified;
+  const sharedMemoryVerified =
+    currentReadinessProvenance && input.readiness.sharedMemoryVerified;
+  const planeReadiness = contextGraphPlaneReadinessVerdict({
+    durableVerified,
+    sharedMemoryVerified,
+    includeSharedMemory: input.includeSharedMemory,
+  });
   const alreadyReady =
     input.hasConfirmedMeta &&
-    requestedPlanesVerified &&
+    planeReadiness.requestedPlanesVerified &&
     input.subscription.synced === true &&
     (!input.includeSharedMemory || input.subscription.sharedMemorySynced === true);
 
@@ -286,16 +315,11 @@ export function classifyExistingContextGraphReadiness(input: {
     };
   }
 
-  const durableVerified =
-    currentReadinessProvenance && input.readiness.durableVerified;
-  const sharedMemoryVerified =
-    currentReadinessProvenance && input.readiness.sharedMemoryVerified;
-  const overallVerified = durableVerified || sharedMemoryVerified;
   const statePatch =
-    input.subscription.synced !== overallVerified ||
+    input.subscription.synced !== planeReadiness.writeReady ||
     input.subscription.sharedMemorySynced !== sharedMemoryVerified
       ? {
-          synced: overallVerified,
+          synced: planeReadiness.writeReady,
           sharedMemorySynced: sharedMemoryVerified,
           metaSynced: true,
           pendingMeta: false,
@@ -536,16 +560,23 @@ export function classifyContextGraphCatchupReadiness(input: {
     // it derives `synced` from the persisted provenance and patches the row
     // back into line, so letting them diverge here would be corrected away on
     // the next pass anyway — after a window in which the graph looked writable.
-    const overallVerifiedPersisted = durableVerifiedPersisted || sharedMemoryVerifiedPersisted;
-    // Durable VM is part of every catch-up request. Shared-memory proof may
-    // make the subscription usable, but it must never make the request itself
-    // report `done` while finalized VM is still incomplete. This distinction
-    // matters for mixed SWM/VM callers: `statePatch.synced` remains the
-    // compatibility/write-readiness bit below, while `jobStatus` truthfully
-    // covers every requested plane.
-    const missingRequestedDurable = !durableVerified;
-    const missingRequestedSharedMemory =
-      input.includeSharedMemory && !sharedMemoryVerified;
+    const persistedPlaneReadiness = contextGraphPlaneReadinessVerdict({
+      durableVerified: durableVerifiedPersisted,
+      sharedMemoryVerified: sharedMemoryVerifiedPersisted,
+      includeSharedMemory: input.includeSharedMemory,
+    });
+    // Use the same requested-plane contract as the pre-catch-up fast path so
+    // SWM-only provenance can never synthesize or terminate a `done` job while
+    // finalized VM remains unverified.
+    const planeReadiness = contextGraphPlaneReadinessVerdict({
+      durableVerified,
+      sharedMemoryVerified,
+      includeSharedMemory: input.includeSharedMemory,
+    });
+    const {
+      missingRequestedDurable,
+      missingRequestedSharedMemory,
+    } = planeReadiness;
     const madeIncompleteProgress =
       (durableDataProgress && !durableReadyThisRun) ||
       (sharedMemoryProgress && !sharedMemoryReadyThisRun);
@@ -581,7 +612,7 @@ export function classifyContextGraphCatchupReadiness(input: {
       jobStatus,
       error,
       statePatch: {
-        synced: overallVerifiedPersisted,
+        synced: persistedPlaneReadiness.writeReady,
         sharedMemorySynced: sharedMemoryVerifiedPersisted,
         metaSynced: true,
         pendingMeta: false,
