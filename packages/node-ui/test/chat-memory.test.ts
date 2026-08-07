@@ -157,7 +157,12 @@ describe('ChatMemoryManager', () => {
     mockQuery.returns.push({ bindings: [] });
     await manager.storeChatExchange('session-1', 'Hello', 'Hi there!');
 
-    expect(mockWriteAssertion.calls[0]).toEqual(['agent-context', 'chat-turns', expect.any(Array)]);
+    expect(mockWriteAssertion.calls[0]).toEqual([
+      'agent-context',
+      'chat-turns',
+      expect.any(Array),
+      { agentAddress: 'did:dkg:agent:test' },
+    ]);
     expect(mockShare.calls).toHaveLength(0);
     const quads = mockWriteAssertion.calls[0][2] as any[];
     expect(quads.length).toBeGreaterThanOrEqual(12);
@@ -913,6 +918,7 @@ describe('ChatMemoryManager WM write discipline', () => {
   let mockShare: TrackingFn;
   let mockCreateAssertion: TrackingFn;
   let mockWriteAssertion: TrackingFn;
+  let mockMigrateLegacyAssertion: TrackingFn;
   let mockCreateContextGraph: TrackingFn;
   let mockListContextGraphs: TrackingFn;
 
@@ -921,6 +927,11 @@ describe('ChatMemoryManager WM write discipline', () => {
     mockShare = trackFn({ shareOperationId: 'op-1' });
     mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
     mockWriteAssertion = trackFn({ written: 0 });
+    mockMigrateLegacyAssertion = trackFn({
+      status: 'not-needed',
+      copiedPublic: 0,
+      preservedPrivate: 0,
+    });
     mockCreateContextGraph = trackFn(undefined);
     mockListContextGraphs = trackFn([{ id: 'agent-context', name: 'Agent Context' }]);
   });
@@ -931,6 +942,7 @@ describe('ChatMemoryManager WM write discipline', () => {
         query: mockQuery,
         createAssertion: mockCreateAssertion,
         writeAssertion: mockWriteAssertion,
+        migrateLegacyAssertion: mockMigrateLegacyAssertion,
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
@@ -948,6 +960,43 @@ describe('ChatMemoryManager WM write discipline', () => {
     expect(mockShare.calls).toHaveLength(0);
   });
 
+  it('migrates the exact agent-scoped chat-turns draft before creating or writing it', async () => {
+    const order: string[] = [];
+    const manager = new ChatMemoryManager(
+      {
+        query: mockQuery,
+        createAssertion: async (...args) => {
+          order.push('create');
+          return mockCreateAssertion(...args);
+        },
+        writeAssertion: async (...args) => {
+          order.push('write');
+          return mockWriteAssertion(...args);
+        },
+        migrateLegacyAssertion: async (...args) => {
+          order.push('migrate');
+          return mockMigrateLegacyAssertion(...args);
+        },
+        createContextGraph: mockCreateContextGraph,
+        listContextGraphs: mockListContextGraphs,
+      },
+      { apiKey: 'test' },
+      { agentAddress: 'did:dkg:agent:test' },
+    );
+    mockQuery.returns.push({ bindings: [] });
+
+    await manager.storeChatExchange('s-migrate', 'hello', 'reply');
+
+    expect(order.slice(0, 3)).toEqual(['migrate', 'create', 'write']);
+    expect(mockMigrateLegacyAssertion.calls).toEqual([[
+      'agent-context',
+      'chat-turns',
+      { agentAddress: 'did:dkg:agent:test' },
+    ]]);
+    expect(mockCreateAssertion.calls[0]?.[2]).toEqual({ agentAddress: 'did:dkg:agent:test' });
+    expect(mockWriteAssertion.calls[0]?.[3]).toEqual({ agentAddress: 'did:dkg:agent:test' });
+  });
+
   it('writeAssertion targets agent-context / chat-turns on every call', async () => {
     const manager = createManager();
     mockQuery.returns.push({ bindings: [] });
@@ -960,6 +1009,7 @@ describe('ChatMemoryManager WM write discipline', () => {
       expect(call[0]).toBe('agent-context');
       expect(call[1]).toBe('chat-turns');
       expect(Array.isArray(call[2])).toBe(true);
+      expect(call[3]).toEqual({ agentAddress: 'did:dkg:agent:test' });
     }
   });
 

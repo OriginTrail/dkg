@@ -2600,6 +2600,30 @@ export class DKGAgent extends DKGAgentBase {
         return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, { allocateKaNumber });
       },
 
+      async migrateLegacyRootScopedWorkingMemory(
+        contextGraphId: string,
+        name: string,
+        opts?: { subGraphName?: string; agentAddress?: string },
+      ) {
+        const author = opts?.agentAddress ?? agentAddress;
+        const isEvmAuthor = /^0x[a-fA-F0-9]{40}$/.test(author);
+        const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
+          ? () => reconcileAndAllocateKaNumber(
+              agent.kaNumberAllocator!,
+              agent.chain,
+              agent.reconciledKaAuthors,
+              author,
+            )
+          : undefined;
+        return agent.publisher.migrateLegacyRootScopedWorkingMemory(
+          contextGraphId,
+          name,
+          author,
+          opts?.subGraphName,
+          { allocateKaNumber },
+        );
+      },
+
       /**
        * Write triples to a WM assertion. Accepts:
        * - `Quad[]` — standard quad array (same as publish/share)

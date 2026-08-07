@@ -24,15 +24,24 @@ export interface MemoryToolContext {
   createAssertion: (
     contextGraphId: string,
     name: string,
-    opts?: { subGraphName?: string },
+    opts?: { subGraphName?: string; agentAddress?: string },
   ) => Promise<{ assertionUri: string | null; alreadyExists: boolean }>;
   /** Append quads into an existing Working Memory assertion graph. */
   writeAssertion: (
     contextGraphId: string,
     name: string,
     quads: any[],
-    opts?: { subGraphName?: string },
+    opts?: { subGraphName?: string; agentAddress?: string },
   ) => Promise<{ written: number }>;
+  /**
+   * Explicitly migrate one legacy, local-only WM assertion before mutation.
+   * Optional for embedders; the daemon supplies it for durable chat memory.
+   */
+  migrateLegacyAssertion?: (
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string; agentAddress?: string },
+  ) => Promise<{ status: string; copiedPublic: number; preservedPrivate: number }>;
   createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
   listContextGraphs: () => Promise<any[]>;
 }
@@ -487,6 +496,10 @@ export class ChatMemoryManager {
     };
   }
 
+  private wmMutationOpts(): { agentAddress?: string } {
+    return { agentAddress: this.agentAddress };
+  }
+
   /**
    * Lazy creation of the chat-turn context graph + assertion. Runs on the
    * first `storeChatExchange` / `ensureInitialized` call and is idempotent
@@ -520,7 +533,20 @@ export class ChatMemoryManager {
     const assertionKey = `${this.agentContextGraph}::${this.chatTurnsAssertion}`;
     if (!this.assertionEnsured.has(assertionKey)) {
       try {
-        await this.tools.createAssertion(this.agentContextGraph, this.chatTurnsAssertion);
+        // Upgraded nodes can still hold the pre-graph-scope, name-keyed
+        // `agent-context/chat-turns` draft. The normal create/write APIs keep
+        // those legacy KAs read-only by design, so the daemon exposes one
+        // explicit, data-preserving migration for this local WM assertion.
+        await this.tools.migrateLegacyAssertion?.(
+          this.agentContextGraph,
+          this.chatTurnsAssertion,
+          this.wmMutationOpts(),
+        );
+        await this.tools.createAssertion(
+          this.agentContextGraph,
+          this.chatTurnsAssertion,
+          this.wmMutationOpts(),
+        );
         this.assertionEnsured.add(assertionKey);
       } catch (err: any) {
         if (err?.message?.includes('already exists')) {
@@ -641,7 +667,12 @@ export class ChatMemoryManager {
       }
     }
 
-    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+    await this.tools.writeAssertion(
+      this.agentContextGraph,
+      this.chatTurnsAssertion,
+      quads,
+      this.wmMutationOpts(),
+    );
     this.knownSessions.add(sessionId);
 
     // Fire-and-forget: extract entity mentions and write them as separate triples
@@ -758,7 +789,12 @@ export class ChatMemoryManager {
         graph: '',
       });
     }
-    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+    await this.tools.writeAssertion(
+      this.agentContextGraph,
+      this.chatTurnsAssertion,
+      quads,
+      this.wmMutationOpts(),
+    );
   }
 
   private async extractAndWriteMentions(
@@ -806,7 +842,12 @@ export class ChatMemoryManager {
     }
 
     if (quads.length > 0) {
-      await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+      await this.tools.writeAssertion(
+        this.agentContextGraph,
+        this.chatTurnsAssertion,
+        quads,
+        this.wmMutationOpts(),
+      );
     }
   }
 
@@ -881,7 +922,12 @@ export class ChatMemoryManager {
         { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${new Date().toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       );
     }
-    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
+    await this.tools.writeAssertion(
+      this.agentContextGraph,
+      this.chatTurnsAssertion,
+      quads,
+      this.wmMutationOpts(),
+    );
     return triples.length;
   }
 

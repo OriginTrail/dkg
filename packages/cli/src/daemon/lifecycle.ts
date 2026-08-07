@@ -3220,13 +3220,15 @@ export async function runDaemonInner(
     createAssertion: async (
       contextGraphId: string,
       name: string,
-      opts?: { subGraphName?: string },
+      opts?: { subGraphName?: string; agentAddress?: string },
     ): Promise<{ assertionUri: string | null; alreadyExists: boolean }> => {
       try {
         const assertionUri = await agent.assertion.create(
           contextGraphId,
           name,
-          opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
+          opts?.subGraphName || opts?.agentAddress
+            ? { subGraphName: opts?.subGraphName, agentAddress: opts?.agentAddress }
+            : undefined,
         );
         return { assertionUri, alreadyExists: false };
       } catch (err: any) {
@@ -3240,13 +3242,15 @@ export async function runDaemonInner(
       contextGraphId: string,
       name: string,
       quads: any[],
-      opts?: { subGraphName?: string },
+      opts?: { subGraphName?: string; agentAddress?: string },
     ): Promise<{ written: number }> => {
       await agent.assertion.write(
         contextGraphId,
         name,
         quads,
-        opts?.subGraphName ? { subGraphName: opts.subGraphName } : undefined,
+        opts?.subGraphName || opts?.agentAddress
+          ? { subGraphName: opts?.subGraphName, agentAddress: opts?.agentAddress }
+          : undefined,
       );
       emitMemoryGraphChanged({
         contextGraphId,
@@ -3258,6 +3262,15 @@ export async function runDaemonInner(
       });
       return { written: quads.length };
     },
+    migrateLegacyAssertion: (
+      contextGraphId: string,
+      name: string,
+      opts?: { subGraphName?: string; agentAddress?: string },
+    ) => agent.assertion.migrateLegacyRootScopedWorkingMemory(
+      contextGraphId,
+      name,
+      opts,
+    ),
     createContextGraph: (opts: {
       id: string;
       name: string;

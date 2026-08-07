@@ -7357,6 +7357,337 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
   }
 
+  /**
+   * Explicit, opt-in migration for a legacy name-keyed Working Memory draft.
+   *
+   * The normal mutation APIs deliberately keep legacy/root-scoped KAs
+   * read-only. Local durable integrations such as `agent-context/chat-turns`,
+   * however, can predate graph-scoped KA storage and must survive an upgrade.
+   * This operation is therefore intentionally separate from `assertionCreate`:
+   * callers must select the exact local assertion they are willing to migrate.
+   *
+   * Safety properties:
+   * - only an active `created`/`WM` lifecycle with no SWM/VM/promote state is
+   *   eligible;
+   * - the legacy data graphs are retained as the durable backup;
+   * - the complete legacy lifecycle/event metadata is copied to a deterministic
+   *   backup graph before active metadata is changed;
+   * - a `prepared` marker makes every later step restart-idempotent;
+   * - public data is copied into a newly allocated graph-scoped WM graph while
+   *   private draft data stays intact under its stable lifecycle key.
+   */
+  async migrateLegacyRootScopedWorkingMemory(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+  ): Promise<{
+    status: 'not-needed' | 'migrated' | 'resumed';
+    copiedPublic: number;
+    preservedPrivate: number;
+    sourceGraph: string;
+    targetGraph?: string;
+    backupGraph: string;
+  }> {
+    return this.withAssertionLifecycleWriteLock(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+      () => this.migrateLegacyRootScopedWorkingMemoryUnlocked(
+        contextGraphId,
+        name,
+        agentAddress,
+        subGraphName,
+        opts,
+      ),
+    );
+  }
+
+  private async migrateLegacyRootScopedWorkingMemoryUnlocked(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+  ): Promise<{
+    status: 'not-needed' | 'migrated' | 'resumed';
+    copiedPublic: number;
+    preservedPrivate: number;
+    sourceGraph: string;
+    targetGraph?: string;
+    backupGraph: string;
+  }> {
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+
+    const dkg = 'http://dkg.io/ontology/';
+    const lifecycle = assertSafeIri(
+      assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName),
+    );
+    const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
+    const sourceGraph = assertSafeIri(
+      contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName),
+    );
+    const backupGraph = assertSafeIri(
+      `${metaGraph}/legacy-wm-backup/${encodeURIComponent(agentAddress.toLowerCase())}`
+      + `/${encodeURIComponent(name)}`
+      + (subGraphName ? `/${encodeURIComponent(subGraphName)}` : ''),
+    );
+    const markerSubject = sourceGraph;
+    const statePredicate = `${dkg}legacyWorkingMemoryMigrationState`;
+    const targetPredicate = `${dkg}legacyWorkingMemoryMigrationTarget`;
+    const copiedPredicate = `${dkg}legacyWorkingMemoryMigrationCopiedPublic`;
+    const privatePredicate = `${dkg}legacyWorkingMemoryMigrationPreservedPrivate`;
+    const appliedAtPredicate = `${dkg}legacyWorkingMemoryMigrationAppliedAt`;
+
+    const markerResult = await this.store.query(
+      `SELECT ?state ?target ?copied ?private WHERE { GRAPH <${backupGraph}> {
+        OPTIONAL { <${markerSubject}> <${statePredicate}> ?state }
+        OPTIONAL { <${markerSubject}> <${targetPredicate}> ?target }
+        OPTIONAL { <${markerSubject}> <${copiedPredicate}> ?copied }
+        OPTIONAL { <${markerSubject}> <${privatePredicate}> ?private }
+      } } LIMIT 4`,
+    );
+    const markerBinding = markerResult.type === 'bindings' ? markerResult.bindings[0] : undefined;
+    const markerState = stripOptionalLiteral(markerBinding?.['state']);
+    const markerTarget = markerBinding?.['target'];
+    const markerCopied = Number(stripOptionalLiteral(markerBinding?.['copied']) ?? 0);
+    const markerPrivate = Number(stripOptionalLiteral(markerBinding?.['private']) ?? 0);
+
+    const lifecycleResult = await this.store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> {
+        ?s ?p ?o .
+        FILTER(STR(?s) = ${JSON.stringify(lifecycle)} || STRSTARTS(STR(?s), ${JSON.stringify(`${lifecycle}/`)}))
+      } } LIMIT 10001`,
+    );
+    const lifecycleRows = lifecycleResult.type === 'bindings'
+      ? lifecycleResult.bindings.filter((row) => row['s'] && row['p'] && row['o'] != null)
+      : [];
+    if (lifecycleRows.length > 10_000) {
+      throw Object.assign(
+        new Error(`Legacy WM migration refused: lifecycle metadata exceeds 10000 rows for ${name}`),
+        { code: 'KA_LEGACY_WM_MIGRATION_REFUSED' },
+      );
+    }
+
+    const activeLifecycleRows = lifecycleRows.filter((row) => row['s'] === lifecycle);
+    const scopeVersions = new Set(
+      activeLifecycleRows
+        .filter((row) => row['p'] === `${dkg}contentScopeVersion`)
+        .map((row) => stripOptionalLiteral(row['o']))
+        .filter((value): value is string => value !== undefined),
+    );
+    const isGraphScoped = scopeVersions.size === 1
+      && scopeVersions.has(String(GRAPH_KA_CONTENT_SCOPE_VERSION));
+
+    if (isGraphScoped && markerState !== 'prepared') {
+      return {
+        status: 'not-needed',
+        copiedPublic: Number.isFinite(markerCopied) ? markerCopied : 0,
+        preservedPrivate: Number.isFinite(markerPrivate) ? markerPrivate : 0,
+        sourceGraph,
+        ...(markerTarget ? { targetGraph: markerTarget } : {}),
+        backupGraph,
+      };
+    }
+    if (markerState !== undefined && markerState !== 'prepared' && markerState !== 'completed') {
+      throw Object.assign(
+        new Error(`Legacy WM migration refused: unsupported marker state ${markerState}`),
+        { code: 'KA_LEGACY_WM_MIGRATION_REFUSED' },
+      );
+    }
+    if (markerState === undefined && lifecycleRows.length === 0) {
+      return {
+        status: 'not-needed',
+        copiedPublic: 0,
+        preservedPrivate: 0,
+        sourceGraph,
+        backupGraph,
+      };
+    }
+
+    const publicQuads = await this.assertionScopedQuads(sourceGraph);
+    const privateQuads = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+      contextGraphId,
+      agentAddress,
+      name,
+      subGraphName,
+    );
+    // Fail before touching active metadata if legacy content cannot enter the
+    // current graph-scoped assertion boundary.
+    rejectUserAuthoredProtocolMetadata(publicQuads);
+    rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
+    rejectOversizedRdfLiterals(privateQuads, 'legacyWorkingMemoryMigration.privateQuads');
+
+    const wasPrepared = markerState === 'prepared';
+    const canAllocateGraphIdentity = opts?.allocateKaNumber !== undefined
+      || (this.kaAllocator !== undefined && /^0x[a-fA-F0-9]{40}$/.test(agentAddress));
+    if (!wasPrepared) {
+      const stateValues = new Set(
+        activeLifecycleRows
+          .filter((row) => row['p'] === `${dkg}state`)
+          .map((row) => stripOptionalLiteral(row['o']))
+          .filter((value): value is string => value !== undefined),
+      );
+      const layerValues = new Set(
+        activeLifecycleRows
+          .filter((row) => row['p'] === `${dkg}memoryLayer`)
+          .map((row) => stripOptionalLiteral(row['o']))
+          .filter((value): value is string => value !== undefined),
+      );
+      const hasDurableOrInFlightState = activeLifecycleRows.some((row) =>
+        row['p'] === SWM_CURRENT_ASSERTION_PRED
+        || row['p'] === VM_CURRENT_ASSERTION_PRED
+        || row['p'] === SHARE_OPERATION_ID_PRED
+        || row['p'] === PROMOTE_OPERATION_INTENT_PRED,
+      );
+      const sealPredicates = [...new Set(Object.values(ASSERTION_SEAL_PREDICATES))]
+        .map((predicate) => `<${assertSafeIri(predicate)}>`)
+        .join(' ');
+      const sealResult = await this.store.query(
+        `ASK { GRAPH <${metaGraph}> { <${sourceGraph}> ?sealPredicate ?sealValue . VALUES ?sealPredicate { ${sealPredicates} } } }`,
+      );
+      const hasSeal = sealResult.type === 'boolean' && sealResult.value;
+      if (
+        scopeVersions.size > 1
+        || stateValues.size !== 1
+        || !stateValues.has('created')
+        || layerValues.size !== 1
+        || !layerValues.has(MemoryLayer.WorkingMemory)
+        || hasDurableOrInFlightState
+        || hasSeal
+      ) {
+        throw Object.assign(
+          new Error(
+            `Legacy WM migration refused for ${contextGraphId}/${name}: only an active, local created/WM draft is eligible`,
+          ),
+          { code: 'KA_LEGACY_WM_MIGRATION_REFUSED' },
+        );
+      }
+      if (!isGraphScoped && !canAllocateGraphIdentity) {
+        throw Object.assign(
+          new Error(
+            `Legacy WM migration requires a graph-scoped identity allocator for ${contextGraphId}/${name}`,
+          ),
+          { code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' },
+        );
+      }
+
+      await this.store.createGraph(backupGraph);
+      await this.store.insert([
+        ...lifecycleRows.map((row) => ({
+          subject: row['s']!,
+          predicate: row['p']!,
+          object: row['o']!,
+          graph: backupGraph,
+        })),
+        {
+          subject: markerSubject,
+          predicate: statePredicate,
+          object: '"prepared"',
+          graph: backupGraph,
+        },
+        {
+          subject: markerSubject,
+          predicate: copiedPredicate,
+          object: `"${publicQuads.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          graph: backupGraph,
+        },
+        {
+          subject: markerSubject,
+          predicate: privatePredicate,
+          object: `"${privateQuads.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          graph: backupGraph,
+        },
+      ]);
+    }
+
+    if (wasPrepared && !isGraphScoped && !canAllocateGraphIdentity) {
+      throw Object.assign(
+        new Error(
+          `Legacy WM migration requires a graph-scoped identity allocator for ${contextGraphId}/${name}`,
+        ),
+        { code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' },
+      );
+    }
+
+    if (!isGraphScoped) {
+      for (const subject of new Set(lifecycleRows.map((row) => row['s']!))) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject });
+      }
+      await this.assertionCreateUnlocked(
+        contextGraphId,
+        name,
+        agentAddress,
+        subGraphName,
+        opts,
+      );
+    }
+
+    const targetGraph = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
+    if (targetGraph === sourceGraph) {
+      throw Object.assign(
+        new Error(
+          `Legacy WM migration requires a graph-scoped identity for ${contextGraphId}/${name}`,
+        ),
+        { code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' },
+      );
+    }
+    if (publicQuads.length > 0) {
+      await this.assertionWriteUnlocked(
+        contextGraphId,
+        name,
+        agentAddress,
+        publicQuads,
+        subGraphName,
+      );
+    }
+
+    await this.store.deleteByPattern({
+      graph: backupGraph,
+      subject: markerSubject,
+      predicate: statePredicate,
+    });
+    await this.store.insert([
+      {
+        subject: markerSubject,
+        predicate: statePredicate,
+        object: '"completed"',
+        graph: backupGraph,
+      },
+      {
+        subject: markerSubject,
+        predicate: targetPredicate,
+        object: targetGraph,
+        graph: backupGraph,
+      },
+      {
+        subject: markerSubject,
+        predicate: appliedAtPredicate,
+        object: `"${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
+        graph: backupGraph,
+      },
+    ]);
+
+    this.log.info(
+      createOperationContext('system'),
+      `Migrated legacy WM ${contextGraphId}/${name} from ${sourceGraph} to ${targetGraph} `
+      + `(public=${publicQuads.length}, private-preserved=${privateQuads.length}, `
+      + `recovery=${wasPrepared ? 'resumed' : 'fresh'})`,
+    );
+
+    return {
+      status: wasPrepared ? 'resumed' : 'migrated',
+      copiedPublic: publicQuads.length,
+      preservedPrivate: privateQuads.length,
+      sourceGraph,
+      targetGraph,
+      backupGraph,
+    };
+  }
+
   async assertionCreate(
     contextGraphId: string,
     name: string,
